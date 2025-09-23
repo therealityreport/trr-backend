@@ -8,17 +8,19 @@ This streamlined collection contains **only the essential scripts** for the comp
 
 ### **Step 1: Add New Shows** 
 ```bash
-cd "SHOW INFO"
-python3 fetch_show_info.py
+cd scripts/1-ShowInfo
+python3 showinfo_step1.py
 ```
 - **Purpose**: Add new reality shows to the `ShowInfo` sheet
 - **Input**: TMDb and IMDb lists (automatically fetched)
 - **Output**: Populated ShowInfo sheet with show metadata
-- **Location**: `SHOW INFO/fetch_show_info.py`
+- **Location**: `scripts/1-ShowInfo/showinfo_step1.py`
 
 ### **Step 2: Extract Cast Information**
 ```bash
-python3 fetch_cast_info.py
+cd scripts/2-CastInfo
+python3 CastInfo_Step1.py   # Build/clean CastInfo A–F
+python3 CastInfo_Step2.py   # Extract episodes/seasons G–H
 ```
 - **Purpose**: Extract cast members from shows in ShowInfo
 - **Input**: ShowInfo sheet
@@ -93,6 +95,31 @@ python3 build_realitease_info.py
 
 ## 🛠️ Utility Scripts
 
+## FinalInfo Steps (People Sheet)
+
+These scripts build and enrich the `FinalList` sheet in `Realitease2025Data`:
+
+- `Step 1`:
+  - Command: `python3 scripts/5-FinalList/FinalInfo_Step1.py`
+  - Purpose: Build initial `FinalList` from `RealiteaseInfo` and `WWHLinfo` (no external APIs)
+
+- `Step 2`:
+  - Command: `python3 scripts/5-FinalList/FinalInfo_Step2.py --batch-size 500 --delay 0.6 --stream-writes --max-retries 4 --retry-base 0.8`
+  - Purpose: Enrich `FinalList` via IMDb API (AlternativeNames, ImageURL)
+  - Flags: `--batch-size`, `--delay`, `--stream-writes`, `--max-retries`, `--retry-base`, `--limit`
+
+- `Step 3`:
+  - Command: `python3 scripts/5-FinalList/FinalInfo_Step3.py --batch-size 500`
+  - Purpose: Normalize AlternativeNames and ImageURL; idempotent cleanup
+
+- `Snapshot`:
+  - Command: `python3 scripts/5-FinalList/verify_finallist_snapshot.py`
+  - Purpose: Quick counts of non-empty AlternativeNames and ImageURL
+
+Notes:
+- Requires Google Sheets service account JSON at `keys/trr-backend-df2c438612e1.json` (or set `GOOGLE_SERVICE_ACCOUNT_FILE`).
+- Firebase uploader is separate (`scripts/5-FinalList/Firebase_Uploader.py`) and not part of Steps 1–3.
+
 ### **Google Sheets Testing**
 ```bash
 python3 test_gsheets.py
@@ -149,8 +176,9 @@ For **Step 5** (episode/season extraction), you have three options:
 
 ### **Complete Pipeline (Basic)**
 ```bash
-cd "SHOW INFO" && python3 fetch_show_info.py  # Add shows
-cd .. && python3 fetch_cast_info.py           # Extract cast
+cd scripts/1-ShowInfo && python3 showinfo_step1.py  # Add shows
+cd ../2-CastInfo && python3 CastInfo_Step1.py       # Build/clean CastInfo A–F
+python3 CastInfo_Step2.py                            # Extract episodes/seasons G–H
 python3 build_update_info.py                  # Build updates
 python3 create_viable_cast_sheet.py           # Create viable cast
 python3 tmdb_final_extractor.py               # Extract episodes (recommended)
@@ -159,8 +187,9 @@ python3 build_realitease_info.py              # Final output
 
 ### **Complete Pipeline (Enhanced with Person Details)**
 ```bash
-cd "SHOW INFO" && python3 fetch_show_info.py           # Add shows
-cd .. && python3 fetch_cast_info.py                   # Extract cast
+cd scripts/1-ShowInfo && python3 showinfo_step1.py    # Add shows
+cd ../2-CastInfo && python3 CastInfo_Step1.py         # Build/clean CastInfo A–F
+python3 CastInfo_Step2.py                              # Extract episodes/seasons G–H
 python3 "Person Details/fetch_famous_birthdays.py"     # Add birthdays
 python3 "Person Details/enhance_cast_info_imdb.py"     # Add IMDb data
 python3 build_update_info.py                           # Build updates
@@ -201,8 +230,8 @@ Today's session organized all working scripts into logical folder structure:
   - `append_viable_cast.py` (data management)
 
 - **CastInfo/** - 2 scripts for cast data collection
-  - `fetch_cast_info.py` (main cast builder)
-  - `fetch_cast_info_simple.py` (simplified version)
+  - `CastInfo_Step1.py` (enhanced CastInfo updater for A–F)
+  - `CastInfo_Step2.py` (parallel episode/season extractor for G–H)
 
 - **UpdateInfo/** - 1 script for data aggregation
   - `build_update_info.py` (person-level aggregations)

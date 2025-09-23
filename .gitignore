@@ -48,6 +48,13 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
+
+# Caches
+.cache/
+*.jsonl
+.gemini_cache.jsonl
+.gemini_realitease_cache.jsonl
 
 # Failed cast member logs
 failed_cast_members_*.json
@@ -60,6 +67,13 @@ failed_cast_members_*.json
 
 # Credentials (keep these secure)
 keys/
+
+# Environment files
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
 
 # Large data files
 *.csv
