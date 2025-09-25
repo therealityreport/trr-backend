@@ -76,6 +76,22 @@ ELEMENT_TIMEOUT = 8
 # Missing data indicator
 MISSING_DATA_MARKER = "**"
 
+# Recency filtering (align with CastInfo Step 1 behaviour)
+RECENT_EPISODE_WINDOW_DAYS = 7
+RECENT_EPISODE_FORMATS = (
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%m/%d/%Y",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M%z",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%b %d %Y",
+    "%B %d %Y",
+)
+
 # ========== Results Manager (from v6) ==========
 class ResultsManager:
     def __init__(self, sheet):
@@ -759,27 +775,147 @@ class CastInfoWorker:
 class v7UniversalSeasonExtractor:
     def __init__(self):
         self.sheet = None
+        self.workbook = None
         self.results_manager = None
         self.skipped_filled = 0
+        today = datetime.datetime.utcnow().date()
+        self.today = today
+        self.recent_window_start = today - datetime.timedelta(days=RECENT_EPISODE_WINDOW_DAYS)
+        self.showinfo_recent_dates = {}
+        self.recent_shows_reprocessed = {}
+        self.recent_rows = 0
+        self._recent_flag_cache = {}
     
     def setup_sheets(self):
         """Connect to Google Sheets."""
         try:
             gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
             wb = gc.open(WORKBOOK_NAME)
+            self.workbook = wb
             self.sheet = wb.worksheet(SHEET_NAME)
             self.results_manager = ResultsManager(self.sheet)
             
             print("✅ Connected to Google Sheets")
             print(f"📊 Workbook: {WORKBOOK_NAME}")
             print(f"📊 Sheet: {SHEET_NAME}")
+
+            self.showinfo_recent_dates = self.load_showinfo_recent_dates(wb)
             
             return True
             
         except Exception as e:
             print(f"❌ Sheets setup failed: {e}")
             return False
-    
+
+    @staticmethod
+    def parse_recent_episode_date(value):
+        raw = (value or "").strip()
+        if not raw:
+            return None
+
+        candidates = [raw]
+        if len(raw) >= 10:
+            candidates.append(raw[:10])
+        if " " in raw:
+            candidates.append(raw.split(" ")[0])
+        if raw.endswith("Z"):
+            candidates.append(raw[:-1])
+            candidates.append(raw[:-1] + "+00:00")
+
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+
+            if len(candidate) == 10 and candidate[4] == "-" and candidate[7] == "-":
+                try:
+                    return datetime.datetime.strptime(candidate, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+
+            try:
+                parsed = datetime.datetime.fromisoformat(candidate)
+                return parsed.date()
+            except ValueError:
+                pass
+
+            for fmt in RECENT_EPISODE_FORMATS:
+                try:
+                    parsed = datetime.datetime.strptime(candidate, fmt)
+                    return parsed.date()
+                except ValueError:
+                    continue
+
+        return None
+
+    def load_showinfo_recent_dates(self, workbook):
+        mapping = {}
+        try:
+            showinfo_ws = workbook.worksheet("ShowInfo")
+        except Exception as e:
+            print(f"⚠️ Could not open ShowInfo sheet: {e}")
+            return mapping
+
+        try:
+            rows = showinfo_ws.get_all_values()
+        except Exception as e:
+            print(f"⚠️ Could not read ShowInfo sheet: {e}")
+            return mapping
+
+        if not rows:
+            print("⚠️ ShowInfo sheet returned no data")
+            return mapping
+
+        header = [h.strip() for h in rows[0]]
+        col_map = {name: idx for idx, name in enumerate(header)}
+        imdb_idx = col_map.get("IMDbSeriesID")
+        recent_idx = col_map.get("Most Recent Episode")
+
+        if imdb_idx is None or recent_idx is None:
+            print("⚠️ ShowInfo sheet missing 'IMDbSeriesID' or 'Most Recent Episode' columns")
+            return mapping
+
+        tracked = 0
+        parsed = 0
+
+        for row in rows[1:]:
+            if len(row) <= max(imdb_idx, recent_idx):
+                continue
+
+            imdb_id = row[imdb_idx].strip()
+            if not imdb_id:
+                continue
+
+            tracked += 1
+            recent_value = row[recent_idx].strip()
+            recent_date = self.parse_recent_episode_date(recent_value)
+            if recent_date:
+                mapping[imdb_id] = recent_date
+                parsed += 1
+
+        if parsed:
+            print(f"📅 Loaded recent-episode dates for {parsed} shows (tracked: {tracked})")
+        else:
+            print("⚠️ No recent-episode dates parsed from ShowInfo")
+
+        return mapping
+
+    def should_process_show(self, show_imdb_id, show_name):
+        if not show_imdb_id:
+            return False
+
+        if show_imdb_id not in self._recent_flag_cache:
+            recent_date = self.showinfo_recent_dates.get(show_imdb_id)
+            flag = bool(recent_date and recent_date >= self.recent_window_start)
+            self._recent_flag_cache[show_imdb_id] = flag
+
+            if flag and show_imdb_id not in self.recent_shows_reprocessed:
+                human = recent_date.isoformat() if recent_date else "unknown"
+                print(f"  🔁 Will refresh '{show_name}' (IMDb {show_imdb_id}) due to recent episode {human}")
+                self.recent_shows_reprocessed[show_imdb_id] = {"name": show_name, "date": recent_date}
+
+        return self._recent_flag_cache[show_imdb_id]
+
     def load_cast_data(self):
         """Load all cast members needing processing."""
         try:
@@ -799,15 +935,20 @@ class v7UniversalSeasonExtractor:
                 show_imdb_id = row[4].strip()
                 episodes = row[6].strip() if len(row) > 6 else ""
                 seasons = row[7].strip() if len(row) > 7 else ""
+
+                needs_recent_update = self.should_process_show(show_imdb_id, show_name)
                 
-                # Skip if both filled
-                if episodes and seasons:
+                # Skip if both filled and the show does not need a recency refresh
+                if episodes and seasons and not needs_recent_update:
                     self.skipped_filled += 1
                     continue
                 
                 # Skip if missing required data
                 if not show_imdb_id or not (cast_imdb_id or cast_name):
                     continue
+
+                if episodes and seasons and needs_recent_update:
+                    self.recent_rows += 1
                 
                 rows.append({
                     "row_num": r + 1,
@@ -819,6 +960,10 @@ class v7UniversalSeasonExtractor:
             
             print(f"📊 Rows to process: {len(rows)}")
             print(f"⏭️ Skipped (filled): {self.skipped_filled}")
+            if self.recent_shows_reprocessed:
+                print(f"  🔁 Shows scheduled due to recent episodes: {len(self.recent_shows_reprocessed)}")
+                if self.recent_rows:
+                    print(f"  🔁 Rows reprocessed due to recent airings: {self.recent_rows}")
             
             return rows
             
@@ -898,6 +1043,10 @@ class v7UniversalSeasonExtractor:
             print(f"✅ Processed: {final_stats['processed']} rows")
             print(f"🗑️ Crew deleted: {final_stats['deleted_crew']} rows")
             print(f"⏭️ Skipped: {self.skipped_filled} rows")
+            if self.recent_shows_reprocessed:
+                print(f"  🔁 Shows refreshed (recent episodes): {len(self.recent_shows_reprocessed)}")
+                if self.recent_rows:
+                    print(f"  🔁 Rows refreshed due to recency: {self.recent_rows}")
             print(f"❌ Errors: {final_stats['errors']}")
             print(f"⚠️ Missing data: {final_stats['missing_data']} cells")
             
