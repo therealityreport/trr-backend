@@ -1,27 +1,63 @@
 #!/usr/bin/env python3
 
-import os
+from __future__ import annotations
+
 import sys
 import time
 import re
 import unicodedata
-import requests
-from dotenv import load_dotenv
-import gspread
-from google.oauth2.service_account import Credentials
-from bs4 import BeautifulSoup
-from datetime import datetime
 import urllib.parse
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Tuple
+
+
+def _bootstrap_environment() -> Path:
+    repo_root = Path(__file__).resolve().parents[2]
+    venv_lib = repo_root / ".venv" / "lib"
+
+    if venv_lib.exists():
+        def version_key(path: Path) -> tuple[int, ...]:
+            name = path.parent.name  # e.g. "python3.13"
+            parts = name.replace('python', '').split('.')
+            return tuple(int(part) for part in parts if part.isdigit())
+
+        site_candidates = sorted(
+            (p for p in venv_lib.glob("python*/site-packages") if p.is_dir()),
+            key=version_key,
+            reverse=True,
+        )
+
+        for candidate in site_candidates:
+            path_str = str(candidate)
+            if path_str in sys.path:
+                # Preferred path already available; avoid inserting lower versions.
+                break
+            sys.path.insert(0, path_str)
+            print(f"🔧 Added site-packages path: {path_str}")
+            break
+
+    return repo_root
+
+
+REPO_ROOT = _bootstrap_environment()
+
+import os  # noqa: E402
+
+import requests  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
+import gspread  # noqa: E402
+from google.oauth2.service_account import Credentials  # noqa: E402
+from bs4 import BeautifulSoup  # noqa: E402
 
 try:
     import google.generativeai as genai  # type: ignore
-except ImportError:
+except ImportError as import_err:
+    print(f"⚠️ google-generativeai import failed: {import_err}")
     genai = None
 
 # Load environment variables
-load_env_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
-load_dotenv(load_env_path)
+load_dotenv(REPO_ROOT / ".env")
 
 # Column indices (0-based) for RealiteaseInfo sheet structure
 REALITEASE_COLUMN_INDEX = {
@@ -1227,4 +1263,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

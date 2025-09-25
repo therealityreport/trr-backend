@@ -1,31 +1,40 @@
 #!/usr/bin/env python3
-"""
-RealiteaseInfo Step 2: Populate show data (Columns D, E, F, G, H, I)
+"""RealiteaseInfo Step 2: Populate show data (columns D–I)."""
 
-This script:
-1. Uses ShowInfo sheet as the authoritative source for show data
-2. Aggregates all shows for each cast member from CastInfo mappings
-3. Updates RealiteaseInfo sheet columns D-I with show data
-4. Preserves existing cast member info (columns A, B, C) and bio data (columns J, K, L)
+from __future__ import annotations
 
-ShowInfo Structure (Updated):
-- Column A: Show (Show Name)
-- Column E: IMDbSeriesID  
-- Column F: TMDbSeriesID ← Now Column F (was G before)
-
-RealiteaseInfo Output:
-- Column F: ShowTMDbIDs ← Gets data from ShowInfo Column F
-"""
-
-import gspread
+import sys
 import time
 import re
-from collections import defaultdict
-from dotenv import load_dotenv
 import os
+from typing import Dict
+from collections import defaultdict
+from pathlib import Path
 
-# Load environment variables
-load_dotenv()
+
+def _bootstrap_environment() -> Path:
+    repo_root = Path(__file__).resolve().parents[2]
+    venv_lib = repo_root / ".venv" / "lib"
+
+    if venv_lib.exists():
+        site_candidates = sorted(venv_lib.glob("python*/site-packages"), reverse=True)
+        for candidate in site_candidates:
+            if candidate.is_dir():
+                path_str = str(candidate)
+                if path_str not in sys.path:
+                    sys.path.insert(0, path_str)
+                break
+
+    return repo_root
+
+
+REPO_ROOT = _bootstrap_environment()
+
+import gspread  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
+
+# Load environment variables from repo root
+load_dotenv(REPO_ROOT / ".env")
 
 class RealiteaseInfoStep2:
     def __init__(self):
@@ -245,9 +254,12 @@ class RealiteaseInfoStep2:
             return 0
             
     def aggregate_show_data_by_realitease_order(self, limit_records=None):
-        """Process RealiteaseInfo in consecutive row order, updating show data for each cast member"""
+        """Process RealiteaseInfo in consecutive row order, updating show data for each cast member.
+        This version reads RealiteaseInfo column B (CastIMDbID) **by position** and matches it to
+        CastInfo column C (IMDbCastID). It also tracks the true sheet row numbers for safe updates.
+        """
         print("📊 Processing RealiteaseInfo in consecutive row order...")
-        
+
         # Limit cast info if requested
         if limit_records:
             print(f"📊 Processing first {limit_records} CastInfo records (for aggregation)")
@@ -256,47 +268,60 @@ class RealiteaseInfoStep2:
         else:
             print(f"📊 Processing all {len(self.cast_info_data)} CastInfo records")
 
-        # Precompute aggregated show data for each cast member
+        # Precompute aggregated show data for each cast member (keyed by IMDbCastID)
         print("  🔄 Aggregating show data per cast member...")
         aggregated_show_data = self._aggregate_show_data_per_cast(self.cast_info_lookup, self.show_info_lookup)
         print(f"  ✅ Aggregated show data for {len(aggregated_show_data)} cast members")
 
-        # Now get RealiteaseInfo data and process EVERY row in consecutive order
-        print("  📋 Reading RealiteaseInfo data...")
-        realitease_data = self.realitease_sheet.get_all_records()
-        print(f"  ✅ Found {len(realitease_data)} cast members in RealiteaseInfo")
-        
-        # Process EVERY RealiteaseInfo row in consecutive order for batch updates
+        # Read ALL values so we can reference **physical** row numbers and columns
+        print("  📋 Reading RealiteaseInfo sheet values...")
+        all_values = self.realitease_sheet.get_all_values()
+        if not all_values:
+            print("  ❌ RealiteaseInfo sheet is empty")
+            return []
+
+        # Row 1 is headers. Data starts at row 2
         consecutive_updates = []
-        
-        for i, realitease_record in enumerate(realitease_data):
-            cast_imdb_id = realitease_record.get('CastIMDbID', '').strip()
+        skipped_without_castinfo = 0
 
-            show_data = aggregated_show_data.get(cast_imdb_id, {
-                'shows': [],
-                'show_imdb_ids': [],
-                'show_tmdb_ids': [],
-                'total_seasons': 0,
-                'total_episodes': 0
-            })
+        for idx in range(1, len(all_values)):
+            row = all_values[idx]
+            # Expect: A=CastName (0), B=CastIMDbID (1)
+            cast_name = (row[0].strip() if len(row) > 0 and row[0] else 'Unknown')
+            cast_imdb_id = (row[1].strip() if len(row) > 1 and row[1] else '')
 
-            # Prepare data for this row (regardless of whether it needs updating)
+            if not cast_imdb_id:
+                skipped_without_castinfo += 1
+                continue
+
+            show_data = aggregated_show_data.get(cast_imdb_id)
+            if not show_data or not show_data['shows']:
+                skipped_without_castinfo += 1
+                continue
+
+            # Compose output columns D–I
             show_names = ', '.join(show_data['shows'])
-            show_imdb_ids = ', '.join(filter(None, show_data['show_imdb_ids']))  
-            show_tmdb_ids = ', '.join(show_data['show_tmdb_ids'])
+            show_imdb_ids = ', '.join([sid for sid in show_data['show_imdb_ids'] if sid])
+            show_tmdb_ids = ', '.join([tid for tid in show_data['show_tmdb_ids'] if tid])
             total_shows = len(show_data['shows'])
             total_seasons = show_data['total_seasons']
             total_episodes = show_data['total_episodes']
-            
-            # Add EVERY row to consecutive updates for true consecutive processing
+
+            # Use actual sheet row number (header is row 1)
             consecutive_updates.append({
-                'row_num': i + 2,  # +2 because row 1 is headers, array is 0-indexed
-                'cast_name': realitease_record.get('CastName', 'Unknown'),
+                'row_num': idx + 1,
+                'cast_name': cast_name,
                 'cast_imdb_id': cast_imdb_id,
                 'data': [show_names, show_imdb_ids, show_tmdb_ids, total_shows, total_seasons, total_episodes]
             })
-        
-        print(f"  ✅ Prepared {len(consecutive_updates)} consecutive updates (all rows)")
+
+        if skipped_without_castinfo:
+            print(
+                f"  ⚠️ Skipped {skipped_without_castinfo} rows with no CastInfo linkage "
+                "(leaving existing values untouched)"
+            )
+
+        print(f"  ✅ Prepared {len(consecutive_updates)} consecutive updates")
         return consecutive_updates
         
     def process_batch_updates(self, batch_updates, dry_run=True):
@@ -368,46 +393,78 @@ class RealiteaseInfoStep2:
         return len(batch_updates)
         
     def update_show_data_consecutive(self, batch_updates, dry_run=True):
-        """Update RealiteaseInfo with truly consecutive batch updates with retry logic"""
+        """Update RealiteaseInfo in strictly consecutive row blocks with retry logic.
+        This avoids writing into unintended rows when there are gaps between target rows.
+        """
         if not batch_updates:
             return 0
-            
-        start_row = batch_updates[0]['row_num']
-        end_row = batch_updates[-1]['row_num']
-        range_name = f'D{start_row}:I{end_row}'
-        batch_data = [update['data'] for update in batch_updates]
-        try:
-            existing_values = self.realitease_sheet.get(range_name)
-        except Exception:
-            existing_values = []
 
-        changed_cells = self._count_changed_cells(existing_values, batch_data)
+        # Sort by row number to ensure consistent ordering
+        batch_updates.sort(key=lambda x: x['row_num'])
 
-        if dry_run:
-            print(f"    🔍 DRY RUN: Would batch update rows {start_row}-{end_row} ({len(batch_updates)} rows / {changed_cells} cells changed)")
-            return len(batch_updates)
+        # Split into truly consecutive runs
+        runs = []
+        current = [batch_updates[0]]
+        for upd in batch_updates[1:]:
+            if upd['row_num'] == current[-1]['row_num'] + 1:
+                current.append(upd)
+            else:
+                runs.append(current)
+                current = [upd]
+        runs.append(current)
 
-        print(f"    📝 Batch updating rows {start_row}-{end_row} ({len(batch_updates)} rows / {changed_cells} cells)")
+        total_rows_updated = 0
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        for run in runs:
+            start_row = run[0]['row_num']
+            end_row = run[-1]['row_num']
+            range_name = f'D{start_row}:I{end_row}'
+            batch_data = [u['data'] for u in run]
+
             try:
-                self.realitease_sheet.update(values=batch_data, range_name=range_name)
-                print(f"    ✅ Batch update applied ({len(batch_updates)} rows / {changed_cells} cells updated)")
-                return len(batch_updates)
-            except Exception as e:
-                if "429" in str(e) or "quota" in str(e).lower():
-                    wait_time = (attempt + 1) * 60
-                    print(f"    ⚠️  API quota limit hit. Waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}...")
-                    time.sleep(wait_time)
-                    if attempt == max_retries - 1:
-                        print(f"    ❌ Failed after {max_retries} retries: {str(e)}")
-                        raise
-                else:
-                    print(f"    ❌ Update failed: {str(e)}")
-                    raise
+                existing_values = self.realitease_sheet.get(range_name)
+            except Exception:
+                existing_values = []
 
-        return len(batch_updates)
+            changed_cells = self._count_changed_cells(existing_values, batch_data)
+
+            if dry_run:
+                print(
+                    f"    🔍 DRY RUN: Would batch update rows {start_row}-{end_row} ("
+                    f"{len(run)} rows / {changed_cells} cells changed)"
+                )
+                total_rows_updated += len(run)
+                continue
+
+            print(
+                f"    📝 Batch updating rows {start_row}-{end_row} ("
+                f"{len(run)} rows / {changed_cells} cells)"
+            )
+
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self.realitease_sheet.update(values=batch_data, range_name=range_name)
+                    for u in run:
+                        print(f"    ✅ Updated row {u['row_num']} - {u['cast_name']}")
+                    break
+                except Exception as e:
+                    if "429" in str(e) or "quota" in str(e).lower():
+                        wait_time = (attempt + 1) * 60
+                        print(
+                            f"    ⚠️  API quota limit hit. Waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}..."
+                        )
+                        time.sleep(wait_time)
+                        if attempt == max_retries - 1:
+                            print(f"    ❌ Failed after {max_retries} retries: {str(e)}")
+                            raise
+                    else:
+                        print(f"    ❌ Update failed: {str(e)}")
+                        raise
+
+            total_rows_updated += len(run)
+
+        return total_rows_updated
 
     @staticmethod
     def _count_changed_cells(existing_values, new_values):
