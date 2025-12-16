@@ -1,0 +1,20 @@
+# Core pipeline deps
+requests>=2.32.0
+python-dotenv>=1.0.0
+gspread>=6.0.0
+google-auth>=2.30.0
+google-auth-oauthlib>=1.2.0
+beautifulsoup4>=4.12.0
+tenacity>=8.2.0
+
+# Gemini integration (used by multiple pipeline stages)
+google-generativeai>=0.8.0
+
+# Firebase deployment helpers (optional; used by upload scripts)
+firebase-admin>=6.5.0
+
+# Postgres/core schema helpers (optional; used by sync + migrations)
+psycopg2-binary>=2.9.9
+
+# Dev / test
+pytest>=8.0.0
