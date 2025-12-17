@@ -84,6 +84,7 @@ curl http://localhost:8000/api/v1/shows
 # Run all API smoke tests
 python -m pytest tests/test_api_smoke.py -v
 pytest tests/test_discussions_smoke.py -v
+pytest tests/test_dms_smoke.py -v
 
 # Run with coverage
 python -m pytest tests/ --cov=api --cov-report=term-missing
@@ -235,13 +236,63 @@ GET /api/v1/threads/{thread_id}/posts?cursor=2025-01-01T00:00:00Z&limit=50
 - `limit`: Max posts to return (default: 50, max: 100)
 - `parent_post_id`: Filter to replies of a specific post (omit for top-level posts)
 
+### Direct Messages (DMs)
+
+1:1 direct messaging between users.
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| POST | `/api/v1/dms` | Create or get 1:1 conversation | Required |
+| GET | `/api/v1/dms` | List user's conversations | Required |
+| GET | `/api/v1/dms/{conversation_id}/messages` | List messages in conversation | Required |
+| POST | `/api/v1/dms/{conversation_id}/messages` | Send a message | Required |
+| POST | `/api/v1/dms/{conversation_id}/read` | Update read receipt | Required |
+
+**Authentication:** All DM endpoints require a valid Supabase JWT. RLS policies ensure users can only access conversations they're members of.
+
+#### Creating a Conversation
+
+```bash
+POST /api/v1/dms
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{"other_user_id": "uuid-of-other-user"}
+```
+
+Returns the conversation (creating it if it doesn't exist). Idempotent - calling with the same user pair always returns the same conversation.
+
+#### Message Pagination
+
+Messages support cursor-based pagination:
+
+```
+GET /api/v1/dms/{conversation_id}/messages?cursor=2025-01-01T00:00:00Z&limit=50
+```
+
+- `cursor`: ISO timestamp to start after
+- `limit`: Max messages to return (default: 50, max: 100)
+- Messages are returned oldest to newest (for chat display)
+
+#### Read Receipts
+
+Mark messages as read:
+
+```bash
+POST /api/v1/dms/{conversation_id}/read
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{"last_read_message_id": "uuid-of-last-read-message"}
+```
+
 ## Database
 
 The API uses Supabase with the following schemas:
 
 - `core` - Shows, seasons, episodes, cast
 - `surveys` - Surveys, questions, responses
-- `social` - Discussion threads, posts, reactions
+- `social` - Discussion threads, posts, reactions, DM conversations, messages, read receipts
 
 See [docs/db/schema.md](../db/schema.md) for full schema documentation.
 
