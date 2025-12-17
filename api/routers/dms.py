@@ -3,13 +3,17 @@ Direct Messages (DM) endpoints.
 
 All DM endpoints require authentication.
 RLS policies enforce member-only access to conversations.
+
+Events are published to WebSocket subscribers after successful writes.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 
 from api.auth import CurrentUser, get_user_supabase_client
@@ -19,9 +23,33 @@ from api.deps import (
     raise_for_supabase_error,
     require_single_result,
 )
+from api.realtime.broker import get_broker
+from api.realtime.events import (
+    get_dm_room,
+    dm_message_created_event,
+    dm_read_updated_event,
+)
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/dms", tags=["dms"])
+
+
+# --- Helper for publishing events ---
+
+
+def publish_event_sync(room: str, event: dict) -> None:
+    """
+    Publish an event to a room (sync wrapper for background task).
+
+    This runs the async publish in a new event loop since
+    FastAPI sync endpoints don't have an event loop.
+    """
+    try:
+        broker = get_broker()
+        asyncio.run(broker.publish(room, event))
+    except Exception as e:
+        logger.error(f"Failed to publish event to {room}: {e}")
 
 
 # --- Pydantic models ---
@@ -222,6 +250,7 @@ def send_message(
     payload: MessageCreate,
     user: CurrentUser,
     db: SupabaseClient,
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """
     Send a message to a conversation.
@@ -262,6 +291,11 @@ def send_message(
     )
     # Don't fail if this update fails - the message was still sent
 
+    # Publish event to WebSocket subscribers
+    room = get_dm_room(str(conversation_id))
+    event = dm_message_created_event(message)
+    background_tasks.add_task(publish_event_sync, room, event.to_dict())
+
     return message
 
 
@@ -270,6 +304,7 @@ def update_read_receipt(
     conversation_id: UUID,
     payload: ReadReceiptUpdate,
     user: CurrentUser,
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """
     Update read receipt to mark messages as read up to a specific message.
@@ -314,4 +349,15 @@ def update_read_receipt(
     if not update_response.data:
         raise HTTPException(status_code=500, detail="Failed to update read receipt")
 
-    return update_response.data[0]
+    receipt = update_response.data[0]
+
+    # Publish event to WebSocket subscribers
+    room = get_dm_room(str(conversation_id))
+    event = dm_read_updated_event(
+        str(conversation_id),
+        user["id"],
+        str(payload.last_read_message_id),
+    )
+    background_tasks.add_task(publish_event_sync, room, event.to_dict())
+
+    return receipt
