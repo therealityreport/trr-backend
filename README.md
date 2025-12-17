@@ -62,6 +62,15 @@ The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system 
    python3 scripts/run_pipeline.py --step showinfo
    ```
 
+## 📦 Repo Layout
+
+- `api/`: FastAPI app (Supabase-backed API + WebSockets)
+- `trr_backend/`: Shared library code (reused by API + pipeline)
+  - `trr_backend/integrations/`: External metadata clients (IMDb/TMDb/etc.)
+- `scripts/`: Data pipeline stages and orchestration (`scripts/run_pipeline.py`)
+- `supabase/`: Database schema, migrations, and seeds
+- `docs/`: Architecture and operating docs
+
 ## 📁 Pipeline Architecture
 
 The data pipeline is organized into 5 sequential stages, each building upon the previous stage's output:

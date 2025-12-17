@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>IMDb List Sample</title>
+    <script type="application/ld+json">
+      {
+        "@context": "http://schema.org",
+        "@type": "ItemList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "item": {
+              "@type": "TVSeries",
+              "name": "Sample Series One",
+              "url": "https://www.imdb.com/title/tt1111111/"
+            }
+          },
+          {
+            "@type": "ListItem",
+            "position": 2,
+            "item": {
+              "@type": "TVSeries",
+              "name": "Sample Series Two",
+              "url": "https://www.imdb.com/title/tt2222222/"
+            }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <a href="/list/ls123456789/?page=2" aria-label="Next">Next</a>
+  </body>
+</html>
+
