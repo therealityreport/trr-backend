@@ -6,6 +6,16 @@ This repository is a data pipeline that pulls reality TV show/cast metadata from
 
 Most pipeline execution lives under `scripts/` and is designed to be run locally or from scheduled jobs.
 
+## FastAPI App (Supabase)
+
+The repo also contains a FastAPI app under `api/` that serves TRR data from Supabase and supports real-time WebSocket updates.
+
+## Shared Library Code
+
+Code that should be reused by both the API and the pipeline should live under `trr_backend/` (not inside `api/` or `scripts/`).
+
+External metadata clients live under `trr_backend/integrations/` (see `docs/architecture/integrations.md`).
+
 ## Pipeline Stages
 
 - `scripts/1-ShowInfo/`: discover/populate show metadata

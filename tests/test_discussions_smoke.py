@@ -341,6 +341,7 @@ class TestCreatePost:
         # Mock Supabase for this specific test
         thread_data = {
             "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "episode_id": "3d037712-54b6-4037-8109-1c69ab00448a",
             "is_locked": False,
         }
         mock_db = create_chainable_mock([MOCK_POST], single_data=thread_data)
@@ -394,6 +395,7 @@ class TestReactions:
         single_data = {
             "id": "b2c3d4e5-f6a7-8901-bcde-f23456789012",
             "thread_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "episode_id": "3d037712-54b6-4037-8109-1c69ab00448a",
             "is_locked": False,
         }
 
