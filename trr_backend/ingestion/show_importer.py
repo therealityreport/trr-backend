@@ -15,7 +15,7 @@ from trr_backend.ingestion.shows_from_lists import (
     fetch_imdb_list_items,
     fetch_tmdb_list_items,
     merge_candidates,
-    parse_imdb_list_url,
+    parse_imdb_list_id,
 )
 from trr_backend.integrations.imdb.episodic_client import HttpImdbEpisodicClient, IMDB_JOB_CATEGORY_SELF
 from trr_backend.models.shows import ShowUpsert
@@ -105,8 +105,8 @@ def collect_candidates_from_lists(
 
     imdb_candidates: list[CandidateShow] = []
     for url in imdb_list_urls:
-        list_id = parse_imdb_list_url(url)
-        items: list[ImdbListItem] = fetch_imdb_list_items(list_id, session=session)
+        list_id = parse_imdb_list_id(url)
+        items: list[ImdbListItem] = fetch_imdb_list_items(url, session=session)
         tag = f"imdb-list:{list_id}"
         for item in items:
             imdb_candidates.append(

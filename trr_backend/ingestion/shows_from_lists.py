@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 from urllib.parse import urljoin
@@ -56,19 +57,42 @@ class CandidateShow:
 
 _IMDB_LIST_ID_RE = re.compile(r"(ls[0-9]+)")
 _IMDB_TITLE_ID_RE = re.compile(r"/title/(tt[0-9]+)/")
+_IMDB_TITLE_ID_FULL_RE = re.compile(r"^(tt[0-9]+)$")
+_YEAR_RE = re.compile(r"\b(19|20)[0-9]{2}\b")
 
 
-def parse_imdb_list_url(url: str) -> str:
-    match = _IMDB_LIST_ID_RE.search(url)
+def parse_imdb_list_id(value: str) -> str:
+    """
+    Parse an IMDb list identifier from either:
+    - a bare id (e.g. "ls4106677119")
+    - a share URL (e.g. "https://www.imdb.com/list/ls4106677119/?ref_=ext_shr_lnk")
+    """
+
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError("IMDb list value is empty.")
+
+    if raw.startswith("ls") and raw[2:].isdigit():
+        return raw
+
+    match = _IMDB_LIST_ID_RE.search(raw)
     if not match:
-        raise ValueError(f"Unable to parse IMDb list id from: {url!r}")
+        raise ValueError(f"Unable to parse IMDb list id from: {value!r}")
     return match.group(1)
 
 
-def _parse_imdb_items_from_soup(soup: BeautifulSoup) -> list[ImdbListItem]:
-    # Strategy 1: JSON-LD structured data (preferred).
+def parse_imdb_list_url(url: str) -> str:
+    # Backwards-compatible alias.
+    return parse_imdb_list_id(url)
+
+
+def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    # A) JSON-LD ItemList (preferred).
+    jsonld_items: list[ImdbListItem] = []
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
-        text = script.string
+        text = script.string or script.get_text()
         if not text:
             continue
         try:
@@ -76,53 +100,227 @@ def _parse_imdb_items_from_soup(soup: BeautifulSoup) -> list[ImdbListItem]:
         except Exception:
             continue
 
-        if not isinstance(data, dict):
-            continue
+        candidates = data if isinstance(data, list) else [data]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
 
-        items = data.get("itemListElement")
-        if not isinstance(items, list):
-            continue
+            items = candidate.get("itemListElement")
+            if not isinstance(items, list):
+                continue
 
-        parsed: list[ImdbListItem] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            tv_series = item.get("item")
-            if not isinstance(tv_series, dict):
-                continue
-            if tv_series.get("@type") not in {"TVSeries", "TVSeriesSeason"}:
-                # Lists can mix media; we only want series-level records.
-                continue
-            name = tv_series.get("name")
-            url = tv_series.get("url")
-            if not isinstance(name, str) or not name.strip() or not isinstance(url, str):
-                continue
-            match = _IMDB_TITLE_ID_RE.search(url)
-            if not match:
-                continue
-            parsed.append(ImdbListItem(imdb_id=match.group(1), title=name.strip(), extra={"url": url}))
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
 
-        if parsed:
-            return parsed
+                tv_series = item.get("item")
+                if not isinstance(tv_series, dict):
+                    continue
 
-    # Strategy 2: HTML parsing fallback.
+                name = tv_series.get("name")
+                url = tv_series.get("url") or tv_series.get("@id")
+                if not isinstance(name, str) or not name.strip() or not isinstance(url, str):
+                    continue
+
+                match = _IMDB_TITLE_ID_RE.search(url)
+                if not match:
+                    continue
+
+                extra: dict[str, Any] = {"source": "jsonld", "url": url}
+                position = item.get("position")
+                if isinstance(position, int):
+                    extra["rank"] = position
+
+                jsonld_items.append(ImdbListItem(imdb_id=match.group(1), title=name.strip(), year=None, extra=extra))
+
+            if jsonld_items:
+                # JSON-LD doesn't usually include year/description; keep None and rely on other paths if needed.
+                return jsonld_items
+
+    # B) __NEXT_DATA__ JSON (secondary).
+    next_script = soup.find("script", attrs={"id": "__NEXT_DATA__", "type": "application/json"})
+    if next_script and next_script.string:
+        try:
+            next_data = json.loads(next_script.string)
+        except Exception:
+            next_data = None
+
+        if isinstance(next_data, (dict, list)):
+            parsed_by_id: dict[str, ImdbListItem] = {}
+
+            def walk(obj: Any) -> None:
+                if isinstance(obj, dict):
+                    title_id = obj.get("id")
+                    if isinstance(title_id, str) and _IMDB_TITLE_ID_FULL_RE.match(title_id):
+                        title_text: str | None = None
+                        title_text_obj = obj.get("titleText")
+                        if isinstance(title_text_obj, dict):
+                            raw_text = title_text_obj.get("text")
+                            if isinstance(raw_text, str) and raw_text.strip():
+                                title_text = raw_text.strip()
+                        elif isinstance(title_text_obj, str) and title_text_obj.strip():
+                            title_text = title_text_obj.strip()
+
+                        if title_text:
+                            year = None
+                            release_year_obj = obj.get("releaseYear")
+                            if isinstance(release_year_obj, dict):
+                                year_value = release_year_obj.get("year")
+                                if isinstance(year_value, int):
+                                    year = year_value
+                                elif isinstance(year_value, str) and year_value.isdigit():
+                                    year = int(year_value)
+
+                            parsed_by_id.setdefault(
+                                title_id,
+                                ImdbListItem(
+                                    imdb_id=title_id,
+                                    title=title_text,
+                                    year=year,
+                                    extra={"source": "next_data"},
+                                ),
+                            )
+
+                    for v in obj.values():
+                        walk(v)
+                elif isinstance(obj, list):
+                    for v in obj:
+                        walk(v)
+
+            walk(next_data)
+            if parsed_by_id:
+                return list(parsed_by_id.values())
+
+    # C) HTML fallback (classic + IPC layouts).
     parsed: list[ImdbListItem] = []
-    for li in soup.find_all("li", class_="ipc-metadata-list-summary-item"):
-        link = li.find("a", class_="ipc-title-link-wrapper")
+
+    def parse_rank_and_title(text: str) -> tuple[int | None, str]:
+        m = re.match(r"^([0-9]+)\.\s*(.+)$", text.strip())
+        if not m:
+            return None, text.strip()
+        return int(m.group(1)), m.group(2).strip()
+
+    def infer_year(container: Any) -> int | None:
+        # Try "year" class first, then fallback to regex match.
+        year_el = container.find("span", class_=re.compile("year", re.I)) if container else None
+        if year_el:
+            m = _YEAR_RE.search(year_el.get_text(" ", strip=True))
+            if m:
+                return int(m.group(0))
+        blob = container.get_text(" ", strip=True) if container else ""
+        m = _YEAR_RE.search(blob)
+        if m:
+            return int(m.group(0))
+        return None
+
+    def infer_description(container: Any) -> str | None:
+        for p in container.find_all("p") if container else []:
+            text = p.get_text(" ", strip=True)
+            if not text:
+                continue
+            if len(text) < 20:
+                continue
+            return text
+        return None
+
+    def infer_rank(container: Any, title_text: str | None) -> int | None:
+        if title_text:
+            rank, _ = parse_rank_and_title(title_text)
+            if rank is not None:
+                return rank
+        idx = container.find("span", class_=re.compile("index", re.I)) if container else None
+        if idx:
+            m = re.search(r"([0-9]+)", idx.get_text(" ", strip=True))
+            if m:
+                return int(m.group(1))
+        return None
+
+    def container_is_too_broad(container: Any) -> bool:
+        name = getattr(container, "name", "")
+        return name in {"html", "body", "main"}
+
+    containers = soup.select("li.ipc-metadata-list-summary-item") or soup.select("div.lister-item") or soup.select(
+        "div.lister-item-content"
+    )
+
+    def parse_container(container: Any) -> None:
+        link = None
+        for a in container.find_all("a", href=True):
+            href_val = a.get("href")
+            if not isinstance(href_val, str):
+                continue
+            if _IMDB_TITLE_ID_RE.search(href_val):
+                link = a
+                break
         if not link:
-            continue
-        href = link.get("href", "")
-        title_h3 = link.find("h3")
-        if not title_h3:
+            return
+
+        href_val = link.get("href", "")
+        match = _IMDB_TITLE_ID_RE.search(href_val)
+        if not match:
+            return
+        imdb_id = match.group(1)
+        if imdb_id in seen:
+            return
+        seen.add(imdb_id)
+
+        title_text: str | None = None
+        header = container.find(["h3", "h4"])
+        if header:
+            title_text = header.get_text(" ", strip=True)
+        if not title_text:
+            title_text = link.get_text(" ", strip=True)
+        if not title_text:
+            return
+
+        rank_from_title, title = parse_rank_and_title(title_text)
+        rank = rank_from_title or infer_rank(container, title_text)
+
+        is_broad = container_is_too_broad(container)
+        year = None if is_broad else infer_year(container)
+        description = None if is_broad else infer_description(container)
+
+        extra: dict[str, Any] = {"source": "html", "href": href_val}
+        if rank is not None:
+            extra["rank"] = rank
+        if description:
+            extra["description"] = description
+
+        parsed.append(ImdbListItem(imdb_id=imdb_id, title=title, year=year, extra=extra))
+
+    seen: set[str] = set()
+    if containers:
+        for container in containers:
+            parse_container(container)
+        return parsed
+
+    # No recognizable per-item containers: fall back to scanning all title links.
+    for a in soup.find_all("a", href=True):
+        href = a.get("href")
+        if not isinstance(href, str):
             continue
         match = _IMDB_TITLE_ID_RE.search(href)
         if not match:
             continue
-        raw_title = title_h3.get_text(strip=True)
-        title = re.sub(r"^[0-9]+\\.\\s*", "", raw_title).strip()
-        if not title:
+        imdb_id = match.group(1)
+        if imdb_id in seen:
             continue
-        parsed.append(ImdbListItem(imdb_id=match.group(1), title=title, extra={"href": href}))
+
+        # Prefer nearest item-ish container; avoid parsing the full page as a container.
+        container = a.find_parent(["li", "div"]) or a.parent
+        if container and container_is_too_broad(container):
+            container = None
+
+        if container:
+            parse_container(container)
+            continue
+
+        title_text = a.get_text(" ", strip=True)
+        if not title_text:
+            continue
+        _, title = parse_rank_and_title(title_text)
+        seen.add(imdb_id)
+        parsed.append(ImdbListItem(imdb_id=imdb_id, title=title, year=None, extra={"source": "html", "href": href}))
 
     return parsed
 
@@ -141,52 +339,72 @@ def _find_next_imdb_list_page(soup: BeautifulSoup, current_url: str) -> str | No
 
 
 def fetch_imdb_list_items(
-    list_id: str,
+    list_url_or_id: str,
     *,
     session: requests.Session | None = None,
     max_pages: int = 25,
 ) -> list[ImdbListItem]:
     session = session or requests.Session()
-    headers = {"User-Agent": "Mozilla/5.0"}
+    list_id = parse_imdb_list_id(list_url_or_id)
 
-    url = f"https://www.imdb.com/list/{list_id}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    base_url = f"https://www.imdb.com/list/{list_id}/"
+    url = base_url
     visited: set[str] = set()
     page_num = 1
-
     items_by_id: dict[str, ImdbListItem] = {}
+
+    def fetch_html(url: str) -> str:
+        last_status = None
+        last_text = ""
+        for attempt in range(3):
+            resp = session.get(url, headers=headers, timeout=30)
+            last_status = resp.status_code
+            last_text = resp.text or ""
+            if resp.status_code == 200:
+                return last_text
+            if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                if attempt < 2:
+                    time.sleep(1.0 * (2**attempt))
+                    continue
+            break
+        snippet = last_text[:200].replace("\n", " ").strip()
+        raise RuntimeError(f"IMDb list fetch failed (HTTP {last_status}) for {url}. Snippet: {snippet}")
 
     while url and url not in visited and page_num <= max_pages:
         visited.add(url)
-        resp = session.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.content, "html.parser")
+        try:
+            html = fetch_html(url)
+        except RuntimeError:
+            if page_num == 1:
+                raise
+            break
+        page_items = parse_imdb_list_page(html)
 
-        for item in _parse_imdb_items_from_soup(soup):
-            items_by_id.setdefault(item.imdb_id, item)
+        new_ids = 0
+        for item in page_items:
+            if item.imdb_id in items_by_id:
+                continue
+            items_by_id[item.imdb_id] = item
+            new_ids += 1
 
+        # Stop when the page doesn't yield items, or yields no new ids.
+        if not page_items or new_ids == 0:
+            break
+
+        soup = BeautifulSoup(html, "html.parser")
         next_url = _find_next_imdb_list_page(soup, url)
         if next_url:
             url = next_url
             page_num += 1
             continue
 
-        # Fallback pagination pattern (IMDb commonly supports ?page=N).
-        candidate_next = f"https://www.imdb.com/list/{list_id}/?page={page_num + 1}"
-        if candidate_next in visited:
-            break
-
-        try:
-            test_resp = session.get(candidate_next, headers=headers, timeout=20)
-            if test_resp.status_code != 200:
-                break
-            test_soup = BeautifulSoup(test_resp.content, "html.parser")
-            new_items = _parse_imdb_items_from_soup(test_soup)
-            if not new_items:
-                break
-            url = candidate_next
-            page_num += 1
-        except requests.RequestException:
-            break
+        page_num += 1
+        url = f"{base_url}?page={page_num}"
 
     return list(items_by_id.values())
 
