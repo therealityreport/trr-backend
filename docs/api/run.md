@@ -22,6 +22,10 @@ The API requires the following environment variables to be set:
 
 If `CORS_ALLOW_ORIGINS` is not set, the API allows all origins but disables credentials (safer default for development).
 
+When origins are explicitly set:
+- Only listed origins are allowed
+- Credentials are enabled (required for authenticated requests)
+
 ## Running Locally
 
 ### 1. Set up Python environment
@@ -79,6 +83,7 @@ curl http://localhost:8000/api/v1/shows
 ```bash
 # Run all API smoke tests
 python -m pytest tests/test_api_smoke.py -v
+pytest tests/test_discussions_smoke.py -v
 
 # Run with coverage
 python -m pytest tests/ --cov=api --cov-report=term-missing
@@ -160,16 +165,88 @@ docker run -p 8000:8000 --env-file .env trr-api
 
 ## API Endpoints
 
+### Health Check
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Health check |
-| GET | `/api/v1/shows` | List all shows |
-| GET | `/api/v1/shows/{id}` | Get show details |
-| GET | `/api/v1/shows/{id}/seasons` | List seasons |
-| GET | `/api/v1/shows/{id}/cast` | List cast members |
-| GET | `/api/v1/surveys` | List surveys |
-| GET | `/api/v1/surveys/{id}` | Get survey with questions |
-| GET | `/api/v1/surveys/{id}/results` | Get live aggregate results |
-| POST | `/api/v1/surveys/{id}/submit` | Submit survey, get instant results |
+| GET | `/` | Root health check |
+| GET | `/health` | Health status |
 
-See `/docs` endpoint for full interactive API documentation.
+### Shows
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/shows` | List all shows |
+| GET | `/api/v1/shows/{show_id}` | Get show details |
+| GET | `/api/v1/shows/{show_id}/seasons` | List seasons for a show |
+| GET | `/api/v1/shows/{show_id}/seasons/{season_number}` | Get season details |
+| GET | `/api/v1/shows/{show_id}/seasons/{season_number}/episodes` | List episodes |
+| GET | `/api/v1/shows/{show_id}/cast` | List cast for a show |
+| GET | `/api/v1/shows/{show_id}/seasons/{season_number}/cast` | List cast for a season |
+
+### Surveys
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| GET | `/api/v1/surveys` | List all active surveys | Public |
+| GET | `/api/v1/surveys/{survey_id}` | Get survey with questions | Public |
+| GET | `/api/v1/surveys/{survey_id}/results` | Get live survey results | Public |
+| POST | `/api/v1/surveys/{survey_id}/submit` | Submit survey response | Optional |
+
+**Note:** Survey submissions support both anonymous and authenticated users. When authenticated, the `user_id` is derived from the JWT token. Anonymous submissions have `user_id = NULL`.
+
+### Discussions (Episode Threads)
+
+Reddit-style discussion threads for episodes.
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| GET | `/api/v1/episodes/{episode_id}/threads` | List threads for an episode | Public |
+| POST | `/api/v1/episodes/{episode_id}/threads` | Create a new thread | Required |
+| GET | `/api/v1/threads/{thread_id}` | Get thread details | Public |
+| GET | `/api/v1/threads/{thread_id}/posts` | List posts in thread | Public |
+| POST | `/api/v1/threads/{thread_id}/posts` | Create a post | Required |
+| GET | `/api/v1/posts/{post_id}/reactions` | Get reaction counts | Public |
+| POST | `/api/v1/posts/{post_id}/reactions` | Toggle reaction | Required |
+
+**Authentication:** Write endpoints require a valid Supabase JWT in the `Authorization: Bearer <token>` header. The API validates tokens via Supabase Auth and enforces RLS policies using the user's identity.
+
+#### Thread Types
+
+- `episode_live` - Live discussion during episode airing
+- `post_episode` - Discussion after episode airs
+- `spoilers` - Spoiler discussions
+- `general` - General discussion
+
+#### Reaction Types
+
+- `upvote`, `downvote` - Vote reactions
+- `lol`, `shade`, `fire`, `heart` - Emoji reactions
+
+#### Pagination
+
+Posts support cursor-based pagination:
+
+```
+GET /api/v1/threads/{thread_id}/posts?cursor=2025-01-01T00:00:00Z&limit=50
+```
+
+- `cursor`: ISO timestamp to start after (from previous page's last post `created_at`)
+- `limit`: Max posts to return (default: 50, max: 100)
+- `parent_post_id`: Filter to replies of a specific post (omit for top-level posts)
+
+## Database
+
+The API uses Supabase with the following schemas:
+
+- `core` - Shows, seasons, episodes, cast
+- `surveys` - Surveys, questions, responses
+- `social` - Discussion threads, posts, reactions
+
+See [docs/db/schema.md](../db/schema.md) for full schema documentation.
+
+## API Documentation
+
+When running locally, interactive docs are available at:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`

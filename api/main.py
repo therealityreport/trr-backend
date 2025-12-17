@@ -4,6 +4,7 @@ TRR Backend API - FastAPI application.
 Provides endpoints for:
 - Browsing shows, seasons, episodes, and cast
 - Submitting surveys with instant live results
+- Episode discussion threads, posts, and reactions
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import shows, surveys
+from api.routers import discussions, shows, surveys
 
 
 def get_cors_origins() -> list[str]:
@@ -60,6 +61,7 @@ app.add_middleware(
 # Include routers
 app.include_router(shows.router, prefix="/api/v1")
 app.include_router(surveys.router, prefix="/api/v1")
+app.include_router(discussions.router, prefix="/api/v1")
 
 
 @app.get("/")
