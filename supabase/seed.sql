@@ -314,4 +314,48 @@ values
   )
 on conflict (id) do nothing;
 
+-- ---------------------------------------------------------------------------
+-- social (discussions)
+-- Note: created_by/user_id are NULL for seed data since we don't have auth users
+-- ---------------------------------------------------------------------------
+
+insert into social.threads (id, episode_id, title, type, created_by, is_locked)
+values (
+  'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+  '3d037712-54b6-4037-8109-1c69ab00448a',
+  'Episode 1 Live Discussion Thread',
+  'episode_live',
+  null,
+  false
+)
+on conflict (id) do nothing;
+
+insert into social.posts (id, thread_id, parent_post_id, user_id, body)
+values
+  (
+    'b2c3d4e5-f6a7-8901-bcde-f23456789012',
+    'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    null,
+    null,
+    'Can''t believe that opening scene! Ava absolutely killed it.'
+  ),
+  (
+    'c3d4e5f6-a7b8-9012-cdef-345678901234',
+    'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    null,
+    null,
+    'Drew''s hosting is top tier this season. The energy is unmatched!'
+  ),
+  (
+    'd4e5f6a7-b8c9-0123-defa-456789012345',
+    'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    'b2c3d4e5-f6a7-8901-bcde-f23456789012',
+    null,
+    'Right?! She really came to play. My MVP vote is locked in.'
+  )
+on conflict (id) do nothing;
+
+-- Note: reactions require user_id which cannot be null per the schema
+-- Skipping reaction seed data since we need real authenticated users
+
 commit;

@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from api.auth import OptionalUser
 from api.deps import (
     SupabaseClient,
     SupabaseAdminClient,
@@ -179,6 +180,7 @@ def submit_survey(
     admin_db: SupabaseAdminClient,
     survey_id: UUID,
     submission: SurveySubmission,
+    user: OptionalUser,
 ) -> dict:
     """
     Submit a survey response and get instant live results.
@@ -189,9 +191,11 @@ def submit_survey(
     3. Updates the aggregate results
     4. Returns the updated results immediately
 
-    Security note: user_id is never accepted from the client payload.
-    For authenticated users, it would be derived from the auth token.
-    For anonymous submissions, user_id is set to NULL.
+    Authentication: Optional. Anonymous submissions allowed.
+    - Authenticated: user_id derived from JWT token
+    - Anonymous: user_id is NULL
+
+    Security note: user_id is NEVER accepted from client payload.
     """
     # Verify survey exists and is published
     survey_response = (
@@ -207,18 +211,17 @@ def submit_survey(
     if survey["status"] != "published":
         raise HTTPException(status_code=400, detail="Survey is not accepting responses")
 
-    # Create response record using admin client to bypass RLS
-    # user_id is explicitly NULL for anonymous submissions
-    # In production with auth, derive user_id from request auth context (e.g., auth.uid())
+    # Build response record - user_id derived from token (if authenticated)
     # SECURITY: user_id is NEVER accepted from client payload
+    response_data: dict[str, str] = {"survey_id": str(survey_id)}
+    if user:
+        response_data["user_id"] = user["id"]
+
+    # Create response record using admin client to bypass RLS for anonymous submissions
     response_record = (
         admin_db.schema("surveys")
         .table("responses")
-        .insert({
-            "survey_id": str(survey_id),
-            # user_id intentionally omitted - will be NULL
-            # When auth is implemented, derive from token: user_id = get_current_user_id(request)
-        })
+        .insert(response_data)
         .execute()
     )
     raise_for_supabase_error(response_record, "creating survey response")
