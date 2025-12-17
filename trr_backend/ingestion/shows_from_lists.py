@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html as html_lib
 import re
 import time
 from dataclasses import dataclass, field
@@ -122,6 +123,11 @@ def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
                 if not isinstance(name, str) or not name.strip() or not isinstance(url, str):
                     continue
 
+                # JSON-LD within <script> can include HTML entities (e.g. &amp;, &apos;).
+                name = html_lib.unescape(name).strip()
+                if not name:
+                    continue
+
                 match = _IMDB_TITLE_ID_RE.search(url)
                 if not match:
                     continue
@@ -162,24 +168,26 @@ def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
                             title_text = title_text_obj.strip()
 
                         if title_text:
-                            year = None
-                            release_year_obj = obj.get("releaseYear")
-                            if isinstance(release_year_obj, dict):
-                                year_value = release_year_obj.get("year")
-                                if isinstance(year_value, int):
-                                    year = year_value
-                                elif isinstance(year_value, str) and year_value.isdigit():
-                                    year = int(year_value)
+                            title_text = html_lib.unescape(title_text).strip()
+                            if title_text:
+                                year = None
+                                release_year_obj = obj.get("releaseYear")
+                                if isinstance(release_year_obj, dict):
+                                    year_value = release_year_obj.get("year")
+                                    if isinstance(year_value, int):
+                                        year = year_value
+                                    elif isinstance(year_value, str) and year_value.isdigit():
+                                        year = int(year_value)
 
-                            parsed_by_id.setdefault(
-                                title_id,
-                                ImdbListItem(
-                                    imdb_id=title_id,
-                                    title=title_text,
-                                    year=year,
-                                    extra={"source": "next_data"},
-                                ),
-                            )
+                                parsed_by_id.setdefault(
+                                    title_id,
+                                    ImdbListItem(
+                                        imdb_id=title_id,
+                                        title=title_text,
+                                        year=year,
+                                        extra={"source": "next_data"},
+                                    ),
+                                )
 
                     for v in obj.values():
                         walk(v)
@@ -326,6 +334,13 @@ def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
 
 
 def _find_next_imdb_list_page(soup: BeautifulSoup, current_url: str) -> str | None:
+    base_url = current_url.split("?", 1)[0]
+    if not base_url.endswith("/"):
+        base_url = f"{base_url}/"
+    return _find_next_imdb_list_page_for_list(soup, current_url, base_url=base_url)
+
+
+def _find_next_imdb_list_page_for_list(soup: BeautifulSoup, current_url: str, *, base_url: str) -> str | None:
     for a in soup.find_all("a", href=True):
         aria = (a.get("aria-label") or "").strip()
         text = a.get_text(strip=True)
@@ -334,7 +349,12 @@ def _find_next_imdb_list_page(soup: BeautifulSoup, current_url: str) -> str | No
         href = a.get("href")
         if not isinstance(href, str) or not href.strip():
             continue
-        return urljoin(current_url, href)
+        if "page=" not in href:
+            continue
+        candidate = urljoin(current_url, href)
+        if not candidate.startswith(base_url):
+            continue
+        return candidate
     return None
 
 
@@ -397,7 +417,7 @@ def fetch_imdb_list_items(
             break
 
         soup = BeautifulSoup(html, "html.parser")
-        next_url = _find_next_imdb_list_page(soup, url)
+        next_url = _find_next_imdb_list_page_for_list(soup, url, base_url=base_url)
         if next_url:
             url = next_url
             page_num += 1
