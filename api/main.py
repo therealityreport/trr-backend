@@ -6,16 +6,21 @@ Provides endpoints for:
 - Submitting surveys with instant live results
 - Episode discussion threads, posts, and reactions
 - Direct messages (1:1 DMs)
+- Real-time WebSocket updates
 """
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import discussions, dms, shows, surveys
+from api.routers import discussions, dms, shows, surveys, ws
+from api.realtime.broker import init_broker, shutdown_broker
+
+logger = logging.getLogger(__name__)
 
 
 def get_cors_origins() -> list[str]:
@@ -34,8 +39,12 @@ def get_cors_origins() -> list[str]:
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
     # Startup
+    logger.info("Starting up TRR Backend API...")
+    await init_broker()
     yield
     # Shutdown
+    logger.info("Shutting down TRR Backend API...")
+    await shutdown_broker()
 
 
 app = FastAPI(
@@ -64,6 +73,7 @@ app.include_router(shows.router, prefix="/api/v1")
 app.include_router(surveys.router, prefix="/api/v1")
 app.include_router(discussions.router, prefix="/api/v1")
 app.include_router(dms.router, prefix="/api/v1")
+app.include_router(ws.router, prefix="/api/v1")
 
 
 @app.get("/")

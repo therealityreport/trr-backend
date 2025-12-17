@@ -3,12 +3,16 @@ Episode discussion endpoints (Reddit-style threads, posts, and reactions).
 
 All reads are public. Writes require authentication.
 user_id is always server-derived from the auth token, never from client.
+
+Events are published to WebSocket subscribers after successful writes.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 
 from api.auth import CurrentUser, get_user_supabase_client
@@ -18,9 +22,36 @@ from api.deps import (
     raise_for_supabase_error,
     require_single_result,
 )
+from api.realtime.broker import get_broker
+from api.realtime.events import (
+    get_discussion_room,
+    thread_created_event,
+    post_created_event,
+    reaction_toggled_event,
+)
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(tags=["discussions"])
+
+
+# --- Helper for publishing events ---
+
+
+def publish_event_sync(room: str, event: dict) -> None:
+    """
+    Publish an event to a room (sync wrapper for background task).
+
+    This runs the async publish in a new event loop since
+    FastAPI sync endpoints don't have an event loop.
+    """
+    try:
+        broker = get_broker()
+        asyncio.run(broker.publish(room, event))
+    except Exception as e:
+        logger.error(f"Failed to publish event to {room}: {e}")
+
 
 # Valid thread types
 VALID_THREAD_TYPES = ("episode_live", "post_episode", "spoilers", "general")
@@ -119,6 +150,7 @@ def create_thread(
     episode_id: UUID,
     thread: ThreadCreate,
     user: CurrentUser,
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """
     Create a new discussion thread for an episode.
@@ -160,7 +192,14 @@ def create_thread(
     if not response.data:
         raise HTTPException(status_code=500, detail="Failed to create thread")
 
-    return response.data[0]
+    created_thread = response.data[0]
+
+    # Publish event to WebSocket subscribers
+    room = get_discussion_room(str(episode_id))
+    event = thread_created_event(created_thread)
+    background_tasks.add_task(publish_event_sync, room, event.to_dict())
+
+    return created_thread
 
 
 @router.get("/threads/{thread_id}", response_model=Thread)
@@ -258,16 +297,18 @@ def create_post(
     thread_id: UUID,
     post: PostCreate,
     user: CurrentUser,
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """
     Create a new post in a thread.
     Requires authentication.
     """
     # Verify thread exists and is not locked (public read)
+    # Also get episode_id for the room
     thread_response = (
         db.schema("social")
         .table("threads")
-        .select("id, is_locked")
+        .select("id, is_locked, episode_id")
         .eq("id", str(thread_id))
         .single()
         .execute()
@@ -317,7 +358,14 @@ def create_post(
     if not response.data:
         raise HTTPException(status_code=500, detail="Failed to create post")
 
-    return response.data[0]
+    created_post = response.data[0]
+
+    # Publish event to WebSocket subscribers
+    room = get_discussion_room(str(thread["episode_id"]))
+    event = post_created_event(created_post)
+    background_tasks.add_task(publish_event_sync, room, event.to_dict())
+
+    return created_post
 
 
 # --- Reaction endpoints ---
@@ -328,6 +376,7 @@ def toggle_reaction(
     post_id: UUID,
     reaction_toggle: ReactionToggle,
     user: CurrentUser,
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """
     Toggle a reaction on a post (add if missing, remove if present).
@@ -353,11 +402,11 @@ def toggle_reaction(
     )
     post_data = require_single_result(post_response, "Post")
 
-    # Check if thread is locked
+    # Check if thread is locked and get episode_id for room
     thread_response = (
         db.schema("social")
         .table("threads")
-        .select("is_locked")
+        .select("is_locked, episode_id")
         .eq("id", post_data["thread_id"])
         .single()
         .execute()
@@ -382,6 +431,9 @@ def toggle_reaction(
     )
     existing = get_list_result(existing_response, "checking reaction")
 
+    # Determine room for event
+    room = get_discussion_room(str(thread["episode_id"]))
+
     if existing:
         # Remove existing reaction
         delete_response = (
@@ -394,6 +446,13 @@ def toggle_reaction(
             .execute()
         )
         raise_for_supabase_error(delete_response, "removing reaction")
+
+        # Publish event
+        event = reaction_toggled_event(
+            str(post_id), user["id"], reaction_toggle.reaction, "removed"
+        )
+        background_tasks.add_task(publish_event_sync, room, event.to_dict())
+
         return {"action": "removed", "reaction": reaction_toggle.reaction}
     else:
         # Add new reaction
@@ -408,6 +467,13 @@ def toggle_reaction(
             .execute()
         )
         raise_for_supabase_error(insert_response, "adding reaction")
+
+        # Publish event
+        event = reaction_toggled_event(
+            str(post_id), user["id"], reaction_toggle.reaction, "added"
+        )
+        background_tasks.add_task(publish_event_sync, room, event.to_dict())
+
         return {"action": "added", "reaction": reaction_toggle.reaction}
 
 
