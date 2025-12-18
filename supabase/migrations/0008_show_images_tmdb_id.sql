@@ -38,7 +38,7 @@ where url_original is null
   and coalesce(source, 'tmdb') = 'tmdb';
 
 -- Replace uniqueness: dedupe by (tmdb_id, source, kind, file_path).
-drop index if exists core_show_images_unique;
+drop index if exists core.core_show_images_unique;
 
 do $$
 begin
@@ -67,4 +67,3 @@ on core.show_images (tmdb_id, kind, iso_639_1)
 where tmdb_id is not null;
 
 commit;
-

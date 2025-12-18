@@ -422,6 +422,7 @@ def _tmdb_show_images_rows(
         images = _normalize_tmdb_images_list(payload.get(key))
         primary[kind] = _primary_tmdb_image_file_path(images)
         for img in images:
+            file_path = img.get("file_path")
             rows.append(
                 {
                     "show_id": show_id,
@@ -429,7 +430,12 @@ def _tmdb_show_images_rows(
                     "source": source,
                     "kind": kind,
                     "iso_639_1": img.get("iso_639_1"),
-                    "file_path": img.get("file_path"),
+                    "file_path": file_path,
+                    "url_original": (
+                        f"https://image.tmdb.org/t/p/original{file_path}"
+                        if isinstance(file_path, str) and file_path.strip()
+                        else None
+                    ),
                     "width": img.get("width"),
                     "height": img.get("height"),
                     "aspect_ratio": img.get("aspect_ratio"),
