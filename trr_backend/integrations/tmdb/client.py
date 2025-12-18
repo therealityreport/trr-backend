@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import time
 from typing import Any, Mapping
@@ -73,7 +74,9 @@ def _request_json(
             resp = session.get(url, params=params, headers=headers, timeout=timeout_seconds)
         except requests.RequestException as exc:
             if attempt < max_attempts - 1:
-                time.sleep(1.0 * (2**attempt))
+                delay = 1.0 * (2**attempt)
+                jitter = random.uniform(0.0, delay * 0.25)
+                time.sleep(delay + jitter)
                 continue
             raise TmdbClientError(f"TMDb request failed: {exc}") from exc
 
@@ -87,7 +90,8 @@ def _request_json(
             retry_after = (resp.headers.get("Retry-After") or "").strip()
             if retry_after.isdigit():
                 delay = max(delay, float(retry_after))
-            time.sleep(delay)
+            jitter = random.uniform(0.0, delay * 0.25)
+            time.sleep(delay + jitter)
             continue
 
         raise TmdbClientError(
