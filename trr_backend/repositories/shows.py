@@ -105,7 +105,7 @@ def find_show_by_tmdb_id(db: Client, tmdb_id: int) -> dict[str, Any] | None:
         db.schema("core")
         .table("shows")
         .select("*")
-        .eq("external_ids->>tmdb", str(int(tmdb_id)))
+        .eq("tmdb_id", int(tmdb_id))
         .limit(1)
         .execute()
     )
@@ -123,6 +123,8 @@ def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
         "premiere_date": show.premiere_date,
         "external_ids": show.external_ids,
     }
+    if show.tmdb_id is not None:
+        payload["tmdb_id"] = int(show.tmdb_id)
     response = db.schema("core").table("shows").insert(payload).execute()
     _raise_for_supabase_error(response, "inserting show")
     data = response.data or []

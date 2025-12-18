@@ -25,7 +25,11 @@ from trr_backend.ingestion.shows_from_lists import (
 from trr_backend.integrations.imdb.episodic_client import HttpImdbEpisodicClient, IMDB_JOB_CATEGORY_SELF
 from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_details, fetch_tv_images
 from trr_backend.models.shows import ShowRecord, ShowUpsert
-from trr_backend.repositories.show_images import assert_core_show_images_table_exists, upsert_show_images
+from trr_backend.repositories.show_images import (
+    assert_core_show_images_table_exists,
+    delete_tmdb_show_images,
+    upsert_show_images,
+)
 from trr_backend.repositories.shows import (
     assert_core_shows_table_exists,
     find_show_by_imdb_id,
@@ -96,12 +100,14 @@ def _merge_external_ids(existing: Mapping[str, Any] | None, updates: Mapping[str
 
 def _candidate_to_show_upsert(candidate: CandidateShow, *, annotate_imdb_episodic: bool) -> ShowUpsert:
     external_ids: dict[str, Any] = {}
+    tmdb_id_column: int | None = None
     if candidate.imdb_id:
         external_ids["imdb"] = candidate.imdb_id
         if annotate_imdb_episodic:
             external_ids["imdb_episodic"] = {"supported": True}
     if candidate.tmdb_id is not None:
-        external_ids["tmdb"] = int(candidate.tmdb_id)
+        tmdb_id_column = int(candidate.tmdb_id)
+        external_ids["tmdb"] = tmdb_id_column
 
     tmdb_external_ids = candidate.tmdb_meta.get("external_ids")
     if isinstance(tmdb_external_ids, dict):
@@ -165,6 +171,7 @@ def _candidate_to_show_upsert(candidate: CandidateShow, *, annotate_imdb_episodi
 
     return ShowUpsert(
         title=candidate.title,
+        tmdb_id=tmdb_id_column or _coerce_int(candidate.tmdb_meta.get("id")),
         premiere_date=candidate.first_air_date,
         description=None,
         external_ids=external_ids,
@@ -402,6 +409,7 @@ def _tmdb_show_images_rows(
     payload: Mapping[str, Any],
     *,
     show_id: str,
+    tmdb_id: int,
     fetched_at: str,
     source: str = "tmdb",
 ) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
@@ -417,6 +425,7 @@ def _tmdb_show_images_rows(
             rows.append(
                 {
                     "show_id": show_id,
+                    "tmdb_id": int(tmdb_id),
                     "source": source,
                     "kind": kind,
                     "iso_639_1": img.get("iso_639_1"),
@@ -435,6 +444,16 @@ def _tmdb_show_images_rows(
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return int(raw)
+    return None
 
 
 def _parse_iso8601_utc(value: Any) -> datetime | None:
@@ -601,6 +620,7 @@ def upsert_candidates_into_supabase(
     tmdb_details_max_age_days: int = 90,
     tmdb_details_language: str = "en-US",
     tmdb_fetch_images: bool = False,
+    tmdb_refresh_images: bool = False,
     enrich_show_metadata: bool = False,
     enrich_region: str = "US",
     enrich_concurrency: int = 5,
@@ -642,15 +662,6 @@ def upsert_candidates_into_supabase(
     tmdb_details_append = ("alternative_titles", "external_ids")
     tmdb_details_cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] = {}
     now = datetime.now(timezone.utc)
-
-    def _coerce_int(value: Any) -> int | None:
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str):
-            raw = value.strip()
-            if raw.isdigit():
-                return int(raw)
-        return None
 
     for idx, candidate in enumerate(candidates_list, start=1):
         existing: dict[str, Any] | None = None
@@ -756,6 +767,7 @@ def upsert_candidates_into_supabase(
                         "title": show_upsert.title,
                         "description": show_upsert.description,
                         "premiere_date": show_upsert.premiere_date,
+                        "tmdb_id": show_upsert.tmdb_id,
                         "external_ids": show_upsert.external_ids,
                     }
                 )
@@ -774,6 +786,8 @@ def upsert_candidates_into_supabase(
             patch["external_ids"] = merged_external_ids
         if not existing.get("premiere_date") and show_upsert.premiere_date:
             patch["premiere_date"] = show_upsert.premiere_date
+        if existing.get("tmdb_id") is None and show_upsert.tmdb_id is not None:
+            patch["tmdb_id"] = int(show_upsert.tmdb_id)
 
         if not patch:
             skipped += 1
@@ -815,6 +829,10 @@ def upsert_candidates_into_supabase(
 
         tmdb_images_total = 0
         for row in upserted_show_rows:
+            tmdb_id_val = row.get("tmdb_id")
+            if isinstance(tmdb_id_val, int):
+                tmdb_images_total += 1
+                continue
             external_ids = row.get("external_ids")
             external_ids_map = external_ids if isinstance(external_ids, dict) else {}
             tmdb_id_val = external_ids_map.get("tmdb")
@@ -835,15 +853,26 @@ def upsert_candidates_into_supabase(
             if not show_id:
                 continue
 
-            external_ids = row.get("external_ids")
-            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
-            tmdb_id_val = external_ids_map.get("tmdb")
+            tmdb_id_val = row.get("tmdb_id")
             if isinstance(tmdb_id_val, int):
                 tmdb_id_int = tmdb_id_val
-            elif isinstance(tmdb_id_val, str) and tmdb_id_val.strip().isdigit():
-                tmdb_id_int = int(tmdb_id_val.strip())
             else:
-                continue
+                external_ids = row.get("external_ids")
+                external_ids_map = external_ids if isinstance(external_ids, dict) else {}
+                tmdb_id_val = external_ids_map.get("tmdb")
+                if isinstance(tmdb_id_val, int):
+                    tmdb_id_int = tmdb_id_val
+                elif isinstance(tmdb_id_val, str) and tmdb_id_val.strip().isdigit():
+                    tmdb_id_int = int(tmdb_id_val.strip())
+                else:
+                    tmdb_meta = external_ids_map.get("tmdb_meta")
+                    tmdb_id_int = _coerce_int(tmdb_meta.get("id")) if isinstance(tmdb_meta, Mapping) else None
+                    if tmdb_id_int is None:
+                        continue
+
+            external_ids = row.get("external_ids")
+            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
+            # (external_ids_map reused below for tmdb_meta if needed)
 
             tmdb_images_processed += 1
 
@@ -851,6 +880,9 @@ def upsert_candidates_into_supabase(
             fetched_at = _now_utc_iso()
 
             try:
+                if tmdb_refresh_images and db is not None and not dry_run:
+                    delete_tmdb_show_images(db, tmdb_id=tmdb_id_int)
+
                 if cache_key in tmdb_images_cache:
                     tmdb_images_skipped_cached += 1
                     payload = tmdb_images_cache[cache_key]
@@ -865,7 +897,12 @@ def upsert_candidates_into_supabase(
                     )
                     tmdb_images_fetched += 1
 
-                image_rows, primary = _tmdb_show_images_rows(payload, show_id=show_id, fetched_at=fetched_at)
+                image_rows, primary = _tmdb_show_images_rows(
+                    payload,
+                    show_id=show_id,
+                    tmdb_id=tmdb_id_int,
+                    fetched_at=fetched_at,
+                )
                 if db is not None and not dry_run:
                     upsert_show_images(db, image_rows)
 

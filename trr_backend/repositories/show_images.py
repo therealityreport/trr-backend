@@ -35,7 +35,8 @@ def assert_core_show_images_table_exists(db: Client) -> None:
     def help_message() -> str:
         return (
             "Database table `core.show_images` is missing. "
-            "Run `supabase db push` to apply migrations (see `supabase/migrations/0005_show_images.sql`), "
+            "Run `supabase db push` to apply migrations (see `supabase/migrations/0005_show_images.sql` "
+            "and `supabase/migrations/0008_show_images_tmdb_id.sql`), "
             "then re-run the import job."
         )
 
@@ -49,6 +50,13 @@ def assert_core_show_images_table_exists(db: Client) -> None:
     try:
         response = db.schema("core").table("show_images").select("id").limit(1).execute()
     except Exception as exc:
+        msg = str(exc).casefold()
+        if "permission denied" in msg or "42501" in msg:
+            raise ShowImageRepositoryError(
+                "Supabase service role lacks access to `core.show_images`. "
+                "Apply grants via `supabase db push` (see `supabase/migrations/0006_show_images_grants.sql` "
+                "and `supabase/migrations/0009_show_images_view.sql`)."
+            ) from exc
         if is_schema_not_exposed(str(exc)):
             raise ShowImageRepositoryError(schema_help_message()) from exc
         if is_missing_relation(str(exc)):
@@ -78,7 +86,7 @@ def upsert_show_images(
     db: Client,
     rows: Iterable[Mapping[str, Any]],
     *,
-    on_conflict: str = "show_id,source,kind,file_path",
+    on_conflict: str = "tmdb_id,source,kind,file_path",
 ) -> list[dict[str, Any]]:
     payload = [dict(r) for r in rows]
     if not payload:
@@ -89,3 +97,15 @@ def upsert_show_images(
     data = response.data or []
     return data if isinstance(data, list) else []
 
+
+def delete_tmdb_show_images(db: Client, *, tmdb_id: int) -> None:
+    response = (
+        db.schema("core")
+        .table("show_images")
+        .delete()
+        .eq("source", "tmdb")
+        .eq("tmdb_id", str(int(tmdb_id)))
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise ShowImageRepositoryError(f"Supabase error deleting TMDb show images: {response.error}")

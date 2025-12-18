@@ -40,7 +40,7 @@ class ShowRecord:
 @dataclass(frozen=True)
 class ShowUpsert:
     title: str
+    tmdb_id: int | None = None
     premiere_date: str | None = None  # YYYY-MM-DD when available
     description: str | None = None
     external_ids: dict[str, Any] = field(default_factory=dict)
-

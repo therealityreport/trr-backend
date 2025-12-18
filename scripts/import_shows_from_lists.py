@@ -70,6 +70,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Skip TMDb /tv/{id}/images fetch (default).",
     )
     parser.add_argument(
+        "--tmdb-refresh-images",
+        action="store_true",
+        help="When fetching TMDb images, delete existing TMDb image rows for each tmdb_id before upserting.",
+    )
+    parser.add_argument(
         "--tmdb-details-max-age-days",
         type=int,
         default=90,
@@ -183,6 +188,7 @@ def run_from_cli(args: argparse.Namespace) -> None:
         tmdb_fetch_details=bool(args.tmdb_fetch_details),
         tmdb_details_max_age_days=0 if bool(args.tmdb_details_refresh) else int(args.tmdb_details_max_age_days or 0),
         tmdb_fetch_images=bool(getattr(args, "tmdb_fetch_images", False)),
+        tmdb_refresh_images=bool(getattr(args, "tmdb_refresh_images", False)),
         enrich_show_metadata=bool(args.enrich_show_metadata),
         enrich_region=str(args.region or "US").upper(),
         enrich_concurrency=int(args.concurrency or 5),
