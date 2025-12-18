@@ -44,6 +44,15 @@ def _require_api_key(api_key: str | None) -> str:
     return resolved
 
 
+def resolve_api_key(api_key: str | None = None) -> str | None:
+    """
+    Best-effort API key resolution for callers that want to continue when the key is missing.
+    """
+
+    resolved = (api_key or os.getenv("TMDB_API_KEY") or "").strip()
+    return resolved or None
+
+
 def _request_json(
     session: requests.Session,
     url: str,
@@ -129,4 +138,46 @@ def fetch_tv_external_ids(
     api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/external_ids"
+    return _request_json(session, url, params={"api_key": api_key})
+
+
+def find_by_imdb_id(
+    imdb_id: str,
+    *,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """
+    Resolve a TMDb record from an IMDb id via `/find/{external_id}`.
+
+    Callers should inspect `tv_results` (and optionally other *_results keys).
+    """
+
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/find/{imdb_id}"
+    return _request_json(session, url, params={"api_key": api_key, "external_source": "imdb_id"})
+
+
+def fetch_tv_details(
+    tv_id: int,
+    *,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}"
+    return _request_json(session, url, params={"api_key": api_key})
+
+
+def fetch_tv_watch_providers(
+    tv_id: int,
+    *,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/watch/providers"
     return _request_json(session, url, params={"api_key": api_key})

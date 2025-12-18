@@ -32,6 +32,40 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Annotate shows with IMDb episodic support flags (and optionally probe seasons if configured).",
     )
+    parser.add_argument(
+        "--enrich-show-metadata",
+        action="store_true",
+        help="After upsert, enrich core.shows.external_ids.show_meta using TMDb/IMDb.",
+    )
+    parser.add_argument(
+        "--region",
+        type=str,
+        default="US",
+        help="Region code for TMDb watch providers (default: US).",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=5,
+        help="Parallelism for metadata fetch (default: 5).",
+    )
+    parser.add_argument(
+        "--max-enrich",
+        type=int,
+        default=None,
+        help="Optional cap on number of shows to enrich (for quick runs).",
+    )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Ignore existing external_ids.show_meta.fetched_at and refetch.",
+    )
+    parser.add_argument(
+        "--imdb-sleep-ms",
+        type=int,
+        default=0,
+        help="Optional delay in ms between IMDb enrichment requests (default: 0).",
+    )
     return parser.parse_args(argv)
 
 
@@ -83,6 +117,12 @@ def run_from_cli(args: argparse.Namespace) -> None:
         candidates,
         dry_run=bool(args.dry_run),
         annotate_imdb_episodic=bool(args.annotate_imdb_episodic),
+        enrich_show_metadata=bool(args.enrich_show_metadata),
+        enrich_region=str(args.region or "US").upper(),
+        enrich_concurrency=int(args.concurrency or 5),
+        enrich_max_enrich=int(args.max_enrich) if args.max_enrich is not None else None,
+        enrich_force_refresh=bool(args.force_refresh),
+        enrich_imdb_sleep_ms=int(args.imdb_sleep_ms or 0),
         imdb_episodic_probe_name_id=imdb_probe_name_id if args.annotate_imdb_episodic else None,
         imdb_episodic_probe_job_category_id=imdb_probe_job_category_id,
         imdb_episodic_extra_headers=imdb_extra_headers,

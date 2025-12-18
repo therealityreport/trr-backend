@@ -4,10 +4,12 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
+from uuid import UUID, uuid4
 
 from supabase import Client
 
 from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.ingestion.shows_from_lists import (
     CandidateShow,
     ImdbListItem,
@@ -18,7 +20,7 @@ from trr_backend.ingestion.shows_from_lists import (
     parse_imdb_list_id,
 )
 from trr_backend.integrations.imdb.episodic_client import HttpImdbEpisodicClient, IMDB_JOB_CATEGORY_SELF
-from trr_backend.models.shows import ShowUpsert
+from trr_backend.models.shows import ShowRecord, ShowUpsert
 from trr_backend.repositories.shows import find_show_by_imdb_id, find_show_by_tmdb_id, insert_show, update_show
 
 
@@ -27,6 +29,7 @@ class ShowImportResult:
     created: int
     updated: int
     skipped: int
+    upserted_show_rows: list[dict[str, Any]]
 
 
 def _merge_external_ids(existing: Mapping[str, Any] | None, updates: Mapping[str, Any]) -> dict[str, Any]:
@@ -44,7 +47,7 @@ def _merge_external_ids(existing: Mapping[str, Any] | None, updates: Mapping[str
         merged["import_sources"] = sorted(sources)
 
     # Merge nested metadata dicts.
-    for key in ("tmdb_meta", "imdb_meta", "imdb_episodic"):
+    for key in ("tmdb_meta", "imdb_meta", "imdb_episodic", "show_meta"):
         existing_value = merged.get(key)
         existing_dict = existing_value if isinstance(existing_value, dict) else {}
         update_value = updates.get(key)
@@ -183,6 +186,12 @@ def upsert_candidates_into_supabase(
     *,
     dry_run: bool,
     annotate_imdb_episodic: bool,
+    enrich_show_metadata: bool = False,
+    enrich_region: str = "US",
+    enrich_concurrency: int = 5,
+    enrich_max_enrich: int | None = None,
+    enrich_force_refresh: bool = False,
+    enrich_imdb_sleep_ms: int = 0,
     supabase_client: Client | None = None,
     imdb_episodic_probe_name_id: str | None = None,
     imdb_episodic_probe_job_category_id: str = IMDB_JOB_CATEGORY_SELF,
@@ -202,6 +211,7 @@ def upsert_candidates_into_supabase(
     created = 0
     updated = 0
     skipped = 0
+    upserted_show_rows: list[dict[str, Any]] = []
 
     for candidate in candidates:
         show_upsert = _candidate_to_show_upsert(candidate, annotate_imdb_episodic=annotate_imdb_episodic)
@@ -227,10 +237,20 @@ def upsert_candidates_into_supabase(
                     f"title={candidate.title!r}"
                 )
                 created += 1
+                upserted_show_rows.append(
+                    {
+                        "id": str(uuid4()),
+                        "title": show_upsert.title,
+                        "description": show_upsert.description,
+                        "premiere_date": show_upsert.premiere_date,
+                        "external_ids": show_upsert.external_ids,
+                    }
+                )
                 continue
 
             inserted = insert_show(db, show_upsert)
             created += 1
+            upserted_show_rows.append(inserted)
             print(f"CREATED show id={inserted.get('id')} title={inserted.get('title')!r}")
             continue
 
@@ -246,6 +266,7 @@ def upsert_candidates_into_supabase(
 
         if not patch:
             skipped += 1
+            upserted_show_rows.append(existing)
             continue
 
         if dry_run:
@@ -254,13 +275,85 @@ def upsert_candidates_into_supabase(
                 f"tmdb_id={candidate.tmdb_id or ''} patch_keys={sorted(patch.keys())}"
             )
             updated += 1
+            merged_existing = dict(existing)
+            merged_existing.update(patch)
+            upserted_show_rows.append(merged_existing)
             continue
 
         updated_row = update_show(db, existing["id"], patch)
         updated += 1
+        upserted_show_rows.append(updated_row)
         print(f"UPDATED show id={updated_row.get('id')} title={updated_row.get('title')!r}")
 
-    return ShowImportResult(created=created, updated=updated, skipped=skipped)
+    # Stage 2 enrichment: populate external_ids.show_meta.
+    if enrich_show_metadata:
+        show_records: list[ShowRecord] = []
+        by_id: dict[str, dict[str, Any]] = {}
+        for row in upserted_show_rows:
+            row_id = row.get("id")
+            if not isinstance(row_id, str) or not row_id:
+                continue
+            by_id[row_id] = row
+
+            try:
+                show_id = UUID(row_id)
+            except Exception:
+                show_id = uuid4()
+
+            external_ids = row.get("external_ids")
+            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
+
+            show_records.append(
+                ShowRecord(
+                    id=show_id,
+                    title=str(row.get("title") or ""),
+                    description=row.get("description") if isinstance(row.get("description"), str) else None,
+                    premiere_date=row.get("premiere_date") if isinstance(row.get("premiere_date"), str) else None,
+                    external_ids=external_ids_map,
+                )
+            )
+
+        summary = enrich_shows_after_upsert(
+            show_records,
+            region=enrich_region,
+            concurrency=enrich_concurrency,
+            max_enrich=enrich_max_enrich,
+            force_refresh=enrich_force_refresh,
+            dry_run=dry_run,
+            imdb_sleep_ms=enrich_imdb_sleep_ms,
+        )
+
+        if summary.failures:
+            print(f"ENRICH failed={summary.failed} (show metadata).")
+            for failure in summary.failures[:10]:
+                print(f"ENRICH FAIL show_id={failure.show_id} title={failure.title!r} error={failure.message}")
+            if len(summary.failures) > 10:
+                print(f"ENRICH FAIL ... and {len(summary.failures) - 10} more")
+
+        for patch in summary.patches:
+            row = by_id.get(str(patch.show_id))
+            if row is None:
+                # Dry-run rows have synthetic UUIDs; fall back to searching by UUID object.
+                row = next((r for r in upserted_show_rows if str(r.get("id")) == str(patch.show_id)), None)
+            if row is None:
+                continue
+
+            existing_external_ids = row.get("external_ids")
+            existing_external_ids_map = existing_external_ids if isinstance(existing_external_ids, dict) else {}
+            merged_external_ids = _merge_external_ids(existing_external_ids_map, patch.external_ids_update)
+            if merged_external_ids == existing_external_ids_map:
+                continue
+
+            if dry_run:
+                print(f"ENRICH UPDATE show id={patch.show_id} patch_keys=['external_ids']")
+                continue
+
+            if db is None:
+                raise RuntimeError("Supabase client is not available for enrichment.")
+            updated_row = update_show(db, patch.show_id, {"external_ids": merged_external_ids})
+            print(f"ENRICH UPDATED show id={updated_row.get('id')} title={updated_row.get('title')!r}")
+
+    return ShowImportResult(created=created, updated=updated, skipped=skipped, upserted_show_rows=upserted_show_rows)
 
 
 def parse_imdb_headers_json_env() -> dict[str, str] | None:
