@@ -109,6 +109,7 @@ def collect_candidates_from_lists(
     tmdb_lists: Iterable[str | int],
     tmdb_api_key: str | None = None,
     http_session: Any | None = None,
+    resolve_tmdb_external_ids: bool = True,
 ) -> list[CandidateShow]:
     session = http_session
 
@@ -142,7 +143,7 @@ def collect_candidates_from_lists(
             value,
             api_key=tmdb_api_key,
             session=session,
-            resolve_external_ids=True,
+            resolve_external_ids=bool(resolve_tmdb_external_ids),
         )
         list_tag = f"tmdb-list:{list_id_int}" if list_id_int is not None else f"tmdb-list:{value}"
         for item in items:
