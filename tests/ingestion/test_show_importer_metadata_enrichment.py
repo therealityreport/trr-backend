@@ -11,6 +11,7 @@ from trr_backend.ingestion.shows_from_lists import CandidateShow
 def test_show_importer_applies_show_meta_patches(monkeypatch):
     from trr_backend.ingestion import show_importer as mod
 
+    monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
     show_id = UUID("00000000-0000-0000-0000-0000000000aa")
     existing = {
         "id": str(show_id),
@@ -84,4 +85,3 @@ def test_show_importer_applies_show_meta_patches(monkeypatch):
     patch = args[2]
     assert set(patch.keys()) == {"external_ids"}
     assert "show_meta" in patch["external_ids"]
-
