@@ -10,6 +10,8 @@ This runbook covers the “one-button” workflow to:
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
+These scripts load `.env` at the repo root via `python-dotenv`, so it’s fine to put the variables there (or export them via your shell/direnv).
+
 ## Optional (recommended) environment variables
 
 - `TMDB_API_KEY` (enables Stage 2 enrichment from TMDb; job still runs without it but with fewer fields)
@@ -53,4 +55,3 @@ Example run:
 If you prefer a thin wrapper that validates env vars and always enables Stage 2:
 
 - `python scripts/run_show_import_job.py --imdb-list "<IMDB_LIST_URL>"`
-
