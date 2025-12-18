@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import html as html_lib
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -444,10 +445,24 @@ def fetch_tmdb_list_items(
     imdb_id_cache: dict[int, str | None] = {}
     parsed: list[TmdbListItem] = []
 
+    tv_items: list[dict[str, Any]] = []
     for item in raw_items:
+        if not isinstance(item, dict):
+            continue
         media_type = item.get("media_type")
         if media_type and media_type != "tv":
             continue
+        tv_items.append(item)
+
+    if resolve_external_ids:
+        print(
+            f"TMDb list {list_id}: fetched {len(tv_items)} tv items; resolving IMDb ids via /tv/{{id}}/external_ids…",
+            file=sys.stderr,
+        )
+    else:
+        print(f"TMDb list {list_id}: fetched {len(tv_items)} tv items.", file=sys.stderr)
+
+    for idx, item in enumerate(tv_items, start=1):
         tmdb_id = item.get("id")
         if not isinstance(tmdb_id, int):
             continue
@@ -468,6 +483,9 @@ def fetch_tmdb_list_items(
 
         imdb_id: str | None = None
         if resolve_external_ids:
+            if idx == 1 or idx % 10 == 0 or idx == len(tv_items):
+                print(f"TMDb list {list_id}: external ids {idx}/{len(tv_items)}", file=sys.stderr)
+
             if tmdb_id not in imdb_id_cache:
                 try:
                     ext = fetch_tv_external_ids(tmdb_id, api_key=api_key, session=session)

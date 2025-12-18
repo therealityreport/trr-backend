@@ -28,6 +28,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--config", type=str, default=None, help="JSON/YAML config file of list sources.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned changes without writing to Supabase.")
     parser.add_argument(
+        "--skip-tmdb-external-ids",
+        action="store_true",
+        help="Skip per-show TMDb /external_ids lookups (faster but no IMDb ids for TMDb list items).",
+    )
+    parser.add_argument(
         "--annotate-imdb-episodic",
         action="store_true",
         help="Annotate shows with IMDb episodic support flags (and optionally probe seasons if configured).",
@@ -104,7 +109,11 @@ def run_from_cli(args: argparse.Namespace) -> None:
     if not imdb_lists and not tmdb_lists:
         raise SystemExit("No list sources provided. Use --imdb-list/--tmdb-list and/or --config.")
 
-    candidates = collect_candidates_from_lists(imdb_list_urls=imdb_lists, tmdb_lists=tmdb_lists)
+    candidates = collect_candidates_from_lists(
+        imdb_list_urls=imdb_lists,
+        tmdb_lists=tmdb_lists,
+        resolve_tmdb_external_ids=not bool(args.skip_tmdb_external_ids),
+    )
     print(f"Collected {len(candidates)} merged candidate shows.")
 
     imdb_probe_name_id = (os.getenv("IMDB_EPISODIC_PROBE_NAME_ID") or "").strip() or None
