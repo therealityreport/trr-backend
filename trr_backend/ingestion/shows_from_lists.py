@@ -397,6 +397,7 @@ def fetch_imdb_list_items(
         raise RuntimeError(f"IMDb list fetch failed (HTTP {last_status}) for {url}. Snippet: {snippet}")
 
     while url and url not in visited and page_num <= max_pages:
+        print(f"IMDb list {list_id}: fetching page {page_num}…", file=sys.stderr)
         visited.add(url)
         try:
             html = fetch_html(url)
@@ -412,6 +413,9 @@ def fetch_imdb_list_items(
                 continue
             items_by_id[item.imdb_id] = item
             new_ids += 1
+
+        if page_items:
+            print(f"IMDb list {list_id}: parsed {len(page_items)} items ({new_ids} new)", file=sys.stderr)
 
         # Stop when the page doesn't yield items, or yields no new ids.
         if not page_items or new_ids == 0:
