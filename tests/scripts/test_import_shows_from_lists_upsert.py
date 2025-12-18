@@ -88,7 +88,8 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     args, kwargs = update_mock.call_args
     assert args[1] == existing["id"]
     patch = args[2]
-    assert set(patch.keys()) == {"external_ids", "premiere_date"}
+    assert set(patch.keys()) == {"external_ids", "premiere_date", "tmdb_id"}
+    assert patch["tmdb_id"] == 123
 
     external_ids = patch["external_ids"]
     assert external_ids["imdb"] == "tt1111111"

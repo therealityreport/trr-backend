@@ -201,6 +201,7 @@ def test_stage1_tmdb_details_skips_when_fresh(monkeypatch: pytest.MonkeyPatch) -
     existing = {
         "id": "00000000-0000-0000-0000-000000000030",
         "title": "Existing Show",
+        "tmdb_id": 12345,
         "premiere_date": None,
         "external_ids": {
             "tmdb": 12345,

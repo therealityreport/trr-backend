@@ -87,6 +87,11 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         help="Skip TMDb /tv/{id}/images fetch (default).",
     )
     parser.add_argument(
+        "--tmdb-refresh-images",
+        action="store_true",
+        help="When fetching TMDb images, delete existing TMDb image rows for each tmdb_id before upserting.",
+    )
+    parser.add_argument(
         "--single-pass",
         action="store_true",
         help="Deprecated: single-pass is now the default.",
@@ -166,6 +171,8 @@ def main(argv: list[str]) -> int:
             run_args.append("--skip-tmdb-external-ids")
         if args.tmdb_fetch_images and "--tmdb-fetch-images" not in run_args:
             run_args.append("--tmdb-fetch-images")
+        if args.tmdb_refresh_images and "--tmdb-refresh-images" not in run_args:
+            run_args.append("--tmdb-refresh-images")
         return _run_importer(run_args)
 
     if args.two_pass_imdb_first:
@@ -203,6 +210,8 @@ def main(argv: list[str]) -> int:
             tmdb_args.append("--skip-tmdb-external-ids")
         if args.tmdb_fetch_images and "--tmdb-fetch-images" not in tmdb_args:
             tmdb_args.append("--tmdb-fetch-images")
+        if args.tmdb_refresh_images and "--tmdb-refresh-images" not in tmdb_args:
+            tmdb_args.append("--tmdb-refresh-images")
         return _run_importer(tmdb_args)
 
     # Optional two-pass mode: TMDb first (reliable), then IMDb (retryable).
@@ -214,6 +223,8 @@ def main(argv: list[str]) -> int:
         tmdb_args.append("--skip-tmdb-external-ids")
     if args.tmdb_fetch_images and "--tmdb-fetch-images" not in tmdb_args:
         tmdb_args.append("--tmdb-fetch-images")
+    if args.tmdb_refresh_images and "--tmdb-refresh-images" not in tmdb_args:
+        tmdb_args.append("--tmdb-refresh-images")
     rc = _run_importer(tmdb_args)
     if rc != 0:
         return rc

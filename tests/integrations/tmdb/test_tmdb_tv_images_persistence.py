@@ -64,6 +64,7 @@ def test_stage1_tmdb_fetch_images_upserts_show_images_and_sets_primary_paths(mon
     assert poster_dup[0].get("iso_639_1") == "en"
 
     assert all(r.get("show_id") == inserted_row["id"] for r in rows)
+    assert all(r.get("tmdb_id") == 12345 for r in rows)
     assert all(r.get("source") == "tmdb" for r in rows)
     assert all(r.get("fetched_at") == "2025-12-18T00:00:00Z" for r in rows)
 
@@ -90,3 +91,81 @@ def test_stage1_tmdb_no_images_skips_fetch(monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert result.created == 1
     assert fetch_images_mock.call_count == 0
+
+
+def test_show_images_read_path_uses_tmdb_id_not_show_id() -> None:
+    from trr_backend.db.show_images import list_tmdb_show_images
+
+    class _Resp:
+        def __init__(self, data, error=None):
+            self.data = data
+            self.error = error
+
+    class _Query:
+        def __init__(self, parent, table_name: str):
+            self.parent = parent
+            self.table_name = table_name
+            self.filters: list[tuple[str, object]] = []
+            self._single = False
+
+        def select(self, *args, **kwargs):
+            return self
+
+        def eq(self, key, value):
+            self.filters.append((str(key), value))
+            return self
+
+        def single(self):
+            self._single = True
+            return self
+
+        def execute(self):
+            if self.table_name == "shows":
+                # Show B has tmdb_id=222
+                return _Resp({"tmdb_id": 222})
+            if self.table_name == "v_show_images":
+                tmdb_id = next((v for (k, v) in self.filters if k == "tmdb_id"), None)
+                assert tmdb_id == 222
+                source = next((v for (k, v) in self.filters if k == "source"), None)
+                assert source == "tmdb"
+                # Simulated view data: includes a "bad" row that points to Show B by show_id but has tmdb_id=111.
+                all_rows = [
+                    {
+                        "id": "00000000-0000-0000-0000-000000000101",
+                        "show_id": "00000000-0000-0000-0000-0000000000b2",
+                        "tmdb_id": 111,
+                        "show_name": "Show B",
+                        "source": "tmdb",
+                        "kind": "backdrop",
+                        "file_path": "/wrong.jpg",
+                        "url_original": "https://image.tmdb.org/t/p/original/wrong.jpg",
+                    },
+                    {
+                        "id": "00000000-0000-0000-0000-000000000202",
+                        "show_id": "00000000-0000-0000-0000-0000000000b2",
+                        "tmdb_id": 222,
+                        "show_name": "Show B",
+                        "source": "tmdb",
+                        "kind": "backdrop",
+                        "file_path": "/right.jpg",
+                        "url_original": "https://image.tmdb.org/t/p/original/right.jpg",
+                    },
+                ]
+                return _Resp([r for r in all_rows if r["tmdb_id"] == tmdb_id and r["source"] == source])
+            raise AssertionError(f"Unexpected table: {self.table_name}")
+
+    class _Schema:
+        def __init__(self, parent):
+            self.parent = parent
+
+        def table(self, name: str):
+            return _Query(self.parent, name)
+
+    class _Db:
+        def schema(self, name: str):
+            assert name == "core"
+            return _Schema(self)
+
+    rows = list_tmdb_show_images(_Db(), show_id="00000000-0000-0000-0000-0000000000b2")
+    assert [r["file_path"] for r in rows] == ["/right.jpg"]
+    assert rows[0]["url_original"] == "https://image.tmdb.org/t/p/original/right.jpg"
