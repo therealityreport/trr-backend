@@ -102,7 +102,8 @@ def test_stage1_tmdb_no_details_avoids_tv_details_fetch(monkeypatch: pytest.Monk
     assert "vote_average" not in external_ids["tmdb_meta"]
 
 
-def test_stage1_tmdb_details_404_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("status_code", [404, 422])
+def test_stage1_tmdb_details_4xx_is_non_fatal(monkeypatch: pytest.MonkeyPatch, status_code: int) -> None:
     from trr_backend.ingestion import show_importer as mod
     from trr_backend.ingestion.shows_from_lists import CandidateShow
     from trr_backend.integrations.tmdb.client import TmdbClientError
@@ -110,7 +111,7 @@ def test_stage1_tmdb_details_404_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         mod,
         "fetch_tv_details",
-        lambda *args, **kwargs: (_ for _ in ()).throw(TmdbClientError("not found", status_code=404)),
+        lambda *args, **kwargs: (_ for _ in ()).throw(TmdbClientError("not found", status_code=status_code)),
     )
 
     candidates = [CandidateShow(imdb_id=None, tmdb_id=999999, title="Missing TMDb Show")]
