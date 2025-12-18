@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
@@ -63,7 +64,8 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-18T00:00:00Z")
     monkeypatch.setattr(mod, "resolve_api_key", lambda: "fake")
     monkeypatch.setattr(mod, "find_by_imdb_id", lambda *args, **kwargs: find_payload)
-    monkeypatch.setattr(mod, "fetch_tv_details", lambda *args, **kwargs: details_payload)
+    fetch_details_mock = MagicMock(return_value=details_payload)
+    monkeypatch.setattr(mod, "fetch_tv_details", fetch_details_mock)
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers_payload)
     monkeypatch.setattr(
         mod.HttpImdbTitleMetadataClient,
@@ -86,6 +88,7 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     assert summary.failed == 0
     assert summary.updated == 1
     assert len(summary.patches) == 1
+    assert fetch_details_mock.call_count == 1
 
     patch = summary.patches[0].external_ids_update
     assert patch["tmdb"] == 12345

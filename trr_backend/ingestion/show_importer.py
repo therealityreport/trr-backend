@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 from uuid import UUID, uuid4
 
@@ -22,7 +23,7 @@ from trr_backend.ingestion.shows_from_lists import (
     parse_imdb_list_id,
 )
 from trr_backend.integrations.imdb.episodic_client import HttpImdbEpisodicClient, IMDB_JOB_CATEGORY_SELF
-from trr_backend.integrations.tmdb.client import fetch_tv_details
+from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_details
 from trr_backend.models.shows import ShowRecord, ShowUpsert
 from trr_backend.repositories.shows import (
     assert_core_shows_table_exists,
@@ -143,7 +144,7 @@ def _imdb_meta_from_list_item(item: ImdbListItem) -> dict[str, Any]:
 
 
 def _tmdb_meta_from_tv_details(details: Mapping[str, Any]) -> dict[str, Any]:
-    meta: dict[str, Any] = {}
+    meta: dict[str, Any] = {"_v": 1}
 
     def copy_scalar(key: str) -> None:
         value = details.get(key)
@@ -244,6 +245,70 @@ def _tmdb_meta_from_tv_details(details: Mapping[str, Any]) -> dict[str, Any]:
     return meta
 
 
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso8601_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _tmdb_meta_is_fresh(
+    tmdb_meta: Mapping[str, Any],
+    *,
+    tmdb_id: int,
+    language: str,
+    max_age_days: int,
+    now: datetime,
+) -> bool:
+    """
+    Return True if an existing `external_ids["tmdb_meta"]` is usable without refetching.
+    """
+
+    meta_id = tmdb_meta.get("id")
+    if not isinstance(meta_id, int) and not (isinstance(meta_id, str) and meta_id.isdigit()):
+        return False
+    try:
+        meta_id_int = int(meta_id)
+    except ValueError:
+        return False
+    if meta_id_int != int(tmdb_id):
+        return False
+
+    if tmdb_meta.get("_v") != 1:
+        return False
+
+    meta_lang = tmdb_meta.get("language")
+    if isinstance(meta_lang, str) and meta_lang.strip():
+        if meta_lang.strip() != language:
+            return False
+    else:
+        return False
+
+    fetched_at = _parse_iso8601_utc(tmdb_meta.get("fetched_at"))
+    if fetched_at is None:
+        return False
+
+    if max_age_days <= 0:
+        return False
+
+    age = now - fetched_at
+    return age.total_seconds() <= (max_age_days * 86400)
+
+
 def collect_candidates_from_lists(
     *,
     imdb_list_urls: Iterable[str],
@@ -252,14 +317,9 @@ def collect_candidates_from_lists(
     http_session: Any | None = None,
     resolve_tmdb_external_ids: bool = True,
     imdb_use_graphql: bool = True,
-    tmdb_fetch_details: bool = True,
 ) -> list[CandidateShow]:
     session = http_session
     tmdb_session = session if isinstance(session, requests.Session) else requests.Session()
-    tmdb_details_cache: dict[int, dict[str, Any]] = {}
-    tmdb_details_fetched = 0
-    tmdb_details_skipped_cached = 0
-    tmdb_details_failed = 0
 
     imdb_candidates: list[CandidateShow] = []
     for url in imdb_list_urls:
@@ -296,39 +356,7 @@ def collect_candidates_from_lists(
         )
         list_tag = f"tmdb-list:{list_id_int}" if list_id_int is not None else f"tmdb-list:{value}"
 
-        list_fetched = 0
-        list_cached = 0
-        list_failed = 0
-        total = len(items)
-
-        for idx, item in enumerate(items, start=1):
-            tmdb_meta: dict[str, Any] = {}
-            if tmdb_fetch_details:
-                tmdb_id = int(item.tmdb_id)
-                details: dict[str, Any] | None = None
-
-                if tmdb_id in tmdb_details_cache:
-                    tmdb_details_skipped_cached += 1
-                    list_cached += 1
-                    details = tmdb_details_cache[tmdb_id]
-                else:
-                    try:
-                        details = fetch_tv_details(
-                            tmdb_id,
-                            api_key=tmdb_api_key,
-                            session=tmdb_session,
-                            cache=tmdb_details_cache,
-                        )
-                        tmdb_details_fetched += 1
-                        list_fetched += 1
-                    except Exception:
-                        tmdb_details_failed += 1
-                        list_failed += 1
-                        details = None
-
-                if isinstance(details, Mapping):
-                    tmdb_meta = _tmdb_meta_from_tv_details(details)
-
+        for item in items:
             tmdb_candidates.append(
                 CandidateShow(
                     imdb_id=item.imdb_id,
@@ -336,27 +364,9 @@ def collect_candidates_from_lists(
                     title=item.name,
                     first_air_date=item.first_air_date,
                     origin_country=item.origin_country,
-                    tmdb_meta=tmdb_meta,
                     source_tags={list_tag},
                 )
             )
-
-            if tmdb_fetch_details and total:
-                if idx == 1 or idx % 10 == 0 or idx == total:
-                    print(
-                        f"TMDb details: processed {idx}/{total} "
-                        f"(fetched={list_fetched} cached={list_cached} failed={list_failed})",
-                        file=sys.stderr,
-                    )
-
-    if tmdb_fetch_details:
-        print(
-            "TMDb details summary "
-            f"tmdb_details_fetched={tmdb_details_fetched} "
-            f"tmdb_details_skipped_cached={tmdb_details_skipped_cached} "
-            f"tmdb_details_failed={tmdb_details_failed}",
-            file=sys.stderr,
-        )
 
     return merge_candidates([*imdb_candidates, *tmdb_candidates])
 
@@ -393,6 +403,9 @@ def upsert_candidates_into_supabase(
     *,
     dry_run: bool,
     annotate_imdb_episodic: bool,
+    tmdb_fetch_details: bool = True,
+    tmdb_details_max_age_days: int = 90,
+    tmdb_details_language: str = "en-US",
     enrich_show_metadata: bool = False,
     enrich_region: str = "US",
     enrich_concurrency: int = 5,
@@ -404,6 +417,8 @@ def upsert_candidates_into_supabase(
     imdb_episodic_probe_job_category_id: str = IMDB_JOB_CATEGORY_SELF,
     imdb_episodic_extra_headers: Mapping[str, str] | None = None,
 ) -> ShowImportResult:
+    candidates_list = list(candidates)
+
     db = supabase_client or (None if dry_run else create_supabase_admin_client())
     if db is not None:
         assert_core_shows_table_exists(db)
@@ -411,7 +426,7 @@ def upsert_candidates_into_supabase(
     seasons_by_imdb_id: dict[str, list[int]] = {}
     if annotate_imdb_episodic and imdb_episodic_probe_name_id:
         seasons_by_imdb_id = annotate_candidates_imdb_episodic(
-            candidates,
+            candidates_list,
             probe_name_id=imdb_episodic_probe_name_id,
             probe_job_category_id=imdb_episodic_probe_job_category_id,
             extra_headers=imdb_episodic_extra_headers,
@@ -422,7 +437,103 @@ def upsert_candidates_into_supabase(
     skipped = 0
     upserted_show_rows: list[dict[str, Any]] = []
 
-    for candidate in candidates:
+    tmdb_details_total = sum(1 for c in candidates_list if c.tmdb_id is not None) if tmdb_fetch_details else 0
+    tmdb_details_processed = 0
+    tmdb_details_fetched = 0
+    tmdb_details_skipped_fresh = 0
+    tmdb_details_skipped_cached = 0
+    tmdb_details_failed = 0
+    tmdb_details_session = requests.Session()
+    tmdb_details_cache: dict[int, dict[str, Any]] = {}
+    now = datetime.now(timezone.utc)
+
+    def _coerce_int(value: Any) -> int | None:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.isdigit():
+                return int(raw)
+        return None
+
+    for idx, candidate in enumerate(candidates_list, start=1):
+        existing: dict[str, Any] | None = None
+        if db is not None:
+            if candidate.imdb_id:
+                existing = find_show_by_imdb_id(db, candidate.imdb_id)
+            if existing is None and candidate.tmdb_id is not None:
+                existing = find_show_by_tmdb_id(db, int(candidate.tmdb_id))
+
+        existing_external_ids = existing.get("external_ids") if isinstance(existing, dict) else None
+        existing_external_ids_map = existing_external_ids if isinstance(existing_external_ids, dict) else {}
+
+        # Stage 1 TMDb details capture (optional): persist curated TV details into external_ids.tmdb_meta.
+        if tmdb_fetch_details and candidate.tmdb_id is not None:
+            tmdb_details_processed += 1
+
+            tmdb_id_for_details = _coerce_int(existing_external_ids_map.get("tmdb")) or int(candidate.tmdb_id)
+            existing_tmdb_meta = existing_external_ids_map.get("tmdb_meta") if isinstance(existing_external_ids_map, dict) else None
+            is_fresh = (
+                isinstance(existing_tmdb_meta, Mapping)
+                and _tmdb_meta_is_fresh(
+                    existing_tmdb_meta,
+                    tmdb_id=tmdb_id_for_details,
+                    language=tmdb_details_language,
+                    max_age_days=int(tmdb_details_max_age_days or 0),
+                    now=now,
+                )
+            )
+
+            if is_fresh:
+                tmdb_details_skipped_fresh += 1
+            else:
+                try:
+                    if tmdb_id_for_details in tmdb_details_cache:
+                        tmdb_details_skipped_cached += 1
+                        details = tmdb_details_cache[tmdb_id_for_details]
+                    else:
+                        details = fetch_tv_details(
+                            tmdb_id_for_details,
+                            api_key=None,
+                            session=tmdb_details_session,
+                            language=tmdb_details_language,
+                            cache=tmdb_details_cache,
+                        )
+                        tmdb_details_fetched += 1
+
+                    tmdb_meta = _tmdb_meta_from_tv_details(details)
+                    tmdb_meta["language"] = tmdb_details_language
+                    tmdb_meta["fetched_at"] = _now_utc_iso()
+                    candidate.tmdb_meta = {**candidate.tmdb_meta, **tmdb_meta}
+                except TmdbClientError as exc:
+                    tmdb_details_failed += 1
+                    status = exc.status_code
+                    if status in {404, 422}:
+                        print(
+                            f"TMDb details: skipping tmdb_id={tmdb_id_for_details} (HTTP {status})",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"TMDb details: failed tmdb_id={tmdb_id_for_details} "
+                            f"(HTTP {status if status is not None else 'unknown'})",
+                            file=sys.stderr,
+                        )
+                except Exception:
+                    tmdb_details_failed += 1
+                    print(f"TMDb details: failed tmdb_id={tmdb_id_for_details} (unexpected error)", file=sys.stderr)
+
+            if tmdb_details_total:
+                if tmdb_details_processed == 1 or tmdb_details_processed % 10 == 0 or tmdb_details_processed == tmdb_details_total:
+                    print(
+                        f"TMDb details: processed {tmdb_details_processed}/{tmdb_details_total} "
+                        f"(fetched={tmdb_details_fetched} "
+                        f"skipped_fresh={tmdb_details_skipped_fresh} "
+                        f"cached={tmdb_details_skipped_cached} "
+                        f"failed={tmdb_details_failed})",
+                        file=sys.stderr,
+                    )
+
         show_upsert = _candidate_to_show_upsert(candidate, annotate_imdb_episodic=annotate_imdb_episodic)
 
         # If probing, attach seasons to external ids for shows with imdb ids.
@@ -431,13 +542,6 @@ def upsert_candidates_into_supabase(
                 candidate.imdb_id
             ]
             show_upsert.external_ids.setdefault("imdb_episodic", {})["reachable"] = True
-
-        existing: dict[str, Any] | None = None
-        if db is not None:
-            if candidate.imdb_id:
-                existing = find_show_by_imdb_id(db, candidate.imdb_id)
-            if existing is None and candidate.tmdb_id is not None:
-                existing = find_show_by_tmdb_id(db, int(candidate.tmdb_id))
 
         if existing is None:
             if dry_run:
@@ -463,8 +567,6 @@ def upsert_candidates_into_supabase(
             print(f"CREATED show id={inserted.get('id')} title={inserted.get('title')!r}")
             continue
 
-        existing_external_ids = existing.get("external_ids")
-        existing_external_ids_map = existing_external_ids if isinstance(existing_external_ids, dict) else {}
         merged_external_ids = _merge_external_ids(existing_external_ids_map, show_upsert.external_ids)
 
         patch: dict[str, Any] = {}
@@ -493,6 +595,16 @@ def upsert_candidates_into_supabase(
         updated += 1
         upserted_show_rows.append(updated_row)
         print(f"UPDATED show id={updated_row.get('id')} title={updated_row.get('title')!r}")
+
+    if tmdb_fetch_details and tmdb_details_total:
+        print(
+            "TMDb details summary "
+            f"tmdb_details_fetched={tmdb_details_fetched} "
+            f"tmdb_details_skipped_fresh={tmdb_details_skipped_fresh} "
+            f"tmdb_details_skipped_cached={tmdb_details_skipped_cached} "
+            f"tmdb_details_failed={tmdb_details_failed}",
+            file=sys.stderr,
+        )
 
     # Stage 2 enrichment: populate external_ids.show_meta.
     if enrich_show_metadata:

@@ -27,6 +27,7 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
         candidates,
         dry_run=False,
         annotate_imdb_episodic=False,
+        tmdb_fetch_details=False,
         supabase_client=fake_db,
     )
 
@@ -76,6 +77,7 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
         candidates,
         dry_run=False,
         annotate_imdb_episodic=True,
+        tmdb_fetch_details=False,
         supabase_client=fake_db,
     )
 

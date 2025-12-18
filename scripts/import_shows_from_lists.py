@@ -56,6 +56,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Skip fetching TMDb /tv/{id} details during list ingestion (faster).",
     )
     parser.add_argument(
+        "--tmdb-details-max-age-days",
+        type=int,
+        default=90,
+        help="Refetch TMDb /tv/{id} details when missing or older than this many days (0 forces refresh).",
+    )
+    parser.add_argument(
+        "--tmdb-details-refresh",
+        action="store_true",
+        help="Force refetch TMDb /tv/{id} details (equivalent to --tmdb-details-max-age-days 0).",
+    )
+    parser.add_argument(
         "--skip-tmdb-external-ids",
         action="store_true",
         help="Skip per-show TMDb /external_ids lookups (faster but no IMDb ids for TMDb list items).",
@@ -142,7 +153,6 @@ def run_from_cli(args: argparse.Namespace) -> None:
         tmdb_lists=tmdb_lists,
         resolve_tmdb_external_ids=not bool(args.skip_tmdb_external_ids),
         imdb_use_graphql=bool(args.imdb_use_graphql),
-        tmdb_fetch_details=bool(args.tmdb_fetch_details),
     )
     print(f"Collected {len(candidates)} merged candidate shows.")
 
@@ -156,6 +166,8 @@ def run_from_cli(args: argparse.Namespace) -> None:
         candidates,
         dry_run=bool(args.dry_run),
         annotate_imdb_episodic=bool(args.annotate_imdb_episodic),
+        tmdb_fetch_details=bool(args.tmdb_fetch_details),
+        tmdb_details_max_age_days=0 if bool(args.tmdb_details_refresh) else int(args.tmdb_details_max_age_days or 0),
         enrich_show_metadata=bool(args.enrich_show_metadata),
         enrich_region=str(args.region or "US").upper(),
         enrich_concurrency=int(args.concurrency or 5),

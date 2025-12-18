@@ -306,7 +306,7 @@ def _enrich_one_show(
 
         details: dict[str, Any] | None = None
         tmdb_meta_existing = external_ids.get("tmdb_meta")
-        if isinstance(tmdb_meta_existing, Mapping):
+        if not force_refresh and isinstance(tmdb_meta_existing, Mapping):
             tmdb_meta_id = _as_int(tmdb_meta_existing.get("id"))
             if tmdb_meta_id == tmdb_series_id:
                 details = dict(tmdb_meta_existing)
