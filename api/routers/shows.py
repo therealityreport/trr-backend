@@ -8,12 +8,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
+from fastapi import HTTPException
 
 from api.deps import (
     SupabaseClient,
     get_list_result,
     require_single_result,
 )
+from trr_backend.db.show_images import ShowImagesError, list_tmdb_show_images
 
 
 router = APIRouter(prefix="/shows", tags=["shows"])
@@ -30,6 +32,9 @@ class Show(BaseModel):
 
 
 class Season(BaseModel):
+    show_name: str | None = None
+    imdb_episode_ids: list[str] | None = None
+    tmdb_episode_ids: list[int] | None = None
     id: UUID
     show_id: UUID
     season_number: int
@@ -39,6 +44,7 @@ class Season(BaseModel):
 
 
 class Episode(BaseModel):
+    show_name: str | None = None
     id: UUID
     season_id: UUID
     episode_number: int
@@ -64,6 +70,22 @@ class CastMember(BaseModel):
     billing_order: int | None
     notes: str | None
     person: Person | None = None
+
+
+class ShowImage(BaseModel):
+    id: UUID
+    show_id: UUID | None = None
+    tmdb_id: int | None = None
+    show_name: str | None = None
+    source: str
+    kind: str
+    iso_639_1: str | None = None
+    file_path: str
+    url_original: str | None = None
+    width: int | None = None
+    height: int | None = None
+    aspect_ratio: float | None = None
+    fetched_at: str | None = None
 
 
 # --- Endpoints ---
@@ -98,6 +120,19 @@ def get_show(db: SupabaseClient, show_id: UUID) -> dict:
         .execute()
     )
     return require_single_result(response, "Show")
+
+
+@router.get("/{show_id}/images", response_model=list[ShowImage])
+def list_show_images(
+    db: SupabaseClient,
+    show_id: UUID,
+    kind: str | None = Query(default=None),
+) -> list[dict]:
+    """List TMDb images (posters/logos/backdrops) for a show."""
+    try:
+        return list_tmdb_show_images(db, show_id=show_id, kind=kind)
+    except ShowImagesError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/{show_id}/seasons", response_model=list[Season])
