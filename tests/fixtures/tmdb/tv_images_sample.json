@@ -1,0 +1,91 @@
+{
+  "id": 12345,
+  "backdrops": [
+    {
+      "aspect_ratio": 1.7777778,
+      "height": 720,
+      "iso_639_1": null,
+      "file_path": "/backdrop_null.jpg",
+      "vote_average": 4.0,
+      "vote_count": 50,
+      "width": 1280
+    },
+    {
+      "aspect_ratio": 1.7777778,
+      "height": 720,
+      "iso_639_1": "en",
+      "file_path": "/backdrop_en.jpg",
+      "vote_average": 3.0,
+      "vote_count": 10,
+      "width": 1280
+    }
+  ],
+  "logos": [
+    {
+      "aspect_ratio": 2.0,
+      "height": 300,
+      "iso_639_1": null,
+      "file_path": "/logo_null.jpg",
+      "vote_average": 0.0,
+      "vote_count": 0,
+      "width": 600
+    },
+    {
+      "aspect_ratio": 2.0,
+      "height": 300,
+      "iso_639_1": "en",
+      "file_path": "/logo_en.jpg",
+      "vote_average": 1.0,
+      "vote_count": 1,
+      "width": 600
+    }
+  ],
+  "posters": [
+    {
+      "aspect_ratio": 0.6666667,
+      "height": 1500,
+      "iso_639_1": null,
+      "file_path": "/poster_null_votes_high.jpg",
+      "vote_average": 5.0,
+      "vote_count": 200,
+      "width": 1000
+    },
+    {
+      "aspect_ratio": 0.6666667,
+      "height": 1500,
+      "iso_639_1": "en",
+      "file_path": "/poster_en_votes_low.jpg",
+      "vote_average": 5.0,
+      "vote_count": 10,
+      "width": 1000
+    },
+    {
+      "aspect_ratio": 0.6666667,
+      "height": 1500,
+      "iso_639_1": "en",
+      "file_path": "/poster_en_votes_high.jpg",
+      "vote_average": 4.0,
+      "vote_count": 150,
+      "width": 1000
+    },
+    {
+      "aspect_ratio": 0.6666667,
+      "height": 1500,
+      "iso_639_1": null,
+      "file_path": "/poster_dup.jpg",
+      "vote_average": 1.0,
+      "vote_count": 1,
+      "width": 1000
+    },
+    {
+      "aspect_ratio": 0.6666667,
+      "height": 1500,
+      "iso_639_1": "en",
+      "file_path": "/poster_dup.jpg",
+      "vote_average": 2.0,
+      "vote_count": 2,
+      "width": 1000
+    }
+  ]
+}
+

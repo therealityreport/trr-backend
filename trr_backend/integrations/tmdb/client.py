@@ -293,3 +293,42 @@ def fetch_tv_watch_providers(
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/watch/providers"
     return _request_json(session, url, params={"api_key": api_key})
+
+
+def fetch_tv_images(
+    tv_id: int,
+    *,
+    language: str = "en-US",
+    include_image_language: str = "en-US,null",
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+    cache: dict[tuple[int, str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch a TV series images payload from TMDb.
+
+    Returns the full JSON object as returned by `/3/tv/{id}/images`.
+
+    Callers may pass a per-run `cache` dict keyed by (tmdb id, language, include_image_language).
+    """
+
+    tv_id_int = int(tv_id)
+    cache_key = (tv_id_int, str(language or "en-US"), str(include_image_language or ""))
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}/images"
+    payload = _request_json(
+        session,
+        url,
+        params={
+            "api_key": api_key,
+            "language": language,
+            "include_image_language": include_image_language,
+        },
+    )
+    if cache is not None:
+        cache[cache_key] = payload
+    return payload
