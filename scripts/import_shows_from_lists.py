@@ -27,6 +27,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--tmdb-list", action="append", default=[], help="TMDb list id or URL (repeatable).")
     parser.add_argument("--config", type=str, default=None, help="JSON/YAML config file of list sources.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned changes without writing to Supabase.")
+    parser.add_argument(
+        "--max-shows",
+        type=int,
+        default=None,
+        help="Optional cap on number of merged candidate shows to process (for quick smoke runs).",
+    )
     imdb_graphql = parser.add_mutually_exclusive_group()
     imdb_graphql.add_argument(
         "--imdb-use-graphql",
@@ -40,6 +46,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         dest="imdb_use_graphql",
         action="store_false",
         help="Disable IMDb GraphQL and use HTML/JSON-LD scraping (debugging only).",
+    )
+    imdb_episodes = parser.add_mutually_exclusive_group()
+    imdb_episodes.add_argument(
+        "--imdb-fetch-episodes",
+        dest="imdb_fetch_episodes",
+        action="store_true",
+        default=False,
+        help="Fetch IMDb /title/{id}/episodes season pages and persist core.seasons/core.episodes (default: off).",
+    )
+    imdb_episodes.add_argument(
+        "--imdb-no-episodes",
+        dest="imdb_fetch_episodes",
+        action="store_false",
+        help="Skip IMDb episodes ingestion (default).",
+    )
+    parser.add_argument(
+        "--imdb-refresh-episodes",
+        action="store_true",
+        help="When fetching IMDb episodes, delete existing episode rows for each show_id before upserting.",
     )
     tmdb_details = parser.add_mutually_exclusive_group()
     tmdb_details.add_argument(
@@ -73,6 +98,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--tmdb-refresh-images",
         action="store_true",
         help="When fetching TMDb images, delete existing TMDb image rows for each tmdb_id before upserting.",
+    )
+    tmdb_seasons = parser.add_mutually_exclusive_group()
+    tmdb_seasons.add_argument(
+        "--tmdb-fetch-seasons",
+        dest="tmdb_fetch_seasons",
+        action="store_true",
+        default=False,
+        help="Fetch TMDb /tv/{id}/season/{n} details+external_ids+images and enrich seasons/episodes (default: off).",
+    )
+    tmdb_seasons.add_argument(
+        "--tmdb-no-seasons",
+        dest="tmdb_fetch_seasons",
+        action="store_false",
+        help="Skip TMDb season enrichment (default).",
+    )
+    parser.add_argument(
+        "--tmdb-refresh-seasons",
+        action="store_true",
+        help="When fetching TMDb seasons, delete existing season/episode/season_image rows for each tmdb_id before upserting.",
     )
     parser.add_argument(
         "--tmdb-details-max-age-days",
@@ -174,6 +218,18 @@ def run_from_cli(args: argparse.Namespace) -> None:
         imdb_use_graphql=bool(args.imdb_use_graphql),
     )
     print(f"Collected {len(candidates)} merged candidate shows.")
+    if args.skip_tmdb_external_ids and imdb_lists and tmdb_lists:
+        print(
+            "Note: --skip-tmdb-external-ids disables IMDb id resolution for TMDb list items, "
+            "so overlap between lists cannot be merged during candidate collection.",
+            file=sys.stderr,
+        )
+
+    if args.max_shows is not None:
+        limit = max(0, int(args.max_shows))
+        if limit and len(candidates) > limit:
+            print(f"Limiting run to first {limit} candidate shows (out of {len(candidates)}).", file=sys.stderr)
+            candidates = candidates[:limit]
 
     imdb_probe_name_id = (os.getenv("IMDB_EPISODIC_PROBE_NAME_ID") or "").strip() or None
     imdb_probe_job_category_id = (
@@ -189,6 +245,10 @@ def run_from_cli(args: argparse.Namespace) -> None:
         tmdb_details_max_age_days=0 if bool(args.tmdb_details_refresh) else int(args.tmdb_details_max_age_days or 0),
         tmdb_fetch_images=bool(getattr(args, "tmdb_fetch_images", False)),
         tmdb_refresh_images=bool(getattr(args, "tmdb_refresh_images", False)),
+        imdb_fetch_episodes=bool(getattr(args, "imdb_fetch_episodes", False)),
+        imdb_refresh_episodes=bool(getattr(args, "imdb_refresh_episodes", False)),
+        tmdb_fetch_seasons=bool(getattr(args, "tmdb_fetch_seasons", False)),
+        tmdb_refresh_seasons=bool(getattr(args, "tmdb_refresh_seasons", False)),
         enrich_show_metadata=bool(args.enrich_show_metadata),
         enrich_region=str(args.region or "US").upper(),
         enrich_concurrency=int(args.concurrency or 5),

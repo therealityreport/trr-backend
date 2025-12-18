@@ -32,6 +32,9 @@ class Show(BaseModel):
 
 
 class Season(BaseModel):
+    show_name: str | None = None
+    imdb_episode_ids: list[str] | None = None
+    tmdb_episode_ids: list[int] | None = None
     id: UUID
     show_id: UUID
     season_number: int
@@ -41,6 +44,7 @@ class Season(BaseModel):
 
 
 class Episode(BaseModel):
+    show_name: str | None = None
     id: UUID
     season_id: UUID
     episode_number: int
@@ -81,8 +85,6 @@ class ShowImage(BaseModel):
     width: int | None = None
     height: int | None = None
     aspect_ratio: float | None = None
-    vote_average: float | None = None
-    vote_count: int | None = None
     fetched_at: str | None = None
 
 

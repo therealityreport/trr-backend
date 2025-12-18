@@ -67,6 +67,12 @@ def test_stage1_tmdb_fetch_images_upserts_show_images_and_sets_primary_paths(mon
     assert all(r.get("tmdb_id") == 12345 for r in rows)
     assert all(r.get("source") == "tmdb" for r in rows)
     assert all(r.get("fetched_at") == "2025-12-18T00:00:00Z" for r in rows)
+    assert all("url_original" not in r for r in rows)
+    assert all("vote_average" not in r for r in rows)
+    assert all("vote_count" not in r for r in rows)
+    assert all(isinstance(r.get("width"), int) for r in rows)
+    assert all(isinstance(r.get("height"), int) for r in rows)
+    assert all(isinstance(r.get("aspect_ratio"), float) for r in rows)
 
     assert update_show_mock.call_count == 1
     patch = update_show_mock.call_args[0][2]
@@ -168,4 +174,7 @@ def test_show_images_read_path_uses_tmdb_id_not_show_id() -> None:
 
     rows = list_tmdb_show_images(_Db(), show_id="00000000-0000-0000-0000-0000000000b2")
     assert [r["file_path"] for r in rows] == ["/right.jpg"]
+    assert rows[0]["show_name"] == "Show B"
     assert rows[0]["url_original"] == "https://image.tmdb.org/t/p/original/right.jpg"
+    assert "vote_average" not in rows[0]
+    assert "vote_count" not in rows[0]

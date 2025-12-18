@@ -332,3 +332,49 @@ def fetch_tv_images(
     if cache is not None:
         cache[cache_key] = payload
     return payload
+
+
+def fetch_tv_season_details(
+    tv_id: int,
+    season_number: int,
+    *,
+    language: str = "en-US",
+    include_image_language: str | None = None,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+    append_to_response: list[str] | None = None,
+    cache: dict[tuple[int, int, str, tuple[str, ...], str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch a TV season details payload from TMDb.
+
+    Returns the full JSON object as returned by `/3/tv/{id}/season/{season_number}`.
+
+    Callers may pass a per-run `cache` dict keyed by:
+    (tv_id, season_number, language, append_tuple, include_image_language).
+    """
+
+    tv_id_int = int(tv_id)
+    season_number_int = int(season_number)
+    append_parts = [p.strip() for p in (append_to_response or []) if isinstance(p, str) and p.strip()]
+    append_key = tuple(sorted(set(append_parts)))
+    include_key = str(include_image_language or "")
+    cache_key = (tv_id_int, season_number_int, str(language or "en-US"), append_key, include_key)
+
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}/season/{season_number_int}"
+
+    params: dict[str, Any] = {"api_key": api_key, "language": language}
+    if append_key:
+        params["append_to_response"] = ",".join(append_key)
+    if include_key:
+        params["include_image_language"] = include_key
+
+    payload = _request_json(session, url, params=params)
+    if cache is not None:
+        cache[cache_key] = payload
+    return payload
