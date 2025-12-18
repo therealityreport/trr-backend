@@ -41,6 +41,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_false",
         help="Disable IMDb GraphQL and use HTML/JSON-LD scraping (debugging only).",
     )
+    tmdb_details = parser.add_mutually_exclusive_group()
+    tmdb_details.add_argument(
+        "--tmdb-fetch-details",
+        dest="tmdb_fetch_details",
+        action="store_true",
+        default=True,
+        help="Fetch TMDb /tv/{id} details during list ingestion (default).",
+    )
+    tmdb_details.add_argument(
+        "--tmdb-no-details",
+        dest="tmdb_fetch_details",
+        action="store_false",
+        help="Skip fetching TMDb /tv/{id} details during list ingestion (faster).",
+    )
     parser.add_argument(
         "--skip-tmdb-external-ids",
         action="store_true",
@@ -128,6 +142,7 @@ def run_from_cli(args: argparse.Namespace) -> None:
         tmdb_lists=tmdb_lists,
         resolve_tmdb_external_ids=not bool(args.skip_tmdb_external_ids),
         imdb_use_graphql=bool(args.imdb_use_graphql),
+        tmdb_fetch_details=bool(args.tmdb_fetch_details),
     )
     print(f"Collected {len(candidates)} merged candidate shows.")
 
