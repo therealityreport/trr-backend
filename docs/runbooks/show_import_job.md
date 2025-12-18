@@ -25,6 +25,15 @@ Link your project (if needed), then push migrations:
 
 The `core.shows` table/indexes are ensured by `supabase/migrations/0004_core_shows.sql`.
 
+## Ensure the Supabase API exposes `core`
+
+The importer uses the Supabase API (PostgREST). By default, new projects may not expose non-`public` schemas.
+
+Choose one:
+
+- Supabase Dashboard → Settings → API → “Exposed schemas” → add `core`
+- Or run `supabase config push` to sync `supabase/config.toml` to your project (review the diff; this may change auth settings too)
+
 ## Run the job
 
 Recommended invocation (Stage 1 + Stage 2):
