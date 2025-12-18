@@ -162,7 +162,31 @@ def fetch_tv_external_ids(
     *,
     api_key: str | None = None,
     session: requests.Session | None = None,
+    cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
+    language: str = "en-US",
+    prefer_append: bool = False,
 ) -> dict[str, Any]:
+    """
+    Fetch TMDb external ids for a TV series.
+
+    When `prefer_append=True`, this uses `/tv/{id}?append_to_response=external_ids` and extracts the appended
+    payload (so it can share a cache with other TV-details calls). Otherwise it calls `/tv/{id}/external_ids`.
+    """
+
+    if prefer_append:
+        payload = fetch_tv_details(
+            tv_id,
+            api_key=api_key,
+            session=session,
+            language=language,
+            append_to_response=["external_ids"],
+            cache=cache,
+        )
+        ext = payload.get("external_ids")
+        if isinstance(ext, Mapping):
+            return dict(ext)
+        raise TmdbClientError("TMDb response missing external_ids.")
+
     api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/external_ids"
@@ -193,7 +217,8 @@ def fetch_tv_details(
     language: str = "en-US",
     api_key: str | None = None,
     session: requests.Session | None = None,
-    cache: dict[int, dict[str, Any]] | None = None,
+    append_to_response: list[str] | None = None,
+    cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Fetch a TV series details payload from TMDb.
@@ -204,16 +229,58 @@ def fetch_tv_details(
     """
 
     tv_id_int = int(tv_id)
-    if cache is not None and tv_id_int in cache:
-        return cache[tv_id_int]
+    append_parts = [p.strip() for p in (append_to_response or []) if isinstance(p, str) and p.strip()]
+    append_key = tuple(sorted(set(append_parts)))
+    cache_key = (tv_id_int, str(language or "en-US"), append_key)
+
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
 
     api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}"
-    payload = _request_json(session, url, params={"api_key": api_key, "language": language})
+    params: dict[str, Any] = {"api_key": api_key, "language": language}
+    if append_key:
+        params["append_to_response"] = ",".join(append_key)
+    payload = _request_json(session, url, params=params)
     if cache is not None:
-        cache[tv_id_int] = payload
+        cache[cache_key] = payload
     return payload
+
+
+def fetch_tv_alternative_titles(
+    tv_id: int,
+    *,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+    cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
+    language: str = "en-US",
+    prefer_append: bool = True,
+) -> dict[str, Any]:
+    """
+    Fetch TMDb TV alternative titles.
+
+    Prefers using `/tv/{id}?append_to_response=alternative_titles` so it can share a cache with TV-details calls.
+    """
+
+    if prefer_append:
+        payload = fetch_tv_details(
+            tv_id,
+            api_key=api_key,
+            session=session,
+            language=language,
+            append_to_response=["alternative_titles"],
+            cache=cache,
+        )
+        alt = payload.get("alternative_titles")
+        if isinstance(alt, Mapping):
+            return dict(alt)
+        raise TmdbClientError("TMDb response missing alternative_titles.")
+
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/alternative_titles"
+    return _request_json(session, url, params={"api_key": api_key})
 
 
 def fetch_tv_watch_providers(

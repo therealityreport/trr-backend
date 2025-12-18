@@ -66,8 +66,19 @@ def test_stage1_tmdb_list_ingestion_persists_tv_details_into_tmdb_meta(monkeypat
     assert tmdb_meta["number_of_episodes"] == 250
     assert tmdb_meta["networks"][0]["name"] == "VH1"
     assert tmdb_meta["seasons"][0]["season_number"] == 16
+    assert tmdb_meta["alternative_titles"][0]["iso_3166_1"] == "US"
+    assert tmdb_meta["external_ids"]["imdb_id"] == "tt1353056"
+    assert tmdb_meta["external_ids"]["tvdb_id"] == 8501
     assert tmdb_meta["language"] == "en-US"
     assert tmdb_meta["fetched_at"] == "2025-12-18T00:00:00Z"
+
+    # Canonical ids are filled from tmdb_meta.external_ids.
+    assert external_ids["tvdb"] == 8501
+    assert external_ids["wikidata"] == "Q123456"
+    assert external_ids["facebook"] == "rupaulsdragrace"
+    assert external_ids["instagram"] == "rupaulsdragrace"
+    assert external_ids["twitter"] == "rupaulsdragrace"
+    assert external_ids["tvrage"] == 1234
 
 
 def test_stage1_tmdb_no_details_avoids_tv_details_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,6 +140,59 @@ def test_stage1_tmdb_details_4xx_is_non_fatal(monkeypatch: pytest.MonkeyPatch, s
     assert "vote_average" not in external_ids.get("tmdb_meta", {})
 
 
+def test_stage1_tmdb_external_ids_fill_missing_but_preserve_existing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.ingestion import show_importer as mod
+    from trr_backend.ingestion.shows_from_lists import CandidateShow
+
+    repo_root = Path(__file__).resolve().parents[3]
+    details = json.loads(
+        (repo_root / "tests" / "fixtures" / "tmdb" / "tv_details_full_sample.json").read_text(encoding="utf-8")
+    )
+
+    monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "find_show_by_tmdb_id",
+        lambda *args, **kwargs: {
+            "id": "00000000-0000-0000-0000-000000000040",
+            "title": "Existing Show",
+            "premiere_date": None,
+            "external_ids": {
+                "tmdb": 12345,
+                "imdb": "tt9999999",
+                "tvdb": 9999,
+                "tmdb_meta": {"_v": 1, "id": 12345, "language": "en-US", "fetched_at": "2000-01-01T00:00:00Z"},
+            },
+        },
+    )
+    monkeypatch.setattr(mod, "fetch_tv_details", lambda *args, **kwargs: details)
+    monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-18T00:00:00Z")
+
+    result = mod.upsert_candidates_into_supabase(
+        [CandidateShow(imdb_id=None, tmdb_id=12345, title="Existing Show")],
+        dry_run=True,
+        annotate_imdb_episodic=False,
+        tmdb_fetch_details=True,
+        supabase_client=object(),
+    )
+
+    assert result.updated == 1
+    row = result.upserted_show_rows[0]
+    external_ids = row["external_ids"]
+
+    # Existing canonical ids are preserved.
+    assert external_ids["imdb"] == "tt9999999"
+    assert external_ids["tvdb"] == 9999
+
+    # Missing canonical ids are filled from tmdb_meta.external_ids.
+    assert external_ids["wikidata"] == "Q123456"
+    assert external_ids["facebook"] == "rupaulsdragrace"
+    assert external_ids["instagram"] == "rupaulsdragrace"
+    assert external_ids["twitter"] == "rupaulsdragrace"
+    assert external_ids["tvrage"] == 1234
+
+
 def test_stage1_tmdb_details_skips_when_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.ingestion import show_importer as mod
     from trr_backend.ingestion.shows_from_lists import CandidateShow
@@ -138,7 +202,18 @@ def test_stage1_tmdb_details_skips_when_fresh(monkeypatch: pytest.MonkeyPatch) -
         "id": "00000000-0000-0000-0000-000000000030",
         "title": "Existing Show",
         "premiere_date": None,
-        "external_ids": {"tmdb": 12345, "tmdb_meta": {"_v": 1, "id": 12345, "language": "en-US", "fetched_at": fetched_at}},
+        "external_ids": {
+            "tmdb": 12345,
+            "imdb": "tt1353056",
+            "tmdb_meta": {
+                "_v": 1,
+                "id": 12345,
+                "language": "en-US",
+                "fetched_at": fetched_at,
+                "alternative_titles": [],
+                "external_ids": {"imdb_id": "tt1353056"},
+            },
+        },
     }
 
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
