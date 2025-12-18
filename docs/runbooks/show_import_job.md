@@ -36,13 +36,27 @@ Choose one:
 
 ## Run the job
 
-Recommended invocation (Stage 1 + Stage 2):
+## Flow
+
+- Stage 1: ingest list items (IMDb/TMDb) → union candidates → upsert into `core.shows`
+- Stage 2: enrich `core.shows.external_ids.show_meta` using “best available” sources:
+  - Prefer TMDb-derived values when a TMDb id exists (or can be resolved).
+  - Fall back to IMDb title/episodes parsing only for fields TMDb can’t provide.
+- Reruns: completed `show_meta` rows are skipped unless `--force-refresh` is set.
+
+## Recommended runs
+
+Combined run (TMDb + IMDb lists in one pass):
+
+- `python -m scripts.import_shows_from_lists --tmdb-list "8301263" --imdb-list "<IMDB_LIST_URL>" --enrich-show-metadata --region US`
+
+TMDb-only:
+
+- `python -m scripts.import_shows_from_lists --tmdb-list "8301263" --enrich-show-metadata --region US`
+
+IMDb-only:
 
 - `python -m scripts.import_shows_from_lists --imdb-list "<IMDB_LIST_URL>" --enrich-show-metadata --region US`
-
-Optional additional sources:
-
-- `--tmdb-list "<TMDB_LIST_ID_OR_URL>"`
 
 Useful options:
 
@@ -63,4 +77,6 @@ Example run:
 
 If you prefer a thin wrapper that validates env vars and always enables Stage 2:
 
-- `python scripts/run_show_import_job.py --imdb-list "<IMDB_LIST_URL>"`
+- `python scripts/run_show_import_job.py --tmdb-list "8301263" --imdb-list "<IMDB_LIST_URL>" --region US`
+
+By default this runs a single combined import; use `--two-pass` only when you need extra resilience against IMDb stalls.

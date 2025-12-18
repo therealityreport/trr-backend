@@ -18,7 +18,6 @@ def _require_env(name: str) -> str | None:
     return value or None
 
 
-
 def _run_importer(args: list[str], *, timeout_seconds: int | None = None) -> int:
     cmd = [sys.executable, "-m", "scripts.import_shows_from_lists", *args]
     env = os.environ.copy()
@@ -76,7 +75,12 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--single-pass",
         action="store_true",
-        help="Run a single combined import instead of TMDb pass then IMDb pass.",
+        help="Deprecated: single-pass is now the default.",
+    )
+    parser.add_argument(
+        "--two-pass",
+        action="store_true",
+        help="Run TMDb import+enrich first, then IMDb import+enrich with retries (more resilient, slower).",
     )
 
     return parser.parse_known_args(argv)
@@ -128,7 +132,12 @@ def main(argv: list[str]) -> int:
     # Always allow power-users to forward extra flags (e.g. --annotate-imdb-episodic).
     common.extend(passthrough)
 
-    if args.single_pass or not (tmdb_lists and imdb_lists):
+    if args.single_pass and args.two_pass:
+        print("Only one of --single-pass and --two-pass can be set.", file=sys.stderr)
+        return 2
+
+    # Default: single combined import (union sources) and a single Stage 2 enrichment pass.
+    if not (args.two_pass and tmdb_lists and imdb_lists):
         run_args = list(common)
         for v in tmdb_lists:
             run_args.extend(["--tmdb-list", v])
@@ -138,8 +147,8 @@ def main(argv: list[str]) -> int:
             run_args.append("--skip-tmdb-external-ids")
         return _run_importer(run_args)
 
-    # Two-pass mode: TMDb first (reliable), then IMDb (retryable).
-    print("==> Pass 1/2: TMDb list import + enrichment", file=sys.stderr)
+    # Optional two-pass mode: TMDb first (reliable), then IMDb (retryable).
+    print("==> Pass 1/2: TMDb list import + enrichment (resilience mode)", file=sys.stderr)
     tmdb_args = list(common)
     for v in tmdb_lists:
         tmdb_args.extend(["--tmdb-list", v])
@@ -149,7 +158,7 @@ def main(argv: list[str]) -> int:
     if rc != 0:
         return rc
 
-    print("==> Pass 2/2: IMDb list import + enrichment", file=sys.stderr)
+    print("==> Pass 2/2: IMDb list import + enrichment (resilience mode)", file=sys.stderr)
     imdb_args = list(common)
     for v in imdb_lists:
         imdb_args.extend(["--imdb-list", v])

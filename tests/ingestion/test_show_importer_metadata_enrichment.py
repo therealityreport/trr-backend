@@ -32,6 +32,7 @@ def test_show_importer_applies_show_meta_patches(monkeypatch):
         attempted=1,
         updated=1,
         skipped=0,
+        skipped_complete=0,
         failed=0,
         patches=[
             ShowEnrichmentPatch(
