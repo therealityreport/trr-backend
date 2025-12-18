@@ -341,7 +341,7 @@ def _is_english_iso_639_1(value: Any) -> bool:
     if not isinstance(value, str):
         return False
     raw = value.strip().casefold()
-    return raw == "en" or raw.startswith("en-")
+    return raw.startswith("en")
 
 
 def _tmdb_image_sort_key(image: Mapping[str, Any]) -> tuple[int, int, float, str]:
@@ -809,7 +809,7 @@ def upsert_candidates_into_supabase(
     # Optional TMDb images capture (posters/logos/backdrops): persist into core.show_images and set primary_* columns.
     if tmdb_fetch_images:
         tmdb_images_language = "en-US"
-        tmdb_images_include_lang = "en-US,null"
+        tmdb_images_include_lang = "en,null"
         tmdb_images_session = requests.Session()
         tmdb_images_cache: dict[tuple[int, str, str], dict[str, Any]] = {}
 

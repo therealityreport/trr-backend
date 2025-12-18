@@ -299,7 +299,7 @@ def fetch_tv_images(
     tv_id: int,
     *,
     language: str = "en-US",
-    include_image_language: str = "en-US,null",
+    include_image_language: str = "en,null",
     api_key: str | None = None,
     session: requests.Session | None = None,
     cache: dict[tuple[int, str, str], dict[str, Any]] | None = None,
