@@ -1,0 +1,125 @@
+{
+  "data": {
+    "list": {
+      "id": "ls4106677119",
+      "titleListItemSearch": {
+        "total": 166,
+        "edges": [
+          {
+            "node": {
+              "absolutePosition": 1,
+              "description": null
+            },
+            "listItem": {
+              "id": "tt1353056",
+              "titleText": {
+                "text": "RuPaul's Drag Race"
+              },
+              "ratingsSummary": {
+                "aggregateRating": 8.5,
+                "voteCount": 123456
+              },
+              "plot": {
+                "plotText": {
+                  "plainText": "Plucky contestants compete for a drag title."
+                }
+              },
+              "releaseYear": {
+                "year": 2009,
+                "endYear": null
+              },
+              "episodes": {
+                "episodes": {
+                  "total": 220
+                }
+              },
+              "titleType": {
+                "id": "tvSeries"
+              },
+              "primaryImage": {
+                "url": "https://m.media-amazon.com/images/M/sample1.jpg",
+                "caption": {
+                  "plainText": "Poster"
+                }
+              },
+              "certificate": {
+                "rating": "TV-14"
+              },
+              "runtime": {
+                "seconds": 3600
+              },
+              "titleGenres": {
+                "genres": [
+                  {
+                    "genre": {
+                      "text": "Reality-TV"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "node": {
+              "absolutePosition": 2,
+              "description": "List note for item 2"
+            },
+            "listItem": {
+              "id": "tt11363282",
+              "titleText": {
+                "text": "The Real Housewives of Salt Lake City"
+              },
+              "ratingsSummary": {
+                "aggregateRating": 6.6,
+                "voteCount": 1125
+              },
+              "plot": {
+                "plotText": {
+                  "plainText": "Follows the affluent wives in Salt Lake City."
+                }
+              },
+              "releaseYear": {
+                "year": 2020,
+                "endYear": null
+              },
+              "episodes": {
+                "episodes": {
+                  "total": 70
+                }
+              },
+              "titleType": {
+                "id": "tvSeries"
+              },
+              "primaryImage": {
+                "url": "https://m.media-amazon.com/images/M/sample2.jpg",
+                "caption": {
+                  "plainText": "Key art"
+                }
+              },
+              "certificate": {
+                "rating": "TV-14"
+              },
+              "runtime": {
+                "seconds": 2580
+              },
+              "titleGenres": {
+                "genres": [
+                  {
+                    "genre": {
+                      "text": "Reality-TV"
+                    }
+                  },
+                  {
+                    "genre": {
+                      "text": "Drama"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

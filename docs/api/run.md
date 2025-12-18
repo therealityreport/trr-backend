@@ -14,6 +14,14 @@ The API requires the following environment variables to be set:
 | `SUPABASE_ANON_KEY` | Supabase anonymous/public key | `eyJhbGciOiJIUzI1NiIs...` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (for admin operations) | `eyJhbGciOiJIUzI1NiIs...` |
 
+### Redis (Optional)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `REDIS_URL` | Redis connection URL for pub/sub (optional) | `redis://localhost:6379` |
+
+If `REDIS_URL` is not set, the API uses an in-memory broker for WebSocket pub/sub. This is fine for local development and single-instance deployments. For multi-instance production deployments, set `REDIS_URL` to enable cross-instance real-time event delivery.
+
 ### CORS (Optional)
 
 | Variable | Description | Example |
@@ -85,6 +93,7 @@ curl http://localhost:8000/api/v1/shows
 python -m pytest tests/test_api_smoke.py -v
 pytest tests/test_discussions_smoke.py -v
 pytest tests/test_dms_smoke.py -v
+pytest tests/test_ws_realtime_smoke.py -v
 
 # Run with coverage
 python -m pytest tests/ --cov=api --cov-report=term-missing
@@ -96,7 +105,7 @@ python -m pytest tests/ --cov=api --cov-report=term-missing
 
 The TRR API is a **FastAPI application** that:
 - Uses synchronous Supabase client calls
-- May add WebSocket support for real-time features in the future
+- Includes WebSocket support for real-time updates (discussions, DMs, typing, presence)
 - Requires persistent process (not serverless)
 
 **Recommended hosting options:**
@@ -285,6 +294,95 @@ Authorization: Bearer <token>
 
 {"last_read_message_id": "uuid-of-last-read-message"}
 ```
+
+### WebSocket Real-Time
+
+Real-time updates via WebSocket connections.
+
+| Endpoint | Description | Auth |
+|----------|-------------|------|
+| `WS /api/v1/ws/discussions/episodes/{episode_id}` | Episode discussion updates | Optional |
+| `WS /api/v1/ws/dms/{conversation_id}` | DM conversation updates | Required |
+
+#### Discussion WebSocket
+
+Connect to receive real-time updates for episode discussions:
+
+```
+ws://localhost:8000/api/v1/ws/discussions/episodes/{episode_id}?token=<jwt>
+```
+
+- **Token optional**: Anonymous users can subscribe to read-only updates
+- **Token required for**: Sending typing events
+
+**Events received:**
+- `thread_created` - New thread created
+- `post_created` - New post created
+- `reaction_toggled` - Reaction added/removed
+
+**Event envelope format:**
+```json
+{
+  "type": "post_created",
+  "ts": "2025-01-01T12:00:00Z",
+  "payload": {
+    "post_id": "uuid",
+    "thread_id": "uuid",
+    "user_id": "uuid",
+    "body": "Post content",
+    "created_at": "2025-01-01T12:00:00Z"
+  }
+}
+```
+
+#### DM WebSocket
+
+Connect to receive real-time updates for DM conversations:
+
+```
+ws://localhost:8000/api/v1/ws/dms/{conversation_id}?token=<jwt>
+```
+
+- **Token required**: Must be authenticated
+- **Membership required**: Must be a member of the conversation
+
+**Events received:**
+- `dm_message_created` - New message in conversation
+- `dm_read_updated` - Read receipt updated
+- `typing` - User started/stopped typing
+- `presence` - User came online/offline
+
+**Client messages:**
+```json
+{"type": "typing_start", "payload": {}}
+{"type": "typing_stop", "payload": {}}
+{"type": "heartbeat", "payload": {}}
+```
+
+- Send `heartbeat` every 20 seconds to maintain presence
+- Connections without heartbeat for 45 seconds are considered offline
+
+**Event envelope format:**
+```json
+{
+  "type": "dm_message_created",
+  "ts": "2025-01-01T12:00:00Z",
+  "payload": {
+    "message_id": "uuid",
+    "conversation_id": "uuid",
+    "sender_id": "uuid",
+    "body": "Hello!",
+    "created_at": "2025-01-01T12:00:00Z"
+  }
+}
+```
+
+#### System Events
+
+Both WebSocket endpoints send these system events:
+
+- `subscribed` - Confirmation of successful subscription
+- `error` - Error message (invalid JSON, auth required, etc.)
 
 ## Database
 
