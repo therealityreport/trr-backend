@@ -612,8 +612,9 @@ def fetch_imdb_list_items(
         try:
             client = HttpImdbListGraphqlClient(session=session)
 
-            items_by_id: dict[str, ImdbListItem] = {}
+            items: list[ImdbListItem] = []
             total: int | None = None
+            processed_entries = 0
 
             first = 250
             jump_to_position = 1
@@ -630,33 +631,45 @@ def fetch_imdb_list_items(
                 if total is None and page_total is not None:
                     total = page_total
 
-                new_ids = 0
-                for item in page_items:
-                    if item.imdb_id in items_by_id:
-                        continue
-                    items_by_id[item.imdb_id] = item
-                    new_ids += 1
+                edges_count = 0
+                try:
+                    data = payload.get("data")
+                    if isinstance(data, Mapping):
+                        list_obj = data.get("list")
+                        if isinstance(list_obj, Mapping):
+                            search = list_obj.get("titleListItemSearch")
+                            if isinstance(search, Mapping):
+                                edges = search.get("edges")
+                                if isinstance(edges, list):
+                                    edges_count = len(edges)
+                except Exception:  # noqa: BLE001
+                    edges_count = 0
+
+                items.extend(page_items)
+                processed_entries += edges_count
 
                 if total == 0:
                     print(f"IMDb list {list_id}: fetched 0 items via GraphQL TitleListMainPage", file=sys.stderr)
                     return []
 
-                if total is not None and len(items_by_id) >= total:
+                if total is not None and processed_entries >= total:
                     break
 
-                if not page_items or new_ids == 0:
+                if edges_count <= 0:
                     break
 
-                jump_to_position += first
+                jump_to_position += edges_count
 
-            if total is not None and len(items_by_id) < total:
-                raise RuntimeError(f"incomplete GraphQL pagination ({len(items_by_id)}/{total})")
+            if total is not None and processed_entries < total:
+                raise RuntimeError(f"incomplete GraphQL pagination ({processed_entries}/{total})")
 
+            unique_titles = len({i.imdb_id for i in items if i.imdb_id})
             print(
-                f"IMDb list {list_id}: fetched {len(items_by_id)} items via GraphQL TitleListMainPage",
+                f"IMDb list {list_id}: fetched {processed_entries} list entries ({unique_titles} unique titles) "
+                "via GraphQL TitleListMainPage",
                 file=sys.stderr,
             )
-            return list(items_by_id.values())
+            return items
         except Exception as exc:  # noqa: BLE001
             print(
                 f"IMDb list {list_id}: GraphQL TitleListMainPage failed ({exc.__class__.__name__}: {exc}); "
