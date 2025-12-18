@@ -6,12 +6,13 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
+from trr_backend.integrations.imdb.list_graphql_client import HttpImdbListGraphqlClient
 from trr_backend.integrations.tmdb.client import fetch_list_items, fetch_tv_external_ids, parse_tmdb_list_id
 
 
@@ -20,6 +21,20 @@ class ImdbListItem:
     imdb_id: str
     title: str
     year: int | None = None
+    imdb_rating: float | None = None
+    imdb_vote_count: int | None = None
+    description: str | None = None
+    release_year: int | None = None
+    end_year: int | None = None
+    episodes_total: int | None = None
+    title_type: str | None = None
+    primary_image_url: str | None = None
+    primary_image_caption: str | None = None
+    certificate: str | None = None
+    runtime_seconds: int | None = None
+    genres: tuple[str, ...] = ()
+    list_rank: int | None = None
+    list_item_note: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -41,6 +56,7 @@ class CandidateShow:
     year: int | None = None
     first_air_date: str | None = None
     origin_country: list[str] | None = None
+    imdb_meta: dict[str, Any] = field(default_factory=dict)
     source_tags: set[str] = field(default_factory=set)
 
     def merge(self, other: "CandidateShow") -> "CandidateShow":
@@ -54,6 +70,13 @@ class CandidateShow:
         self.year = self.year or other.year
         self.first_air_date = self.first_air_date or other.first_air_date
         self.origin_country = self.origin_country or other.origin_country
+        if other.imdb_meta:
+            if not self.imdb_meta:
+                self.imdb_meta = dict(other.imdb_meta)
+            else:
+                for k, v in other.imdb_meta.items():
+                    if k not in self.imdb_meta or self.imdb_meta[k] is None:
+                        self.imdb_meta[k] = v
         return self
 
 
@@ -61,6 +84,193 @@ _IMDB_LIST_ID_RE = re.compile(r"(ls[0-9]+)")
 _IMDB_TITLE_ID_RE = re.compile(r"/title/(tt[0-9]+)/")
 _IMDB_TITLE_ID_FULL_RE = re.compile(r"^(tt[0-9]+)$")
 _YEAR_RE = re.compile(r"\b(19|20)[0-9]{2}\b")
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return int(raw)
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, float):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_nonempty_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _dedupe_preserve_order(values: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        if v in seen:
+            continue
+        out.append(v)
+        seen.add(v)
+    return tuple(out)
+
+
+def _parse_imdb_title_list_main_page_payload(payload: Mapping[str, Any], *, list_id: str) -> tuple[int | None, list[ImdbListItem]]:
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        raise RuntimeError("IMDb GraphQL response missing `data`.")
+
+    list_obj = data.get("list")
+    if not isinstance(list_obj, Mapping):
+        raise RuntimeError("IMDb GraphQL response missing `data.list`.")
+
+    search = list_obj.get("titleListItemSearch")
+    if not isinstance(search, Mapping):
+        raise RuntimeError("IMDb GraphQL response missing `data.list.titleListItemSearch`.")
+
+    total = _as_int(search.get("total"))
+    edges = search.get("edges")
+    if not isinstance(edges, list):
+        raise RuntimeError("IMDb GraphQL response missing `data.list.titleListItemSearch.edges`.")
+
+    items: list[ImdbListItem] = []
+    for edge in edges:
+        if not isinstance(edge, Mapping):
+            continue
+
+        node = edge.get("node")
+        node_map = node if isinstance(node, Mapping) else {}
+
+        list_item = edge.get("listItem")
+        if not isinstance(list_item, Mapping):
+            continue
+
+        imdb_id = _as_nonempty_str(list_item.get("id"))
+        if not imdb_id:
+            continue
+
+        title_text_obj = list_item.get("titleText")
+        title_text_map = title_text_obj if isinstance(title_text_obj, Mapping) else {}
+        title = _as_nonempty_str(title_text_map.get("text")) or imdb_id
+
+        ratings_obj = list_item.get("ratingsSummary")
+        ratings_map = ratings_obj if isinstance(ratings_obj, Mapping) else {}
+        imdb_rating = _as_float(ratings_map.get("aggregateRating"))
+        imdb_vote_count = _as_int(ratings_map.get("voteCount"))
+
+        plot_text: str | None = None
+        plot_obj = list_item.get("plot")
+        if isinstance(plot_obj, Mapping):
+            plot_text_obj = plot_obj.get("plotText")
+            if isinstance(plot_text_obj, Mapping):
+                plot_text = _as_nonempty_str(plot_text_obj.get("plainText"))
+
+        list_item_note = _as_nonempty_str(node_map.get("description"))
+        description = plot_text or list_item_note
+
+        release_year = None
+        end_year = None
+        release_year_obj = list_item.get("releaseYear")
+        if isinstance(release_year_obj, Mapping):
+            release_year = _as_int(release_year_obj.get("year"))
+            end_year = _as_int(release_year_obj.get("endYear"))
+
+        episodes_total = None
+        episodes_obj = list_item.get("episodes")
+        if isinstance(episodes_obj, Mapping):
+            inner = episodes_obj.get("episodes")
+            if isinstance(inner, Mapping):
+                episodes_total = _as_int(inner.get("total"))
+
+        title_type_obj = list_item.get("titleType")
+        title_type_map = title_type_obj if isinstance(title_type_obj, Mapping) else {}
+        title_type = _as_nonempty_str(title_type_map.get("id"))
+
+        primary_image_url = None
+        primary_image_caption = None
+        primary_image_obj = list_item.get("primaryImage")
+        if isinstance(primary_image_obj, Mapping):
+            primary_image_url = _as_nonempty_str(primary_image_obj.get("url"))
+            caption_obj = primary_image_obj.get("caption")
+            if isinstance(caption_obj, Mapping):
+                primary_image_caption = _as_nonempty_str(caption_obj.get("plainText"))
+
+        certificate_obj = list_item.get("certificate")
+        certificate = None
+        if isinstance(certificate_obj, Mapping):
+            certificate = _as_nonempty_str(certificate_obj.get("rating"))
+
+        runtime_obj = list_item.get("runtime")
+        runtime_seconds = None
+        if isinstance(runtime_obj, Mapping):
+            runtime_seconds = _as_int(runtime_obj.get("seconds"))
+
+        genres_names: list[str] = []
+        title_genres_obj = list_item.get("titleGenres")
+        if isinstance(title_genres_obj, Mapping):
+            genres_obj = title_genres_obj.get("genres")
+            if isinstance(genres_obj, list):
+                for g in genres_obj:
+                    if not isinstance(g, Mapping):
+                        continue
+                    genre_obj = g.get("genre")
+                    if isinstance(genre_obj, Mapping):
+                        name = _as_nonempty_str(genre_obj.get("text"))
+                        if name:
+                            genres_names.append(name)
+
+        list_rank = _as_int(node_map.get("absolutePosition"))
+
+        items.append(
+            ImdbListItem(
+                imdb_id=imdb_id,
+                title=title,
+                year=release_year,
+                imdb_rating=imdb_rating,
+                imdb_vote_count=imdb_vote_count,
+                description=description,
+                release_year=release_year,
+                end_year=end_year,
+                episodes_total=episodes_total,
+                title_type=title_type,
+                primary_image_url=primary_image_url,
+                primary_image_caption=primary_image_caption,
+                certificate=certificate,
+                runtime_seconds=runtime_seconds,
+                genres=_dedupe_preserve_order(genres_names),
+                list_rank=list_rank,
+                list_item_note=list_item_note,
+                extra={"source": "graphql_title_list_main_page", "list_id": list_id},
+            )
+        )
+
+    return total, items
 
 
 def parse_imdb_list_id(value: str) -> str:
@@ -138,7 +348,16 @@ def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
                 if isinstance(position, int):
                     extra["rank"] = position
 
-                jsonld_items.append(ImdbListItem(imdb_id=match.group(1), title=name.strip(), year=None, extra=extra))
+                jsonld_items.append(
+                    ImdbListItem(
+                        imdb_id=match.group(1),
+                        title=name.strip(),
+                        year=None,
+                        release_year=None,
+                        list_rank=position if isinstance(position, int) else None,
+                        extra=extra,
+                    )
+                )
 
             if jsonld_items:
                 # JSON-LD doesn't usually include year/description; keep None and rely on other paths if needed.
@@ -186,6 +405,7 @@ def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
                                         imdb_id=title_id,
                                         title=title_text,
                                         year=year,
+                                        release_year=year,
                                         extra={"source": "next_data"},
                                     ),
                                 )
@@ -295,7 +515,17 @@ def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
         if description:
             extra["description"] = description
 
-        parsed.append(ImdbListItem(imdb_id=imdb_id, title=title, year=year, extra=extra))
+        parsed.append(
+            ImdbListItem(
+                imdb_id=imdb_id,
+                title=title,
+                year=year,
+                release_year=year,
+                description=description,
+                list_rank=rank,
+                extra=extra,
+            )
+        )
 
     seen: set[str] = set()
     if containers:
@@ -329,7 +559,15 @@ def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
             continue
         _, title = parse_rank_and_title(title_text)
         seen.add(imdb_id)
-        parsed.append(ImdbListItem(imdb_id=imdb_id, title=title, year=None, extra={"source": "html", "href": href}))
+        parsed.append(
+            ImdbListItem(
+                imdb_id=imdb_id,
+                title=title,
+                year=None,
+                release_year=None,
+                extra={"source": "html", "href": href},
+            )
+        )
 
     return parsed
 
@@ -364,9 +602,67 @@ def fetch_imdb_list_items(
     *,
     session: requests.Session | None = None,
     max_pages: int = 25,
+    use_graphql: bool = True,
+    graphql_locale: str = "en-US",
 ) -> list[ImdbListItem]:
     session = session or requests.Session()
     list_id = parse_imdb_list_id(list_url_or_id)
+
+    if use_graphql:
+        try:
+            client = HttpImdbListGraphqlClient(session=session)
+
+            items_by_id: dict[str, ImdbListItem] = {}
+            total: int | None = None
+
+            first = 250
+            jump_to_position = 1
+
+            for _ in range(max_pages):
+                payload = client.fetch_title_list_main_page(
+                    list_id,
+                    locale=graphql_locale,
+                    first=first,
+                    jump_to_position=jump_to_position,
+                )
+
+                page_total, page_items = _parse_imdb_title_list_main_page_payload(payload, list_id=list_id)
+                if total is None and page_total is not None:
+                    total = page_total
+
+                new_ids = 0
+                for item in page_items:
+                    if item.imdb_id in items_by_id:
+                        continue
+                    items_by_id[item.imdb_id] = item
+                    new_ids += 1
+
+                if total == 0:
+                    print(f"IMDb list {list_id}: fetched 0 items via GraphQL TitleListMainPage", file=sys.stderr)
+                    return []
+
+                if total is not None and len(items_by_id) >= total:
+                    break
+
+                if not page_items or new_ids == 0:
+                    break
+
+                jump_to_position += first
+
+            if total is not None and len(items_by_id) < total:
+                raise RuntimeError(f"incomplete GraphQL pagination ({len(items_by_id)}/{total})")
+
+            print(
+                f"IMDb list {list_id}: fetched {len(items_by_id)} items via GraphQL TitleListMainPage",
+                file=sys.stderr,
+            )
+            return list(items_by_id.values())
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"IMDb list {list_id}: GraphQL TitleListMainPage failed ({exc.__class__.__name__}: {exc}); "
+                "falling back to HTML parsing.",
+                file=sys.stderr,
+            )
 
     headers = {
         "User-Agent": "Mozilla/5.0",

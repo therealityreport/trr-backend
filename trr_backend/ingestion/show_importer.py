@@ -89,9 +89,10 @@ def _candidate_to_show_upsert(candidate: CandidateShow, *, annotate_imdb_episodi
     if tmdb_meta:
         external_ids["tmdb_meta"] = tmdb_meta
 
-    imdb_meta: dict[str, Any] = {}
+    imdb_meta: dict[str, Any] = dict(candidate.imdb_meta or {})
     if candidate.year is not None:
-        imdb_meta["year"] = int(candidate.year)
+        imdb_meta.setdefault("year", int(candidate.year))
+        imdb_meta.setdefault("release_year", int(candidate.year))
     if imdb_meta:
         external_ids["imdb_meta"] = imdb_meta
 
@@ -103,6 +104,41 @@ def _candidate_to_show_upsert(candidate: CandidateShow, *, annotate_imdb_episodi
     )
 
 
+def _imdb_meta_from_list_item(item: ImdbListItem) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    if item.imdb_rating is not None:
+        meta["rating"] = float(item.imdb_rating)
+    if item.imdb_vote_count is not None:
+        meta["vote_count"] = int(item.imdb_vote_count)
+    if item.description:
+        meta["plot"] = item.description
+    if item.release_year is not None:
+        meta["release_year"] = int(item.release_year)
+    if item.end_year is not None:
+        meta["end_year"] = int(item.end_year)
+    if item.episodes_total is not None:
+        meta["episodes_total"] = int(item.episodes_total)
+    if item.title_type:
+        meta["title_type"] = item.title_type
+    if item.primary_image_url:
+        meta["primary_image_url"] = item.primary_image_url
+    if item.primary_image_caption:
+        meta["primary_image_caption"] = item.primary_image_caption
+    if item.certificate:
+        meta["certificate"] = item.certificate
+    if item.runtime_seconds is not None:
+        meta["runtime_seconds"] = int(item.runtime_seconds)
+    if item.genres:
+        meta["genres"] = list(item.genres)
+    if item.list_rank is not None:
+        meta["list_rank"] = int(item.list_rank)
+    if item.list_item_note:
+        meta["list_item_note"] = item.list_item_note
+    if item.year is not None:
+        meta.setdefault("year", int(item.year))
+    return meta
+
+
 def collect_candidates_from_lists(
     *,
     imdb_list_urls: Iterable[str],
@@ -110,13 +146,14 @@ def collect_candidates_from_lists(
     tmdb_api_key: str | None = None,
     http_session: Any | None = None,
     resolve_tmdb_external_ids: bool = True,
+    imdb_use_graphql: bool = True,
 ) -> list[CandidateShow]:
     session = http_session
 
     imdb_candidates: list[CandidateShow] = []
     for url in imdb_list_urls:
         list_id = parse_imdb_list_id(url)
-        items: list[ImdbListItem] = fetch_imdb_list_items(url, session=session)
+        items: list[ImdbListItem] = fetch_imdb_list_items(url, session=session, use_graphql=bool(imdb_use_graphql))
         tag = f"imdb-list:{list_id}"
         for item in items:
             imdb_candidates.append(
@@ -125,6 +162,7 @@ def collect_candidates_from_lists(
                     tmdb_id=None,
                     title=item.title,
                     year=item.year,
+                    imdb_meta=_imdb_meta_from_list_item(item),
                     source_tags={tag},
                 )
             )
