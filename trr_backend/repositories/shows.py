@@ -29,6 +29,14 @@ def assert_core_shows_table_exists(db: Client) -> None:
             or ("could not find" in msg and "relation" in msg)
         )
 
+    def is_schema_not_exposed(message: str) -> bool:
+        msg = (message or "").casefold()
+        return (
+            "pgrst106" in msg  # postgrest: invalid schema
+            or ("invalid schema" in msg and "core" in msg)
+            or ("schemas are exposed" in msg and "public" in msg)
+        )
+
     def help_message() -> str:
         return (
             "Database table `core.shows` is missing. "
@@ -36,9 +44,18 @@ def assert_core_shows_table_exists(db: Client) -> None:
             "then re-run the import job."
         )
 
+    def schema_help_message() -> str:
+        return (
+            "Supabase API does not expose schema `core`, so the importer cannot access `core.shows`. "
+            "Add `core` to `supabase/config.toml` under `[api].schemas` and run `supabase config push` "
+            "(or enable `core` in Supabase Dashboard → Settings → API → Exposed schemas), then re-run the import job."
+        )
+
     try:
         response = db.schema("core").table("shows").select("id").limit(1).execute()
     except Exception as exc:
+        if is_schema_not_exposed(str(exc)):
+            raise ShowRepositoryError(schema_help_message()) from exc
         if is_missing_relation(str(exc)):
             raise ShowRepositoryError(help_message()) from exc
         raise ShowRepositoryError(f"Supabase error during core.shows preflight: {exc}") from exc
@@ -55,6 +72,8 @@ def assert_core_shows_table_exists(db: Client) -> None:
         str(error),
     ]
     combined = " ".join([p for p in parts if p]).strip()
+    if is_schema_not_exposed(combined):
+        raise ShowRepositoryError(schema_help_message())
     if is_missing_relation(combined):
         raise ShowRepositoryError(help_message())
     raise ShowRepositoryError(f"Supabase error during core.shows preflight: {combined}")
