@@ -86,6 +86,23 @@
   "status": "Returning Series",
   "tagline": "May the best drag queen win!",
   "type": "Reality",
+  "alternative_titles": {
+    "id": 12345,
+    "results": [
+      { "iso_3166_1": "US", "title": "RuPaul’s Drag Race", "type": "" },
+      { "iso_3166_1": "GB", "title": "RuPaul's Drag Race (UK listing)", "type": "Alternative Title" }
+    ]
+  },
+  "external_ids": {
+    "id": 12345,
+    "imdb_id": "tt1353056",
+    "tvdb_id": 8501,
+    "wikidata_id": "Q123456",
+    "facebook_id": "rupaulsdragrace",
+    "instagram_id": "rupaulsdragrace",
+    "twitter_id": "rupaulsdragrace",
+    "tvrage_id": 1234
+  },
   "vote_average": 8.5,
   "vote_count": 123456
 }

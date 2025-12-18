@@ -65,10 +65,30 @@ def _merge_external_ids(existing: Mapping[str, Any] | None, updates: Mapping[str
         if update_dict:
             merged[key] = {**existing_dict, **update_dict}
 
-    # Only set core external ids if missing.
-    for key in ("imdb", "tmdb"):
-        if key not in merged and key in updates:
-            merged[key] = updates[key]
+    def has_nonempty_str(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    def has_nonempty_int(value: Any) -> bool:
+        if isinstance(value, int):
+            return value > 0
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip()) > 0
+        return False
+
+    def is_missing_str(value: Any) -> bool:
+        return not has_nonempty_str(value)
+
+    def is_missing_int(value: Any) -> bool:
+        return not has_nonempty_int(value)
+
+    # Only set canonical external ids if missing/blank.
+    for key in ("imdb", "wikidata", "facebook", "instagram", "twitter"):
+        if is_missing_str(merged.get(key)) and has_nonempty_str(updates.get(key)):
+            merged[key] = str(updates[key]).strip()
+
+    for key in ("tmdb", "tvdb", "tvrage"):
+        if is_missing_int(merged.get(key)) and has_nonempty_int(updates.get(key)):
+            merged[key] = int(updates[key])
 
     return merged
 
@@ -81,6 +101,48 @@ def _candidate_to_show_upsert(candidate: CandidateShow, *, annotate_imdb_episodi
             external_ids["imdb_episodic"] = {"supported": True}
     if candidate.tmdb_id is not None:
         external_ids["tmdb"] = int(candidate.tmdb_id)
+
+    tmdb_external_ids = candidate.tmdb_meta.get("external_ids")
+    if isinstance(tmdb_external_ids, dict):
+        imdb_id = tmdb_external_ids.get("imdb_id")
+        if "imdb" not in external_ids and isinstance(imdb_id, str) and imdb_id.strip():
+            external_ids["imdb"] = imdb_id.strip()
+
+        def as_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                raw = value.strip()
+                if raw.isdigit():
+                    return int(raw)
+                return None
+            return None
+
+        def as_str(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            raw = value.strip()
+            return raw or None
+
+        tvdb_id = as_int(tmdb_external_ids.get("tvdb_id"))
+        if tvdb_id is not None:
+            external_ids["tvdb"] = tvdb_id
+
+        tvrage_id = as_int(tmdb_external_ids.get("tvrage_id"))
+        if tvrage_id is not None:
+            external_ids["tvrage"] = tvrage_id
+
+        wikidata_id = as_str(tmdb_external_ids.get("wikidata_id"))
+        if wikidata_id is not None:
+            external_ids["wikidata"] = wikidata_id
+
+        for key in ("facebook_id", "instagram_id", "twitter_id"):
+            value = as_str(tmdb_external_ids.get(key))
+            if value is None:
+                continue
+            external_ids[key.replace("_id", "")] = value
 
     if candidate.source_tags:
         external_ids["import_sources"] = sorted(candidate.source_tags)
@@ -241,6 +303,35 @@ def _tmdb_meta_from_tv_details(details: Mapping[str, Any]) -> dict[str, Any]:
     copy_episode_obj("last_episode_to_air")
     copy_episode_obj("next_episode_to_air")
 
+    alt_raw = details.get("alternative_titles")
+    if isinstance(alt_raw, Mapping):
+        results = alt_raw.get("results")
+        if isinstance(results, list):
+            alt_titles: list[dict[str, Any]] = []
+            for item in results:
+                if not isinstance(item, Mapping):
+                    continue
+                alt_titles.append(
+                    {
+                        "iso_3166_1": item.get("iso_3166_1"),
+                        "title": item.get("title"),
+                        "type": item.get("type"),
+                    }
+                )
+            meta["alternative_titles"] = alt_titles
+
+    external_ids_raw = details.get("external_ids")
+    if isinstance(external_ids_raw, Mapping):
+        meta["external_ids"] = {
+            "imdb_id": external_ids_raw.get("imdb_id"),
+            "tvdb_id": external_ids_raw.get("tvdb_id"),
+            "wikidata_id": external_ids_raw.get("wikidata_id"),
+            "facebook_id": external_ids_raw.get("facebook_id"),
+            "instagram_id": external_ids_raw.get("instagram_id"),
+            "twitter_id": external_ids_raw.get("twitter_id"),
+            "tvrage_id": external_ids_raw.get("tvrage_id"),
+        }
+
     # Certificate/rating is not part of the v3 TV details response. Leave it to IMDb/meta sources if needed.
     return meta
 
@@ -289,6 +380,12 @@ def _tmdb_meta_is_fresh(
         return False
 
     if tmdb_meta.get("_v") != 1:
+        return False
+
+    # Ensure the v1 schema includes the additional appended payloads we expect.
+    if not isinstance(tmdb_meta.get("external_ids"), Mapping):
+        return False
+    if not isinstance(tmdb_meta.get("alternative_titles"), list):
         return False
 
     meta_lang = tmdb_meta.get("language")
@@ -444,7 +541,8 @@ def upsert_candidates_into_supabase(
     tmdb_details_skipped_cached = 0
     tmdb_details_failed = 0
     tmdb_details_session = requests.Session()
-    tmdb_details_cache: dict[int, dict[str, Any]] = {}
+    tmdb_details_append = ("alternative_titles", "external_ids")
+    tmdb_details_cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] = {}
     now = datetime.now(timezone.utc)
 
     def _coerce_int(value: Any) -> int | None:
@@ -486,17 +584,21 @@ def upsert_candidates_into_supabase(
 
             if is_fresh:
                 tmdb_details_skipped_fresh += 1
+                if isinstance(existing_tmdb_meta, Mapping):
+                    candidate.tmdb_meta = {**dict(existing_tmdb_meta), **candidate.tmdb_meta}
             else:
                 try:
-                    if tmdb_id_for_details in tmdb_details_cache:
+                    cache_key = (tmdb_id_for_details, tmdb_details_language, tmdb_details_append)
+                    if cache_key in tmdb_details_cache:
                         tmdb_details_skipped_cached += 1
-                        details = tmdb_details_cache[tmdb_id_for_details]
+                        details = tmdb_details_cache[cache_key]
                     else:
                         details = fetch_tv_details(
                             tmdb_id_for_details,
                             api_key=None,
                             session=tmdb_details_session,
                             language=tmdb_details_language,
+                            append_to_response=list(tmdb_details_append),
                             cache=tmdb_details_cache,
                         )
                         tmdb_details_fetched += 1
