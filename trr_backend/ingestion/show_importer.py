@@ -332,6 +332,15 @@ def upsert_candidates_into_supabase(
             imdb_sleep_ms=enrich_imdb_sleep_ms,
         )
 
+        print(
+            "ENRICH summary "
+            f"attempted={summary.attempted} "
+            f"updated={summary.updated} "
+            f"skipped_complete={summary.skipped_complete} "
+            f"skipped={summary.skipped} "
+            f"failed={summary.failed}"
+        )
+
         if summary.failures:
             print(f"ENRICH failed={summary.failed} (show metadata).")
             for failure in summary.failures[:10]:
