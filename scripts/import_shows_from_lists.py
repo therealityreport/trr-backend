@@ -27,6 +27,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--tmdb-list", action="append", default=[], help="TMDb list id or URL (repeatable).")
     parser.add_argument("--config", type=str, default=None, help="JSON/YAML config file of list sources.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned changes without writing to Supabase.")
+    imdb_graphql = parser.add_mutually_exclusive_group()
+    imdb_graphql.add_argument(
+        "--imdb-use-graphql",
+        dest="imdb_use_graphql",
+        action="store_true",
+        default=True,
+        help="Use IMDb GraphQL TitleListMainPage for list ingestion (default).",
+    )
+    imdb_graphql.add_argument(
+        "--imdb-no-graphql",
+        dest="imdb_use_graphql",
+        action="store_false",
+        help="Disable IMDb GraphQL and use HTML/JSON-LD scraping (debugging only).",
+    )
     parser.add_argument(
         "--skip-tmdb-external-ids",
         action="store_true",
@@ -113,6 +127,7 @@ def run_from_cli(args: argparse.Namespace) -> None:
         imdb_list_urls=imdb_lists,
         tmdb_lists=tmdb_lists,
         resolve_tmdb_external_ids=not bool(args.skip_tmdb_external_ids),
+        imdb_use_graphql=bool(args.imdb_use_graphql),
     )
     print(f"Collected {len(candidates)} merged candidate shows.")
 

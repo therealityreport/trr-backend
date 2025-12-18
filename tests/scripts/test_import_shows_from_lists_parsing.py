@@ -86,7 +86,7 @@ def test_fetch_imdb_list_items_parses_jsonld_and_paginates() -> None:
         }
     )
 
-    items = fetch_imdb_list_items("ls123456789", session=session, max_pages=3)
+    items = fetch_imdb_list_items("ls123456789", session=session, max_pages=3, use_graphql=False)
     assert {i.imdb_id for i in items} == {"tt1111111", "tt2222222", "tt3333333"}
     assert any(i.title == "Sample Series One" for i in items)
 
@@ -103,7 +103,7 @@ def test_fetch_imdb_list_items_stops_when_no_new_ids() -> None:
         }
     )
 
-    items = fetch_imdb_list_items("ls123456789", session=session, max_pages=5)
+    items = fetch_imdb_list_items("ls123456789", session=session, max_pages=5, use_graphql=False)
     assert {i.imdb_id for i in items} == {"tt1111111", "tt2222222"}
     assert session.calls == [
         "https://www.imdb.com/list/ls123456789/",

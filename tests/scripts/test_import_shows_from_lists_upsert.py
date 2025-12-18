@@ -67,6 +67,7 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
             title="Existing Show",
             first_air_date="2020-01-01",
             origin_country=["US"],
+            imdb_meta={"rating": 6.6, "vote_count": 1125},
             source_tags={"imdb-list:ls1", "tmdb-list:8301263"},
         )
     ]
@@ -93,5 +94,7 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     assert set(external_ids["import_sources"]) == {"old-source", "imdb-list:ls1", "tmdb-list:8301263"}
     assert external_ids["tmdb_meta"]["origin_country"] == ["US"]
     assert external_ids["tmdb_meta"]["first_air_date"] == "2020-01-01"
+    assert external_ids["imdb_meta"]["rating"] == 6.6
+    assert external_ids["imdb_meta"]["vote_count"] == 1125
     assert external_ids["imdb_episodic"]["supported"] is True
     assert patch["premiere_date"] == "2020-01-01"
