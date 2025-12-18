@@ -72,6 +72,20 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         action="store_true",
         help="Skip per-show TMDb external_ids lookups (faster; fewer cross-links).",
     )
+    tmdb_images = parser.add_mutually_exclusive_group()
+    tmdb_images.add_argument(
+        "--tmdb-fetch-images",
+        dest="tmdb_fetch_images",
+        action="store_true",
+        default=False,
+        help="Fetch TMDb /tv/{id}/images and persist posters/logos/backdrops (default: off).",
+    )
+    tmdb_images.add_argument(
+        "--tmdb-no-images",
+        dest="tmdb_fetch_images",
+        action="store_false",
+        help="Skip TMDb /tv/{id}/images fetch (default).",
+    )
     parser.add_argument(
         "--single-pass",
         action="store_true",
@@ -150,6 +164,8 @@ def main(argv: list[str]) -> int:
             run_args.extend(["--imdb-list", v])
         if args.skip_tmdb_external_ids and "--skip-tmdb-external-ids" not in run_args:
             run_args.append("--skip-tmdb-external-ids")
+        if args.tmdb_fetch_images and "--tmdb-fetch-images" not in run_args:
+            run_args.append("--tmdb-fetch-images")
         return _run_importer(run_args)
 
     if args.two_pass_imdb_first:
@@ -185,6 +201,8 @@ def main(argv: list[str]) -> int:
             tmdb_args.extend(["--tmdb-list", v])
         if args.skip_tmdb_external_ids and "--skip-tmdb-external-ids" not in tmdb_args:
             tmdb_args.append("--skip-tmdb-external-ids")
+        if args.tmdb_fetch_images and "--tmdb-fetch-images" not in tmdb_args:
+            tmdb_args.append("--tmdb-fetch-images")
         return _run_importer(tmdb_args)
 
     # Optional two-pass mode: TMDb first (reliable), then IMDb (retryable).
@@ -194,6 +212,8 @@ def main(argv: list[str]) -> int:
         tmdb_args.extend(["--tmdb-list", v])
     if args.skip_tmdb_external_ids and "--skip-tmdb-external-ids" not in tmdb_args:
         tmdb_args.append("--skip-tmdb-external-ids")
+    if args.tmdb_fetch_images and "--tmdb-fetch-images" not in tmdb_args:
+        tmdb_args.append("--tmdb-fetch-images")
     rc = _run_importer(tmdb_args)
     if rc != 0:
         return rc
