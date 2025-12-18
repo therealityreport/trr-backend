@@ -82,6 +82,11 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         action="store_true",
         help="Run TMDb import+enrich first, then IMDb import+enrich with retries (more resilient, slower).",
     )
+    parser.add_argument(
+        "--two-pass-imdb-first",
+        action="store_true",
+        help="When using --two-pass, run IMDb first then TMDb (alternative ordering).",
+    )
 
     return parser.parse_known_args(argv)
 
@@ -147,6 +152,41 @@ def main(argv: list[str]) -> int:
             run_args.append("--skip-tmdb-external-ids")
         return _run_importer(run_args)
 
+    if args.two_pass_imdb_first:
+        # Optional two-pass mode: IMDb first, then TMDb.
+        print("==> Pass 1/2: IMDb list import + enrichment (resilience mode)", file=sys.stderr)
+        imdb_args = list(common)
+        for v in imdb_lists:
+            imdb_args.extend(["--imdb-list", v])
+        if args.imdb_max_enrich and int(args.imdb_max_enrich) > 0 and "--max-enrich" not in imdb_args:
+            imdb_args.extend(["--max-enrich", str(int(args.imdb_max_enrich))])
+
+        retries = max(1, int(args.imdb_retries or 1))
+        timeout_seconds = int(args.imdb_timeout_seconds or 0)
+        for attempt in range(1, retries + 1):
+            rc = _run_importer(imdb_args, timeout_seconds=timeout_seconds if timeout_seconds > 0 else None)
+            if rc == 0:
+                break
+            if rc == 130:
+                return rc
+            if attempt < retries:
+                sleep_s = min(30, 2**attempt)
+                print(
+                    f"IMDb pass failed (exit {rc}); retrying in {sleep_s}s (attempt {attempt+1}/{retries})…",
+                    file=sys.stderr,
+                )
+                time.sleep(sleep_s)
+                continue
+            return rc
+
+        print("==> Pass 2/2: TMDb list import + enrichment (resilience mode)", file=sys.stderr)
+        tmdb_args = list(common)
+        for v in tmdb_lists:
+            tmdb_args.extend(["--tmdb-list", v])
+        if args.skip_tmdb_external_ids and "--skip-tmdb-external-ids" not in tmdb_args:
+            tmdb_args.append("--skip-tmdb-external-ids")
+        return _run_importer(tmdb_args)
+
     # Optional two-pass mode: TMDb first (reliable), then IMDb (retryable).
     print("==> Pass 1/2: TMDb list import + enrichment (resilience mode)", file=sys.stderr)
     tmdb_args = list(common)
@@ -175,7 +215,10 @@ def main(argv: list[str]) -> int:
             return rc
         if attempt < retries:
             sleep_s = min(30, 2**attempt)
-            print(f"IMDb pass failed (exit {rc}); retrying in {sleep_s}s (attempt {attempt+1}/{retries})…", file=sys.stderr)
+            print(
+                f"IMDb pass failed (exit {rc}); retrying in {sleep_s}s (attempt {attempt+1}/{retries})…",
+                file=sys.stderr,
+            )
             time.sleep(sleep_s)
             continue
         return rc
