@@ -46,6 +46,22 @@ class ImdbEpisodesPageMetadata:
     episodes: list[ImdbEpisodeInfo]
 
 
+@dataclass(frozen=True)
+class ImdbSeasonEpisode:
+    season: int
+    episode: int
+    imdb_episode_id: str | None
+    title: str | None
+    air_date: str | None  # YYYY-MM-DD when parseable
+    overview: str | None
+    imdb_rating: float | None
+    imdb_vote_count: int | None
+    imdb_primary_image_url: str | None
+    imdb_primary_image_caption: str | None
+    imdb_primary_image_width: int | None
+    imdb_primary_image_height: int | None
+
+
 def _as_int(value: Any) -> int | None:
     if isinstance(value, int):
         return value
@@ -271,6 +287,173 @@ def parse_imdb_episodes_page(html: str, *, season: int | None = None) -> ImdbEpi
     return ImdbEpisodesPageMetadata(available_seasons=sorted(seasons), episodes=episode_cards)
 
 
+def _extract_next_data_json(html: str) -> dict[str, Any] | None:
+    soup = BeautifulSoup(html, "html.parser")
+    script = soup.find("script", attrs={"id": "__NEXT_DATA__"})
+    if not script or not script.string:
+        return None
+    try:
+        data = json.loads(script.string)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _extract_imdb_episode_items_from_next_data(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    try:
+        items = payload["props"]["pageProps"]["contentData"]["section"]["episodes"]["items"]
+    except Exception:
+        items = None
+    if isinstance(items, list):
+        return [i for i in items if isinstance(i, Mapping)]
+
+    # Fallback: tolerant scan for an `items` list that looks like episode cards.
+    out: list[Mapping[str, Any]] = []
+    stack: list[Any] = [payload]
+    while stack and len(out) < 2000:
+        node = stack.pop()
+        if isinstance(node, Mapping):
+            maybe_items = node.get("items")
+            if isinstance(maybe_items, list) and maybe_items and all(isinstance(x, Mapping) for x in maybe_items[:3]):
+                sample = maybe_items[0]
+                if isinstance(sample, Mapping) and {"id", "season", "episode", "titleText"} <= set(sample.keys()):
+                    out.extend([x for x in maybe_items if isinstance(x, Mapping)])
+                    break
+            stack.extend(list(node.values()))
+        elif isinstance(node, list):
+            stack.extend(node)
+    return out
+
+
+def _parse_imdb_release_date(value: Any) -> str | None:
+    if isinstance(value, str):
+        return _parse_air_date(value)
+    if isinstance(value, Mapping):
+        year = _as_int(value.get("year"))
+        month = _as_int(value.get("month"))
+        day = _as_int(value.get("day"))
+        if year and month and day:
+            try:
+                return date(year, month, day).isoformat()
+            except ValueError:
+                return None
+    return None
+
+
+def parse_imdb_season_episodes_page(html: str, *, season: int | None = None) -> list[ImdbSeasonEpisode]:
+    """
+    Parse an IMDb season episodes page into rich per-episode objects.
+
+    Prefers extracting episodes from Next.js `__NEXT_DATA__` (contains plot/rating/image),
+    with a best-effort HTML fallback when the JSON payload is unavailable.
+    """
+
+    next_data = _extract_next_data_json(html)
+    if isinstance(next_data, Mapping):
+        items = _extract_imdb_episode_items_from_next_data(next_data)
+        episodes: list[ImdbSeasonEpisode] = []
+        for item in items:
+            imdb_episode_id = item.get("id")
+            if not isinstance(imdb_episode_id, str) or not _IMDB_TITLE_ID_RE.match(imdb_episode_id.strip()):
+                imdb_episode_id = None
+
+            season_val = _as_int(item.get("season"))
+            episode_val = _as_int(item.get("episode"))
+            if season_val is None and season is not None:
+                season_val = int(season)
+            if season_val is None or episode_val is None:
+                continue
+
+            title_obj = item.get("titleText")
+            if isinstance(title_obj, str):
+                title = unescape(title_obj).strip() or None
+            elif isinstance(title_obj, Mapping):
+                title_raw = title_obj.get("text")
+                title = unescape(title_raw).strip() if isinstance(title_raw, str) and title_raw.strip() else None
+            else:
+                title = None
+
+            plot_obj = item.get("plot")
+            if isinstance(plot_obj, str):
+                overview = unescape(plot_obj).strip() or None
+            elif isinstance(plot_obj, Mapping):
+                inner = plot_obj.get("plotText")
+                if isinstance(inner, Mapping):
+                    text = inner.get("plainText")
+                    overview = unescape(text).strip() if isinstance(text, str) and text.strip() else None
+                else:
+                    overview = None
+            else:
+                overview = None
+
+            air_date = _parse_imdb_release_date(item.get("releaseDate"))
+
+            rating = item.get("aggregateRating")
+            imdb_rating = float(rating) if isinstance(rating, (int, float)) else None
+
+            vote_count = item.get("voteCount")
+            imdb_vote_count = int(vote_count) if isinstance(vote_count, int) else None
+
+            image_obj = item.get("image")
+            image_url: str | None = None
+            image_caption: str | None = None
+            image_width: int | None = None
+            image_height: int | None = None
+            if isinstance(image_obj, Mapping):
+                url = image_obj.get("url")
+                if isinstance(url, str) and url.strip():
+                    image_url = url.strip()
+                cap = image_obj.get("caption")
+                if isinstance(cap, str) and cap.strip():
+                    image_caption = unescape(cap).strip()
+                image_width = _as_int(image_obj.get("maxWidth"))
+                image_height = _as_int(image_obj.get("maxHeight"))
+
+            episodes.append(
+                ImdbSeasonEpisode(
+                    season=int(season_val),
+                    episode=int(episode_val),
+                    imdb_episode_id=imdb_episode_id,
+                    title=title,
+                    air_date=air_date,
+                    overview=overview,
+                    imdb_rating=imdb_rating,
+                    imdb_vote_count=imdb_vote_count,
+                    imdb_primary_image_url=image_url,
+                    imdb_primary_image_caption=image_caption,
+                    imdb_primary_image_width=image_width,
+                    imdb_primary_image_height=image_height,
+                )
+            )
+
+        if episodes:
+            return episodes
+
+    # HTML fallback (limited fields).
+    fallback = parse_imdb_episodes_page(html, season=season)
+    out: list[ImdbSeasonEpisode] = []
+    for ep in fallback.episodes:
+        if ep.season is None or ep.episode is None:
+            continue
+        out.append(
+            ImdbSeasonEpisode(
+                season=int(ep.season),
+                episode=int(ep.episode),
+                imdb_episode_id=ep.imdb_episode_id,
+                title=ep.title,
+                air_date=ep.air_date,
+                overview=None,
+                imdb_rating=None,
+                imdb_vote_count=None,
+                imdb_primary_image_url=None,
+                imdb_primary_image_caption=None,
+                imdb_primary_image_width=None,
+                imdb_primary_image_height=None,
+            )
+        )
+    return out
+
+
 def pick_most_recent_episode(episodes: Iterable[ImdbEpisodeInfo]) -> ImdbEpisodeInfo | None:
     items = list(episodes)
     if not items:
@@ -354,4 +537,3 @@ class HttpImdbTitleMetadataClient:
                 status_code=getattr(exc, "status_code", None),
                 body_snippet=getattr(exc, "body_snippet", None),
             ) from exc
-
