@@ -1,0 +1,18 @@
+{
+  "id": 12345,
+  "name": "RuPaul's Drag Race",
+  "networks": [
+    {
+      "id": 1,
+      "name": "VH1"
+    }
+  ],
+  "number_of_seasons": 16,
+  "number_of_episodes": 250,
+  "last_episode_to_air": {
+    "season_number": 16,
+    "episode_number": 16,
+    "name": "Grand Finale",
+    "air_date": "2024-04-19"
+  }
+}

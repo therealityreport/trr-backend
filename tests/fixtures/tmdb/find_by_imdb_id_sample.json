@@ -1,0 +1,12 @@
+{
+  "movie_results": [],
+  "person_results": [],
+  "tv_results": [
+    {
+      "id": 12345,
+      "name": "RuPaul's Drag Race"
+    }
+  ],
+  "tv_episode_results": [],
+  "tv_season_results": []
+}

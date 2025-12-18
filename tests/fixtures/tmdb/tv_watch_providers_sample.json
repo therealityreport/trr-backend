@@ -1,0 +1,18 @@
+{
+  "id": 12345,
+  "results": {
+    "US": {
+      "link": "https://www.themoviedb.org/tv/12345/watch",
+      "flatrate": [
+        {
+          "provider_id": 15,
+          "provider_name": "Hulu"
+        },
+        {
+          "provider_id": 531,
+          "provider_name": "Paramount+"
+        }
+      ]
+    }
+  }
+}
