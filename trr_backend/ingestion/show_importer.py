@@ -21,7 +21,13 @@ from trr_backend.ingestion.shows_from_lists import (
 )
 from trr_backend.integrations.imdb.episodic_client import HttpImdbEpisodicClient, IMDB_JOB_CATEGORY_SELF
 from trr_backend.models.shows import ShowRecord, ShowUpsert
-from trr_backend.repositories.shows import find_show_by_imdb_id, find_show_by_tmdb_id, insert_show, update_show
+from trr_backend.repositories.shows import (
+    assert_core_shows_table_exists,
+    find_show_by_imdb_id,
+    find_show_by_tmdb_id,
+    insert_show,
+    update_show,
+)
 
 
 @dataclass(frozen=True)
@@ -198,6 +204,8 @@ def upsert_candidates_into_supabase(
     imdb_episodic_extra_headers: Mapping[str, str] | None = None,
 ) -> ShowImportResult:
     db = supabase_client or (None if dry_run else create_supabase_admin_client())
+    if db is not None:
+        assert_core_shows_table_exists(db)
 
     seasons_by_imdb_id: dict[str, list[int]] = {}
     if annotate_imdb_episodic and imdb_episodic_probe_name_id:

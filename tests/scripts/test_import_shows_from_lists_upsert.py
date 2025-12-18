@@ -10,6 +10,7 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
     from trr_backend.ingestion import show_importer as mod
 
     fake_db = object()
+    monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
 
@@ -39,6 +40,7 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
 def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     from trr_backend.ingestion import show_importer as mod
 
+    monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
     existing = {
         "id": "00000000-0000-0000-0000-000000000002",
         "title": "Existing Show",
@@ -93,4 +95,3 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     assert external_ids["tmdb_meta"]["first_air_date"] == "2020-01-01"
     assert external_ids["imdb_episodic"]["supported"] is True
     assert patch["premiere_date"] == "2020-01-01"
-
