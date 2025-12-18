@@ -55,6 +55,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_false",
         help="Skip fetching TMDb /tv/{id} details during list ingestion (faster).",
     )
+    tmdb_images = parser.add_mutually_exclusive_group()
+    tmdb_images.add_argument(
+        "--tmdb-fetch-images",
+        dest="tmdb_fetch_images",
+        action="store_true",
+        default=False,
+        help="Fetch TMDb /tv/{id}/images and persist posters/logos/backdrops (default: off).",
+    )
+    tmdb_images.add_argument(
+        "--tmdb-no-images",
+        dest="tmdb_fetch_images",
+        action="store_false",
+        help="Skip TMDb /tv/{id}/images fetch (default).",
+    )
     parser.add_argument(
         "--tmdb-details-max-age-days",
         type=int,
@@ -168,6 +182,7 @@ def run_from_cli(args: argparse.Namespace) -> None:
         annotate_imdb_episodic=bool(args.annotate_imdb_episodic),
         tmdb_fetch_details=bool(args.tmdb_fetch_details),
         tmdb_details_max_age_days=0 if bool(args.tmdb_details_refresh) else int(args.tmdb_details_max_age_days or 0),
+        tmdb_fetch_images=bool(getattr(args, "tmdb_fetch_images", False)),
         enrich_show_metadata=bool(args.enrich_show_metadata),
         enrich_region=str(args.region or "US").upper(),
         enrich_concurrency=int(args.concurrency or 5),

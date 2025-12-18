@@ -23,8 +23,9 @@ from trr_backend.ingestion.shows_from_lists import (
     parse_imdb_list_id,
 )
 from trr_backend.integrations.imdb.episodic_client import HttpImdbEpisodicClient, IMDB_JOB_CATEGORY_SELF
-from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_details
+from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_details, fetch_tv_images
 from trr_backend.models.shows import ShowRecord, ShowUpsert
+from trr_backend.repositories.show_images import assert_core_show_images_table_exists, upsert_show_images
 from trr_backend.repositories.shows import (
     assert_core_shows_table_exists,
     find_show_by_imdb_id,
@@ -336,6 +337,102 @@ def _tmdb_meta_from_tv_details(details: Mapping[str, Any]) -> dict[str, Any]:
     return meta
 
 
+def _is_english_iso_639_1(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    raw = value.strip().casefold()
+    return raw == "en" or raw.startswith("en-")
+
+
+def _tmdb_image_sort_key(image: Mapping[str, Any]) -> tuple[int, int, float, str]:
+    iso = image.get("iso_639_1")
+    if _is_english_iso_639_1(iso):
+        bucket = 0
+    elif iso is None or (isinstance(iso, str) and not iso.strip()):
+        bucket = 1
+    else:
+        bucket = 2
+
+    vote_count = image.get("vote_count")
+    vote_count_int = int(vote_count) if isinstance(vote_count, int) else 0
+    vote_average = image.get("vote_average")
+    vote_avg_float = float(vote_average) if isinstance(vote_average, (int, float)) else 0.0
+    file_path = str(image.get("file_path") or "")
+    return (bucket, -vote_count_int, -vote_avg_float, file_path)
+
+
+def _normalize_tmdb_images_list(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+
+    by_file_path: dict[str, dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        file_path = item.get("file_path")
+        if not isinstance(file_path, str) or not file_path.strip():
+            continue
+
+        normalized: dict[str, Any] = {
+            "iso_639_1": item.get("iso_639_1") if isinstance(item.get("iso_639_1"), str) else None,
+            "file_path": file_path,
+            "width": item.get("width") if isinstance(item.get("width"), int) else None,
+            "height": item.get("height") if isinstance(item.get("height"), int) else None,
+            "aspect_ratio": item.get("aspect_ratio") if isinstance(item.get("aspect_ratio"), (int, float)) else None,
+            "vote_average": item.get("vote_average") if isinstance(item.get("vote_average"), (int, float)) else None,
+            "vote_count": item.get("vote_count") if isinstance(item.get("vote_count"), int) else None,
+        }
+
+        existing = by_file_path.get(file_path)
+        if existing is None or _tmdb_image_sort_key(normalized) < _tmdb_image_sort_key(existing):
+            by_file_path[file_path] = normalized
+
+    return list(by_file_path.values())
+
+
+def _primary_tmdb_image_file_path(images: list[dict[str, Any]]) -> str | None:
+    if not images:
+        return None
+    sorted_images = sorted(images, key=_tmdb_image_sort_key)
+    file_path = sorted_images[0].get("file_path")
+    return file_path if isinstance(file_path, str) and file_path.strip() else None
+
+
+def _tmdb_show_images_rows(
+    payload: Mapping[str, Any],
+    *,
+    show_id: str,
+    fetched_at: str,
+    source: str = "tmdb",
+) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+    kind_to_key = {"poster": "posters", "backdrop": "backdrops", "logo": "logos"}
+
+    rows: list[dict[str, Any]] = []
+    primary: dict[str, str | None] = {}
+
+    for kind, key in kind_to_key.items():
+        images = _normalize_tmdb_images_list(payload.get(key))
+        primary[kind] = _primary_tmdb_image_file_path(images)
+        for img in images:
+            rows.append(
+                {
+                    "show_id": show_id,
+                    "source": source,
+                    "kind": kind,
+                    "iso_639_1": img.get("iso_639_1"),
+                    "file_path": img.get("file_path"),
+                    "width": img.get("width"),
+                    "height": img.get("height"),
+                    "aspect_ratio": img.get("aspect_ratio"),
+                    "vote_average": img.get("vote_average"),
+                    "vote_count": img.get("vote_count"),
+                    "fetched_at": fetched_at,
+                }
+            )
+
+    return rows, primary
+
+
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -503,6 +600,7 @@ def upsert_candidates_into_supabase(
     tmdb_fetch_details: bool = True,
     tmdb_details_max_age_days: int = 90,
     tmdb_details_language: str = "en-US",
+    tmdb_fetch_images: bool = False,
     enrich_show_metadata: bool = False,
     enrich_region: str = "US",
     enrich_concurrency: int = 5,
@@ -707,6 +805,120 @@ def upsert_candidates_into_supabase(
             f"tmdb_details_failed={tmdb_details_failed}",
             file=sys.stderr,
         )
+
+    # Optional TMDb images capture (posters/logos/backdrops): persist into core.show_images and set primary_* columns.
+    if tmdb_fetch_images:
+        tmdb_images_language = "en-US"
+        tmdb_images_include_lang = "en-US,null"
+        tmdb_images_session = requests.Session()
+        tmdb_images_cache: dict[tuple[int, str, str], dict[str, Any]] = {}
+
+        tmdb_images_total = 0
+        for row in upserted_show_rows:
+            external_ids = row.get("external_ids")
+            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
+            tmdb_id_val = external_ids_map.get("tmdb")
+            if isinstance(tmdb_id_val, int) or (isinstance(tmdb_id_val, str) and tmdb_id_val.strip().isdigit()):
+                tmdb_images_total += 1
+
+        if db is not None:
+            assert_core_show_images_table_exists(db)
+
+        tmdb_images_processed = 0
+        tmdb_images_fetched = 0
+        tmdb_images_skipped_cached = 0
+        tmdb_images_failed = 0
+
+        for i, row in enumerate(upserted_show_rows, start=1):
+            row_id = row.get("id")
+            show_id = str(row_id) if row_id is not None else ""
+            if not show_id:
+                continue
+
+            external_ids = row.get("external_ids")
+            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
+            tmdb_id_val = external_ids_map.get("tmdb")
+            if isinstance(tmdb_id_val, int):
+                tmdb_id_int = tmdb_id_val
+            elif isinstance(tmdb_id_val, str) and tmdb_id_val.strip().isdigit():
+                tmdb_id_int = int(tmdb_id_val.strip())
+            else:
+                continue
+
+            tmdb_images_processed += 1
+
+            cache_key = (tmdb_id_int, tmdb_images_language, tmdb_images_include_lang)
+            fetched_at = _now_utc_iso()
+
+            try:
+                if cache_key in tmdb_images_cache:
+                    tmdb_images_skipped_cached += 1
+                    payload = tmdb_images_cache[cache_key]
+                else:
+                    payload = fetch_tv_images(
+                        tmdb_id_int,
+                        api_key=None,
+                        session=tmdb_images_session,
+                        language=tmdb_images_language,
+                        include_image_language=tmdb_images_include_lang,
+                        cache=tmdb_images_cache,
+                    )
+                    tmdb_images_fetched += 1
+
+                image_rows, primary = _tmdb_show_images_rows(payload, show_id=show_id, fetched_at=fetched_at)
+                if db is not None and not dry_run:
+                    upsert_show_images(db, image_rows)
+
+                patch: dict[str, Any] = {}
+                poster = primary.get("poster")
+                backdrop = primary.get("backdrop")
+                logo = primary.get("logo")
+
+                if isinstance(poster, str) and poster.strip() and poster != row.get("primary_tmdb_poster_path"):
+                    patch["primary_tmdb_poster_path"] = poster
+                if isinstance(backdrop, str) and backdrop.strip() and backdrop != row.get("primary_tmdb_backdrop_path"):
+                    patch["primary_tmdb_backdrop_path"] = backdrop
+                if isinstance(logo, str) and logo.strip() and logo != row.get("primary_tmdb_logo_path"):
+                    patch["primary_tmdb_logo_path"] = logo
+
+                if patch:
+                    if dry_run:
+                        print(f"TMDb images UPDATE show id={show_id} patch_keys={sorted(patch.keys())}")
+                        row.update(patch)
+                    elif db is not None:
+                        updated_row = update_show(db, show_id, patch)
+                        row.update(updated_row)
+            except TmdbClientError as exc:
+                tmdb_images_failed += 1
+                status = exc.status_code
+                if status in {404, 422}:
+                    print(f"TMDb images: skipping tmdb_id={tmdb_id_int} (HTTP {status})", file=sys.stderr)
+                else:
+                    print(
+                        f"TMDb images: failed tmdb_id={tmdb_id_int} "
+                        f"(HTTP {status if status is not None else 'unknown'})",
+                        file=sys.stderr,
+                    )
+            except Exception:
+                tmdb_images_failed += 1
+                print(f"TMDb images: failed tmdb_id={tmdb_id_int} (unexpected error)", file=sys.stderr)
+
+            if tmdb_images_total:
+                if tmdb_images_processed == 1 or tmdb_images_processed % 10 == 0 or tmdb_images_processed == tmdb_images_total:
+                    print(
+                        f"TMDb images: processed {tmdb_images_processed}/{tmdb_images_total} "
+                        f"(fetched={tmdb_images_fetched} cached={tmdb_images_skipped_cached} failed={tmdb_images_failed})",
+                        file=sys.stderr,
+                    )
+
+        if tmdb_images_total:
+            print(
+                "TMDb images summary "
+                f"tmdb_images_fetched={tmdb_images_fetched} "
+                f"tmdb_images_skipped_cached={tmdb_images_skipped_cached} "
+                f"tmdb_images_failed={tmdb_images_failed}",
+                file=sys.stderr,
+            )
 
     # Stage 2 enrichment: populate external_ids.show_meta.
     if enrich_show_metadata:
