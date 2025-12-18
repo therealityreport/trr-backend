@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 from uuid import UUID, uuid4
 
+import requests
 from supabase import Client
 
 from trr_backend.db.supabase import create_supabase_admin_client
@@ -20,6 +22,7 @@ from trr_backend.ingestion.shows_from_lists import (
     parse_imdb_list_id,
 )
 from trr_backend.integrations.imdb.episodic_client import HttpImdbEpisodicClient, IMDB_JOB_CATEGORY_SELF
+from trr_backend.integrations.tmdb.client import fetch_tv_details
 from trr_backend.models.shows import ShowRecord, ShowUpsert
 from trr_backend.repositories.shows import (
     assert_core_shows_table_exists,
@@ -81,11 +84,11 @@ def _candidate_to_show_upsert(candidate: CandidateShow, *, annotate_imdb_episodi
     if candidate.source_tags:
         external_ids["import_sources"] = sorted(candidate.source_tags)
 
-    tmdb_meta: dict[str, Any] = {}
+    tmdb_meta: dict[str, Any] = dict(candidate.tmdb_meta or {})
     if candidate.first_air_date:
-        tmdb_meta["first_air_date"] = candidate.first_air_date
+        tmdb_meta.setdefault("first_air_date", candidate.first_air_date)
     if candidate.origin_country:
-        tmdb_meta["origin_country"] = list(candidate.origin_country)
+        tmdb_meta.setdefault("origin_country", list(candidate.origin_country))
     if tmdb_meta:
         external_ids["tmdb_meta"] = tmdb_meta
 
@@ -139,6 +142,108 @@ def _imdb_meta_from_list_item(item: ImdbListItem) -> dict[str, Any]:
     return meta
 
 
+def _tmdb_meta_from_tv_details(details: Mapping[str, Any]) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+
+    def copy_scalar(key: str) -> None:
+        value = details.get(key)
+        if value is None:
+            return
+        meta[key] = value
+
+    for key in (
+        "id",
+        "name",
+        "original_name",
+        "overview",
+        "first_air_date",
+        "last_air_date",
+        "in_production",
+        "status",
+        "type",
+        "tagline",
+        "homepage",
+        "original_language",
+        "origin_country",
+        "languages",
+        "episode_run_time",
+        "number_of_seasons",
+        "number_of_episodes",
+        "vote_average",
+        "vote_count",
+        "popularity",
+        "poster_path",
+        "backdrop_path",
+        "adult",
+    ):
+        copy_scalar(key)
+
+    def copy_list_of_dicts(key: str, allowed_keys: tuple[str, ...]) -> None:
+        raw = details.get(key)
+        if raw is None:
+            return
+        if not isinstance(raw, list):
+            return
+        out: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            filtered = {k: item.get(k) for k in allowed_keys if k in item}
+            out.append(filtered)
+        meta[key] = out
+
+    copy_list_of_dicts("genres", ("id", "name"))
+    copy_list_of_dicts("networks", ("id", "name", "logo_path", "origin_country"))
+    copy_list_of_dicts("created_by", ("id", "name", "gender", "profile_path", "credit_id"))
+    copy_list_of_dicts("production_companies", ("id", "name", "logo_path", "origin_country"))
+    copy_list_of_dicts("production_countries", ("iso_3166_1", "name"))
+    copy_list_of_dicts("spoken_languages", ("english_name", "iso_639_1", "name"))
+
+    seasons_raw = details.get("seasons")
+    if seasons_raw is not None and isinstance(seasons_raw, list):
+        seasons: list[dict[str, Any]] = []
+        for season in seasons_raw:
+            if not isinstance(season, Mapping):
+                continue
+            seasons.append(
+                {
+                    "id": season.get("id"),
+                    "season_number": season.get("season_number"),
+                    "name": season.get("name"),
+                    "air_date": season.get("air_date"),
+                    "episode_count": season.get("episode_count"),
+                    "overview": season.get("overview"),
+                    "poster_path": season.get("poster_path"),
+                    "vote_average": season.get("vote_average"),
+                }
+            )
+        meta["seasons"] = seasons
+
+    def copy_episode_obj(key: str) -> None:
+        raw = details.get(key)
+        if raw is None:
+            return
+        if not isinstance(raw, Mapping):
+            return
+        meta[key] = {
+            "id": raw.get("id"),
+            "name": raw.get("name"),
+            "air_date": raw.get("air_date"),
+            "season_number": raw.get("season_number"),
+            "episode_number": raw.get("episode_number"),
+            "overview": raw.get("overview"),
+            "vote_average": raw.get("vote_average"),
+            "vote_count": raw.get("vote_count"),
+            "still_path": raw.get("still_path"),
+        }
+
+    copy_episode_obj("last_episode_to_air")
+    copy_episode_obj("next_episode_to_air")
+
+    # Certificate/rating is not part of the v3 TV details response. Leave it to IMDb/meta sources if needed.
+    return meta
+
+
 def collect_candidates_from_lists(
     *,
     imdb_list_urls: Iterable[str],
@@ -147,8 +252,14 @@ def collect_candidates_from_lists(
     http_session: Any | None = None,
     resolve_tmdb_external_ids: bool = True,
     imdb_use_graphql: bool = True,
+    tmdb_fetch_details: bool = True,
 ) -> list[CandidateShow]:
     session = http_session
+    tmdb_session = session if isinstance(session, requests.Session) else requests.Session()
+    tmdb_details_cache: dict[int, dict[str, Any]] = {}
+    tmdb_details_fetched = 0
+    tmdb_details_skipped_cached = 0
+    tmdb_details_failed = 0
 
     imdb_candidates: list[CandidateShow] = []
     for url in imdb_list_urls:
@@ -180,11 +291,44 @@ def collect_candidates_from_lists(
         items: list[TmdbListItem] = fetch_tmdb_list_items(
             value,
             api_key=tmdb_api_key,
-            session=session,
+            session=tmdb_session,
             resolve_external_ids=bool(resolve_tmdb_external_ids),
         )
         list_tag = f"tmdb-list:{list_id_int}" if list_id_int is not None else f"tmdb-list:{value}"
-        for item in items:
+
+        list_fetched = 0
+        list_cached = 0
+        list_failed = 0
+        total = len(items)
+
+        for idx, item in enumerate(items, start=1):
+            tmdb_meta: dict[str, Any] = {}
+            if tmdb_fetch_details:
+                tmdb_id = int(item.tmdb_id)
+                details: dict[str, Any] | None = None
+
+                if tmdb_id in tmdb_details_cache:
+                    tmdb_details_skipped_cached += 1
+                    list_cached += 1
+                    details = tmdb_details_cache[tmdb_id]
+                else:
+                    try:
+                        details = fetch_tv_details(
+                            tmdb_id,
+                            api_key=tmdb_api_key,
+                            session=tmdb_session,
+                            cache=tmdb_details_cache,
+                        )
+                        tmdb_details_fetched += 1
+                        list_fetched += 1
+                    except Exception:
+                        tmdb_details_failed += 1
+                        list_failed += 1
+                        details = None
+
+                if isinstance(details, Mapping):
+                    tmdb_meta = _tmdb_meta_from_tv_details(details)
+
             tmdb_candidates.append(
                 CandidateShow(
                     imdb_id=item.imdb_id,
@@ -192,9 +336,27 @@ def collect_candidates_from_lists(
                     title=item.name,
                     first_air_date=item.first_air_date,
                     origin_country=item.origin_country,
+                    tmdb_meta=tmdb_meta,
                     source_tags={list_tag},
                 )
             )
+
+            if tmdb_fetch_details and total:
+                if idx == 1 or idx % 10 == 0 or idx == total:
+                    print(
+                        f"TMDb details: processed {idx}/{total} "
+                        f"(fetched={list_fetched} cached={list_cached} failed={list_failed})",
+                        file=sys.stderr,
+                    )
+
+    if tmdb_fetch_details:
+        print(
+            "TMDb details summary "
+            f"tmdb_details_fetched={tmdb_details_fetched} "
+            f"tmdb_details_skipped_cached={tmdb_details_skipped_cached} "
+            f"tmdb_details_failed={tmdb_details_failed}",
+            file=sys.stderr,
+        )
 
     return merge_candidates([*imdb_candidates, *tmdb_candidates])
 

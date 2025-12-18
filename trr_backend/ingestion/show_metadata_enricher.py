@@ -304,12 +304,20 @@ def _enrich_one_show(
     if tmdb_series_id is not None and tmdb_api_key:
         session = requests.Session()
 
-        with cache_lock:
-            details = tmdb_details_cache.get(tmdb_series_id)
+        details: dict[str, Any] | None = None
+        tmdb_meta_existing = external_ids.get("tmdb_meta")
+        if isinstance(tmdb_meta_existing, Mapping):
+            tmdb_meta_id = _as_int(tmdb_meta_existing.get("id"))
+            if tmdb_meta_id == tmdb_series_id:
+                details = dict(tmdb_meta_existing)
+
         if details is None:
-            details = fetch_tv_details(tmdb_series_id, api_key=tmdb_api_key, session=session)
             with cache_lock:
-                tmdb_details_cache[tmdb_series_id] = details
+                details = tmdb_details_cache.get(tmdb_series_id)
+            if details is None:
+                details = fetch_tv_details(tmdb_series_id, api_key=tmdb_api_key, session=session)
+                with cache_lock:
+                    tmdb_details_cache[tmdb_series_id] = details
         tmdb_sources.append("details")
 
         networks = details.get("networks")

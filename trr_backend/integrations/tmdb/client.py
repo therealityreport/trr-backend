@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Any, Mapping
 
 import requests
@@ -64,17 +65,40 @@ def _request_json(
         "accept": "application/json",
         "user-agent": "Mozilla/5.0",
     }
-    try:
-        resp = session.get(url, params=params, headers=headers, timeout=timeout_seconds)
-    except requests.RequestException as exc:
-        raise TmdbClientError(f"TMDb request failed: {exc}") from exc
+    max_attempts = 3
 
-    if resp.status_code != 200:
+    last_response: requests.Response | None = None
+    for attempt in range(max_attempts):
+        try:
+            resp = session.get(url, params=params, headers=headers, timeout=timeout_seconds)
+        except requests.RequestException as exc:
+            if attempt < max_attempts - 1:
+                time.sleep(1.0 * (2**attempt))
+                continue
+            raise TmdbClientError(f"TMDb request failed: {exc}") from exc
+
+        last_response = resp
+        if resp.status_code == 200:
+            break
+
+        retryable = resp.status_code == 429 or 500 <= resp.status_code < 600
+        if retryable and attempt < max_attempts - 1:
+            delay = 1.0 * (2**attempt)
+            retry_after = (resp.headers.get("Retry-After") or "").strip()
+            if retry_after.isdigit():
+                delay = max(delay, float(retry_after))
+            time.sleep(delay)
+            continue
+
         raise TmdbClientError(
             f"TMDb request failed with HTTP {resp.status_code}.",
             status_code=resp.status_code,
             body_snippet=(resp.text or "")[:400],
         )
+
+    if last_response is None:
+        raise TmdbClientError("TMDb request failed (no response).")
+    resp = last_response
 
     try:
         payload = resp.json()
@@ -162,13 +186,30 @@ def find_by_imdb_id(
 def fetch_tv_details(
     tv_id: int,
     *,
+    language: str = "en-US",
     api_key: str | None = None,
     session: requests.Session | None = None,
+    cache: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """
+    Fetch a TV series details payload from TMDb.
+
+    Returns the full JSON object as returned by `/3/tv/{id}`.
+
+    Callers may pass a per-run `cache` dict keyed by tmdb id to avoid refetching.
+    """
+
+    tv_id_int = int(tv_id)
+    if cache is not None and tv_id_int in cache:
+        return cache[tv_id_int]
+
     api_key = _require_api_key(api_key)
     session = session or requests.Session()
-    url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}"
-    return _request_json(session, url, params={"api_key": api_key})
+    url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}"
+    payload = _request_json(session, url, params={"api_key": api_key, "language": language})
+    if cache is not None:
+        cache[tv_id_int] = payload
+    return payload
 
 
 def fetch_tv_watch_providers(

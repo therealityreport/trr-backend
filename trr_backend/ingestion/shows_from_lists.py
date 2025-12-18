@@ -56,6 +56,7 @@ class CandidateShow:
     year: int | None = None
     first_air_date: str | None = None
     origin_country: list[str] | None = None
+    tmdb_meta: dict[str, Any] = field(default_factory=dict)
     imdb_meta: dict[str, Any] = field(default_factory=dict)
     source_tags: set[str] = field(default_factory=set)
 
@@ -70,6 +71,13 @@ class CandidateShow:
         self.year = self.year or other.year
         self.first_air_date = self.first_air_date or other.first_air_date
         self.origin_country = self.origin_country or other.origin_country
+        if other.tmdb_meta:
+            if not self.tmdb_meta:
+                self.tmdb_meta = dict(other.tmdb_meta)
+            else:
+                for k, v in other.tmdb_meta.items():
+                    if k not in self.tmdb_meta or self.tmdb_meta[k] is None:
+                        self.tmdb_meta[k] = v
         if other.imdb_meta:
             if not self.imdb_meta:
                 self.imdb_meta = dict(other.imdb_meta)
