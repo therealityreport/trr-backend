@@ -51,6 +51,8 @@ def test_stage1_tmdb_fetch_images_upserts_show_images_and_sets_primary_paths(mon
     assert result.created == 1
 
     assert fetch_images_mock.call_count == 1
+    _, call_kwargs = fetch_images_mock.call_args
+    assert call_kwargs["include_image_language"] == "en,null"
     assert upsert_images_mock.call_count == 1
 
     rows = upsert_images_mock.call_args[0][1]
@@ -88,4 +90,3 @@ def test_stage1_tmdb_no_images_skips_fetch(monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert result.created == 1
     assert fetch_images_mock.call_count == 0
-
