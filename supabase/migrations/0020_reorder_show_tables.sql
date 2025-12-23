@@ -37,6 +37,29 @@ alter table core.episodes rename to episodes_old;
 alter table core.seasons rename to seasons_old;
 alter table core.shows rename to shows_old;
 
+-- Avoid index-name collisions when rebuilding core.shows
+do $$
+declare
+  new_name text;
+begin
+  if to_regclass('core.shows_pkey') is not null then
+    new_name := 'shows_pkey_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.shows_pkey rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_shows_external_ids_gin') is not null then
+    new_name := 'core_shows_external_ids_gin_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_shows_external_ids_gin rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_shows_external_ids_imdb_unique') is not null then
+    new_name := 'core_shows_external_ids_imdb_unique_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_shows_external_ids_imdb_unique rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_shows_external_ids_tmdb_unique') is not null then
+    new_name := 'core_shows_external_ids_tmdb_unique_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_shows_external_ids_tmdb_unique rename to %I', new_name);
+  end if;
+end $$;
+
 -- ---------------------------------------------------------------------------
 -- core.shows (reordered columns + explicit metadata columns)
 -- ---------------------------------------------------------------------------
