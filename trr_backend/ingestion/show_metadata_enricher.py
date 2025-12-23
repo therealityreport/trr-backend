@@ -28,12 +28,13 @@ from trr_backend.models.shows import ShowRecord
 class ShowEnrichmentPatch:
     show_id: UUID
     external_ids_update: dict[str, Any]
+    show_update: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class EnrichFailure:
     show_id: UUID
-    title: str
+    name: str
     message: str
 
 
@@ -217,7 +218,7 @@ def _enrich_one_show(
     imdb_title_cache: dict[str, str],
     imdb_episodes_cache: dict[tuple[str, int | None], str],
     cache_lock: Lock,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
     external_ids = dict(show.external_ids or {})
     existing_show_meta = external_ids.get("show_meta") if isinstance(external_ids.get("show_meta"), dict) else None
 
@@ -252,7 +253,9 @@ def _enrich_one_show(
                 ]
 
                 imdb_id = show.imdb_id or _as_str(existing_show_meta.get("imdb_series_id"))
-                tmdb_series_id_existing = show.tmdb_id or _as_int(existing_show_meta.get("tmdb_series_id"))
+                tmdb_series_id_existing = show.tmdb_series_id or show.tmdb_id or _as_int(
+                    existing_show_meta.get("tmdb_series_id")
+                )
                 tmdb_possible = bool(tmdb_api_key and (tmdb_series_id_existing or imdb_id))
                 imdb_possible = bool(imdb_id)
 
@@ -271,11 +274,11 @@ def _enrich_one_show(
                 if missing_fields and not any(fillable(f) for f in missing_fields):
                     return None
 
-    show_meta["show"] = show.title
+    show_meta["show"] = show.name
     if show.imdb_id and (force_refresh or _is_blank(show_meta.get("imdb_series_id"))):
         show_meta["imdb_series_id"] = show.imdb_id
 
-    tmdb_series_id: int | None = show.tmdb_id or _as_int(show_meta.get("tmdb_series_id"))
+    tmdb_series_id: int | None = show.tmdb_series_id or show.tmdb_id or _as_int(show_meta.get("tmdb_series_id"))
     tmdb_sources: list[str] = []
 
     # Resolve TMDb id from IMDb id when missing.
@@ -441,7 +444,17 @@ def _enrich_one_show(
 
     _ensure_show_meta_shape(show_meta)
 
-    return updates
+    show_update = {
+        "network": _as_str(show_meta.get("network")),
+        "streaming": _as_str(show_meta.get("streaming")),
+        "show_total_seasons": _as_int(show_meta.get("show_total_seasons")),
+        "show_total_episodes": _as_int(show_meta.get("show_total_episodes")),
+        "imdb_series_id": _as_str(show_meta.get("imdb_series_id")) or show.imdb_id,
+        "tmdb_series_id": _as_int(show_meta.get("tmdb_series_id")) or show.tmdb_id,
+        "most_recent_episode": _as_str(show_meta.get("most_recent_episode")),
+    }
+
+    return updates, show_update
 
 
 def enrich_shows_after_upsert(
@@ -502,7 +515,9 @@ def enrich_shows_after_upsert(
     # Keep concurrency polite and simple; a worker fetches and builds one show patch.
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    def run_one(show: ShowRecord) -> tuple[UUID, dict[str, Any] | None, str | None]:
+    def run_one(
+        show: ShowRecord,
+    ) -> tuple[UUID, tuple[dict[str, Any], dict[str, Any]] | None, str | None]:
         try:
             patch = _enrich_one_show(
                 show,
@@ -529,14 +544,21 @@ def enrich_shows_after_upsert(
             show_id, patch, error = fut.result()
             if error:
                 failed += 1
-                failures.append(EnrichFailure(show_id=show_id, title=show.title, message=error))
+                failures.append(EnrichFailure(show_id=show_id, name=show.name, message=error))
                 continue
             if patch is None:
                 skipped += 1
                 continue
 
             updated += 1
-            patches.append(ShowEnrichmentPatch(show_id=show_id, external_ids_update=patch))
+            external_patch, show_update = patch
+            patches.append(
+                ShowEnrichmentPatch(
+                    show_id=show_id,
+                    external_ids_update=external_patch,
+                    show_update=show_update,
+                )
+            )
 
     return EnrichSummary(
         attempted=attempted,

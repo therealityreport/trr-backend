@@ -80,7 +80,7 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
 
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000001"),
-        title="RuPaul's Drag Race",
+        name="RuPaul's Drag Race",
         external_ids={"imdb": "tt1353056"},
     )
 
@@ -140,7 +140,7 @@ def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch
 
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000002"),
-        title="Sample Show",
+        name="Sample Show",
         external_ids={"imdb": "tt1353056"},
     )
 
@@ -187,7 +187,7 @@ def test_enrich_shows_after_upsert_skips_complete(monkeypatch: pytest.MonkeyPatc
 
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000003"),
-        title="Sample Show",
+        name="Sample Show",
         external_ids={
             "show_meta": {
                 "show": "Sample Show",
@@ -240,7 +240,7 @@ def test_enrich_shows_after_upsert_does_not_overwrite_ids_with_null(monkeypatch:
 
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000004"),
-        title="Sample Show",
+        name="Sample Show",
         external_ids={
             "show_meta": {
                 # Present ids should not be overwritten by missing external_ids.imdb/tmdb.

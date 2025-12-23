@@ -89,6 +89,18 @@ def find_show_by_imdb_id(db: Client, imdb_id: str) -> dict[str, Any] | None:
         db.schema("core")
         .table("shows")
         .select("*")
+        .eq("imdb_series_id", imdb_id)
+        .limit(1)
+        .execute()
+    )
+    _raise_for_supabase_error(response, "finding show by imdb id")
+    data = response.data or []
+    if isinstance(data, list) and data:
+        return data[0]
+    response = (
+        db.schema("core")
+        .table("shows")
+        .select("*")
         .eq("external_ids->>imdb", imdb_id)
         .limit(1)
         .execute()
@@ -105,7 +117,7 @@ def find_show_by_tmdb_id(db: Client, tmdb_id: int) -> dict[str, Any] | None:
         db.schema("core")
         .table("shows")
         .select("*")
-        .eq("tmdb_id", int(tmdb_id))
+        .eq("tmdb_series_id", int(tmdb_id))
         .limit(1)
         .execute()
     )
@@ -118,13 +130,25 @@ def find_show_by_tmdb_id(db: Client, tmdb_id: int) -> dict[str, Any] | None:
 
 def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "title": show.title,
+        "name": show.name,
         "description": show.description,
         "premiere_date": show.premiere_date,
         "external_ids": show.external_ids,
     }
-    if show.tmdb_id is not None:
-        payload["tmdb_id"] = int(show.tmdb_id)
+    if show.network is not None:
+        payload["network"] = show.network
+    if show.streaming is not None:
+        payload["streaming"] = show.streaming
+    if show.show_total_seasons is not None:
+        payload["show_total_seasons"] = int(show.show_total_seasons)
+    if show.show_total_episodes is not None:
+        payload["show_total_episodes"] = int(show.show_total_episodes)
+    if show.imdb_series_id is not None:
+        payload["imdb_series_id"] = show.imdb_series_id
+    if show.tmdb_series_id is not None:
+        payload["tmdb_series_id"] = int(show.tmdb_series_id)
+    if show.most_recent_episode is not None:
+        payload["most_recent_episode"] = show.most_recent_episode
     response = db.schema("core").table("shows").insert(payload).execute()
     _raise_for_supabase_error(response, "inserting show")
     data = response.data or []

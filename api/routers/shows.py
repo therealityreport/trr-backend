@@ -25,7 +25,7 @@ router = APIRouter(prefix="/shows", tags=["shows"])
 
 class Show(BaseModel):
     id: UUID
-    title: str
+    name: str
     description: str | None
     premiere_date: str | None
     external_ids: dict[str, Any]
@@ -101,7 +101,7 @@ def list_shows(
         db.schema("core")
         .table("shows")
         .select("*")
-        .order("title")
+        .order("name")
         .range(offset, offset + limit - 1)
         .execute()
     )

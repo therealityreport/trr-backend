@@ -15,7 +15,7 @@ def test_show_importer_applies_show_meta_patches(monkeypatch):
     show_id = UUID("00000000-0000-0000-0000-0000000000aa")
     existing = {
         "id": str(show_id),
-        "title": "Existing Show",
+        "name": "Existing Show",
         "description": None,
         "premiere_date": None,
         "external_ids": {"imdb": "tt1234567"},

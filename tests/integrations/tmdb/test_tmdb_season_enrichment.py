@@ -30,10 +30,12 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
     def _fake_insert_show(_db, show_upsert):
         return {
             "id": inserted_show_id,
-            "title": show_upsert.title,
+            "name": show_upsert.name,
             "description": show_upsert.description,
             "premiere_date": show_upsert.premiere_date,
-            "tmdb_id": int(show_upsert.tmdb_id) if show_upsert.tmdb_id is not None else None,
+            "tmdb_series_id": (
+                int(show_upsert.tmdb_series_id) if show_upsert.tmdb_series_id is not None else None
+            ),
             "external_ids": show_upsert.external_ids,
         }
 
@@ -147,4 +149,3 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
     assert all(r["source"] == "tmdb" for r in poster_rows)
     assert all(r["fetched_at"] == "2025-12-18T00:00:00Z" for r in poster_rows)
     assert all("url_original" not in r for r in poster_rows)
-

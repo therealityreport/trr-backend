@@ -66,6 +66,31 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="When fetching IMDb episodes, delete existing episode rows for each show_id before upserting.",
     )
+    imdb_cast = parser.add_mutually_exclusive_group()
+    imdb_cast.add_argument(
+        "--imdb-fetch-cast",
+        dest="imdb_fetch_cast",
+        action="store_true",
+        default=False,
+        help="Fetch IMDb credits and populate core.people/core.cast_memberships (default: off).",
+    )
+    imdb_cast.add_argument(
+        "--imdb-no-cast",
+        dest="imdb_fetch_cast",
+        action="store_false",
+        help="Skip IMDb cast ingestion (default).",
+    )
+    parser.add_argument(
+        "--imdb-refresh-cast",
+        action="store_true",
+        help="When fetching IMDb cast, delete existing cast memberships for each show_id before upserting.",
+    )
+    parser.add_argument(
+        "--imdb-cast-overrides-url",
+        type=str,
+        default=None,
+        help="Optional override URL for published ShowInfo OVERRIDE sheet (CSV or pubhtml).",
+    )
     tmdb_details = parser.add_mutually_exclusive_group()
     tmdb_details.add_argument(
         "--tmdb-fetch-details",
@@ -247,6 +272,9 @@ def run_from_cli(args: argparse.Namespace) -> None:
         tmdb_refresh_images=bool(getattr(args, "tmdb_refresh_images", False)),
         imdb_fetch_episodes=bool(getattr(args, "imdb_fetch_episodes", False)),
         imdb_refresh_episodes=bool(getattr(args, "imdb_refresh_episodes", False)),
+        imdb_fetch_cast=bool(getattr(args, "imdb_fetch_cast", False)),
+        imdb_refresh_cast=bool(getattr(args, "imdb_refresh_cast", False)),
+        imdb_cast_overrides_url=str(args.imdb_cast_overrides_url or "") or None,
         tmdb_fetch_seasons=bool(getattr(args, "tmdb_fetch_seasons", False)),
         tmdb_refresh_seasons=bool(getattr(args, "tmdb_refresh_seasons", False)),
         enrich_show_metadata=bool(args.enrich_show_metadata),

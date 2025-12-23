@@ -8,7 +8,7 @@ begin;
 -- core
 -- ---------------------------------------------------------------------------
 
-insert into core.shows (id, title, description, premiere_date)
+insert into core.shows (id, name, description, premiere_date)
 values (
   'd1fdacc4-ccb0-4d52-8096-89889db83282',
   'TRR Sample Show',

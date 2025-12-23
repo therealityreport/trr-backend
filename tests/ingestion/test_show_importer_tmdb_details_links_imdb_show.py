@@ -34,7 +34,7 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
 
     def _find_by_tmdb(_db, tmdb_id: int):
         nonlocal show_row
-        if show_row and show_row.get("tmdb_id") == tmdb_id:
+        if show_row and show_row.get("tmdb_series_id") == tmdb_id:
             return dict(show_row)
         return None
 
@@ -44,10 +44,10 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
         nonlocal show_row
         show_row = {
             "id": "00000000-0000-0000-0000-0000000000aa",
-            "title": show_upsert.title,
+            "name": show_upsert.name,
             "description": show_upsert.description,
             "premiere_date": show_upsert.premiere_date,
-            "tmdb_id": None,
+            "tmdb_series_id": None,
             "external_ids": dict(show_upsert.external_ids),
         }
         return dict(show_row)
@@ -92,9 +92,8 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
     assert update_show_mock.call_count == 1
 
     patch = update_show_mock.call_args[0][2]
-    assert patch["tmdb_id"] == 12345
+    assert patch["tmdb_series_id"] == 12345
 
     assert fetch_tv_details_mock.call_count == 1
     # Deduplication runs after upsert; downstream pipelines should see the show once.
     assert len(result.upserted_show_rows) == 1
-

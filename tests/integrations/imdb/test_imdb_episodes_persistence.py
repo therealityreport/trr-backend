@@ -44,10 +44,10 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
     def _fake_insert_show(_db, show_upsert):
         return {
             "id": inserted_show_id,
-            "title": show_upsert.title,
+            "name": show_upsert.name,
             "description": show_upsert.description,
             "premiere_date": show_upsert.premiere_date,
-            "tmdb_id": show_upsert.tmdb_id,
+            "tmdb_series_id": show_upsert.tmdb_series_id,
             "external_ids": show_upsert.external_ids,
         }
 
@@ -112,4 +112,3 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
     assert "guest_stars" not in ep1
     assert "tmdb_episode_id" not in ep1
     assert "tmdb_series_id" not in ep1
-
