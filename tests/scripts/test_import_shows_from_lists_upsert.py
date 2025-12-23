@@ -14,7 +14,7 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
 
-    insert_mock = MagicMock(return_value={"id": "00000000-0000-0000-0000-000000000001", "title": "New Show"})
+    insert_mock = MagicMock(return_value={"id": "00000000-0000-0000-0000-000000000001", "name": "New Show"})
     update_mock = MagicMock()
     monkeypatch.setattr(mod, "insert_show", insert_mock)
     monkeypatch.setattr(mod, "update_show", update_mock)
@@ -44,7 +44,7 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
     existing = {
         "id": "00000000-0000-0000-0000-000000000002",
-        "title": "Existing Show",
+        "name": "Existing Show",
         "premiere_date": None,
         "external_ids": {
             "imdb": "tt1111111",
@@ -88,8 +88,8 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     args, kwargs = update_mock.call_args
     assert args[1] == existing["id"]
     patch = args[2]
-    assert set(patch.keys()) == {"external_ids", "premiere_date", "tmdb_id"}
-    assert patch["tmdb_id"] == 123
+    assert set(patch.keys()) == {"external_ids", "premiere_date", "tmdb_series_id"}
+    assert patch["tmdb_series_id"] == 123
 
     external_ids = patch["external_ids"]
     assert external_ids["imdb"] == "tt1111111"

@@ -14,18 +14,24 @@ class ShowRecord:
     """
 
     id: UUID
-    title: str
+    name: str
     description: str | None = None
     premiere_date: str | None = None
     external_ids: Mapping[str, Any] = field(default_factory=dict)
+    imdb_series_id: str | None = None
+    tmdb_series_id: int | None = None
 
     @property
     def imdb_id(self) -> str | None:
+        if isinstance(self.imdb_series_id, str) and self.imdb_series_id.strip():
+            return self.imdb_series_id.strip()
         value = self.external_ids.get("imdb")
         return value if isinstance(value, str) and value else None
 
     @property
     def tmdb_id(self) -> int | None:
+        if isinstance(self.tmdb_series_id, int):
+            return self.tmdb_series_id
         value = self.external_ids.get("tmdb")
         if isinstance(value, int):
             return value
@@ -39,8 +45,14 @@ class ShowRecord:
 
 @dataclass(frozen=True)
 class ShowUpsert:
-    title: str
-    tmdb_id: int | None = None
+    name: str
+    tmdb_series_id: int | None = None
+    imdb_series_id: str | None = None
+    network: str | None = None
+    streaming: str | None = None
+    show_total_seasons: int | None = None
+    show_total_episodes: int | None = None
+    most_recent_episode: str | None = None
     premiere_date: str | None = None  # YYYY-MM-DD when available
     description: str | None = None
     external_ids: dict[str, Any] = field(default_factory=dict)

@@ -23,9 +23,10 @@ def test_stage1_tmdb_fetch_images_upserts_show_images_and_sets_primary_paths(mon
 
     inserted_row = {
         "id": "00000000-0000-0000-0000-000000000010",
-        "title": "RuPaul's Drag Race",
+        "name": "RuPaul's Drag Race",
         "description": None,
         "premiere_date": None,
+        "tmdb_series_id": 12345,
         "external_ids": {"tmdb": 12345},
     }
     monkeypatch.setattr(mod, "insert_show", lambda *args, **kwargs: dict(inserted_row))
@@ -127,8 +128,8 @@ def test_show_images_read_path_uses_tmdb_id_not_show_id() -> None:
 
         def execute(self):
             if self.table_name == "shows":
-                # Show B has tmdb_id=222
-                return _Resp({"tmdb_id": 222})
+                # Show B has tmdb_series_id=222
+                return _Resp({"tmdb_series_id": 222})
             if self.table_name == "v_show_images":
                 tmdb_id = next((v for (k, v) in self.filters if k == "tmdb_id"), None)
                 assert tmdb_id == 222

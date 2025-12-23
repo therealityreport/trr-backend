@@ -156,7 +156,8 @@ def test_stage1_tmdb_external_ids_fill_missing_but_preserve_existing(monkeypatch
         "find_show_by_tmdb_id",
         lambda *args, **kwargs: {
             "id": "00000000-0000-0000-0000-000000000040",
-            "title": "Existing Show",
+            "name": "Existing Show",
+            "tmdb_series_id": 12345,
             "premiere_date": None,
             "external_ids": {
                 "tmdb": 12345,
@@ -200,8 +201,8 @@ def test_stage1_tmdb_details_skips_when_fresh(monkeypatch: pytest.MonkeyPatch) -
     fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     existing = {
         "id": "00000000-0000-0000-0000-000000000030",
-        "title": "Existing Show",
-        "tmdb_id": 12345,
+        "name": "Existing Show",
+        "tmdb_series_id": 12345,
         "premiere_date": None,
         "external_ids": {
             "tmdb": 12345,
@@ -271,7 +272,7 @@ def test_stage2_uses_tmdb_meta_and_does_not_refetch_tv_details(monkeypatch: pyte
 
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000010"),
-        title="RuPaul's Drag Race",
+        name="RuPaul's Drag Race",
         external_ids={"imdb": "tt1353056", "tmdb": 12345, "tmdb_meta": details},
     )
 
@@ -331,8 +332,16 @@ def test_stage2_multiple_shows_does_not_refetch_tv_details_when_tmdb_meta_presen
     }
 
     shows = [
-        ShowRecord(id=UUID("00000000-0000-0000-0000-000000000020"), title="Show A", external_ids={"tmdb": 111, "tmdb_meta": meta_a, "imdb": "tt0000001"}),
-        ShowRecord(id=UUID("00000000-0000-0000-0000-000000000021"), title="Show B", external_ids={"tmdb": 222, "tmdb_meta": meta_b, "imdb": "tt0000002"}),
+        ShowRecord(
+            id=UUID("00000000-0000-0000-0000-000000000020"),
+            name="Show A",
+            external_ids={"tmdb": 111, "tmdb_meta": meta_a, "imdb": "tt0000001"},
+        ),
+        ShowRecord(
+            id=UUID("00000000-0000-0000-0000-000000000021"),
+            name="Show B",
+            external_ids={"tmdb": 222, "tmdb_meta": meta_b, "imdb": "tt0000002"},
+        ),
     ]
 
     summary = mod.enrich_shows_after_upsert(shows, region="US", concurrency=1, force_refresh=False)

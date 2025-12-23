@@ -19,24 +19,24 @@ def list_tmdb_show_images(
     """
     Return TMDb images for a show via `core.v_show_images` (includes show_name + url_original).
 
-    This intentionally queries by `core.shows.tmdb_id`, not `core.show_images.show_id`, to avoid mismatches.
+    This intentionally queries by `core.shows.tmdb_series_id`, not `core.show_images.show_id`, to avoid mismatches.
     """
 
     response = (
         db.schema("core")
         .table("shows")
-        .select("tmdb_id")
+        .select("tmdb_series_id")
         .eq("id", str(show_id))
         .single()
         .execute()
     )
     if hasattr(response, "error") and response.error:
-        raise ShowImagesError(f"Supabase error reading show tmdb_id: {response.error}")
+        raise ShowImagesError(f"Supabase error reading show tmdb_series_id: {response.error}")
     show_row = response.data or {}
     if not isinstance(show_row, dict):
         raise ShowImagesError("Supabase returned unexpected show response shape.")
 
-    tmdb_id = show_row.get("tmdb_id")
+    tmdb_id = show_row.get("tmdb_series_id")
     if not isinstance(tmdb_id, int):
         return []
 
@@ -55,4 +55,3 @@ def list_tmdb_show_images(
 
     data = images_response.data or []
     return data if isinstance(data, list) else []
-
