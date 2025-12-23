@@ -25,49 +25,103 @@ begin
     from pg_constraint
     where contype = 'f'
       and confrelid in (
-        'core.shows'::regclass,
-        'core.seasons'::regclass,
-        'core.episodes'::regclass,
-        'core.people'::regclass,
-        'core.show_cast'::regclass,
-        'core.episode_appearances'::regclass
+        to_regclass('core.shows'),
+        to_regclass('core.seasons'),
+        to_regclass('core.episodes'),
+        to_regclass('core.people'),
+        to_regclass('core.show_cast'),
+        to_regclass('core.episode_appearances')
       )
   loop
     execute format('alter table %s drop constraint %I', r.table_name, r.conname);
   end loop;
 end $$;
 
-alter table core.episode_appearances rename to episode_appearances_old;
-alter table core.show_cast rename to show_cast_old;
-alter table core.episodes rename to episodes_old;
-alter table core.seasons rename to seasons_old;
-alter table core.people rename to people_old;
+do $$
+begin
+  if to_regclass('core.episode_appearances_old') is null
+    and to_regclass('core.episode_appearances') is not null then
+    execute 'alter table core.episode_appearances rename to episode_appearances_old';
+  end if;
+  if to_regclass('core.show_cast_old') is null
+    and to_regclass('core.show_cast') is not null then
+    execute 'alter table core.show_cast rename to show_cast_old';
+  end if;
+  if to_regclass('core.episodes_old') is null
+    and to_regclass('core.episodes') is not null then
+    execute 'alter table core.episodes rename to episodes_old';
+  end if;
+  if to_regclass('core.seasons_old') is null
+    and to_regclass('core.seasons') is not null then
+    execute 'alter table core.seasons rename to seasons_old';
+  end if;
+  if to_regclass('core.people_old') is null
+    and to_regclass('core.people') is not null then
+    execute 'alter table core.people rename to people_old';
+  end if;
+end $$;
 
--- Drop constraint/index names from renamed tables so recreated tables can reuse them.
-alter table core.seasons_old drop constraint if exists seasons_show_id_season_number_unique;
-alter table core.episodes_old drop constraint if exists episodes_season_id_episode_number_unique;
-alter table core.show_cast_old drop constraint if exists show_cast_show_id_person_id_credit_category_key;
-alter table core.episode_appearances_old drop constraint if exists episode_appearances_show_id_person_id_episode_imdb_id_credit_category_key;
+-- Drop constraint names from renamed tables so recreated tables can reuse them.
+do $$
+begin
+  if to_regclass('core.seasons_old') is not null then
+    execute 'alter table core.seasons_old drop constraint if exists seasons_show_id_season_number_unique';
+  end if;
+  if to_regclass('core.episodes_old') is not null then
+    execute 'alter table core.episodes_old drop constraint if exists episodes_season_id_episode_number_unique';
+  end if;
+  if to_regclass('core.show_cast_old') is not null then
+    execute 'alter table core.show_cast_old drop constraint if exists show_cast_show_id_person_id_credit_category_key';
+  end if;
+  if to_regclass('core.episode_appearances_old') is not null then
+    execute 'alter table core.episode_appearances_old drop constraint if exists episode_appearances_show_id_person_id_episode_imdb_id_credit_category_key';
+    execute 'alter table core.episode_appearances_old drop constraint if exists episode_appearances_show_id_person_id_episode_imdb_id_credit_ca';
+  end if;
+end $$;
 
-drop index if exists people_full_name_idx;
-drop index if exists core_people_imdb_unique;
-
-drop index if exists seasons_show_id_idx;
-drop index if exists core_seasons_show_id_season_number_idx;
-drop index if exists core_seasons_tmdb_series_season_unique;
-
-drop index if exists episodes_season_id_idx;
-drop index if exists core_episodes_show_season_idx;
-drop index if exists core_episodes_show_season_episode_unique;
-drop index if exists core_episodes_imdb_episode_id_unique;
-drop index if exists core_episodes_tmdb_episode_id_unique;
-
-drop index if exists core_show_cast_show_id_idx;
-drop index if exists core_show_cast_person_id_idx;
-
-drop index if exists core_episode_appearances_show_id_idx;
-drop index if exists core_episode_appearances_person_id_idx;
-drop index if exists core_episode_appearances_episode_imdb_id_idx;
+-- Avoid index-name collisions when rebuilding tables.
+do $$
+declare
+  idx record;
+  new_name text;
+begin
+  for idx in
+    select
+      c.relname as index_name,
+      c.oid::regclass as index_regclass,
+      i.indrelid::regclass::text as table_name
+    from pg_class c
+    join pg_index i on i.indexrelid = c.oid
+    where c.relnamespace = 'core'::regnamespace
+      and c.relname in (
+        'people_full_name_idx',
+        'core_people_imdb_unique',
+        'seasons_show_id_idx',
+        'core_seasons_show_id_season_number_idx',
+        'core_seasons_tmdb_series_season_unique',
+        'seasons_show_id_season_number_unique',
+        'episodes_season_id_idx',
+        'core_episodes_show_season_idx',
+        'core_episodes_show_season_episode_unique',
+        'core_episodes_imdb_episode_id_unique',
+        'core_episodes_tmdb_episode_id_unique',
+        'episodes_season_id_episode_number_unique',
+        'core_show_cast_show_id_idx',
+        'core_show_cast_person_id_idx',
+        'show_cast_show_id_person_id_credit_category_key',
+        'core_episode_appearances_show_id_idx',
+        'core_episode_appearances_person_id_idx',
+        'core_episode_appearances_episode_imdb_id_idx',
+        'episode_appearances_show_id_person_id_episode_imdb_id_credit_ca',
+        'episode_appearances_show_id_person_id_episode_imdb_id_credit_category_key'
+      )
+  loop
+    if idx.table_name like '%_old' then
+      new_name := left(idx.index_name, 40) || '_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+      execute format('alter index %s rename to %I', idx.index_regclass, new_name);
+    end if;
+  end loop;
+end $$;
 
 -- ---------------------------------------------------------------------------
 -- core.people (full_name first)
@@ -233,7 +287,9 @@ before update on core.seasons
 for each row
 execute function core.set_updated_at();
 
-create or replace function core.set_season_show_name()
+drop trigger if exists core_seasons_set_show_name on core.seasons;
+drop function if exists core.set_season_show_name();
+create function core.set_season_show_name()
 returns trigger
 language plpgsql
 as $$
@@ -244,8 +300,6 @@ begin
   return new;
 end;
 $$;
-
-drop trigger if exists core_seasons_set_show_name on core.seasons;
 create trigger core_seasons_set_show_name
 before insert or update on core.seasons
 for each row
@@ -415,7 +469,9 @@ before update on core.episodes
 for each row
 execute function core.set_updated_at();
 
-create or replace function core.set_episode_show_name()
+drop trigger if exists core_episodes_set_show_name on core.episodes;
+drop function if exists core.set_episode_show_name();
+create function core.set_episode_show_name()
 returns trigger
 language plpgsql
 as $$
@@ -426,8 +482,6 @@ begin
   return new;
 end;
 $$;
-
-drop trigger if exists core_episodes_set_show_name on core.episodes;
 create trigger core_episodes_set_show_name
 before insert or update on core.episodes
 for each row
@@ -490,7 +544,9 @@ before update on core.show_cast
 for each row
 execute function core.set_updated_at();
 
-create or replace function core.set_show_cast_names()
+drop trigger if exists core_show_cast_set_names on core.show_cast;
+drop function if exists core.set_show_cast_names();
+create function core.set_show_cast_names()
 returns trigger
 language plpgsql
 as $$
@@ -505,8 +561,6 @@ begin
   return new;
 end;
 $$;
-
-drop trigger if exists core_show_cast_set_names on core.show_cast;
 create trigger core_show_cast_set_names
 before insert or update on core.show_cast
 for each row
@@ -590,7 +644,9 @@ before update on core.episode_appearances
 for each row
 execute function core.set_updated_at();
 
-create or replace function core.set_episode_appearance_names()
+drop trigger if exists core_episode_appearances_set_names on core.episode_appearances;
+drop function if exists core.set_episode_appearance_names();
+create function core.set_episode_appearance_names()
 returns trigger
 language plpgsql
 as $$
@@ -605,8 +661,6 @@ begin
   return new;
 end;
 $$;
-
-drop trigger if exists core_episode_appearances_set_names on core.episode_appearances;
 create trigger core_episode_appearances_set_names
 before insert or update on core.episode_appearances
 for each row
@@ -616,7 +670,13 @@ execute function core.set_episode_appearance_names();
 -- Propagate show/person renames
 -- ---------------------------------------------------------------------------
 
-create or replace function core.propagate_show_name_to_dependents()
+drop trigger if exists core_shows_propagate_title_to_seasons on core.shows;
+drop trigger if exists core_shows_propagate_name_to_seasons on core.shows;
+drop trigger if exists core_shows_propagate_title_to_episodes on core.shows;
+drop trigger if exists core_shows_propagate_name_to_episodes on core.shows;
+drop trigger if exists core_shows_propagate_name_to_dependents on core.shows;
+drop function if exists core.propagate_show_name_to_dependents();
+create function core.propagate_show_name_to_dependents()
 returns trigger
 language plpgsql
 as $$
@@ -645,17 +705,14 @@ begin
 end;
 $$;
 
-drop trigger if exists core_shows_propagate_title_to_seasons on core.shows;
-drop trigger if exists core_shows_propagate_name_to_seasons on core.shows;
-drop trigger if exists core_shows_propagate_title_to_episodes on core.shows;
-drop trigger if exists core_shows_propagate_name_to_episodes on core.shows;
-drop trigger if exists core_shows_propagate_name_to_dependents on core.shows;
 create trigger core_shows_propagate_name_to_dependents
 after update of name on core.shows
 for each row
 execute function core.propagate_show_name_to_dependents();
 
-create or replace function core.propagate_person_name_to_dependents()
+drop trigger if exists core_people_propagate_name_to_dependents on core.people;
+drop function if exists core.propagate_person_name_to_dependents();
+create function core.propagate_person_name_to_dependents()
 returns trigger
 language plpgsql
 as $$
@@ -674,7 +731,6 @@ begin
 end;
 $$;
 
-drop trigger if exists core_people_propagate_name_to_dependents on core.people;
 create trigger core_people_propagate_name_to_dependents
 after update of full_name on core.people
 for each row
@@ -793,10 +849,10 @@ create policy core_episode_appearances_public_read on core.episode_appearances
 for select to anon, authenticated
 using (true);
 
-drop table core.episode_appearances_old;
-drop table core.show_cast_old;
-drop table core.episodes_old;
-drop table core.seasons_old;
-drop table core.people_old;
+drop table if exists core.episode_appearances_old;
+drop table if exists core.show_cast_old;
+drop table if exists core.episodes_old;
+drop table if exists core.seasons_old;
+drop table if exists core.people_old;
 
 commit;

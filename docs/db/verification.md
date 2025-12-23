@@ -30,6 +30,26 @@ supabase status --output env
 
 Expected: output includes applying `0001_init.sql` and seeding `supabase/seed.sql` without errors.
 
+## Remote migration status check
+
+Run in the Supabase SQL editor to confirm applied migrations and whether any `_old` rebuild tables remain:
+
+```sql
+select version
+from supabase_migrations.schema_migrations
+order by version;
+
+select
+  to_regclass('core.people') as people,
+  to_regclass('core.show_cast') as show_cast,
+  to_regclass('core.episode_appearances') as episode_appearances;
+
+select
+  to_regclass('core.people_old') as people_old,
+  to_regclass('core.show_cast_old') as show_cast_old,
+  to_regclass('core.episode_appearances_old') as episode_appearances_old;
+```
+
 ## Expected seed row counts
 
 ```bash
