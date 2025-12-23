@@ -125,7 +125,11 @@ def _extract_cast_group_id_from_html(html: str) -> str | None:
 
 
 def _extract_cast_group_id_from_next_data(html: str) -> str | None:
-    match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html)
+    match = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        html,
+        re.S,
+    )
     if not match:
         return None
     try:
@@ -178,11 +182,17 @@ def _parse_cast_items_from_section(section, *, series_id: str | None, job_catego
     rows: list[CastRow] = []
     items = section.find_all("li", attrs={"data-testid": "name-credits-list-item"})
     for idx, item in enumerate(items, start=1):
-        name_anchor = item.find("a", href=re.compile(r"/name/nm\d+", re.IGNORECASE))
+        name_anchor = None
+        name = ""
+        for candidate in item.find_all("a", href=re.compile(r"/name/nm\d+", re.IGNORECASE)):
+            candidate_name = candidate.get_text(strip=True)
+            if candidate_name:
+                name_anchor = candidate
+                name = candidate_name
+                break
         if not name_anchor:
             continue
         name_id = _extract_imdb_name_id(name_anchor.get("href"))
-        name = name_anchor.get_text(strip=True)
         if not name_id or not name:
             continue
 
