@@ -3,6 +3,9 @@ begin;
 create extension if not exists pgcrypto;
 create schema if not exists core;
 
+-- Drop views that depend on tables we are rebuilding.
+drop view if exists core.v_show_seasons;
+
 -- Ensure updated_at helper exists (shared across core tables).
 create or replace function core.set_updated_at()
 returns trigger
@@ -878,6 +881,35 @@ drop policy if exists core_episode_appearances_public_read on core.episode_appea
 create policy core_episode_appearances_public_read on core.episode_appearances
 for select to anon, authenticated
 using (true);
+
+-- Recreate dependent view using the rebuilt seasons table.
+create view core.v_show_seasons as
+select
+  se.show_name,
+  se.name as season_name,
+  se.season_number,
+  se.show_id,
+  se.title,
+  se.overview,
+  se.air_date,
+  se.premiere_date,
+  se.tmdb_series_id,
+  se.imdb_series_id,
+  se.tmdb_season_id,
+  se.tmdb_season_object_id,
+  se.poster_path,
+  se.url_original_poster,
+  se.external_tvdb_id,
+  se.external_wikidata_id,
+  se.external_ids,
+  se.language,
+  se.fetched_at,
+  se.id,
+  se.created_at,
+  se.updated_at
+from core.seasons se;
+
+grant select on table core.v_show_seasons to anon, authenticated, service_role;
 
 drop table if exists core.episode_appearances_old;
 drop table if exists core.show_cast_old;
