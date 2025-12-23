@@ -719,15 +719,37 @@ using (true);
 -- Update dependent views to use show name column
 -- ---------------------------------------------------------------------------
 
-create or replace view core.v_show_seasons as
-select
-  sh.name as show_name,
-  se.*
-from core.seasons se
-join core.shows sh
-  on se.show_id = sh.id;
+drop view if exists core.v_show_seasons;
 
-create or replace view core.v_show_images as
+create view core.v_show_seasons as
+select
+  se.show_name,
+  se.name as season_name,
+  se.season_number,
+  se.show_id,
+  se.title,
+  se.overview,
+  se.air_date,
+  se.premiere_date,
+  se.tmdb_series_id,
+  se.imdb_series_id,
+  se.tmdb_season_id,
+  se.tmdb_season_object_id,
+  se.poster_path,
+  se.url_original_poster,
+  se.external_tvdb_id,
+  se.external_wikidata_id,
+  se.external_ids,
+  se.language,
+  se.fetched_at,
+  se.id,
+  se.created_at,
+  se.updated_at
+from core.seasons se;
+
+drop view if exists core.v_show_images;
+
+create view core.v_show_images as
 select
   si.id,
   si.show_id,
