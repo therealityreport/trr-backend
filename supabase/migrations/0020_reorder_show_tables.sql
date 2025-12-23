@@ -207,6 +207,29 @@ where tmdb_series_id is not null;
 -- core.seasons (show_name first)
 -- ---------------------------------------------------------------------------
 
+-- Avoid index-name collisions when rebuilding core.seasons
+do $$
+declare
+  new_name text;
+begin
+  if to_regclass('core.seasons_show_id_season_number_unique') is not null then
+    new_name := 'seasons_show_id_season_number_unique_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.seasons_show_id_season_number_unique rename to %I', new_name);
+  end if;
+  if to_regclass('core.seasons_show_id_idx') is not null then
+    new_name := 'seasons_show_id_idx_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.seasons_show_id_idx rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_seasons_show_id_season_number_idx') is not null then
+    new_name := 'core_seasons_show_id_season_number_idx_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_seasons_show_id_season_number_idx rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_seasons_tmdb_series_season_unique') is not null then
+    new_name := 'core_seasons_tmdb_series_season_unique_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_seasons_tmdb_series_season_unique rename to %I', new_name);
+  end if;
+end $$;
+
 create table core.seasons (
   show_name text,
   show_id uuid not null references core.shows (id) on delete cascade,
@@ -350,6 +373,37 @@ execute function core.propagate_show_name_to_seasons();
 -- ---------------------------------------------------------------------------
 -- core.episodes (show_name first)
 -- ---------------------------------------------------------------------------
+
+-- Avoid index-name collisions when rebuilding core.episodes
+do $$
+declare
+  new_name text;
+begin
+  if to_regclass('core.episodes_season_id_episode_number_unique') is not null then
+    new_name := 'episodes_season_id_episode_number_unique_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.episodes_season_id_episode_number_unique rename to %I', new_name);
+  end if;
+  if to_regclass('core.episodes_season_id_idx') is not null then
+    new_name := 'episodes_season_id_idx_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.episodes_season_id_idx rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_episodes_show_season_idx') is not null then
+    new_name := 'core_episodes_show_season_idx_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_episodes_show_season_idx rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_episodes_show_season_episode_unique') is not null then
+    new_name := 'core_episodes_show_season_episode_unique_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_episodes_show_season_episode_unique rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_episodes_imdb_episode_id_unique') is not null then
+    new_name := 'core_episodes_imdb_episode_id_unique_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_episodes_imdb_episode_id_unique rename to %I', new_name);
+  end if;
+  if to_regclass('core.core_episodes_tmdb_episode_id_unique') is not null then
+    new_name := 'core_episodes_tmdb_episode_id_unique_old_' || to_char(now(), 'YYYYMMDDHH24MISS');
+    execute format('alter index core.core_episodes_tmdb_episode_id_unique rename to %I', new_name);
+  end if;
+end $$;
 
 create table core.episodes (
   show_name text,
