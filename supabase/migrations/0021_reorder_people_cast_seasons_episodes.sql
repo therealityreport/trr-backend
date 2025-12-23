@@ -43,6 +43,32 @@ alter table core.episodes rename to episodes_old;
 alter table core.seasons rename to seasons_old;
 alter table core.people rename to people_old;
 
+-- Drop constraint/index names from renamed tables so recreated tables can reuse them.
+alter table core.seasons_old drop constraint if exists seasons_show_id_season_number_unique;
+alter table core.episodes_old drop constraint if exists episodes_season_id_episode_number_unique;
+alter table core.show_cast_old drop constraint if exists show_cast_show_id_person_id_credit_category_key;
+alter table core.episode_appearances_old drop constraint if exists episode_appearances_show_id_person_id_episode_imdb_id_credit_category_key;
+
+drop index if exists people_full_name_idx;
+drop index if exists core_people_imdb_unique;
+
+drop index if exists seasons_show_id_idx;
+drop index if exists core_seasons_show_id_season_number_idx;
+drop index if exists core_seasons_tmdb_series_season_unique;
+
+drop index if exists episodes_season_id_idx;
+drop index if exists core_episodes_show_season_idx;
+drop index if exists core_episodes_show_season_episode_unique;
+drop index if exists core_episodes_imdb_episode_id_unique;
+drop index if exists core_episodes_tmdb_episode_id_unique;
+
+drop index if exists core_show_cast_show_id_idx;
+drop index if exists core_show_cast_person_id_idx;
+
+drop index if exists core_episode_appearances_show_id_idx;
+drop index if exists core_episode_appearances_person_id_idx;
+drop index if exists core_episode_appearances_episode_imdb_id_idx;
+
 -- ---------------------------------------------------------------------------
 -- core.people (full_name first)
 -- ---------------------------------------------------------------------------
