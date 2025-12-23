@@ -288,6 +288,12 @@ for each row
 execute function core.set_updated_at();
 
 drop trigger if exists core_seasons_set_show_name on core.seasons;
+do $$
+begin
+  if to_regclass('core.seasons_old') is not null then
+    execute 'drop trigger if exists core_seasons_set_show_name on core.seasons_old';
+  end if;
+end $$;
 drop function if exists core.set_season_show_name();
 create function core.set_season_show_name()
 returns trigger
@@ -470,6 +476,12 @@ for each row
 execute function core.set_updated_at();
 
 drop trigger if exists core_episodes_set_show_name on core.episodes;
+do $$
+begin
+  if to_regclass('core.episodes_old') is not null then
+    execute 'drop trigger if exists core_episodes_set_show_name on core.episodes_old';
+  end if;
+end $$;
 drop function if exists core.set_episode_show_name();
 create function core.set_episode_show_name()
 returns trigger
@@ -545,6 +557,12 @@ for each row
 execute function core.set_updated_at();
 
 drop trigger if exists core_show_cast_set_names on core.show_cast;
+do $$
+begin
+  if to_regclass('core.show_cast_old') is not null then
+    execute 'drop trigger if exists core_show_cast_set_names on core.show_cast_old';
+  end if;
+end $$;
 drop function if exists core.set_show_cast_names();
 create function core.set_show_cast_names()
 returns trigger
@@ -645,6 +663,12 @@ for each row
 execute function core.set_updated_at();
 
 drop trigger if exists core_episode_appearances_set_names on core.episode_appearances;
+do $$
+begin
+  if to_regclass('core.episode_appearances_old') is not null then
+    execute 'drop trigger if exists core_episode_appearances_set_names on core.episode_appearances_old';
+  end if;
+end $$;
 drop function if exists core.set_episode_appearance_names();
 create function core.set_episode_appearance_names()
 returns trigger
@@ -711,6 +735,12 @@ for each row
 execute function core.propagate_show_name_to_dependents();
 
 drop trigger if exists core_people_propagate_name_to_dependents on core.people;
+do $$
+begin
+  if to_regclass('core.people_old') is not null then
+    execute 'drop trigger if exists core_people_propagate_name_to_dependents on core.people_old';
+  end if;
+end $$;
 drop function if exists core.propagate_person_name_to_dependents();
 create function core.propagate_person_name_to_dependents()
 returns trigger
