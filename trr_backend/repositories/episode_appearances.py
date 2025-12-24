@@ -36,7 +36,7 @@ def assert_core_episode_appearances_table_exists(db: Client) -> None:
         return (
             "Database table `core.episode_appearances` is missing. "
             "Run `supabase db push` to apply migrations "
-            "(see `supabase/migrations/0018_imdb_cast_episode_appearances.sql`), "
+            "(see `supabase/migrations/0024_episode_appearances_aggregate.sql`), "
             "then re-run the import job."
         )
 
@@ -79,37 +79,11 @@ def assert_core_episode_appearances_table_exists(db: Client) -> None:
     )
 
 
-def fetch_existing_episode_ids(
-    db: Client,
-    *,
-    show_id: str,
-    person_id: str,
-    credit_category: str = "Self",
-) -> set[str]:
-    response = (
-        db.schema("core")
-        .table("episode_appearances")
-        .select("episode_imdb_id")
-        .eq("show_id", str(show_id))
-        .eq("person_id", str(person_id))
-        .eq("credit_category", str(credit_category))
-        .execute()
-    )
-    if hasattr(response, "error") and response.error:
-        raise EpisodeAppearancesRepositoryError(
-            f"Supabase error listing episode appearances for person_id={person_id}: {response.error}"
-        )
-    data = response.data or []
-    if not isinstance(data, list):
-        return set()
-    return {str(row.get("episode_imdb_id")) for row in data if row.get("episode_imdb_id")}
-
-
 def upsert_episode_appearances(
     db: Client,
     rows: Iterable[Mapping[str, Any]],
     *,
-    on_conflict: str = "show_id,person_id,episode_imdb_id,credit_category",
+    on_conflict: str = "show_id,person_id",
     chunk_size: int = 500,
 ) -> list[dict[str, Any]]:
     payload = [{k: v for k, v in dict(r).items() if v is not None} for r in rows]

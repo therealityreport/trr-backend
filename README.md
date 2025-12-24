@@ -62,6 +62,44 @@ The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system 
    python3 scripts/run_pipeline.py --step showinfo
    ```
 
+## 🧰 DB Sync Scripts
+
+These scripts read the list of shows from `core.shows` (Supabase) and update tables directly. They load `.env` from the repo root.
+
+```bash
+# Shows
+python -m scripts.sync_shows --all
+
+# Seasons (TMDb season enrichment)
+python -m scripts.sync_seasons --all
+
+# Episodes (IMDb episode enumeration)
+python -m scripts.sync_episodes --all
+
+# People (cast members, Self-only)
+python -m scripts.sync_people --all
+
+# Show cast mapping
+python -m scripts.sync_show_cast --all
+
+# Episode appearances (aggregated per person/show)
+python -m scripts.sync_episode_appearances --all
+```
+
+Or run everything in order:
+
+```bash
+python -m scripts.sync_all_tables --all
+python -m scripts.sync_all_tables --tables shows,episodes,episode_appearances --imdb-series-id tt1234567
+```
+
+Common filters: `--show-id`, `--tmdb-show-id`, `--imdb-series-id`, `--limit`, `--dry-run`, `--verbose`.
+
+Incremental/resume flags: `--incremental/--no-incremental`, `--resume/--no-resume`, `--force`, `--since`.
+Incremental mode uses `core.sync_state` + `shows.most_recent_episode` to skip unchanged shows and retry failures.
+After seasons/episodes sync, `shows.show_total_seasons` is normalized to the count of seasons with `season_number > 0`.
+Per-show progress is stored in `core.sync_state` (one row per show + table).
+
 ## 📦 Repo Layout
 
 - `api/`: FastAPI app (Supabase-backed API + WebSockets)
