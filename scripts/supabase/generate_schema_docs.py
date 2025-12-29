@@ -6,11 +6,18 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
-import psycopg2
-from psycopg2.extras import RealDictCursor
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError as exc:  # pragma: no cover - depends on local environment
+    raise SystemExit(
+        "Missing psycopg2; install dev deps (e.g., `pip install -r requirements.txt`)."
+    ) from exc
 
 _OUTPUT_DIR = Path("supabase/schema_docs")
 _SCHEMAS = ("core",)
@@ -48,11 +55,46 @@ def _resolve_db_url() -> str:
         sslmode = f"?sslmode={env['sslmode']}" if env["sslmode"] else ""
         return f"postgresql://{auth}{env['host']}{port}/{env['dbname']}{sslmode}"
 
-    raise RuntimeError("Database connection env vars not set. Use SUPABASE_DB_URL or TRR_DB_URL.")
+    supabase_db_url = _resolve_supabase_db_url()
+    if supabase_db_url:
+        return supabase_db_url
+
+    raise RuntimeError(
+        "Database connection env vars not set. Start Supabase or export SUPABASE_DB_URL "
+        "(preferred: run `make schema-docs`)."
+    )
+
+
+def _resolve_supabase_db_url() -> str | None:
+    try:
+        result = subprocess.run(
+            ["supabase", "status", "--output", "env"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+
+    for line in (result.stdout or "").splitlines():
+        if not line.startswith("DB_URL="):
+            continue
+        value = line.split("=", 1)[1].strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        if value:
+            return value
+    return None
 
 
 def _connect() -> psycopg2.extensions.connection:
-    return psycopg2.connect(_resolve_db_url(), cursor_factory=RealDictCursor)
+    try:
+        return psycopg2.connect(_resolve_db_url(), cursor_factory=RealDictCursor)
+    except psycopg2.OperationalError as exc:
+        raise RuntimeError(
+            "Failed to connect to database. Start Supabase or export SUPABASE_DB_URL "
+            "then run `make schema-docs`."
+        ) from exc
 
 
 def _list_schemas(cur: RealDictCursor) -> list[str]:

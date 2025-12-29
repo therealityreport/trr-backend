@@ -13,7 +13,7 @@ google-generativeai>=0.8.0
 # Firebase deployment helpers (optional; used by upload scripts)
 firebase-admin>=6.5.0
 
-# Postgres/core schema helpers (optional; used by sync + migrations)
+# Postgres/core schema helpers (used by sync + schema docs)
 psycopg2-binary>=2.9.9
 
 # API server
