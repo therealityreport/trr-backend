@@ -1,0 +1,228 @@
+{
+  "schema": "core",
+  "table": "shows",
+  "columns": [
+    {
+      "name": "name",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "network",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "streaming",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_total_seasons",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_total_episodes",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_series_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_series_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "most_recent_episode",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "description",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "premiere_date",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "external_ids",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "primary_tmdb_poster_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "primary_tmdb_backdrop_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "primary_tmdb_logo_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_meta",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "core_shows_external_ids_gin",
+      "columns": [
+        "external_ids"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_external_ids_gin ON core.shows USING gin (external_ids)"
+    },
+    {
+      "name": "core_shows_external_ids_imdb_unique",
+      "columns": [
+        "((external_ids ->> 'imdb'::text))) WHERE (COALESCE((external_ids ->> 'imdb'::text)",
+        "''::text) <> ''::text"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX core_shows_external_ids_imdb_unique ON core.shows USING btree (((external_ids ->> 'imdb'::text))) WHERE (COALESCE((external_ids ->> 'imdb'::text), ''::text) <> ''::text)"
+    },
+    {
+      "name": "core_shows_external_ids_tmdb_unique",
+      "columns": [
+        "((external_ids ->> 'tmdb'::text))) WHERE (COALESCE((external_ids ->> 'tmdb'::text)",
+        "''::text) <> ''::text"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX core_shows_external_ids_tmdb_unique ON core.shows USING btree (((external_ids ->> 'tmdb'::text))) WHERE (COALESCE((external_ids ->> 'tmdb'::text), ''::text) <> ''::text)"
+    },
+    {
+      "name": "core_shows_imdb_series_id_unique",
+      "columns": [
+        "imdb_series_id) WHERE ((imdb_series_id IS NOT NULL) AND (btrim(imdb_series_id) <> ''::text)"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX core_shows_imdb_series_id_unique ON core.shows USING btree (imdb_series_id) WHERE ((imdb_series_id IS NOT NULL) AND (btrim(imdb_series_id) <> ''::text))"
+    },
+    {
+      "name": "core_shows_tmdb_series_id_unique",
+      "columns": [
+        "tmdb_series_id) WHERE (tmdb_series_id IS NOT NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX core_shows_tmdb_series_id_unique ON core.shows USING btree (tmdb_series_id) WHERE (tmdb_series_id IS NOT NULL)"
+    },
+    {
+      "name": "shows_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX shows_pkey ON core.shows USING btree (id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "name": "example",
+    "network": "example",
+    "streaming": "example",
+    "show_total_seasons": 0,
+    "show_total_episodes": 0,
+    "imdb_series_id": "example",
+    "tmdb_series_id": 0,
+    "most_recent_episode": "example",
+    "id": "00000000-0000-0000-0000-000000000000",
+    "description": "example",
+    "premiere_date": "1970-01-01",
+    "external_ids": {},
+    "primary_tmdb_poster_path": "example",
+    "primary_tmdb_backdrop_path": "example",
+    "primary_tmdb_logo_path": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z",
+    "imdb_meta": {}
+  }
+}

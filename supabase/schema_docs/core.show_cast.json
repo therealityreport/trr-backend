@@ -1,0 +1,157 @@
+{
+  "schema": "core",
+  "table": "show_cast",
+  "columns": [
+    {
+      "name": "show_name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "cast_member_name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "billing_order",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "role",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "credit_category",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'Self'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "show_cast_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    },
+    {
+      "constraint": "show_cast_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "show_id",
+      "person_id",
+      "credit_category"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "core_show_cast_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_cast_person_id_idx ON core.show_cast USING btree (person_id)"
+    },
+    {
+      "name": "core_show_cast_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_cast_show_id_idx ON core.show_cast USING btree (show_id)"
+    },
+    {
+      "name": "show_cast_pkey1",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_cast_pkey1 ON core.show_cast USING btree (id)"
+    },
+    {
+      "name": "show_cast_show_id_person_id_credit_category_key",
+      "columns": [
+        "show_id",
+        "person_id",
+        "credit_category"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_cast_show_id_person_id_credit_category_key ON core.show_cast USING btree (show_id, person_id, credit_category)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "show_name": "example",
+    "cast_member_name": "example",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "billing_order": 0,
+    "role": "example",
+    "credit_category": "example",
+    "id": "00000000-0000-0000-0000-000000000000",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}
