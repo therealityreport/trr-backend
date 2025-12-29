@@ -135,6 +135,8 @@ def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
         "premiere_date": show.premiere_date,
         "external_ids": show.external_ids,
     }
+    if show.imdb_meta:
+        payload["imdb_meta"] = show.imdb_meta
     if show.network is not None:
         payload["network"] = show.network
     if show.streaming is not None:

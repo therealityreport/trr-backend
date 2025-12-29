@@ -1928,6 +1928,7 @@ def upsert_candidates_into_supabase(
                     description=row.get("description") if isinstance(row.get("description"), str) else None,
                     premiere_date=row.get("premiere_date") if isinstance(row.get("premiere_date"), str) else None,
                     external_ids=external_ids_map,
+                    imdb_meta=row.get("imdb_meta") if isinstance(row.get("imdb_meta"), dict) else {},
                     imdb_series_id=(
                         row.get("imdb_series_id") if isinstance(row.get("imdb_series_id"), str) else None
                     ),
