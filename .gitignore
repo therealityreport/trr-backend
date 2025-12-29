@@ -90,3 +90,7 @@ scripts/**/debug_html/
 # Large data files
 *.csv
 *.xlsx
+
+# Local / generated
+.mcp.json
+out/
