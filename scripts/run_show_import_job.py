@@ -18,6 +18,18 @@ def _require_env(name: str) -> str | None:
     return value or None
 
 
+def _load_env_list(name: str) -> list[str]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return []
+    parts = []
+    for chunk in raw.split(","):
+        item = chunk.strip()
+        if item:
+            parts.append(item)
+    return parts
+
+
 def _run_importer(args: list[str], *, timeout_seconds: int | None = None) -> int:
     cmd = [sys.executable, "-m", "scripts.import_shows_from_lists", *args]
     env = os.environ.copy()
@@ -118,6 +130,15 @@ def main(argv: list[str]) -> int:
     # Back-compat fallback: if no explicit list args were provided, pass everything through.
     tmdb_lists = [str(v) for v in (args.tmdb_list or []) if str(v).strip()]
     imdb_lists = [str(v) for v in (args.imdb_list or []) if str(v).strip()]
+
+    if not tmdb_lists:
+        tmdb_lists = _load_env_list("TMDB_LIST_ID")
+        if tmdb_lists:
+            print(f"Using TMDB_LIST_ID from .env ({', '.join(tmdb_lists)})")
+    if not imdb_lists:
+        imdb_lists = _load_env_list("IMDB_LIST_URL")
+        if imdb_lists:
+            print(f"Using IMDB_LIST_URL from .env ({', '.join(imdb_lists)})")
     if not tmdb_lists and not imdb_lists:
         passthrough = list(argv)
         if "--enrich-show-metadata" not in passthrough:

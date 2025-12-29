@@ -39,6 +39,15 @@ python3 scripts/run_show_import_job.py \
   --region US
 ```
 
+Default list sources (no flags required):
+
+```bash
+# Set once in .env:
+# TMDB_LIST_ID=8301263
+# IMDB_LIST_URL=https://www.imdb.com/list/ls4106677119/
+python3 scripts/run_show_import_job.py
+```
+
 Sync/enrich existing show rows (filters available):
 
 ```bash

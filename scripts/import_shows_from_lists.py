@@ -233,6 +233,17 @@ def run_from_cli(args: argparse.Namespace) -> None:
     imdb_lists = [u for u in imdb_lists if str(u).strip()]
     tmdb_lists = [u for u in tmdb_lists if str(u).strip()]
 
+    if not imdb_lists:
+        imdb_default = (os.getenv("IMDB_LIST_URL") or "").strip()
+        if imdb_default:
+            imdb_lists = [imdb_default]
+            print(f"Using IMDB_LIST_URL from .env ({imdb_default})")
+    if not tmdb_lists:
+        tmdb_default = (os.getenv("TMDB_LIST_ID") or "").strip()
+        if tmdb_default:
+            tmdb_lists = [tmdb_default]
+            print(f"Using TMDB_LIST_ID from .env ({tmdb_default})")
+
     if not imdb_lists and not tmdb_lists:
         raise SystemExit("No list sources provided. Use --imdb-list/--tmdb-list and/or --config.")
 
