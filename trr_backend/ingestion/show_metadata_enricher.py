@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import sys
+import time
 from threading import Lock
 from typing import Any, Mapping
 from uuid import UUID
@@ -13,6 +15,10 @@ from trr_backend.integrations.imdb.title_metadata_client import (
     parse_imdb_episodes_page,
     parse_imdb_title_page,
     pick_most_recent_episode,
+)
+from trr_backend.integrations.imdb.title_page_metadata import (
+    fetch_imdb_title_html,
+    parse_imdb_title_html,
 )
 from trr_backend.integrations.tmdb.client import (
     TmdbClientError,
@@ -51,6 +57,37 @@ class EnrichSummary:
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _build_imdb_meta_payload(parsed: Mapping[str, Any], *, imdb_id: str, fetched_at: str) -> dict[str, Any]:
+    aggregate_value = parsed.get("aggregate_rating_value")
+    aggregate_count = parsed.get("aggregate_rating_count")
+    aggregate_rating: dict[str, Any] | None = None
+    if aggregate_value is not None or aggregate_count is not None:
+        aggregate_rating = {
+            "value": aggregate_value,
+            "count": aggregate_count,
+        }
+
+    return {
+        "imdb_id": imdb_id,
+        "imdb_url": parsed.get("imdb_url"),
+        "title": parsed.get("title"),
+        "description": parsed.get("description"),
+        "tags": parsed.get("tags") or [],
+        "genres": parsed.get("genres") or [],
+        "content_rating": parsed.get("content_rating"),
+        "keywords": parsed.get("keywords") or [],
+        "aggregate_rating": aggregate_rating,
+        "poster_image_url": parsed.get("poster_image_url"),
+        "date_published": parsed.get("date_published"),
+        "runtime_minutes": parsed.get("runtime_minutes"),
+        "trailer": parsed.get("trailer"),
+        "total_episodes": parsed.get("total_episodes"),
+        "total_seasons": parsed.get("total_seasons"),
+        "fetched_at": fetched_at,
+        "source": "imdb_title_page",
+    }
 
 
 def _as_int(value: Any) -> int | None:
@@ -223,14 +260,17 @@ def _enrich_one_show(
     existing_show_meta = external_ids.get("show_meta") if isinstance(external_ids.get("show_meta"), dict) else None
 
     show_meta: dict[str, Any] = dict(existing_show_meta or {})
+    imdb_id = show.imdb_id or _as_str(show_meta.get("imdb_series_id"))
+    needs_imdb_meta = bool(imdb_id)
 
-    # Skip when already complete for this region (unless forced).
-    if (
-        not force_refresh
-        and isinstance(existing_show_meta, Mapping)
+    show_meta_complete = (
+        isinstance(existing_show_meta, Mapping)
         and is_show_meta_complete(dict(existing_show_meta))
         and (str(existing_show_meta.get("region") or "").strip().upper() == region.upper())
-    ):
+    )
+
+    # Skip when already complete for this region (unless forced or IMDb meta needed).
+    if not force_refresh and show_meta_complete and not needs_imdb_meta:
         return None
 
     # Fail-safe: if we already fetched for this region and nothing missing is fillable, skip to avoid hammering sources.
@@ -252,7 +292,6 @@ def _enrich_one_show(
                     if key not in existing_show_meta or _is_blank(existing_show_meta.get(key))
                 ]
 
-                imdb_id = show.imdb_id or _as_str(existing_show_meta.get("imdb_series_id"))
                 tmdb_series_id_existing = show.tmdb_series_id or show.tmdb_id or _as_int(
                     existing_show_meta.get("tmdb_series_id")
                 )
@@ -271,7 +310,7 @@ def _enrich_one_show(
                         return tmdb_possible or imdb_possible
                     return False
 
-                if missing_fields and not any(fillable(f) for f in missing_fields):
+                if missing_fields and not any(fillable(f) for f in missing_fields) and not needs_imdb_meta:
                     return None
 
     show_meta["show"] = show.name
@@ -283,7 +322,7 @@ def _enrich_one_show(
 
     # Resolve TMDb id from IMDb id when missing.
     imdb_id_for_find = show.imdb_id or _as_str(show_meta.get("imdb_series_id"))
-    if tmdb_series_id is None and tmdb_api_key and imdb_id_for_find:
+    if tmdb_series_id is None and tmdb_api_key and imdb_id_for_find and (force_refresh or not show_meta_complete):
         with cache_lock:
             cached = tmdb_find_cache.get(imdb_id_for_find)
         if cached is None and imdb_id_for_find not in tmdb_find_cache:
@@ -304,7 +343,7 @@ def _enrich_one_show(
         updates["tmdb"] = int(tmdb_series_id)
 
     # Primary: TMDb TV details + watch providers.
-    if tmdb_series_id is not None and tmdb_api_key:
+    if tmdb_series_id is not None and tmdb_api_key and (force_refresh or not show_meta_complete):
         session = requests.Session()
 
         details: dict[str, Any] | None = None
@@ -378,7 +417,7 @@ def _enrich_one_show(
     ) is None or _is_blank(show_meta.get("most_recent_episode"))
 
     imdb_id = show.imdb_id or _as_str(show_meta.get("imdb_series_id"))
-    if imdb_id and (need_imdb_title or need_imdb_episodes):
+    if imdb_id and (need_imdb_title or need_imdb_episodes) and (force_refresh or not show_meta_complete):
         client = HttpImdbTitleMetadataClient(sleep_ms=imdb_sleep_ms)
 
         if need_imdb_title:
@@ -432,8 +471,29 @@ def _enrich_one_show(
                     show_meta["most_recent_episode_obj"] = ep_obj
                     show_meta["most_recent_episode"] = _build_most_recent_episode_string(ep_obj)
 
+    fetched_at = _now_utc_iso()
+
+    imdb_meta_update: dict[str, Any] | None = None
+    if imdb_id:
+        title_html = None
+        with cache_lock:
+            title_html = imdb_title_cache.get(imdb_id)
+        if title_html is None:
+            try:
+                if imdb_sleep_ms:
+                    time.sleep(imdb_sleep_ms / 1000.0)
+                title_html = fetch_imdb_title_html(imdb_id)
+                with cache_lock:
+                    imdb_title_cache[imdb_id] = title_html
+            except Exception as exc:  # noqa: BLE001
+                print(f"IMDb title meta: failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
+                title_html = None
+        if title_html:
+            parsed = parse_imdb_title_html(title_html, imdb_id=imdb_id)
+            imdb_meta_update = _build_imdb_meta_payload(parsed, imdb_id=imdb_id, fetched_at=fetched_at)
+
     show_meta["region"] = region.upper()
-    show_meta["fetched_at"] = _now_utc_iso()
+    show_meta["fetched_at"] = fetched_at
 
     source: dict[str, Any] = show_meta.get("source") if isinstance(show_meta.get("source"), dict) else {}
     if tmdb_sources:
@@ -453,6 +513,8 @@ def _enrich_one_show(
         "tmdb_series_id": _as_int(show_meta.get("tmdb_series_id")) or show.tmdb_id,
         "most_recent_episode": _as_str(show_meta.get("most_recent_episode")),
     }
+    if imdb_meta_update is not None:
+        show_update["imdb_meta"] = imdb_meta_update
 
     return updates, show_update
 
@@ -493,8 +555,10 @@ def enrich_shows_after_upsert(
             show_meta = show.external_ids.get("show_meta")
             if isinstance(show_meta, dict) and is_show_meta_complete(show_meta):
                 if (str(show_meta.get("region") or "").strip().upper() == region.upper()):
-                    skipped_complete += 1
-                    continue
+                    imdb_id = show.imdb_id or _as_str(show_meta.get("imdb_series_id"))
+                    if not imdb_id:
+                        skipped_complete += 1
+                        continue
             remaining.append(show)
         rows = remaining
 

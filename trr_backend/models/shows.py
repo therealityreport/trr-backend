@@ -18,6 +18,7 @@ class ShowRecord:
     description: str | None = None
     premiere_date: str | None = None
     external_ids: Mapping[str, Any] = field(default_factory=dict)
+    imdb_meta: Mapping[str, Any] = field(default_factory=dict)
     imdb_series_id: str | None = None
     tmdb_series_id: int | None = None
 
@@ -56,3 +57,4 @@ class ShowUpsert:
     premiere_date: str | None = None  # YYYY-MM-DD when available
     description: str | None = None
     external_ids: dict[str, Any] = field(default_factory=dict)
+    imdb_meta: dict[str, Any] = field(default_factory=dict)

@@ -58,6 +58,7 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     providers_payload = json.loads(
         (repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text()
     )
+    title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_sample.html").read_text(encoding="utf-8")
 
     from trr_backend.ingestion import show_metadata_enricher as mod
 
@@ -67,6 +68,7 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     fetch_details_mock = MagicMock(return_value=details_payload)
     monkeypatch.setattr(mod, "fetch_tv_details", fetch_details_mock)
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers_payload)
+    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
     monkeypatch.setattr(
         mod.HttpImdbTitleMetadataClient,
         "fetch_title_page",
@@ -128,6 +130,7 @@ def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-18T00:00:00Z")
     monkeypatch.setattr(mod, "resolve_api_key", lambda: None)
+    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
 
     def fake_fetch_title_page(self, imdb_id: str) -> str:  # noqa: ANN001
         return title_html
@@ -177,13 +180,17 @@ def test_is_show_meta_complete() -> None:
     )
 
 
-def test_enrich_shows_after_upsert_skips_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enrich_shows_after_upsert_does_not_skip_when_imdb_meta_needed(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_sample.html").read_text(encoding="utf-8")
+
     from trr_backend.ingestion import show_metadata_enricher as mod
 
     monkeypatch.setattr(mod, "resolve_api_key", lambda: "fake")
     monkeypatch.setattr(mod, "find_by_imdb_id", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
     monkeypatch.setattr(mod, "fetch_tv_details", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
 
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000003"),
@@ -205,10 +212,62 @@ def test_enrich_shows_after_upsert_skips_complete(monkeypatch: pytest.MonkeyPatc
     )
 
     summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=False)
-    assert summary.skipped_complete == 1
-    assert summary.attempted == 0
-    assert summary.updated == 0
-    assert summary.patches == []
+    assert summary.skipped_complete == 0
+    assert summary.attempted == 1
+    assert summary.updated == 1
+
+
+def test_enrich_shows_after_upsert_imdb_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_tt8819906_sample.html").read_text(
+        encoding="utf-8"
+    )
+
+    from trr_backend.ingestion import show_metadata_enricher as mod
+
+    monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-29T00:00:00Z")
+    monkeypatch.setattr(mod, "resolve_api_key", lambda: None)
+    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
+    monkeypatch.setattr(
+        mod.HttpImdbTitleMetadataClient,
+        "fetch_title_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("IMDb title fallback should not be invoked.")),
+    )
+    monkeypatch.setattr(
+        mod.HttpImdbTitleMetadataClient,
+        "fetch_episodes_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("IMDb episodes fallback should not be invoked.")),
+    )
+
+    show = ShowRecord(
+        id=UUID("00000000-0000-0000-0000-000000000005"),
+        name="Love Island USA",
+        external_ids={
+            "show_meta": {
+                "show": "Love Island USA",
+                "network": "Peacock",
+                "streaming": None,
+                "show_total_seasons": 8,
+                "show_total_episodes": 235,
+                "imdb_series_id": "tt8819906",
+                "tmdb_series_id": None,
+                "most_recent_episode": None,
+                "region": "US",
+            }
+        },
+        imdb_series_id="tt8819906",
+    )
+
+    summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=False)
+    assert summary.failed == 0
+    assert summary.updated == 1
+    imdb_meta = summary.patches[0].show_update.get("imdb_meta") or {}
+    assert imdb_meta.get("description") == (
+        "U.S. version of the British show 'Love Island' where a group of singles come to stay in a villa for a few "
+        "weeks and have to couple up with one another."
+    )
+    assert "Reality TV" in (imdb_meta.get("tags") or [])
+    assert "Reality TV Dating" in (imdb_meta.get("tags") or [])
 
 
 def test_enrich_shows_after_upsert_does_not_overwrite_ids_with_null(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -225,6 +284,7 @@ def test_enrich_shows_after_upsert_does_not_overwrite_ids_with_null(monkeypatch:
 
     monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-18T00:00:00Z")
     monkeypatch.setattr(mod, "resolve_api_key", lambda: None)
+    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
 
     def fake_fetch_title_page(self, imdb_id: str) -> str:  # noqa: ANN001
         assert imdb_id == "tt1353056"

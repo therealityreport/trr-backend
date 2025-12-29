@@ -249,6 +249,7 @@ def test_stage2_uses_tmdb_meta_and_does_not_refetch_tv_details(monkeypatch: pyte
     providers = json.loads(
         (repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text(encoding="utf-8")
     )
+    title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_sample.html").read_text(encoding="utf-8")
 
     from trr_backend.ingestion import show_metadata_enricher as mod
 
@@ -259,6 +260,7 @@ def test_stage2_uses_tmdb_meta_and_does_not_refetch_tv_details(monkeypatch: pyte
     fetch_details_mock = MagicMock(return_value=details)
     monkeypatch.setattr(mod, "fetch_tv_details", fetch_details_mock)
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers)
+    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
     monkeypatch.setattr(
         mod.HttpImdbTitleMetadataClient,
         "fetch_title_page",
@@ -296,6 +298,7 @@ def test_stage2_multiple_shows_does_not_refetch_tv_details_when_tmdb_meta_presen
     providers = json.loads(
         (repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text(encoding="utf-8")
     )
+    title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_sample.html").read_text(encoding="utf-8")
 
     from trr_backend.ingestion import show_metadata_enricher as mod
 
@@ -305,6 +308,7 @@ def test_stage2_multiple_shows_does_not_refetch_tv_details_when_tmdb_meta_presen
     fetch_details_mock = MagicMock(side_effect=AssertionError("Stage 2 should reuse tmdb_meta and not refetch details."))
     monkeypatch.setattr(mod, "fetch_tv_details", fetch_details_mock)
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers)
+    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
     monkeypatch.setattr(
         mod.HttpImdbTitleMetadataClient,
         "fetch_title_page",
