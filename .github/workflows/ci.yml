@@ -34,10 +34,5 @@ jobs:
           supabase start --exclude gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
           supabase db reset --yes
 
-      - name: Export DB URL
-        run: |
-          eval "$(supabase status --output env)"
-          echo "SUPABASE_DB_URL=$DB_URL" >> "$GITHUB_ENV"
-
       - name: Schema docs check
         run: make schema-docs-check
