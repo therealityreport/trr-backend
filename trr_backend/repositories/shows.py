@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -10,6 +11,14 @@ from trr_backend.models.shows import ShowUpsert
 
 class ShowRepositoryError(RuntimeError):
     pass
+
+
+_MISSING_COLUMN_RE = re.compile(r"could not find the '([^']+)' column", re.IGNORECASE)
+
+
+def _missing_column_from_error(message: str) -> str | None:
+    match = _MISSING_COLUMN_RE.search(message or "")
+    return match.group(1) if match else None
 
 
 def assert_core_shows_table_exists(db: Client) -> None:
@@ -151,7 +160,15 @@ def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
         payload["tmdb_series_id"] = int(show.tmdb_series_id)
     if show.most_recent_episode is not None:
         payload["most_recent_episode"] = show.most_recent_episode
-    response = db.schema("core").table("shows").insert(payload).execute()
+    try:
+        response = db.schema("core").table("shows").insert(payload).execute()
+    except Exception as exc:
+        missing = _missing_column_from_error(str(exc))
+        if missing and missing in payload:
+            payload.pop(missing, None)
+            response = db.schema("core").table("shows").insert(payload).execute()
+        else:
+            raise ShowRepositoryError(f"Supabase error during inserting show: {exc}") from exc
     _raise_for_supabase_error(response, "inserting show")
     data = response.data or []
     if isinstance(data, list) and data:
@@ -160,7 +177,30 @@ def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
 
 
 def update_show(db: Client, show_id: UUID | str, patch: Mapping[str, Any]) -> dict[str, Any]:
-    response = db.schema("core").table("shows").update(dict(patch)).eq("id", str(show_id)).execute()
+    payload = dict(patch)
+    try:
+        response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
+    except Exception as exc:
+        missing = _missing_column_from_error(str(exc))
+        if missing and missing in payload:
+            payload.pop(missing, None)
+            if not payload:
+                response = (
+                    db.schema("core")
+                    .table("shows")
+                    .select("*")
+                    .eq("id", str(show_id))
+                    .limit(1)
+                    .execute()
+                )
+                _raise_for_supabase_error(response, "finding show after missing column skip")
+                data = response.data or []
+                if isinstance(data, list) and data:
+                    return data[0]
+                raise ShowRepositoryError("Supabase fetch returned no data for show after missing column skip.")
+            response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
+        else:
+            raise ShowRepositoryError(f"Supabase error during updating show: {exc}") from exc
     _raise_for_supabase_error(response, "updating show")
     data = response.data or []
     if isinstance(data, list) and data:
