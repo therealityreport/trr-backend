@@ -78,6 +78,8 @@ from trr_backend.repositories.shows import (
     update_show,
 )
 
+TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/original"
+
 
 @dataclass(frozen=True)
 class ShowImportResult:
@@ -839,6 +841,7 @@ def _normalize_tmdb_images_list(raw: Any) -> list[dict[str, Any]]:
             "aspect_ratio": item.get("aspect_ratio") if isinstance(item.get("aspect_ratio"), (int, float)) else None,
             "vote_average": item.get("vote_average") if isinstance(item.get("vote_average"), (int, float)) else None,
             "vote_count": item.get("vote_count") if isinstance(item.get("vote_count"), int) else None,
+            "raw": dict(item),
         }
 
         existing = by_file_path.get(file_path)
@@ -891,13 +894,21 @@ def _tmdb_show_images_rows(
                     "show_id": show_id,
                     "tmdb_id": int(tmdb_id),
                     "source": source,
+                    "source_image_id": file_path,
                     "kind": kind,
                     "iso_639_1": img.get("iso_639_1"),
                     "file_path": file_path,
+                    "url_path": file_path,
+                    "url": f"{TMDB_IMAGE_BASE_URL}{file_path}" if isinstance(file_path, str) else None,
+                    "image_type": kind,
+                    "caption": None,
+                    "position": None,
                     "width": width_int,
                     "height": height_int,
                     "aspect_ratio": aspect_ratio_val,
+                    "metadata": {"tmdb": img.get("raw") or img},
                     "fetched_at": fetched_at,
+                    "updated_at": fetched_at,
                 }
             )
 
@@ -1984,6 +1995,18 @@ def upsert_candidates_into_supabase(
             for key, value in (patch.show_update or {}).items():
                 if row.get(key) != value:
                     update_patch[key] = value
+
+            if patch.show_images_rows:
+                if dry_run:
+                    print(
+                        f"ENRICH images show_id={patch.show_id} "
+                        f"rows={len(patch.show_images_rows)} source=imdb"
+                    )
+                elif supabase_client is not None:
+                    try:
+                        upsert_show_images(supabase_client, patch.show_images_rows)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"ENRICH images failed show_id={patch.show_id} error={exc}", file=sys.stderr)
 
             if not update_patch:
                 continue

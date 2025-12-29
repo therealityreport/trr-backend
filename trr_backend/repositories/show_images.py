@@ -36,7 +36,8 @@ def assert_core_show_images_table_exists(db: Client) -> None:
         return (
             "Database table `core.show_images` is missing. "
             "Run `supabase db push` to apply migrations (see `supabase/migrations/0005_show_images.sql` "
-            "`supabase/migrations/0008_show_images_tmdb_id.sql`, and `supabase/migrations/0010_show_images_no_votes.sql`), "
+            "`supabase/migrations/0008_show_images_tmdb_id.sql`, `supabase/migrations/0010_show_images_no_votes.sql`, "
+            "and `supabase/migrations/0027_show_images_media_sources.sql`), "
             "then re-run the import job."
         )
 
@@ -86,7 +87,7 @@ def upsert_show_images(
     db: Client,
     rows: Iterable[Mapping[str, Any]],
     *,
-    on_conflict: str = "tmdb_id,source,kind,file_path",
+    on_conflict: str = "show_id,source,source_image_id",
 ) -> list[dict[str, Any]]:
     payload = [dict(r) for r in rows]
     if not payload:

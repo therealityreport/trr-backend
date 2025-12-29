@@ -261,6 +261,7 @@ def test_stage2_uses_tmdb_meta_and_does_not_refetch_tv_details(monkeypatch: pyte
     monkeypatch.setattr(mod, "fetch_tv_details", fetch_details_mock)
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers)
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         mod.HttpImdbTitleMetadataClient,
         "fetch_title_page",
@@ -309,6 +310,7 @@ def test_stage2_multiple_shows_does_not_refetch_tv_details_when_tmdb_meta_presen
     monkeypatch.setattr(mod, "fetch_tv_details", fetch_details_mock)
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers)
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         mod.HttpImdbTitleMetadataClient,
         "fetch_title_page",

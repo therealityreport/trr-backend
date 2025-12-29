@@ -69,6 +69,7 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(mod, "fetch_tv_details", fetch_details_mock)
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers_payload)
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         mod.HttpImdbTitleMetadataClient,
         "fetch_title_page",
@@ -131,6 +132,7 @@ def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-18T00:00:00Z")
     monkeypatch.setattr(mod, "resolve_api_key", lambda: None)
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
 
     def fake_fetch_title_page(self, imdb_id: str) -> str:  # noqa: ANN001
         return title_html
@@ -191,6 +193,7 @@ def test_enrich_shows_after_upsert_does_not_skip_when_imdb_meta_needed(monkeypat
     monkeypatch.setattr(mod, "fetch_tv_details", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
 
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000003"),
@@ -228,6 +231,7 @@ def test_enrich_shows_after_upsert_imdb_meta(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-29T00:00:00Z")
     monkeypatch.setattr(mod, "resolve_api_key", lambda: None)
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         mod.HttpImdbTitleMetadataClient,
         "fetch_title_page",

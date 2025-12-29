@@ -67,13 +67,19 @@ def test_stage1_tmdb_fetch_images_upserts_show_images_and_sets_primary_paths(mon
     assert all(r.get("show_id") == inserted_row["id"] for r in rows)
     assert all(r.get("tmdb_id") == 12345 for r in rows)
     assert all(r.get("source") == "tmdb" for r in rows)
+    assert all(r.get("source_image_id") == r.get("file_path") for r in rows)
+    assert all(r.get("url_path") == r.get("file_path") for r in rows)
+    assert all(r.get("url") == f"https://image.tmdb.org/t/p/original{r.get('file_path')}" for r in rows)
+    assert all(r.get("image_type") == r.get("kind") for r in rows)
     assert all(r.get("fetched_at") == "2025-12-18T00:00:00Z" for r in rows)
+    assert all(r.get("updated_at") == "2025-12-18T00:00:00Z" for r in rows)
     assert all("url_original" not in r for r in rows)
     assert all("vote_average" not in r for r in rows)
     assert all("vote_count" not in r for r in rows)
     assert all(isinstance(r.get("width"), int) for r in rows)
     assert all(isinstance(r.get("height"), int) for r in rows)
     assert all(isinstance(r.get("aspect_ratio"), float) for r in rows)
+    assert all("metadata" in r for r in rows)
 
     assert update_show_mock.call_count == 1
     patch = update_show_mock.call_args[0][2]
