@@ -8,6 +8,7 @@ from uuid import UUID
 from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.models.shows import ShowRecord
 from trr_backend.repositories.shows import update_show
+from trr_backend.repositories.show_images import upsert_show_images
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 
@@ -97,6 +98,12 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in (patch.show_update or {}).items():
             if row.get(key) != value:
                 update_patch[key] = value
+
+        if patch.show_images_rows:
+            try:
+                upsert_show_images(db, patch.show_images_rows)
+            except Exception as exc:  # noqa: BLE001
+                print(f"ENRICH images failed show_id={patch.show_id} error={exc}")
 
         if not update_patch:
             continue
