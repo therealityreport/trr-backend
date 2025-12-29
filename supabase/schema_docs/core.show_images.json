@@ -1,0 +1,283 @@
+{
+  "schema": "core",
+  "table": "show_images",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'tmdb'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "kind",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "iso_639_1",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "file_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "width",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "height",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "aspect_ratio",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url_original",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "ALWAYS"
+    },
+    {
+      "name": "source_image_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "caption",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "position",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "metadata",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "image_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "show_images_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "core_show_images_kind_lang_idx",
+      "columns": [
+        "kind",
+        "iso_639_1"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_images_kind_lang_idx ON core.show_images USING btree (kind, iso_639_1)"
+    },
+    {
+      "name": "core_show_images_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_images_show_id_idx ON core.show_images USING btree (show_id)"
+    },
+    {
+      "name": "core_show_images_show_kind_idx",
+      "columns": [
+        "show_id",
+        "kind"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_images_show_kind_idx ON core.show_images USING btree (show_id, kind)"
+    },
+    {
+      "name": "core_show_images_source_show_idx",
+      "columns": [
+        "source",
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_images_source_show_idx ON core.show_images USING btree (source, show_id)"
+    },
+    {
+      "name": "core_show_images_source_unique",
+      "columns": [
+        "show_id",
+        "source",
+        "source_image_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX core_show_images_source_unique ON core.show_images USING btree (show_id, source, source_image_id)"
+    },
+    {
+      "name": "core_show_images_tmdb_kind_idx",
+      "columns": [
+        "tmdb_id",
+        "kind"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_images_tmdb_kind_idx ON core.show_images USING btree (tmdb_id, kind)"
+    },
+    {
+      "name": "core_show_images_tmdb_kind_lang_idx",
+      "columns": [
+        "tmdb_id",
+        "kind",
+        "iso_639_1) WHERE (tmdb_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_images_tmdb_kind_lang_idx ON core.show_images USING btree (tmdb_id, kind, iso_639_1) WHERE (tmdb_id IS NOT NULL)"
+    },
+    {
+      "name": "show_images_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_images_pkey ON core.show_images USING btree (id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "source": "example",
+    "kind": "example",
+    "iso_639_1": "example",
+    "file_path": "example",
+    "width": 0,
+    "height": 0,
+    "aspect_ratio": 0,
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "tmdb_id": 0,
+    "url_original": "example",
+    "source_image_id": "example",
+    "url": "example",
+    "url_path": "example",
+    "caption": "example",
+    "position": 0,
+    "metadata": {},
+    "image_type": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

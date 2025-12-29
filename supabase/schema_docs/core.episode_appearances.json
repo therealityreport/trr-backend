@@ -1,0 +1,191 @@
+{
+  "schema": "core",
+  "table": "episode_appearances",
+  "columns": [
+    {
+      "name": "show_name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "cast_member_name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "seasons",
+      "data_type": "ARRAY",
+      "is_nullable": "NO",
+      "default": "'{}'::integer[]",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_season_ids",
+      "data_type": "ARRAY",
+      "is_nullable": "NO",
+      "default": "'{}'::integer[]",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_show_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_show_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_episode_title_ids",
+      "data_type": "ARRAY",
+      "is_nullable": "NO",
+      "default": "'{}'::text[]",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_episode_ids",
+      "data_type": "ARRAY",
+      "is_nullable": "NO",
+      "default": "'{}'::integer[]",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "total_episodes",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "ALWAYS"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "episode_appearances_person_id_fkey1",
+      "column": "person_id",
+      "references": "core.people.id"
+    },
+    {
+      "constraint": "episode_appearances_show_id_fkey1",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "show_id",
+      "person_id"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "core_episode_appearances_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_episode_appearances_person_id_idx ON core.episode_appearances USING btree (person_id)"
+    },
+    {
+      "name": "core_episode_appearances_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_episode_appearances_show_id_idx ON core.episode_appearances USING btree (show_id)"
+    },
+    {
+      "name": "episode_appearances_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX episode_appearances_pkey ON core.episode_appearances USING btree (id)"
+    },
+    {
+      "name": "episode_appearances_show_id_person_id_key",
+      "columns": [
+        "show_id",
+        "person_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX episode_appearances_show_id_person_id_key ON core.episode_appearances USING btree (show_id, person_id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "show_name": "example",
+    "cast_member_name": "example",
+    "seasons": [],
+    "tmdb_season_ids": [],
+    "tmdb_show_id": 0,
+    "imdb_show_id": "example",
+    "imdb_episode_title_ids": [],
+    "tmdb_episode_ids": [],
+    "total_episodes": 0,
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "id": "00000000-0000-0000-0000-000000000000",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

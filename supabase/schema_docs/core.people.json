@@ -1,0 +1,94 @@
+{
+  "schema": "core",
+  "table": "people",
+  "columns": [
+    {
+      "name": "full_name",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "known_for",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "external_ids",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "core_people_imdb_unique",
+      "columns": [
+        "((external_ids ->> 'imdb'::text))) WHERE ((external_ids ? 'imdb'::text) AND (btrim((external_ids ->> 'imdb'::text)) <> ''::text)"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX core_people_imdb_unique ON core.people USING btree (((external_ids ->> 'imdb'::text))) WHERE ((external_ids ? 'imdb'::text) AND (btrim((external_ids ->> 'imdb'::text)) <> ''::text))"
+    },
+    {
+      "name": "people_full_name_idx",
+      "columns": [
+        "full_name"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX people_full_name_idx ON core.people USING btree (full_name)"
+    },
+    {
+      "name": "people_pkey1",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX people_pkey1 ON core.people USING btree (id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "full_name": "example",
+    "known_for": "example",
+    "external_ids": {},
+    "id": "00000000-0000-0000-0000-000000000000",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

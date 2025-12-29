@@ -1,0 +1,157 @@
+{
+  "schema": "core",
+  "table": "cast_memberships",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "season_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "role",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'cast'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "billing_order",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "notes",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "cast_memberships_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    },
+    {
+      "constraint": "cast_memberships_season_id_fkey",
+      "column": "season_id",
+      "references": "core.seasons.id"
+    },
+    {
+      "constraint": "cast_memberships_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "cast_memberships_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX cast_memberships_person_id_idx ON core.cast_memberships USING btree (person_id)"
+    },
+    {
+      "name": "cast_memberships_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_memberships_pkey ON core.cast_memberships USING btree (id)"
+    },
+    {
+      "name": "cast_memberships_season_id_idx",
+      "columns": [
+        "season_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX cast_memberships_season_id_idx ON core.cast_memberships USING btree (season_id)"
+    },
+    {
+      "name": "cast_memberships_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX cast_memberships_show_id_idx ON core.cast_memberships USING btree (show_id)"
+    },
+    {
+      "name": "cast_memberships_show_person_role_no_season_unique_idx",
+      "columns": [
+        "show_id",
+        "person_id",
+        "role) WHERE (season_id IS NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_memberships_show_person_role_no_season_unique_idx ON core.cast_memberships USING btree (show_id, person_id, role) WHERE (season_id IS NULL)"
+    },
+    {
+      "name": "cast_memberships_show_season_person_role_unique_idx",
+      "columns": [
+        "show_id",
+        "season_id",
+        "person_id",
+        "role) WHERE (season_id IS NOT NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_memberships_show_season_person_role_unique_idx ON core.cast_memberships USING btree (show_id, season_id, person_id, role) WHERE (season_id IS NOT NULL)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "season_id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "role": "example",
+    "billing_order": 0,
+    "notes": "example",
+    "created_at": "1970-01-01T00:00:00Z"
+  }
+}

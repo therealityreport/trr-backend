@@ -715,6 +715,10 @@ create policy core_episodes_public_read on core.episodes
 for select to anon, authenticated
 using (true);
 
+-- Drop dependent views before removing old tables.
+drop view if exists core.v_show_seasons;
+drop view if exists core.v_show_images;
+
 drop table core.episodes_old;
 drop table core.seasons_old;
 drop table core.shows_old;
@@ -722,8 +726,6 @@ drop table core.shows_old;
 -- ---------------------------------------------------------------------------
 -- Update dependent views to use show name column (after old tables are dropped)
 -- ---------------------------------------------------------------------------
-
-drop view if exists core.v_show_seasons;
 
 create view core.v_show_seasons as
 select
@@ -750,8 +752,6 @@ select
   se.created_at,
   se.updated_at
 from core.seasons se;
-
-drop view if exists core.v_show_images;
 
 create view core.v_show_images as
 select

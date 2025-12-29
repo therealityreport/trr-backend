@@ -1,0 +1,110 @@
+{
+  "schema": "core",
+  "table": "episode_cast",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "episode_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "cast_membership_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "appearance_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "episode_cast_cast_membership_id_fkey",
+      "column": "cast_membership_id",
+      "references": "core.cast_memberships.id"
+    },
+    {
+      "constraint": "episode_cast_episode_id_fkey",
+      "column": "episode_id",
+      "references": "core.episodes.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "episode_id",
+      "cast_membership_id"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "episode_cast_cast_membership_id_idx",
+      "columns": [
+        "cast_membership_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX episode_cast_cast_membership_id_idx ON core.episode_cast USING btree (cast_membership_id)"
+    },
+    {
+      "name": "episode_cast_episode_id_idx",
+      "columns": [
+        "episode_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX episode_cast_episode_id_idx ON core.episode_cast USING btree (episode_id)"
+    },
+    {
+      "name": "episode_cast_episode_id_membership_unique",
+      "columns": [
+        "episode_id",
+        "cast_membership_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX episode_cast_episode_id_membership_unique ON core.episode_cast USING btree (episode_id, cast_membership_id)"
+    },
+    {
+      "name": "episode_cast_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX episode_cast_pkey ON core.episode_cast USING btree (id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "episode_id": "00000000-0000-0000-0000-000000000000",
+    "cast_membership_id": "00000000-0000-0000-0000-000000000000",
+    "appearance_type": "example",
+    "created_at": "1970-01-01T00:00:00Z"
+  }
+}

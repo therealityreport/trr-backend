@@ -1,0 +1,189 @@
+{
+  "schema": "core",
+  "table": "season_images",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "season_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_series_id",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "season_number",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'tmdb'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "kind",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'poster'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "iso_639_1",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "file_path",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url_original",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "ALWAYS"
+    },
+    {
+      "name": "width",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "height",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "aspect_ratio",
+      "data_type": "numeric",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "season_images_season_id_fkey",
+      "column": "season_id",
+      "references": "core.seasons.id"
+    },
+    {
+      "constraint": "season_images_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "core_season_images_season_id_idx",
+      "columns": [
+        "season_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_season_images_season_id_idx ON core.season_images USING btree (season_id)"
+    },
+    {
+      "name": "core_season_images_tmdb_series_season_idx",
+      "columns": [
+        "tmdb_series_id",
+        "season_number"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_season_images_tmdb_series_season_idx ON core.season_images USING btree (tmdb_series_id, season_number)"
+    },
+    {
+      "name": "core_season_images_unique",
+      "columns": [
+        "tmdb_series_id",
+        "season_number",
+        "source",
+        "file_path"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX core_season_images_unique ON core.season_images USING btree (tmdb_series_id, season_number, source, file_path)"
+    },
+    {
+      "name": "season_images_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX season_images_pkey ON core.season_images USING btree (id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "season_id": "00000000-0000-0000-0000-000000000000",
+    "tmdb_series_id": 0,
+    "season_number": 0,
+    "source": "example",
+    "kind": "example",
+    "iso_639_1": "example",
+    "file_path": "example",
+    "url_original": "example",
+    "width": 0,
+    "height": 0,
+    "aspect_ratio": 0,
+    "fetched_at": "1970-01-01T00:00:00Z"
+  }
+}

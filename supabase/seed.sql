@@ -27,21 +27,36 @@ values (
 )
 on conflict (id) do nothing;
 
-insert into core.episodes (id, season_id, episode_number, title, air_date)
+insert into core.episodes (
+  id,
+  show_id,
+  season_id,
+  season_number,
+  episode_number,
+  title,
+  air_date,
+  show_name
+)
 values
   (
     '3d037712-54b6-4037-8109-1c69ab00448a',
+    'd1fdacc4-ccb0-4d52-8096-89889db83282',
     '2ea88321-cb37-4527-892f-0441030b6e68',
     1,
+    1,
     'Episode 1: Kickoff',
-    '2025-01-01'
+    '2025-01-01',
+    'TRR Sample Show'
   ),
   (
     '1a9ba2e1-031e-4279-a2fe-2f09deb8d2d0',
+    'd1fdacc4-ccb0-4d52-8096-89889db83282',
     '2ea88321-cb37-4527-892f-0441030b6e68',
+    1,
     2,
     'Episode 2: Fallout',
-    '2025-01-08'
+    '2025-01-08',
+    'TRR Sample Show'
   )
 on conflict (id) do nothing;
 
