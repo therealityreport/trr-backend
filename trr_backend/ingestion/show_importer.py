@@ -513,6 +513,32 @@ def _merge_external_ids(existing: Mapping[str, Any] | None, updates: Mapping[str
     if sources:
         merged["import_sources"] = sorted(sources)
 
+    # Merge source lists in stable imdb/tmdb order.
+    def _normalize_source_list(values: Any) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        out: list[str] = []
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            item = value.strip()
+            if item:
+                out.append(item)
+        return out
+
+    source_seen: set[str] = set()
+    source_lists: list[str] = []
+    for item in _normalize_source_list(merged.get("source_lists")) + _normalize_source_list(updates.get("source_lists")):
+        if item in source_seen:
+            continue
+        source_seen.add(item)
+        source_lists.append(item)
+    if source_lists:
+        preferred = ["imdb", "tmdb"]
+        ordered: list[str] = [item for item in preferred if item in source_seen]
+        extras = [item for item in source_lists if item not in preferred]
+        merged["source_lists"] = ordered + extras
+
     # Merge nested metadata dicts.
     for key in ("tmdb_meta", "imdb_meta", "imdb_episodic", "show_meta"):
         existing_value = merged.get(key)
@@ -605,6 +631,14 @@ def _candidate_to_show_upsert(candidate: CandidateShow, *, annotate_imdb_episodi
 
     if candidate.source_tags:
         external_ids["import_sources"] = sorted(candidate.source_tags)
+        source_lists: list[str] = []
+        tags = {str(tag) for tag in candidate.source_tags}
+        if any(tag.startswith("imdb-list:") for tag in tags):
+            source_lists.append("imdb")
+        if any(tag.startswith("tmdb-list:") for tag in tags):
+            source_lists.append("tmdb")
+        if source_lists:
+            external_ids["source_lists"] = source_lists
 
     tmdb_meta: dict[str, Any] = dict(candidate.tmdb_meta or {})
     if candidate.first_air_date:
