@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import re
 import sys
 import time
 from threading import Lock
@@ -17,7 +18,7 @@ from trr_backend.integrations.imdb.title_metadata_client import (
     parse_imdb_title_page,
     pick_most_recent_episode,
 )
-from trr_backend.integrations.imdb.mediaindex_images import ImdbMediaImage, fetch_imdb_mediaindex_images
+from trr_backend.ingestion.imdb_images import extract_imdb_image_urls, fetch_imdb_mediaindex_html
 from trr_backend.integrations.imdb.title_page_metadata import (
     fetch_imdb_title_html,
     parse_imdb_title_html,
@@ -93,36 +94,50 @@ def _build_imdb_meta_payload(parsed: Mapping[str, Any], *, imdb_id: str, fetched
     }
 
 
-def _build_imdb_show_image_rows(
-    images: list[ImdbMediaImage],
+_IMDB_IMAGE_BASE_RE = re.compile(r"^(?P<base>.+?)\._V\d+", re.IGNORECASE)
+
+
+def _imdb_source_image_id_from_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    filename = (parsed.path or "").rsplit("/", 1)[-1]
+    if not filename:
+        return None
+    stem = filename.rsplit(".", 1)[0]
+    match = _IMDB_IMAGE_BASE_RE.match(stem)
+    if match:
+        return match.group("base")
+    return stem or None
+
+
+def _build_imdb_show_image_rows_from_urls(
+    urls: list[str],
     *,
     show_id: UUID,
     fetched_at: str,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for image in images:
-        image_type = image.image_type
-        kind = image_type or "media"
+    for position, url in enumerate(urls, start=1):
+        source_image_id = _imdb_source_image_id_from_url(url)
+        if not source_image_id:
+            continue
         url_path = None
-        parsed = urlparse(image.url)
+        parsed = urlparse(url)
         if parsed.path:
             url_path = parsed.path
-        metadata = dict(image.metadata or {})
-        metadata.setdefault("viewer_url", image.viewer_url)
-        metadata.setdefault("viewer_path", image.viewer_path)
+        metadata = {"source": "imdb_section_images"}
         rows.append(
             {
                 "show_id": str(show_id),
                 "source": "imdb",
-                "source_image_id": image.imdb_image_id,
-                "kind": kind,
-                "image_type": image_type,
-                "caption": image.caption,
-                "position": image.position,
-                "url": image.url,
+                "source_image_id": source_image_id,
+                "kind": "media",
+                "image_type": None,
+                "caption": None,
+                "position": position,
+                "url": url,
                 "url_path": url_path,
-                "width": image.width,
-                "height": image.height,
+                "width": None,
+                "height": None,
                 "metadata": metadata,
                 "fetched_at": fetched_at,
                 "updated_at": fetched_at,
@@ -295,7 +310,7 @@ def _enrich_one_show(
     tmdb_watch_cache: dict[int, dict[str, Any]],
     imdb_title_cache: dict[str, str],
     imdb_episodes_cache: dict[tuple[str, int | None], str],
-    imdb_images_cache: dict[str, list[ImdbMediaImage]],
+    imdb_images_cache: dict[str, list[str]],
     cache_lock: Lock,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]] | None:
     external_ids = dict(show.external_ids or {})
@@ -536,22 +551,32 @@ def _enrich_one_show(
             imdb_meta_update = _build_imdb_meta_payload(parsed, imdb_id=imdb_id, fetched_at=fetched_at)
 
     if imdb_id:
-        try:
+        with cache_lock:
+            cached_urls = imdb_images_cache.get(imdb_id)
+        fetched_html = False
+        if cached_urls is None and imdb_id not in imdb_images_cache:
+            html: str | None = None
+            try:
+                if imdb_sleep_ms:
+                    time.sleep(imdb_sleep_ms / 1000.0)
+                html = fetch_imdb_mediaindex_html(imdb_id)
+            except Exception as exc:  # noqa: BLE001
+                print(f"IMDb images: imdb_id={imdb_id} error={exc}", file=sys.stderr)
+                html = None
+            fetched_html = html is not None
+            urls = extract_imdb_image_urls(html) if fetched_html else []
             with cache_lock:
-                cached_images = imdb_images_cache.get(imdb_id)
-            if cached_images is None and imdb_id not in imdb_images_cache:
-                cached_images = fetch_imdb_mediaindex_images(imdb_id, sleep_ms=imdb_sleep_ms)
-                with cache_lock:
-                    imdb_images_cache[imdb_id] = cached_images
-            images = cached_images or []
-            if images:
-                show_images_rows = _build_imdb_show_image_rows(
-                    images,
-                    show_id=show.id,
-                    fetched_at=fetched_at,
-                )
-        except Exception as exc:  # noqa: BLE001
-            print(f"IMDb mediaindex fetch failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
+                imdb_images_cache[imdb_id] = urls
+            cached_urls = urls
+        urls = cached_urls or []
+        if urls:
+            show_images_rows = _build_imdb_show_image_rows_from_urls(
+                urls,
+                show_id=show.id,
+                fetched_at=fetched_at,
+            )
+        elif cached_urls is not None and fetched_html:
+            print(f"IMDb images: imdb_id={imdb_id} parsed 0 images", file=sys.stderr)
 
     show_meta["region"] = region.upper()
     show_meta["fetched_at"] = fetched_at
@@ -628,7 +653,7 @@ def enrich_shows_after_upsert(
     tmdb_watch_cache: dict[int, dict[str, Any]] = {}
     imdb_title_cache: dict[str, str] = {}
     imdb_episodes_cache: dict[tuple[str, int | None], str] = {}
-    imdb_images_cache: dict[str, list[ImdbMediaImage]] = {}
+    imdb_images_cache: dict[str, list[str]] = {}
     cache_lock = Lock()
 
     attempted = 0
