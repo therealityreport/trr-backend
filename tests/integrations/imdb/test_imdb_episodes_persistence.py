@@ -38,6 +38,8 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
 
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "upsert_imdb_series", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mod, "upsert_tmdb_series", lambda *args, **kwargs: [])
 
     inserted_show_id = "00000000-0000-0000-0000-0000000000aa"
 
@@ -47,8 +49,8 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
             "name": show_upsert.name,
             "description": show_upsert.description,
             "premiere_date": show_upsert.premiere_date,
-            "tmdb_series_id": show_upsert.tmdb_series_id,
-            "external_ids": show_upsert.external_ids,
+            "imdb_id": show_upsert.imdb_id,
+            "tmdb_id": show_upsert.tmdb_id,
         }
 
     monkeypatch.setattr(mod, "insert_show", _fake_insert_show)

@@ -6,7 +6,7 @@ from trr_backend.ingestion.fandom_person_scraper import parse_fandom_person_html
 
 
 def _read_fixture(name: str) -> str:
-    base = Path(__file__).resolve().parents[2] / "fixtures" / "fandom"
+    base = Path(__file__).resolve().parents[1] / "fixtures" / "fandom"
     return (base / name).read_text(encoding="utf-8")
 
 
@@ -38,7 +38,7 @@ def test_fandom_person_parsing_infobox_taglines_reunion_images() -> None:
     canonical_urls = [photo.get("image_url_canonical") for photo in photos]
     canonical_urls = [url for url in canonical_urls if url]
     assert len(photos) == len(set(canonical_urls))
-    assert len(photos) == 5
+    assert len(photos) == 6
 
     reunion_photo = next(
         photo for photo in photos if photo.get("context_section") == "reunion_seating"
