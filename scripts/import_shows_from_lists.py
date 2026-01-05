@@ -72,7 +72,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         dest="imdb_fetch_cast",
         action="store_true",
         default=False,
-        help="Fetch IMDb credits and populate core.people/core.cast_memberships (default: off).",
+        help="Fetch IMDb credits and populate core.people/core.show_cast (default: off).",
     )
     imdb_cast.add_argument(
         "--imdb-no-cast",

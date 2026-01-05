@@ -28,13 +28,13 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
 
     def _find_by_imdb(_db, imdb_id: str):
         nonlocal show_row
-        if show_row and show_row.get("external_ids", {}).get("imdb") == imdb_id:
+        if show_row and show_row.get("imdb_id") == imdb_id:
             return dict(show_row)
         return None
 
     def _find_by_tmdb(_db, tmdb_id: int):
         nonlocal show_row
-        if show_row and show_row.get("tmdb_series_id") == tmdb_id:
+        if show_row and show_row.get("tmdb_id") == tmdb_id:
             return dict(show_row)
         return None
 
@@ -47,8 +47,8 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
             "name": show_upsert.name,
             "description": show_upsert.description,
             "premiere_date": show_upsert.premiere_date,
-            "tmdb_series_id": None,
-            "external_ids": dict(show_upsert.external_ids),
+            "tmdb_id": show_upsert.tmdb_id,
+            "imdb_id": show_upsert.imdb_id,
         }
         return dict(show_row)
 
@@ -69,6 +69,9 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
 
     monkeypatch.setattr(mod, "find_show_by_imdb_id", _find_by_imdb)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", _find_by_tmdb)
+    monkeypatch.setattr(mod, "upsert_imdb_series", MagicMock(return_value=[]))
+    monkeypatch.setattr(mod, "upsert_tmdb_series", MagicMock(return_value=[]))
+    monkeypatch.setattr(mod, "fetch_tmdb_series", MagicMock(return_value=None))
 
     result = mod.upsert_candidates_into_supabase(
         [
@@ -92,7 +95,7 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
     assert update_show_mock.call_count == 1
 
     patch = update_show_mock.call_args[0][2]
-    assert patch["tmdb_series_id"] == 12345
+    assert patch["tmdb_id"] == 12345
 
     assert fetch_tv_details_mock.call_count == 1
     # Deduplication runs after upsert; downstream pipelines should see the show once.

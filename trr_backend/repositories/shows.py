@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Mapping
 from uuid import UUID
 
 from supabase import Client
 
+from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
 from trr_backend.models.shows import ShowUpsert
 
 
@@ -15,10 +17,42 @@ class ShowRepositoryError(RuntimeError):
 
 _MISSING_COLUMN_RE = re.compile(r"could not find the '([^']+)' column", re.IGNORECASE)
 
+# PGRST204 retry configuration
+_PGRST204_MAX_RETRIES = 1
+_PGRST204_RETRY_DELAY = 0.5
+
 
 def _missing_column_from_error(message: str) -> str | None:
     match = _MISSING_COLUMN_RE.search(message or "")
     return match.group(1) if match else None
+
+
+def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> bool:
+    """
+    Handle PGRST204 schema cache errors with retry.
+
+    Returns True if retry should be attempted, False otherwise.
+    Raises the exception with a helpful hint if retries are exhausted.
+    """
+    if not is_pgrst204_error(exc):
+        return False
+
+    if attempt >= _PGRST204_MAX_RETRIES:
+        hint = (
+            f"\n\nPostgREST schema cache may still be stale after retry during {context}. "
+            "Wait 30-60s and try again, or run:\n"
+            "  psql \"$SUPABASE_DB_URL\" -f scripts/db/reload_postgrest_schema.sql"
+        )
+        raise ShowRepositoryError(f"{exc}{hint}") from exc
+
+    # Trigger schema reload and retry
+    try:
+        reload_postgrest_schema()
+    except Exception:
+        pass  # Best effort - continue with retry anyway
+
+    time.sleep(_PGRST204_RETRY_DELAY)
+    return True
 
 
 def assert_core_shows_table_exists(db: Client) -> None:
@@ -98,19 +132,7 @@ def find_show_by_imdb_id(db: Client, imdb_id: str) -> dict[str, Any] | None:
         db.schema("core")
         .table("shows")
         .select("*")
-        .eq("imdb_series_id", imdb_id)
-        .limit(1)
-        .execute()
-    )
-    _raise_for_supabase_error(response, "finding show by imdb id")
-    data = response.data or []
-    if isinstance(data, list) and data:
-        return data[0]
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("*")
-        .eq("external_ids->>imdb", imdb_id)
+        .eq("imdb_id", imdb_id)
         .limit(1)
         .execute()
     )
@@ -126,7 +148,7 @@ def find_show_by_tmdb_id(db: Client, tmdb_id: int) -> dict[str, Any] | None:
         db.schema("core")
         .table("shows")
         .select("*")
-        .eq("tmdb_series_id", int(tmdb_id))
+        .eq("tmdb_id", int(tmdb_id))
         .limit(1)
         .execute()
     )
@@ -142,33 +164,78 @@ def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
         "name": show.name,
         "description": show.description,
         "premiere_date": show.premiere_date,
-        "external_ids": show.external_ids,
     }
-    if show.imdb_meta:
-        payload["imdb_meta"] = show.imdb_meta
-    if show.network is not None:
-        payload["network"] = show.network
-    if show.streaming is not None:
-        payload["streaming"] = show.streaming
     if show.show_total_seasons is not None:
         payload["show_total_seasons"] = int(show.show_total_seasons)
     if show.show_total_episodes is not None:
         payload["show_total_episodes"] = int(show.show_total_episodes)
-    if show.imdb_series_id is not None:
-        payload["imdb_series_id"] = show.imdb_series_id
-    if show.tmdb_series_id is not None:
-        payload["tmdb_series_id"] = int(show.tmdb_series_id)
+    if show.imdb_id is not None:
+        payload["imdb_id"] = show.imdb_id
+    if show.tmdb_id is not None:
+        payload["tmdb_id"] = int(show.tmdb_id)
     if show.most_recent_episode is not None:
         payload["most_recent_episode"] = show.most_recent_episode
-    try:
-        response = db.schema("core").table("shows").insert(payload).execute()
-    except Exception as exc:
-        missing = _missing_column_from_error(str(exc))
-        if missing and missing in payload:
-            payload.pop(missing, None)
+    if show.most_recent_episode_season is not None:
+        payload["most_recent_episode_season"] = int(show.most_recent_episode_season)
+    if show.most_recent_episode_number is not None:
+        payload["most_recent_episode_number"] = int(show.most_recent_episode_number)
+    if show.most_recent_episode_title is not None:
+        payload["most_recent_episode_title"] = show.most_recent_episode_title
+    if show.most_recent_episode_air_date is not None:
+        payload["most_recent_episode_air_date"] = show.most_recent_episode_air_date
+    if show.most_recent_episode_imdb_id is not None:
+        payload["most_recent_episode_imdb_id"] = show.most_recent_episode_imdb_id
+    if show.needs_imdb_resolution is not None:
+        payload["needs_imdb_resolution"] = bool(show.needs_imdb_resolution)
+    if show.needs_tmdb_resolution is not None:
+        payload["needs_tmdb_resolution"] = bool(show.needs_tmdb_resolution)
+
+    # Array columns (only include if not None/empty to avoid overwriting)
+    if show.genres:
+        payload["genres"] = list(show.genres)
+    if show.keywords:
+        payload["keywords"] = list(show.keywords)
+    if show.tags:
+        payload["tags"] = list(show.tags)
+    if show.networks:
+        payload["networks"] = list(show.networks)
+    if show.streaming_providers:
+        payload["streaming_providers"] = list(show.streaming_providers)
+    if show.listed_on:
+        payload["listed_on"] = list(show.listed_on)
+
+    # External IDs
+    if show.tvdb_id is not None:
+        payload["tvdb_id"] = int(show.tvdb_id)
+    if show.tvrage_id is not None:
+        payload["tvrage_id"] = int(show.tvrage_id)
+    if show.wikidata_id is not None:
+        payload["wikidata_id"] = show.wikidata_id
+    if show.facebook_id is not None:
+        payload["facebook_id"] = show.facebook_id
+    if show.instagram_id is not None:
+        payload["instagram_id"] = show.instagram_id
+    if show.twitter_id is not None:
+        payload["twitter_id"] = show.twitter_id
+
+    for attempt in range(_PGRST204_MAX_RETRIES + 1):
+        try:
             response = db.schema("core").table("shows").insert(payload).execute()
-        else:
-            raise ShowRepositoryError(f"Supabase error during inserting show: {exc}") from exc
+            break
+        except Exception as exc:
+            # Check for PGRST204 first (schema cache error)
+            if _handle_pgrst204_with_retry(exc, attempt, "inserting show"):
+                continue
+
+            # Handle missing column errors
+            missing = _missing_column_from_error(str(exc))
+            if missing and missing in payload:
+                payload.pop(missing, None)
+                response = db.schema("core").table("shows").insert(payload).execute()
+                break
+            else:
+                raise ShowRepositoryError(f"Supabase error during inserting show: {exc}") from exc
+
     _raise_for_supabase_error(response, "inserting show")
     data = response.data or []
     if isinstance(data, list) and data:
@@ -178,31 +245,55 @@ def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
 
 def update_show(db: Client, show_id: UUID | str, patch: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(patch)
-    try:
-        response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
-    except Exception as exc:
-        missing = _missing_column_from_error(str(exc))
-        if missing and missing in payload:
-            payload.pop(missing, None)
-            if not payload:
-                response = (
-                    db.schema("core")
-                    .table("shows")
-                    .select("*")
-                    .eq("id", str(show_id))
-                    .limit(1)
-                    .execute()
-                )
-                _raise_for_supabase_error(response, "finding show after missing column skip")
-                data = response.data or []
-                if isinstance(data, list) and data:
-                    return data[0]
-                raise ShowRepositoryError("Supabase fetch returned no data for show after missing column skip.")
+    for attempt in range(_PGRST204_MAX_RETRIES + 1):
+        try:
             response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
-        else:
-            raise ShowRepositoryError(f"Supabase error during updating show: {exc}") from exc
+            break
+        except Exception as exc:
+            # Check for PGRST204 first (schema cache error)
+            if _handle_pgrst204_with_retry(exc, attempt, "updating show"):
+                continue
+
+            # Handle missing column errors
+            missing = _missing_column_from_error(str(exc))
+            if missing and missing in payload:
+                payload.pop(missing, None)
+                if not payload:
+                    response = (
+                        db.schema("core")
+                        .table("shows")
+                        .select("*")
+                        .eq("id", str(show_id))
+                        .limit(1)
+                        .execute()
+                    )
+                    _raise_for_supabase_error(response, "finding show after missing column skip")
+                    data = response.data or []
+                    if isinstance(data, list) and data:
+                        return data[0]
+                    raise ShowRepositoryError("Supabase fetch returned no data for show after missing column skip.")
+                response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
+                break
+            else:
+                raise ShowRepositoryError(f"Supabase error during updating show: {exc}") from exc
+
     _raise_for_supabase_error(response, "updating show")
     data = response.data or []
     if isinstance(data, list) and data:
         return data[0]
     raise ShowRepositoryError("Supabase update returned no data for show.")
+
+
+def merge_shows(db: Client, *, source_show_id: UUID | str, target_show_id: UUID | str) -> None:
+    try:
+        response = (
+            db.schema("core")
+            .rpc(
+                "merge_shows",
+                {"source_show_id": str(source_show_id), "target_show_id": str(target_show_id)},
+            )
+            .execute()
+        )
+    except Exception as exc:
+        raise ShowRepositoryError(f"Supabase error during merging shows: {exc}") from exc
+    _raise_for_supabase_error(response, "merging shows")

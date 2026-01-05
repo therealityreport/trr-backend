@@ -122,6 +122,33 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return parser.parse_known_args(argv)
 
 
+def _preflight_db_check(dry_run: bool) -> bool:
+    """
+    Verify DB connection and reload PostgREST schema cache before running import.
+
+    Returns True if check passed, False if it failed but we should continue (dry-run).
+    Prints errors to stderr.
+    """
+    if dry_run:
+        return True
+
+    try:
+        # Ensure REPO_ROOT is in sys.path for imports
+        repo_root_str = str(REPO_ROOT)
+        if repo_root_str not in sys.path:
+            sys.path.insert(0, repo_root_str)
+
+        from trr_backend.db.connection import ensure_ready_for_ingestion
+
+        print("Verifying database connection and reloading schema cache...", file=sys.stderr)
+        ensure_ready_for_ingestion(reload_schema_cache=True)
+        print("Database ready.", file=sys.stderr)
+        return True
+    except Exception as e:
+        print(f"Database pre-flight check failed: {e}", file=sys.stderr)
+        return False
+
+
 def main(argv: list[str]) -> int:
     load_dotenv(REPO_ROOT / ".env")
 
@@ -159,6 +186,10 @@ def main(argv: list[str]) -> int:
     if tmdb_lists and not _require_env("TMDB_API_KEY"):
         print("Missing required environment variable: TMDB_API_KEY (required for TMDb list ingestion).", file=sys.stderr)
         return 2
+
+    # Pre-flight DB check: verify connection and reload PostgREST schema cache
+    if not _preflight_db_check(args.dry_run):
+        return 3
 
     common: list[str] = []
     if "--enrich-show-metadata" not in passthrough:
