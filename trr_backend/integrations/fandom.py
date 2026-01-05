@@ -7,7 +7,7 @@ import json
 import re
 import time
 from typing import Mapping
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlparse
 import urllib.error
 import urllib.request
 
@@ -62,6 +62,25 @@ class FandomSourceRecord:
     url: str
     fetched_at: str
     fields: list[str]
+
+
+@dataclass(frozen=True)
+class FandomGalleryImage:
+    """A single image from a Fandom gallery page."""
+    url: str
+    thumb_url: str | None
+    caption: str | None
+    source_page_url: str
+
+
+@dataclass(frozen=True)
+class FandomGalleryResult:
+    """Result of parsing a Fandom gallery page."""
+    source: str
+    url: str
+    person_name: str
+    images: list[FandomGalleryImage]
+    error: str | None
 
 
 def build_real_housewives_wiki_url_from_name(name: str) -> str:
@@ -363,3 +382,285 @@ def search_real_housewives_wiki(
 def build_fandom_source_record(result: FandomInfoboxResult, *, fetched_at: str) -> FandomSourceRecord:
     fields = sorted(result.infobox.keys())
     return FandomSourceRecord(url=result.url, fetched_at=fetched_at, fields=fields)
+
+
+def build_real_housewives_gallery_url_from_name(name: str) -> str:
+    """Build a gallery page URL from a person's name."""
+    safe_name = re.sub(r"\s+", "_", (name or "").strip())
+    return f"https://real-housewives.fandom.com/wiki/{quote(safe_name)}/Gallery"
+
+
+def _extract_full_image_url(thumb_url: str) -> str:
+    """
+    Convert a Fandom thumbnail URL to the full-size image URL.
+
+    Fandom thumbnail URLs look like:
+    https://static.wikia.nocookie.net/.../revision/latest/scale-to-width-down/185?cb=...
+
+    Full URLs look like:
+    https://static.wikia.nocookie.net/.../revision/latest?cb=...
+    """
+    if not thumb_url:
+        return thumb_url
+    # Remove scale-to-width-down or other resize parameters
+    url = re.sub(r"/scale-to-width-down/\d+", "", thumb_url)
+    url = re.sub(r"/scale-to-height-down/\d+", "", url)
+    url = re.sub(r"/scale-to-width/\d+", "", url)
+    url = re.sub(r"/smart/width/\d+/height/\d+", "", url)
+    url = re.sub(r"/window-crop/width/\d+/x-offset/\d+/y-offset/\d+/window-width/\d+/window-height/\d+", "", url)
+    return url
+
+
+def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> FandomGalleryResult:
+    """
+    Parse a Fandom gallery page and extract all image URLs.
+
+    Gallery pages typically have images in:
+    - .wikia-gallery elements
+    - .gallery elements
+    - .pi-image-collection (infobox galleries)
+    - Standard gallery markup
+    """
+    if not html:
+        return FandomGalleryResult(
+            source="fandom",
+            url=url,
+            person_name=person_name,
+            images=[],
+            error="Empty HTML response",
+        )
+
+    soup = BeautifulSoup(html, "html.parser")
+    images: list[FandomGalleryImage] = []
+    seen_urls: set[str] = set()
+
+    # Method 1: Look for gallery items (.wikia-gallery-item, .gallery-image-wrapper, etc.)
+    gallery_selectors = [
+        ".wikia-gallery-item",
+        ".gallery-image-wrapper",
+        ".gallerybox",
+        ".image-thumbnail",
+        ".lightbox-caption",
+    ]
+
+    for selector in gallery_selectors:
+        for item in soup.select(selector):
+            img = item.select_one("img")
+            if not img:
+                continue
+
+            # Get the image URL (prefer data-src for lazy-loaded images)
+            thumb = img.get("data-src") or img.get("src") or ""
+            if not thumb or "data:image" in thumb:
+                continue
+
+            full_url = _extract_full_image_url(thumb)
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+
+            # Try to get caption
+            caption = None
+            caption_el = item.select_one(".lightbox-caption") or item.select_one(".gallerytext")
+            if caption_el:
+                caption = caption_el.get_text(" ", strip=True) or None
+
+            images.append(FandomGalleryImage(
+                url=full_url,
+                thumb_url=thumb if thumb != full_url else None,
+                caption=caption,
+                source_page_url=url,
+            ))
+
+    # Method 2: Look for images inside gallery tags
+    for gallery in soup.select(".gallery, .wikia-gallery"):
+        for img in gallery.select("img"):
+            thumb = img.get("data-src") or img.get("src") or ""
+            if not thumb or "data:image" in thumb:
+                continue
+
+            full_url = _extract_full_image_url(thumb)
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+
+            # Get alt text as caption fallback
+            caption = img.get("alt") or img.get("title")
+            if caption and caption.lower() in ("image", "photo", "gallery"):
+                caption = None
+
+            images.append(FandomGalleryImage(
+                url=full_url,
+                thumb_url=thumb if thumb != full_url else None,
+                caption=caption,
+                source_page_url=url,
+            ))
+
+    # Method 3: Look for any article images (broader search)
+    article = soup.select_one(".mw-parser-output") or soup.select_one("#mw-content-text")
+    if article:
+        for img in article.select("img"):
+            thumb = img.get("data-src") or img.get("src") or ""
+            if not thumb or "data:image" in thumb:
+                continue
+            # Skip tiny images (icons, etc.)
+            width = img.get("width") or img.get("data-image-width")
+            if width:
+                try:
+                    if int(width) < 100:
+                        continue
+                except ValueError:
+                    pass
+
+            full_url = _extract_full_image_url(thumb)
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+
+            caption = img.get("alt") or img.get("title")
+            if caption and caption.lower() in ("image", "photo", "gallery"):
+                caption = None
+
+            images.append(FandomGalleryImage(
+                url=full_url,
+                thumb_url=thumb if thumb != full_url else None,
+                caption=caption,
+                source_page_url=url,
+            ))
+
+    return FandomGalleryResult(
+        source="fandom",
+        url=url,
+        person_name=person_name,
+        images=images,
+        error=None,
+    )
+
+
+def _is_challenge_page(html: str) -> bool:
+    """Check if the HTML is a Cloudflare/anti-bot challenge page."""
+    if not html:
+        return False
+    text = html.lower()
+    return (
+        ("client challenge" in text and "loading-error" in text)
+        or ("cloudflare" in text and "challenge" in text)
+        or (len(html) < 5000 and "/_fs-ch-" in html)
+    )
+
+
+def _fetch_fandom_page_via_api(
+    page_url: str,
+    *,
+    timeout_seconds: float = 30.0,
+) -> tuple[str | None, str | None]:
+    """
+    Fetch a Fandom page using the MediaWiki API.
+
+    Returns:
+        (html, error) tuple
+    """
+    try:
+        parsed = urlparse(page_url)
+        # Extract page name from URL
+        if "/wiki/" in parsed.path:
+            page = parsed.path.split("/wiki/")[-1]
+        else:
+            page = parsed.path.rsplit("/", 1)[-1]
+        page = unquote(page)
+
+        api_url = (
+            f"{parsed.scheme}://{parsed.netloc}/api.php"
+            f"?action=parse&page={quote(page)}&prop=text&format=json"
+        )
+
+        headers = {**_DEFAULT_HEADERS, "accept": "application/json"}
+        api_req = urllib.request.Request(api_url, headers=headers)
+        with urllib.request.urlopen(api_req, timeout=timeout_seconds) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+        if "error" in data:
+            error_info = data.get("error", {})
+            return None, error_info.get("info", "API error")
+
+        html = data.get("parse", {}).get("text", {}).get("*", "")
+        return html, None
+
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code}: {exc.reason}"
+    except urllib.error.URLError as exc:
+        return None, str(exc)
+    except Exception as exc:
+        return None, str(exc)
+
+
+def fetch_fandom_gallery(
+    name: str,
+    *,
+    timeout_seconds: float = 30.0,
+    max_retries: int = 2,
+) -> FandomGalleryResult:
+    """
+    Fetch and parse a Fandom gallery page for a person.
+
+    Uses the MediaWiki API to bypass anti-bot challenges, with fallback to
+    direct page fetch if needed.
+
+    Args:
+        name: Person's name (e.g., "Lisa Barlow")
+        timeout_seconds: Request timeout
+        max_retries: Number of retries for transient errors
+
+    Returns:
+        FandomGalleryResult with extracted images
+    """
+    url = build_real_housewives_gallery_url_from_name(name)
+
+    # Try MediaWiki API first (more reliable, bypasses challenges)
+    html, api_error = _fetch_fandom_page_via_api(url, timeout_seconds=timeout_seconds)
+
+    if html:
+        # Check if API returned "page doesn't exist" error in the HTML
+        if is_fandom_page_missing(html, 200):
+            return FandomGalleryResult(
+                source="fandom",
+                url=url,
+                person_name=name,
+                images=[],
+                error="Gallery page not found",
+            )
+        return parse_fandom_gallery_html(html, url=url, person_name=name)
+
+    # Fallback to direct page fetch
+    result = fetch_fandom_page(url, timeout_seconds=timeout_seconds, max_retries=max_retries)
+
+    if result.error and result.status_code is None:
+        # Return API error if we have one, otherwise the fetch error
+        return FandomGalleryResult(
+            source="fandom",
+            url=url,
+            person_name=name,
+            images=[],
+            error=api_error or result.error,
+        )
+
+    if is_fandom_page_missing(result.html, result.status_code):
+        return FandomGalleryResult(
+            source="fandom",
+            url=url,
+            person_name=name,
+            images=[],
+            error="Gallery page not found",
+        )
+
+    # Check if we got a challenge page
+    if _is_challenge_page(result.html or ""):
+        return FandomGalleryResult(
+            source="fandom",
+            url=url,
+            person_name=name,
+            images=[],
+            error=api_error or "Anti-bot challenge page - API fetch also failed",
+        )
+
+    return parse_fandom_gallery_html(result.html or "", url=url, person_name=name)

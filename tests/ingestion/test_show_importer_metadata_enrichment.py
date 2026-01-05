@@ -8,7 +8,7 @@ from trr_backend.ingestion.show_importer import upsert_candidates_into_supabase
 from trr_backend.ingestion.shows_from_lists import CandidateShow
 
 
-def test_show_importer_applies_show_meta_patches(monkeypatch):
+def test_show_importer_applies_show_update_patches(monkeypatch):
     from trr_backend.ingestion import show_importer as mod
 
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
@@ -18,14 +18,15 @@ def test_show_importer_applies_show_meta_patches(monkeypatch):
         "name": "Existing Show",
         "description": None,
         "premiere_date": None,
-        "external_ids": {"imdb": "tt1234567"},
+        "imdb_id": "tt1234567",
+        "tmdb_id": None,
     }
 
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: existing)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "insert_show", MagicMock())
 
-    update_mock = MagicMock(return_value={**existing, "external_ids": {**existing["external_ids"], "show_meta": {}}})
+    update_mock = MagicMock(return_value={**existing, "description": "Updated description"})
     monkeypatch.setattr(mod, "update_show", update_mock)
 
     summary = EnrichSummary(
@@ -37,27 +38,12 @@ def test_show_importer_applies_show_meta_patches(monkeypatch):
         patches=[
             ShowEnrichmentPatch(
                 show_id=show_id,
-                external_ids_update={
-                    "show_meta": {
-                        "show": "Existing Show",
-                        "imdb_series_id": "tt1234567",
-                        "tmdb_series_id": None,
-                        "network": None,
-                        "streaming": None,
-                        "show_total_seasons": None,
-                        "show_total_episodes": None,
-                        "most_recent_episode": None,
-                        "most_recent_episode_obj": {
-                            "season": None,
-                            "episode": None,
-                            "title": None,
-                            "air_date": None,
-                            "imdb_episode_id": None,
-                        },
-                        "source": {},
-                        "fetched_at": "2025-12-18T00:00:00Z",
-                        "region": "US",
-                    }
+                show_update={
+                    "description": "Updated description",
+                },
+                imdb_series={
+                    "title": "Existing Show",
+                    "imdb_id": "tt1234567",
                 },
             )
         ],
@@ -65,6 +51,8 @@ def test_show_importer_applies_show_meta_patches(monkeypatch):
     )
 
     monkeypatch.setattr(mod, "enrich_shows_after_upsert", lambda *args, **kwargs: summary)
+    monkeypatch.setattr(mod, "upsert_imdb_series", MagicMock(return_value=[]))
+    monkeypatch.setattr(mod, "upsert_tmdb_series", MagicMock(return_value=[]))
 
     fake_db = object()
     candidates = [CandidateShow(imdb_id="tt1234567", tmdb_id=None, title="Existing Show")]
@@ -77,12 +65,12 @@ def test_show_importer_applies_show_meta_patches(monkeypatch):
     )
 
     assert result.created == 0
-    assert result.updated == 0
-    assert result.skipped == 1
+    # Show is updated via enrichment patches (show_update applied)
+    assert result.updated == 1
+    assert result.skipped == 0
 
-    update_mock.assert_called_once()
-    args, _kwargs = update_mock.call_args
-    assert args[1] == show_id
-    patch = args[2]
-    assert set(patch.keys()) == {"external_ids"}
-    assert "show_meta" in patch["external_ids"]
+    # update_show is called for the enrichment-based resolution flags update
+    update_mock.assert_called()
+    # Verify at least one call was for this show_id
+    call_show_ids = [str(call[0][1]) for call in update_mock.call_args_list]
+    assert str(show_id) in call_show_ids

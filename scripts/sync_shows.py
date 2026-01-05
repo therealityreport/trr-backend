@@ -13,16 +13,6 @@ from trr_backend.repositories.show_images import upsert_show_images
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 
 
-def _merge_external_ids(existing: dict[str, object], updates: dict[str, object]) -> dict[str, object]:
-    merged = dict(existing)
-    for key, value in updates.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = {**merged[key], **value}
-        else:
-            merged[key] = value
-    return merged
-
-
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sync_shows",
@@ -30,6 +20,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     add_show_filter_args(parser)
     return parser.parse_args(argv)
+
+
+def _extract_imdb_id(row: dict[str, object]) -> str | None:
+    """Extract IMDb ID, supporting both old and new column names."""
+    for key in ("imdb_id", "imdb_series_id"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _extract_tmdb_id(row: dict[str, object]) -> int | None:
+    """Extract TMDb ID, supporting both old and new column names."""
+    for key in ("tmdb_id", "tmdb_series_id"):
+        value = row.get(key)
+        if isinstance(value, int):
+            return value
+    return None
 
 
 def _build_show_records(show_rows: list[dict[str, object]]) -> list[ShowRecord]:
@@ -40,17 +48,14 @@ def _build_show_records(show_rows: list[dict[str, object]]) -> list[ShowRecord]:
             show_uuid = UUID(str(show_id))
         except Exception:
             continue
-        external_ids = row.get("external_ids")
-        external_ids_map = external_ids if isinstance(external_ids, dict) else {}
         records.append(
             ShowRecord(
                 id=show_uuid,
                 name=str(row.get("name") or ""),
                 description=row.get("description") if isinstance(row.get("description"), str) else None,
                 premiere_date=row.get("premiere_date") if isinstance(row.get("premiere_date"), str) else None,
-                external_ids=external_ids_map,
-                imdb_series_id=row.get("imdb_series_id") if isinstance(row.get("imdb_series_id"), str) else None,
-                tmdb_series_id=row.get("tmdb_series_id") if isinstance(row.get("tmdb_series_id"), int) else None,
+                imdb_id=_extract_imdb_id(row),
+                tmdb_id=_extract_tmdb_id(row),
             )
         )
     return records
@@ -88,13 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         row = show_by_id.get(str(patch.show_id))
         if row is None:
             continue
-        existing_external_ids = row.get("external_ids")
-        existing_external_ids_map = existing_external_ids if isinstance(existing_external_ids, dict) else {}
-        merged_external_ids = _merge_external_ids(existing_external_ids_map, patch.external_ids_update)
 
         update_patch: dict[str, object] = {}
-        if merged_external_ids != existing_external_ids_map:
-            update_patch["external_ids"] = merged_external_ids
         for key, value in (patch.show_update or {}).items():
             if row.get(key) != value:
                 update_patch[key] = value

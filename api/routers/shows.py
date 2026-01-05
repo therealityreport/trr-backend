@@ -213,37 +213,17 @@ def list_episodes(
 def list_show_cast(
     db: SupabaseClient,
     show_id: UUID,
-    season_number: int | None = Query(default=None),
     limit: int = Query(default=50, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict]:
     """
     List cast members for a show.
-    Optionally filter by season number.
     """
-    query = (
+    response = (
         db.schema("core")
-        .table("cast_memberships")
+        .table("show_cast")
         .select("*, person:people(*)")
         .eq("show_id", str(show_id))
-    )
-
-    if season_number is not None:
-        # Get season ID first
-        season_response = (
-            db.schema("core")
-            .table("seasons")
-            .select("id")
-            .eq("show_id", str(show_id))
-            .eq("season_number", season_number)
-            .single()
-            .execute()
-        )
-        season = require_single_result(season_response, "Season")
-        query = query.eq("season_id", season["id"])
-
-    response = (
-        query
         .order("billing_order", nullsfirst=False)
         .range(offset, offset + limit - 1)
         .execute()

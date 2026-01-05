@@ -1,12 +1,48 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Iterable, Mapping
 
 from supabase import Client
 
+from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
+
 
 class ShowImageRepositoryError(RuntimeError):
     pass
+
+
+# PGRST204 retry configuration
+_PGRST204_MAX_RETRIES = 1
+_PGRST204_RETRY_DELAY = 0.5
+
+
+def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> bool:
+    """
+    Handle PGRST204 schema cache errors with retry.
+
+    Returns True if retry should be attempted, False otherwise.
+    Raises the exception with a helpful hint if retries are exhausted.
+    """
+    if not is_pgrst204_error(exc):
+        return False
+
+    if attempt >= _PGRST204_MAX_RETRIES:
+        hint = (
+            f"\n\nPostgREST schema cache may still be stale after retry during {context}. "
+            "Wait 30-60s and try again, or run:\n"
+            "  psql \"$SUPABASE_DB_URL\" -f scripts/db/reload_postgrest_schema.sql"
+        )
+        raise ShowImageRepositoryError(f"{exc}{hint}") from exc
+
+    # Trigger schema reload and retry
+    try:
+        reload_postgrest_schema()
+    except Exception:
+        pass  # Best effort - continue with retry anyway
+
+    time.sleep(_PGRST204_RETRY_DELAY)
+    return True
 
 
 def assert_core_show_images_table_exists(db: Client) -> None:
@@ -86,27 +122,160 @@ def assert_core_show_images_table_exists(db: Client) -> None:
 def upsert_show_images(
     db: Client,
     rows: Iterable[Mapping[str, Any]],
-    *,
-    on_conflict: str = "show_id,source,source_image_id",
 ) -> list[dict[str, Any]]:
     payload = [dict(r) for r in rows]
     if not payload:
         return []
-    response = db.schema("core").table("show_images").upsert(payload, on_conflict=on_conflict).execute()
+    tmdb_rows = [row for row in payload if row.get("source") == "tmdb" and row.get("tmdb_id") is not None]
+    other_rows = [row for row in payload if row not in tmdb_rows]
+
+    results: list[dict[str, Any]] = []
+
+    if other_rows:
+        for attempt in range(_PGRST204_MAX_RETRIES + 1):
+            try:
+                response = db.schema("core").rpc("upsert_show_images_by_identity", {"rows": other_rows}).execute()
+                break
+            except Exception as exc:
+                if _handle_pgrst204_with_retry(exc, attempt, "upserting show images (identity)"):
+                    continue
+                raise ShowImageRepositoryError(
+                    f"Supabase error upserting show images (identity constraint): {exc}"
+                ) from exc
+        if hasattr(response, "error") and response.error:
+            raise ShowImageRepositoryError(
+                f"Supabase error upserting show images (identity constraint): {response.error}"
+            )
+        data = response.data or []
+        if isinstance(data, list):
+            results.extend(data)
+
+    if tmdb_rows:
+        for attempt in range(_PGRST204_MAX_RETRIES + 1):
+            try:
+                response = db.schema("core").rpc("upsert_tmdb_show_images_by_identity", {"rows": tmdb_rows}).execute()
+                break
+            except Exception as exc:
+                if _handle_pgrst204_with_retry(exc, attempt, "upserting show images (tmdb)"):
+                    continue
+                raise ShowImageRepositoryError(
+                    f"Supabase error upserting show images (tmdb constraint): {exc}"
+                ) from exc
+        if hasattr(response, "error") and response.error:
+            raise ShowImageRepositoryError(
+                f"Supabase error upserting show images (tmdb constraint): {response.error}"
+            )
+        data = response.data or []
+        if isinstance(data, list):
+            results.extend(data)
+
+    return results
+
+
+def delete_tmdb_show_images(db: Client, *, tmdb_id: int) -> None:
+    for attempt in range(_PGRST204_MAX_RETRIES + 1):
+        try:
+            response = (
+                db.schema("core")
+                .table("show_images")
+                .delete()
+                .eq("source", "tmdb")
+                .eq("tmdb_id", str(int(tmdb_id)))
+                .execute()
+            )
+            break
+        except Exception as exc:
+            if _handle_pgrst204_with_retry(exc, attempt, "deleting tmdb show images"):
+                continue
+            raise ShowImageRepositoryError(f"Supabase error deleting TMDb show images: {exc}") from exc
     if hasattr(response, "error") and response.error:
-        raise ShowImageRepositoryError(f"Supabase error upserting show images: {response.error}")
+        raise ShowImageRepositoryError(f"Supabase error deleting TMDb show images: {response.error}")
+
+
+def fetch_show_images_missing_hosted(
+    db: Client,
+    *,
+    source: str | None = None,
+    show_id: str | None = None,
+    imdb_id: str | None = None,
+    tmdb_id: int | None = None,
+    kind: str | None = None,
+    limit: int = 200,
+    include_hosted: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    Fetch show images that are missing hosted URLs (for S3 mirroring).
+
+    Joins with shows table to get show metadata for S3 path building.
+    """
+    query = db.schema("core").table("show_images").select(
+        "id,show_id,source,source_image_id,kind,file_path,url,url_path,"
+        "width,height,caption,position,image_type,tmdb_id,"
+        "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
+        "shows:show_id(title,imdb_id,tmdb_id)"
+    )
+
+    if source and source != "all":
+        query = query.eq("source", source)
+    if show_id:
+        query = query.eq("show_id", show_id)
+    if imdb_id:
+        # Filter via the joined shows table
+        query = query.eq("shows.imdb_id", imdb_id)
+    if tmdb_id is not None:
+        query = query.eq("tmdb_id", int(tmdb_id))
+    if kind:
+        query = query.eq("kind", kind)
+    if not include_hosted:
+        query = query.is_("hosted_url", "null")
+    if limit is not None:
+        query = query.limit(max(0, int(limit)))
+
+    for attempt in range(_PGRST204_MAX_RETRIES + 1):
+        try:
+            response = query.execute()
+            break
+        except Exception as exc:
+            if _handle_pgrst204_with_retry(exc, attempt, "fetching show images missing hosted"):
+                continue
+            raise ShowImageRepositoryError(f"Supabase error fetching show images: {exc}") from exc
+
+    if hasattr(response, "error") and response.error:
+        raise ShowImageRepositoryError(f"Supabase error fetching show images: {response.error}")
     data = response.data or []
     return data if isinstance(data, list) else []
 
 
-def delete_tmdb_show_images(db: Client, *, tmdb_id: int) -> None:
-    response = (
-        db.schema("core")
-        .table("show_images")
-        .delete()
-        .eq("source", "tmdb")
-        .eq("tmdb_id", str(int(tmdb_id)))
-        .execute()
-    )
+def update_show_image_hosted_fields(
+    db: Client,
+    image_id: str,
+    patch: Mapping[str, Any],
+) -> dict[str, Any]:
+    """
+    Update hosted fields for a single show image after S3 upload.
+    """
+    payload = {k: v for k, v in dict(patch).items() if v is not None}
+    if not payload:
+        raise ShowImageRepositoryError("Hosted fields update payload is empty.")
+
+    for attempt in range(_PGRST204_MAX_RETRIES + 1):
+        try:
+            response = (
+                db.schema("core")
+                .table("show_images")
+                .update(payload)
+                .eq("id", str(image_id))
+                .execute()
+            )
+            break
+        except Exception as exc:
+            if _handle_pgrst204_with_retry(exc, attempt, "updating show image hosted fields"):
+                continue
+            raise ShowImageRepositoryError(f"Supabase error updating show image hosted fields: {exc}") from exc
+
     if hasattr(response, "error") and response.error:
-        raise ShowImageRepositoryError(f"Supabase error deleting TMDb show images: {response.error}")
+        raise ShowImageRepositoryError(f"Supabase error updating show image hosted fields: {response.error}")
+    data = response.data or []
+    if isinstance(data, list) and data:
+        return data[0]
+    raise ShowImageRepositoryError("Supabase show image update returned no data.")
