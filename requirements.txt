@@ -16,6 +16,9 @@ firebase-admin>=6.5.0
 # Postgres/core schema helpers (used by sync + schema docs)
 psycopg2-binary>=2.9.9
 
+# Media mirroring
+boto3>=1.35.0
+
 # API server
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0

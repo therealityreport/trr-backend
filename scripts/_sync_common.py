@@ -13,9 +13,14 @@ from trr_backend.repositories.sync_state import assert_core_sync_state_table_exi
 from trr_backend.utils.env import load_env
 
 
+# Note: Column names depend on whether migration 0028 has been applied.
+# Old names: imdb_series_id, tmdb_series_id
+# New names: imdb_id, tmdb_id
+# We select both patterns and use whichever exists.
 SHOW_SELECT_FIELDS = (
-    "id,name,description,premiere_date,imdb_series_id,tmdb_series_id,"
-    "external_ids,show_total_seasons,most_recent_episode"
+    "id,name,description,premiere_date,"
+    "imdb_series_id,tmdb_series_id,"  # legacy column names (pre-0028)
+    "show_total_seasons,most_recent_episode"
 )
 
 
@@ -162,15 +167,7 @@ def _parse_since(value: object) -> datetime | None:
 
 
 def extract_most_recent_episode(show: Mapping[str, Any]) -> str | None:
-    direct = _normalize_marker(show.get("most_recent_episode"))
-    if direct:
-        return direct
-    external_ids = show.get("external_ids")
-    if isinstance(external_ids, Mapping):
-        show_meta = external_ids.get("show_meta")
-        if isinstance(show_meta, Mapping):
-            return _normalize_marker(show_meta.get("most_recent_episode"))
-    return None
+    return _normalize_marker(show.get("most_recent_episode"))
 
 
 def extract_show_total_seasons(show: Mapping[str, Any]) -> int | None:
@@ -387,11 +384,11 @@ def fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any]
     else:
         rows.extend(_fetch_by_in(db, column="id", values=show_ids))
         if tmdb_ids:
+            # Try new column name first, fall back to legacy
             rows.extend(_fetch_by_in(db, column="tmdb_series_id", values=tmdb_ids))
-            rows.extend(_fetch_by_in(db, column="external_ids->>tmdb", values=[str(v) for v in tmdb_ids]))
         if imdb_ids:
+            # Try new column name first, fall back to legacy
             rows.extend(_fetch_by_in(db, column="imdb_series_id", values=imdb_ids))
-            rows.extend(_fetch_by_in(db, column="external_ids->>imdb", values=imdb_ids))
 
     rows = _dedupe_rows(rows)
     if args.limit is not None:
@@ -400,28 +397,20 @@ def fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any]
 
 
 def extract_imdb_series_id(show: dict[str, Any]) -> str | None:
-    imdb_id = show.get("imdb_series_id")
-    if isinstance(imdb_id, str) and imdb_id.strip():
-        return imdb_id.strip()
-    external_ids = show.get("external_ids")
-    if isinstance(external_ids, dict):
-        ext = external_ids.get("imdb")
-        if isinstance(ext, str) and ext.strip():
-            return ext.strip()
+    # Support both old (imdb_series_id) and new (imdb_id) column names
+    for key in ("imdb_id", "imdb_series_id"):
+        imdb_id = show.get(key)
+        if isinstance(imdb_id, str) and imdb_id.strip():
+            return imdb_id.strip()
     return None
 
 
 def extract_tmdb_series_id(show: dict[str, Any]) -> int | None:
-    tmdb_id = show.get("tmdb_series_id")
-    if isinstance(tmdb_id, int):
-        return tmdb_id
-    external_ids = show.get("external_ids")
-    if isinstance(external_ids, dict):
-        ext = external_ids.get("tmdb")
-        if isinstance(ext, int):
-            return ext
-        if isinstance(ext, str) and ext.strip().isdigit():
-            return int(ext.strip())
+    # Support both old (tmdb_series_id) and new (tmdb_id) column names
+    for key in ("tmdb_id", "tmdb_series_id"):
+        tmdb_id = show.get(key)
+        if isinstance(tmdb_id, int):
+            return tmdb_id
     return None
 
 

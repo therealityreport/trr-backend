@@ -75,6 +75,15 @@ def assert_core_show_cast_table_exists(db: Client) -> None:
     raise ShowCastRepositoryError(f"Supabase error during core.show_cast preflight: {combined}")
 
 
+def delete_show_cast_for_show(db: Client, show_id: str) -> int:
+    """Delete all show_cast rows for a given show."""
+    response = db.schema("core").table("show_cast").delete().eq("show_id", show_id).execute()
+    if hasattr(response, "error") and response.error:
+        raise ShowCastRepositoryError(f"Supabase error deleting show_cast rows: {response.error}")
+    data = response.data or []
+    return len(data) if isinstance(data, list) else 0
+
+
 def upsert_show_cast(
     db: Client,
     rows: Iterable[Mapping[str, Any]],

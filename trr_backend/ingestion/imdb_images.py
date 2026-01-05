@@ -144,55 +144,78 @@ def fetch_imdb_mediaindex_html(imdb_id: str) -> str | None:
 _SRCSET_DESC_RE = re.compile(r"^\d+(?:\.\d+)?[wx]$")
 
 
+def _split_srcset(srcset: str) -> list[str]:
+    raw = srcset or ""
+    parts: list[str] = []
+    buf: list[str] = []
+    i = 0
+    length = len(raw)
+    while i < length:
+        ch = raw[i]
+        if ch == ",":
+            j = i + 1
+            while j < length and raw[j].isspace():
+                j += 1
+            lookahead = raw[j : j + 8].lower()
+            if lookahead.startswith("http://") or lookahead.startswith("https://") or lookahead.startswith("//"):
+                part = "".join(buf).strip()
+                if part:
+                    parts.append(part)
+                buf = []
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def _parse_srcset(srcset: str) -> list[tuple[str, str | None]]:
     candidates: list[tuple[str, str | None]] = []
-    tokens = (srcset or "").replace("\n", " ").split()
-    i = 0
-    while i < len(tokens):
-        token = tokens[i].strip()
-        if not token:
-            i += 1
+    for part in _split_srcset(srcset):
+        tokens = part.replace("\n", " ").split()
+        if not tokens:
             continue
-        url = token.rstrip(",")
+        url = tokens[0].strip().rstrip(",")
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("//")):
-            i += 1
             continue
         descriptor: str | None = None
-        if i + 1 < len(tokens):
-            candidate = tokens[i + 1].rstrip(",")
+        if len(tokens) > 1:
+            candidate = tokens[1].strip().rstrip(",")
             if _SRCSET_DESC_RE.match(candidate):
                 descriptor = candidate
-                i += 1
         candidates.append((url, descriptor))
-        i += 1
     return candidates
+
+
+def _candidate_width(url: str, descriptor: str | None) -> int:
+    url_score = _image_quality_score(url)
+    if descriptor:
+        if descriptor.endswith("w"):
+            try:
+                return int(descriptor[:-1])
+            except ValueError:
+                return url_score
+        if descriptor.endswith("x"):
+            try:
+                scale = float(descriptor[:-1])
+            except ValueError:
+                scale = 0.0
+            return url_score or int(scale * 1000)
+    return url_score
 
 
 def _pick_best_url(srcset: str | None, src: str | None) -> str | None:
     candidates = _parse_srcset(srcset or "")
     if candidates:
-        two_x = [url for url, desc in candidates if desc and desc.endswith("x") and desc.startswith("2")]
-        if two_x:
-            return two_x[0]
-        scaled = []
+        scored: list[tuple[int, str]] = []
         for url, desc in candidates:
-            if desc and desc.endswith("x"):
-                try:
-                    scaled.append((float(desc[:-1]), url))
-                except ValueError:
-                    continue
-        if scaled:
-            return max(scaled, key=lambda item: item[0])[1]
-        widths = []
-        for url, desc in candidates:
-            if desc and desc.endswith("w"):
-                try:
-                    widths.append((int(desc[:-1]), url))
-                except ValueError:
-                    continue
-        if widths:
-            return max(widths, key=lambda item: item[0])[1]
-        return candidates[-1][0]
+            scored.append((_candidate_width(url, desc), url))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        best = scored[0][1] if scored else None
+        return best or candidates[-1][0]
     return src or None
 
 
@@ -211,6 +234,10 @@ def _image_base_key(url: str) -> str:
     stem = filename.rsplit(".", 1)[0]
     if not stem:
         return url
+    if "._V" in stem:
+        return stem.split("._V", 1)[0]
+    if "._" in stem:
+        return stem.split("._", 1)[0]
     match = _BASE_ID_RE.match(stem) or _BASE_ID_FALLBACK_RE.match(stem)
     if match:
         return match.group("base")
@@ -242,7 +269,11 @@ def extract_imdb_image_urls(html: str, limit: int = 30) -> list[str]:
             continue
         if not picked.startswith(_MEDIA_AMAZON_PREFIX):
             continue
-        base_key = _image_base_key(picked)
+        base_source = _normalize_image_url(src) if isinstance(src, str) else None
+        if base_source and base_source.startswith(_MEDIA_AMAZON_PREFIX):
+            base_key = _image_base_key(base_source)
+        else:
+            base_key = _image_base_key(picked)
         score = _image_quality_score(picked)
         existing = best_by_base.get(base_key)
         if existing is None:
@@ -251,14 +282,18 @@ def extract_imdb_image_urls(html: str, limit: int = 30) -> list[str]:
         else:
             if score > existing[1]:
                 best_by_base[base_key] = (picked, score)
-        if len(urls) >= max(1, int(limit)):
-            break
+    limit = max(1, int(limit))
     for base_key in base_order:
         url = best_by_base[base_key][0]
         urls.append(url)
-        if len(urls) >= max(1, int(limit)):
+        if len(urls) >= limit:
             break
     return urls
+
+
+def extract_imdb_image_width(url: str) -> int | None:
+    score = _image_quality_score(url)
+    return score or None
 
 
 def _iter_chunks(resp: Iterable[bytes]) -> Iterable[bytes]:
