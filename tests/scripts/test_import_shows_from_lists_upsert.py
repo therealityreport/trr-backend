@@ -13,6 +13,8 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "upsert_imdb_series", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mod, "upsert_tmdb_series", lambda *args, **kwargs: [])
 
     insert_mock = MagicMock(return_value={"id": "00000000-0000-0000-0000-000000000001", "name": "New Show"})
     update_mock = MagicMock()
@@ -38,19 +40,20 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
     update_mock.assert_not_called()
 
 
-def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
+def test_upsert_candidates_updates_show_columns_without_clobber(monkeypatch):
+    """Test that upsert adds tmdb_id, premiere_date, listed_on without overwriting existing data."""
     from trr_backend.ingestion import show_importer as mod
 
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "upsert_imdb_series", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mod, "upsert_tmdb_series", lambda *args, **kwargs: [])
     existing = {
         "id": "00000000-0000-0000-0000-000000000002",
         "name": "Existing Show",
+        "imdb_id": "tt1111111",
+        "tmdb_id": None,
         "premiere_date": None,
-        "external_ids": {
-            "imdb": "tt1111111",
-            "import_sources": ["old-source"],
-            "tmdb_meta": {"origin_country": ["US"]},
-        },
+        "listed_on": ["old-source"],
     }
 
     fake_db = object()
@@ -58,7 +61,7 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "insert_show", MagicMock())
 
-    update_mock = MagicMock(return_value={**existing, "external_ids": {}})
+    update_mock = MagicMock(return_value={**existing, "tmdb_id": 123})
     monkeypatch.setattr(mod, "update_show", update_mock)
 
     candidates = [
@@ -76,7 +79,7 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     result = upsert_candidates_into_supabase(
         candidates,
         dry_run=False,
-        annotate_imdb_episodic=True,
+        annotate_imdb_episodic=False,
         tmdb_fetch_details=False,
         supabase_client=fake_db,
     )
@@ -88,16 +91,11 @@ def test_upsert_candidates_updates_external_ids_without_clobber(monkeypatch):
     args, kwargs = update_mock.call_args
     assert args[1] == existing["id"]
     patch = args[2]
-    assert set(patch.keys()) == {"external_ids", "premiere_date", "tmdb_series_id"}
-    assert patch["tmdb_series_id"] == 123
-
-    external_ids = patch["external_ids"]
-    assert external_ids["imdb"] == "tt1111111"
-    assert external_ids["tmdb"] == 123
-    assert set(external_ids["import_sources"]) == {"old-source", "imdb-list:ls1", "tmdb-list:8301263"}
-    assert external_ids["tmdb_meta"]["origin_country"] == ["US"]
-    assert external_ids["tmdb_meta"]["first_air_date"] == "2020-01-01"
-    assert external_ids["imdb_meta"]["rating"] == 6.6
-    assert external_ids["imdb_meta"]["vote_count"] == 1125
-    assert external_ids["imdb_episodic"]["supported"] is True
+    # New schema: tmdb_id, premiere_date, and listed_on are individual columns
+    assert "tmdb_id" in patch
+    assert patch["tmdb_id"] == 123
+    assert "premiere_date" in patch
     assert patch["premiere_date"] == "2020-01-01"
+    assert "listed_on" in patch
+    # listed_on should merge old-source with new sources
+    assert set(patch["listed_on"]) == {"imdb", "old-source", "tmdb"}

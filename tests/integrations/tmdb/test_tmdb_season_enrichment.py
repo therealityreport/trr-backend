@@ -24,6 +24,8 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
 
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "upsert_imdb_series", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mod, "upsert_tmdb_series", lambda *args, **kwargs: [])
 
     inserted_show_id = "00000000-0000-0000-0000-0000000000bb"
 
@@ -33,10 +35,14 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
             "name": show_upsert.name,
             "description": show_upsert.description,
             "premiere_date": show_upsert.premiere_date,
-            "tmdb_series_id": (
-                int(show_upsert.tmdb_series_id) if show_upsert.tmdb_series_id is not None else None
+            "imdb_id": show_upsert.imdb_id,
+            "tmdb_id": (
+                int(show_upsert.tmdb_id) if show_upsert.tmdb_id is not None else None
             ),
-            "external_ids": show_upsert.external_ids,
+            # Legacy external_ids format for tmdb_meta with seasons
+            "external_ids": {
+                "tmdb_meta": {"seasons": [{"season_number": 1}]},
+            },
         }
 
     monkeypatch.setattr(mod, "insert_show", _fake_insert_show)

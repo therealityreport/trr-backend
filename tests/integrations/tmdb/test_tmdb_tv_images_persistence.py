@@ -134,8 +134,8 @@ def test_show_images_read_path_uses_tmdb_id_not_show_id() -> None:
 
         def execute(self):
             if self.table_name == "shows":
-                # Show B has tmdb_series_id=222
-                return _Resp({"tmdb_series_id": 222})
+                # Show B has tmdb_id=222
+                return _Resp({"tmdb_id": 222})
             if self.table_name == "v_show_images":
                 tmdb_id = next((v for (k, v) in self.filters if k == "tmdb_id"), None)
                 assert tmdb_id == 222

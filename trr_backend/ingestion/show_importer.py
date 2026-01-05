@@ -1576,6 +1576,9 @@ def upsert_candidates_into_supabase(
                     if tmdb_id_int is None:
                         print(f"TMDb seasons: skipping show_id={show_id} (missing tmdb_series_id)", file=sys.stderr)
                     else:
+                        # Get external_ids from row (legacy) or use empty dict
+                        external_ids = row.get("external_ids")
+                        external_ids_map = external_ids if isinstance(external_ids, dict) else {}
                         tmdb_meta = external_ids_map.get("tmdb_meta")
                         tmdb_meta_map = tmdb_meta if isinstance(tmdb_meta, Mapping) else {}
                         raw_seasons = tmdb_meta_map.get("seasons")
