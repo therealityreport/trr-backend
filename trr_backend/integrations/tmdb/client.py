@@ -378,3 +378,108 @@ def fetch_tv_season_details(
     if cache is not None:
         cache[cache_key] = payload
     return payload
+
+
+def fetch_person_details(
+    person_id: int,
+    *,
+    language: str = "en-US",
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+    append_to_response: list[str] | None = None,
+    cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch a person details payload from TMDb.
+
+    Returns the full JSON object as returned by `/3/person/{id}`.
+
+    Callers may pass a per-run `cache` dict keyed by (person_id, language, append_tuple).
+    """
+
+    person_id_int = int(person_id)
+    append_parts = [p.strip() for p in (append_to_response or []) if isinstance(p, str) and p.strip()]
+    append_key = tuple(sorted(set(append_parts)))
+    cache_key = (person_id_int, str(language or "en-US"), append_key)
+
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/person/{person_id_int}"
+    params: dict[str, Any] = {"api_key": api_key, "language": language}
+    if append_key:
+        params["append_to_response"] = ",".join(append_key)
+    payload = _request_json(session, url, params=params)
+    if cache is not None:
+        cache[cache_key] = payload
+    return payload
+
+
+def fetch_person_images(
+    person_id: int,
+    *,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+    cache: dict[tuple[int], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch person images (profile photos) from TMDb.
+
+    Returns the full JSON object as returned by `/3/person/{id}/images`.
+    The response contains a `profiles` array with image metadata.
+
+    Callers may pass a per-run `cache` dict keyed by (person_id,).
+    """
+
+    person_id_int = int(person_id)
+    cache_key = (person_id_int,)
+
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/person/{person_id_int}/images"
+    payload = _request_json(session, url, params={"api_key": api_key})
+    if cache is not None:
+        cache[cache_key] = payload
+    return payload
+
+
+def fetch_person_external_ids(
+    person_id: int,
+    *,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+    cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
+    language: str = "en-US",
+    prefer_append: bool = False,
+) -> dict[str, Any]:
+    """
+    Fetch TMDb external IDs for a person (IMDb, Instagram, Twitter, etc.).
+
+    When `prefer_append=True`, this uses `/person/{id}?append_to_response=external_ids`
+    and extracts the appended payload (so it can share a cache with other person-details calls).
+    Otherwise it calls `/person/{id}/external_ids`.
+    """
+
+    if prefer_append:
+        payload = fetch_person_details(
+            person_id,
+            api_key=api_key,
+            session=session,
+            language=language,
+            append_to_response=["external_ids"],
+            cache=cache,
+        )
+        ext = payload.get("external_ids")
+        if isinstance(ext, Mapping):
+            return dict(ext)
+        raise TmdbClientError("TMDb response missing external_ids.")
+
+    api_key = _require_api_key(api_key)
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/person/{int(person_id)}/external_ids"
+    return _request_json(session, url, params={"api_key": api_key})

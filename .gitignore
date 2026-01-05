@@ -94,3 +94,10 @@ scripts/**/debug_html/
 # Local / generated
 .mcp.json
 out/
+
+# Secrets
+*.pem
+pk-*.pem
+
+# Local dumps
+backup_before_*.sql

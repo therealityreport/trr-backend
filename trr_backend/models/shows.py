@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Mapping
+from dataclasses import dataclass
+from datetime import date
 from uuid import UUID
 
 
@@ -10,51 +10,150 @@ class ShowRecord:
     """
     Canonical show record (maps to `core.shows`).
 
-    Note: external IDs and provider metadata live in `external_ids` (jsonb).
+    Note: core.shows is the canonical surface; vendor payloads live in source tables.
     """
 
     id: UUID
     name: str
     description: str | None = None
     premiere_date: str | None = None
-    external_ids: Mapping[str, Any] = field(default_factory=dict)
-    imdb_meta: Mapping[str, Any] = field(default_factory=dict)
+
+    # ID columns (renamed from imdb_series_id/tmdb_series_id)
+    imdb_id: str | None = None
+    tmdb_id: int | None = None
+    # Backward compatibility aliases
     imdb_series_id: str | None = None
     tmdb_series_id: int | None = None
 
-    @property
-    def imdb_id(self) -> str | None:
-        if isinstance(self.imdb_series_id, str) and self.imdb_series_id.strip():
-            return self.imdb_series_id.strip()
-        value = self.external_ids.get("imdb")
-        return value if isinstance(value, str) and value else None
+    # Show metadata
+    show_total_seasons: int | None = None
+    show_total_episodes: int | None = None
 
-    @property
-    def tmdb_id(self) -> int | None:
-        if isinstance(self.tmdb_series_id, int):
-            return self.tmdb_series_id
-        value = self.external_ids.get("tmdb")
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str):
-            try:
-                return int(value)
-            except ValueError:
-                return None
-        return None
+    # New typed columns for most_recent_episode
+    most_recent_episode: str | None = None  # Legacy text field
+    most_recent_episode_season: int | None = None
+    most_recent_episode_number: int | None = None
+    most_recent_episode_title: str | None = None
+    most_recent_episode_air_date: date | None = None
+    most_recent_episode_imdb_id: str | None = None
+
+    # Primary image FKs
+    primary_poster_image_id: UUID | None = None
+    primary_backdrop_image_id: UUID | None = None
+    primary_logo_image_id: UUID | None = None
+
+    # Resolution flags
+    needs_imdb_resolution: bool | None = None
+    needs_tmdb_resolution: bool | None = None
+
+    # Array columns for attributes
+    genres: list[str] | None = None
+    keywords: list[str] | None = None
+    tags: list[str] | None = None
+    networks: list[str] | None = None
+    streaming_providers: list[str] | None = None
+
+    # List provenance (values: 'imdb', 'tmdb')
+    listed_on: list[str] | None = None
+
+    # External IDs (from TMDb)
+    tvdb_id: int | None = None
+    tvrage_id: int | None = None
+    wikidata_id: str | None = None
+    facebook_id: str | None = None
+    instagram_id: str | None = None
+    twitter_id: str | None = None
 
 
 @dataclass(frozen=True)
 class ShowUpsert:
+    """Data for inserting/updating a show."""
+
     name: str
-    tmdb_series_id: int | None = None
-    imdb_series_id: str | None = None
-    network: str | None = None
-    streaming: str | None = None
+
+    # ID columns (use new names)
+    imdb_id: str | None = None
+    tmdb_id: int | None = None
+
+    # Core metadata
     show_total_seasons: int | None = None
     show_total_episodes: int | None = None
-    most_recent_episode: str | None = None
     premiere_date: str | None = None  # YYYY-MM-DD when available
     description: str | None = None
-    external_ids: dict[str, Any] = field(default_factory=dict)
-    imdb_meta: dict[str, Any] = field(default_factory=dict)
+    needs_imdb_resolution: bool | None = None
+
+    # Most recent episode (typed)
+    most_recent_episode: str | None = None  # Legacy text field (for backward compat)
+    most_recent_episode_season: int | None = None
+    most_recent_episode_number: int | None = None
+    most_recent_episode_title: str | None = None
+    most_recent_episode_air_date: str | None = None  # YYYY-MM-DD
+    most_recent_episode_imdb_id: str | None = None
+
+    # Resolution flags
+    needs_tmdb_resolution: bool | None = None
+
+    # Array columns for attributes
+    genres: list[str] | None = None
+    keywords: list[str] | None = None
+    tags: list[str] | None = None
+    networks: list[str] | None = None
+    streaming_providers: list[str] | None = None
+
+    # List provenance (values: 'imdb', 'tmdb')
+    listed_on: list[str] | None = None
+
+    # External IDs (from TMDb)
+    tvdb_id: int | None = None
+    tvrage_id: int | None = None
+    wikidata_id: str | None = None
+    facebook_id: str | None = None
+    instagram_id: str | None = None
+    twitter_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ImdbSeriesUpsert:
+    """Data for inserting/updating IMDb-specific series metadata."""
+
+    imdb_id: str
+    show_id: UUID
+    title: str | None = None
+    description: str | None = None
+    content_rating: str | None = None
+    rating_value: float | None = None
+    rating_count: int | None = None
+    date_published: str | None = None  # YYYY-MM-DD
+    end_year: int | None = None
+    total_seasons: int | None = None
+    total_episodes: int | None = None
+    runtime_minutes: int | None = None
+    trailer_url: str | None = None
+    poster_image_url: str | None = None
+    poster_image_caption: str | None = None
+    imdb_url: str | None = None
+
+
+@dataclass(frozen=True)
+class TmdbSeriesUpsert:
+    """Data for inserting/updating TMDb-specific series metadata."""
+
+    tmdb_id: int
+    show_id: UUID
+    name: str | None = None
+    original_name: str | None = None
+    overview: str | None = None
+    tagline: str | None = None
+    homepage: str | None = None
+    original_language: str | None = None
+    popularity: float | None = None
+    vote_average: float | None = None
+    vote_count: int | None = None
+    first_air_date: str | None = None  # YYYY-MM-DD
+    last_air_date: str | None = None  # YYYY-MM-DD
+    status: str | None = None
+    type: str | None = None
+    in_production: bool | None = None
+    adult: bool | None = None
+    number_of_seasons: int | None = None
+    number_of_episodes: int | None = None

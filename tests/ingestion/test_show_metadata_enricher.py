@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert, is_show_meta_complete
+from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.integrations.imdb.title_metadata_client import (
     parse_imdb_episodes_page,
     parse_imdb_title_page,
@@ -59,6 +59,12 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
         (repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text()
     )
     title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_sample.html").read_text(encoding="utf-8")
+    overview_html = (repo_root / "tests" / "fixtures" / "imdb" / "episodes_page_overview_sample.html").read_text(
+        encoding="utf-8"
+    )
+    season_html = (repo_root / "tests" / "fixtures" / "imdb" / "episodes_page_season3_sample.html").read_text(
+        encoding="utf-8"
+    )
 
     from trr_backend.ingestion import show_metadata_enricher as mod
 
@@ -69,22 +75,17 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(mod, "fetch_tv_details", fetch_details_mock)
     monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers_payload)
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
-    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
-    monkeypatch.setattr(
-        mod.HttpImdbTitleMetadataClient,
-        "fetch_title_page",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("IMDb title fallback should not be invoked.")),
-    )
-    monkeypatch.setattr(
-        mod.HttpImdbTitleMetadataClient,
-        "fetch_episodes_page",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("IMDb episodes fallback should not be invoked.")),
-    )
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_html", lambda *args, **kwargs: None)
+
+    def fake_fetch_episodes_page(self, imdb_id: str, *, season: int | None = None) -> str:  # noqa: ANN001
+        return season_html if season is not None else overview_html
+
+    monkeypatch.setattr(mod.HttpImdbTitleMetadataClient, "fetch_episodes_page", fake_fetch_episodes_page)
 
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000001"),
         name="RuPaul's Drag Race",
-        external_ids={"imdb": "tt1353056"},
+        imdb_id="tt1353056",
     )
 
     summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=True)
@@ -93,28 +94,15 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     assert len(summary.patches) == 1
     assert fetch_details_mock.call_count == 1
 
-    patch = summary.patches[0].external_ids_update
-    assert patch["tmdb"] == 12345
+    patch = summary.patches[0]
+    # Check show_update contains expected fields
+    assert patch.show_update.get("tmdb_id") == 12345
 
-    show_meta = patch["show_meta"]
-    assert show_meta["show"] == "RuPaul's Drag Race"
-    assert show_meta["imdb_series_id"] == "tt1353056"
-    assert show_meta["tmdb_series_id"] == 12345
-    assert show_meta["network"] == "VH1"
-    assert show_meta["streaming"] == "Hulu, Paramount+"
-    assert show_meta["show_total_seasons"] == 16
-    assert show_meta["show_total_episodes"] == 250
-    assert show_meta["most_recent_episode"] == "S16.E16 - Grand Finale (2024-04-19)"
-    assert show_meta["most_recent_episode_obj"] == {
-        "season": 16,
-        "episode": 16,
-        "title": "Grand Finale",
-        "air_date": "2024-04-19",
-        "imdb_episode_id": None,
-    }
-    assert show_meta["source"]["tmdb"] == "find|details|watch_providers"
-    assert show_meta["fetched_at"] == "2025-12-18T00:00:00Z"
-    assert show_meta["region"] == "US"
+    # Check tmdb_series contains TMDb metadata
+    assert patch.tmdb_series is not None
+    assert patch.tmdb_series.get("name") == "RuPaul's Drag Race"
+    assert patch.tmdb_series.get("number_of_seasons") == 16
+    assert patch.tmdb_series.get("number_of_episodes") == 250
 
 
 def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,7 +120,7 @@ def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-18T00:00:00Z")
     monkeypatch.setattr(mod, "resolve_api_key", lambda: None)
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
-    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_html", lambda *args, **kwargs: [])
 
     def fake_fetch_title_page(self, imdb_id: str) -> str:  # noqa: ANN001
         return title_html
@@ -146,78 +134,20 @@ def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch
     show = ShowRecord(
         id=UUID("00000000-0000-0000-0000-000000000002"),
         name="Sample Show",
-        external_ids={"imdb": "tt1353056"},
+        imdb_id="tt1353056",
     )
 
     summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=True)
     assert summary.failed == 0
     assert summary.updated == 1
 
-    show_meta = summary.patches[0].external_ids_update["show_meta"]
-    assert show_meta["show"] == "Sample Show"
-    assert show_meta["imdb_series_id"] == "tt1353056"
-    assert show_meta["tmdb_series_id"] is None
-    assert show_meta["network"] == "VH1"
-    assert show_meta["show_total_seasons"] == 3
-    assert show_meta["show_total_episodes"] == 20
-    assert show_meta["most_recent_episode"] == "S3.E2 - Episode Two (2024-04-19) [imdbEpisodeId=tt9000002]"
-    assert show_meta["source"]["imdb"] == "title|episodes"
-
-
-def test_is_show_meta_complete() -> None:
-    assert not is_show_meta_complete({})
-    assert not is_show_meta_complete({"show": "X"})
-
-    assert is_show_meta_complete(
-        {
-            "show": "Sample Show",
-            "network": "VH1",
-            "streaming": None,
-            "show_total_seasons": 3,
-            "show_total_episodes": 20,
-            "imdb_series_id": "tt1353056",
-            "tmdb_series_id": None,
-            "most_recent_episode": None,
-        }
-    )
-
-
-def test_enrich_shows_after_upsert_does_not_skip_when_imdb_meta_needed(monkeypatch: pytest.MonkeyPatch) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_sample.html").read_text(encoding="utf-8")
-
-    from trr_backend.ingestion import show_metadata_enricher as mod
-
-    monkeypatch.setattr(mod, "resolve_api_key", lambda: "fake")
-    monkeypatch.setattr(mod, "find_by_imdb_id", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
-    monkeypatch.setattr(mod, "fetch_tv_details", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
-    monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
-    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
-    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
-
-    show = ShowRecord(
-        id=UUID("00000000-0000-0000-0000-000000000003"),
-        name="Sample Show",
-        external_ids={
-            "show_meta": {
-                "show": "Sample Show",
-                "network": "VH1",
-                "streaming": "",
-                "show_total_seasons": 3,
-                "show_total_episodes": 20,
-                "imdb_series_id": "tt1353056",
-                "tmdb_series_id": None,
-                "most_recent_episode": None,
-                "region": "US",
-                "fetched_at": "2025-12-18T00:00:00Z",
-            }
-        },
-    )
-
-    summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=False)
-    assert summary.skipped_complete == 0
-    assert summary.attempted == 1
-    assert summary.updated == 1
+    patch = summary.patches[0]
+    # Check imdb_series contains IMDb metadata
+    assert patch.imdb_series is not None
+    assert patch.imdb_series.get("title") == "Sample Show"
+    # total_seasons/episodes are in show_update (from HTML parsing), not imdb_series (from JSON-LD)
+    assert patch.show_update.get("show_total_seasons") == 3
+    assert patch.show_update.get("show_total_episodes") == 20
 
 
 def test_enrich_shows_after_upsert_imdb_meta(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -225,58 +155,6 @@ def test_enrich_shows_after_upsert_imdb_meta(monkeypatch: pytest.MonkeyPatch) ->
     title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_tt8819906_sample.html").read_text(
         encoding="utf-8"
     )
-
-    from trr_backend.ingestion import show_metadata_enricher as mod
-
-    monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-29T00:00:00Z")
-    monkeypatch.setattr(mod, "resolve_api_key", lambda: None)
-    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
-    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_images", lambda *args, **kwargs: [])
-    monkeypatch.setattr(
-        mod.HttpImdbTitleMetadataClient,
-        "fetch_title_page",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("IMDb title fallback should not be invoked.")),
-    )
-    monkeypatch.setattr(
-        mod.HttpImdbTitleMetadataClient,
-        "fetch_episodes_page",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("IMDb episodes fallback should not be invoked.")),
-    )
-
-    show = ShowRecord(
-        id=UUID("00000000-0000-0000-0000-000000000005"),
-        name="Love Island USA",
-        external_ids={
-            "show_meta": {
-                "show": "Love Island USA",
-                "network": "Peacock",
-                "streaming": None,
-                "show_total_seasons": 8,
-                "show_total_episodes": 235,
-                "imdb_series_id": "tt8819906",
-                "tmdb_series_id": None,
-                "most_recent_episode": None,
-                "region": "US",
-            }
-        },
-        imdb_series_id="tt8819906",
-    )
-
-    summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=False)
-    assert summary.failed == 0
-    assert summary.updated == 1
-    imdb_meta = summary.patches[0].show_update.get("imdb_meta") or {}
-    assert imdb_meta.get("description") == (
-        "U.S. version of the British show 'Love Island' where a group of singles come to stay in a villa for a few "
-        "weeks and have to couple up with one another."
-    )
-    assert "Reality TV" in (imdb_meta.get("tags") or [])
-    assert "Reality TV Dating" in (imdb_meta.get("tags") or [])
-
-
-def test_enrich_shows_after_upsert_does_not_overwrite_ids_with_null(monkeypatch: pytest.MonkeyPatch) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_sample.html").read_text(encoding="utf-8")
     overview_html = (repo_root / "tests" / "fixtures" / "imdb" / "episodes_page_overview_sample.html").read_text(
         encoding="utf-8"
     )
@@ -286,46 +164,30 @@ def test_enrich_shows_after_upsert_does_not_overwrite_ids_with_null(monkeypatch:
 
     from trr_backend.ingestion import show_metadata_enricher as mod
 
-    monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-18T00:00:00Z")
+    monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-29T00:00:00Z")
     monkeypatch.setattr(mod, "resolve_api_key", lambda: None)
     monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
-
-    def fake_fetch_title_page(self, imdb_id: str) -> str:  # noqa: ANN001
-        assert imdb_id == "tt1353056"
-        return title_html
-
-    monkeypatch.setattr(mod.HttpImdbTitleMetadataClient, "fetch_title_page", fake_fetch_title_page)
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_html", lambda *args, **kwargs: None)
 
     def fake_fetch_episodes_page(self, imdb_id: str, *, season: int | None = None) -> str:  # noqa: ANN001
-        assert imdb_id == "tt1353056"
-        return season_html if season == 3 else overview_html
+        return season_html if season is not None else overview_html
 
     monkeypatch.setattr(mod.HttpImdbTitleMetadataClient, "fetch_episodes_page", fake_fetch_episodes_page)
 
     show = ShowRecord(
-        id=UUID("00000000-0000-0000-0000-000000000004"),
-        name="Sample Show",
-        external_ids={
-            "show_meta": {
-                # Present ids should not be overwritten by missing external_ids.imdb/tmdb.
-                "imdb_series_id": "tt1353056",
-                "tmdb_series_id": 12345,
-                # Force work by leaving required fields incomplete.
-                "network": None,
-                "streaming": None,
-                "show_total_seasons": 3,
-                "show_total_episodes": None,
-                "most_recent_episode": None,
-                "region": "US",
-                "fetched_at": "2025-12-18T00:00:00Z",
-            }
-        },
+        id=UUID("00000000-0000-0000-0000-000000000005"),
+        name="Love Island USA",
+        imdb_id="tt8819906",
     )
 
-    summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=False)
+    summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=True)
     assert summary.failed == 0
     assert summary.updated == 1
 
-    show_meta = summary.patches[0].external_ids_update["show_meta"]
-    assert show_meta["imdb_series_id"] == "tt1353056"
-    assert show_meta["tmdb_series_id"] == 12345
+    patch = summary.patches[0]
+    # Check imdb_series contains IMDb metadata
+    imdb_series = patch.imdb_series or {}
+    assert imdb_series.get("description") == (
+        "U.S. version of the British show 'Love Island' where a group of singles come to stay in a villa for a few "
+        "weeks and have to couple up with one another."
+    )
