@@ -251,12 +251,14 @@ def _mirror_person_photos(
     Returns:
         Tuple of (mirrored_count, failed_count)
     """
-    from trr_backend.media.s3_mirror import mirror_cast_photo_row
+    from trr_backend.media.s3_mirror import get_cdn_base_url, mirror_cast_photo_row
 
+    cdn_base_url = None if force else get_cdn_base_url()
     rows = fetch_cast_photos_missing_hosted(
         db,
         person_ids=[person_id],
-        include_hosted=force,
+        include_hosted=True,
+        cdn_base_url=cdn_base_url,
     )
 
     if not rows:

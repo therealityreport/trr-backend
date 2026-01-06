@@ -41,8 +41,6 @@ from trr_backend.models.shows import ShowRecord
 class ShowEnrichmentPatch:
     show_id: UUID
     show_update: dict[str, Any] = field(default_factory=dict)
-    imdb_series: dict[str, Any] | None = None
-    tmdb_series: dict[str, Any] | None = None
     # tmdb_external_ids removed - now written directly to show_update
     # Flat array columns (merged from all sources)
     genres: list[str] | None = None
@@ -50,6 +48,8 @@ class ShowEnrichmentPatch:
     tags: list[str] | None = None
     networks: list[str] | None = None
     streaming_providers: list[str] | None = None
+    tmdb_network_ids: list[int] | None = None
+    tmdb_production_company_ids: list[int] | None = None
     show_images_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -137,6 +137,20 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
+def _as_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+    return None
+
+
 def _as_str(value: Any) -> str | None:
     if isinstance(value, str):
         s = value.strip()
@@ -213,6 +227,20 @@ def _extract_tmdb_network_rows(details: Mapping[str, Any]) -> list[dict[str, Any
     return rows
 
 
+def _extract_tmdb_production_company_ids(details: Mapping[str, Any]) -> list[int]:
+    companies = details.get("production_companies")
+    if not isinstance(companies, list):
+        return []
+    out: list[int] = []
+    for item in companies:
+        if not isinstance(item, dict):
+            continue
+        company_id = _as_int(item.get("id"))
+        if company_id is not None:
+            out.append(company_id)
+    return out
+
+
 def _extract_tmdb_genres(details: Mapping[str, Any]) -> list[str]:
     genres = details.get("genres")
     if not isinstance(genres, list):
@@ -258,57 +286,81 @@ def _extract_tmdb_watch_providers(payload: Mapping[str, Any], *, region: str) ->
     return providers
 
 
-def _build_imdb_series_upsert(parsed: Mapping[str, Any], *, imdb_id: str, show_id: UUID, fetched_at: str) -> dict[str, Any]:
-    aggregate_value = parsed.get("aggregate_rating_value")
-    aggregate_count = parsed.get("aggregate_rating_count")
-    trailer = parsed.get("trailer")
-    trailer_url = None
-    if isinstance(trailer, Mapping):
-        trailer_url = _as_str(trailer.get("url")) or _as_str(trailer.get("embed_url"))
-
-    return {
-        "imdb_id": imdb_id,
-        "show_id": str(show_id),
-        "title": parsed.get("title"),
-        "description": parsed.get("description"),
-        "content_rating": parsed.get("content_rating"),
-        "rating_value": aggregate_value,
-        "rating_count": aggregate_count,
-        "date_published": parsed.get("date_published"),
-        "total_seasons": parsed.get("total_seasons"),
-        "total_episodes": parsed.get("total_episodes"),
-        "runtime_minutes": parsed.get("runtime_minutes"),
-        "trailer_url": trailer_url,
-        "poster_image_url": parsed.get("poster_image_url"),
-        "poster_image_caption": None,
-        "imdb_url": parsed.get("imdb_url"),
-        "fetched_at": fetched_at,
+def _build_imdb_show_patch(parsed: Mapping[str, Any], *, fetched_at: str) -> dict[str, Any]:
+    patch: dict[str, Any] = {
+        "imdb_meta": dict(parsed),
+        "imdb_fetched_at": fetched_at,
     }
 
+    title = _as_str(parsed.get("title"))
+    if title:
+        patch["imdb_title"] = title
 
-def _build_tmdb_series_upsert(details: Mapping[str, Any], *, tmdb_id: int, show_id: UUID, fetched_at: str) -> dict[str, Any]:
-    return {
-        "tmdb_id": tmdb_id,
-        "show_id": str(show_id),
-        "name": details.get("name"),
-        "original_name": details.get("original_name"),
-        "overview": details.get("overview"),
-        "tagline": details.get("tagline"),
-        "homepage": details.get("homepage"),
-        "original_language": details.get("original_language"),
-        "popularity": details.get("popularity"),
-        "vote_average": details.get("vote_average"),
-        "vote_count": details.get("vote_count"),
-        "first_air_date": details.get("first_air_date"),
-        "last_air_date": details.get("last_air_date"),
-        "status": details.get("status"),
-        "type": details.get("type"),
-        "in_production": details.get("in_production"),
-        "adult": details.get("adult"),
-        "number_of_seasons": details.get("number_of_seasons"),
-        "number_of_episodes": details.get("number_of_episodes"),
-        "fetched_at": fetched_at,
+    content_rating = _as_str(parsed.get("content_rating"))
+    if content_rating:
+        patch["imdb_content_rating"] = content_rating
+
+    rating_value = _as_float(parsed.get("aggregate_rating_value"))
+    if rating_value is not None:
+        patch["imdb_rating_value"] = rating_value
+
+    rating_count = _as_int(parsed.get("aggregate_rating_count"))
+    if rating_count is not None:
+        patch["imdb_rating_count"] = rating_count
+
+    date_published = _as_str(parsed.get("date_published"))
+    if date_published:
+        patch["imdb_date_published"] = date_published
+
+    return patch
+
+
+def _tmdb_meta_from_tv_details(details: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(details, Mapping):
+        return {}
+    return dict(details)
+
+
+def _build_tmdb_show_patch(details: Mapping[str, Any], *, fetched_at: str) -> dict[str, Any]:
+    meta = _tmdb_meta_from_tv_details(details)
+    patch: dict[str, Any] = {
+        "tmdb_meta": meta,
+        "tmdb_fetched_at": fetched_at,
     }
+
+    tmdb_name = _as_str(details.get("name"))
+    if tmdb_name:
+        patch["tmdb_name"] = tmdb_name
+
+    tmdb_status = _as_str(details.get("status"))
+    if tmdb_status:
+        patch["tmdb_status"] = tmdb_status
+
+    tmdb_type = _as_str(details.get("type"))
+    if tmdb_type:
+        patch["tmdb_type"] = tmdb_type
+
+    first_air = _as_str(details.get("first_air_date"))
+    if first_air:
+        patch["tmdb_first_air_date"] = first_air
+
+    last_air = _as_str(details.get("last_air_date"))
+    if last_air:
+        patch["tmdb_last_air_date"] = last_air
+
+    vote_average = _as_float(details.get("vote_average"))
+    if vote_average is not None:
+        patch["tmdb_vote_average"] = vote_average
+
+    vote_count = _as_int(details.get("vote_count"))
+    if vote_count is not None:
+        patch["tmdb_vote_count"] = vote_count
+
+    popularity = _as_float(details.get("popularity"))
+    if popularity is not None:
+        patch["tmdb_popularity"] = popularity
+
+    return patch
 
 
 def _build_tmdb_external_ids(details: Mapping[str, Any], *, tmdb_id: int) -> dict[str, Any] | None:
@@ -350,8 +402,8 @@ def _enrich_one_show(
     tags: list[str] = []
     networks: list[str] = []
     streaming_providers: list[str] = []
-    imdb_series: dict[str, Any] | None = None
-    tmdb_series: dict[str, Any] | None = None
+    tmdb_network_ids: list[int] = []
+    tmdb_production_company_ids: list[int] = []
     show_images_rows: list[dict[str, Any]] = []
 
     imdb_id = _as_str(show.imdb_id)
@@ -389,7 +441,7 @@ def _enrich_one_show(
                 tmdb_details_cache[tmdb_id] = details
         tmdb_sources.append("details")
 
-        tmdb_series = _build_tmdb_series_upsert(details, tmdb_id=tmdb_id, show_id=show.id, fetched_at=fetched_at)
+        show_update.update(_build_tmdb_show_patch(details, fetched_at=fetched_at))
 
         # Extract external IDs and add to show_update
         ext_ids = _build_tmdb_external_ids(details, tmdb_id=tmdb_id)
@@ -408,6 +460,13 @@ def _enrich_one_show(
         network_rows = _extract_tmdb_network_rows(details)
         if network_rows:
             networks.extend([r["network"] for r in network_rows if r.get("network")])
+            tmdb_network_ids.extend(
+                [r["tmdb_network_id"] for r in network_rows if r.get("tmdb_network_id") is not None]
+            )
+
+        production_company_ids = _extract_tmdb_production_company_ids(details)
+        if production_company_ids:
+            tmdb_production_company_ids.extend(production_company_ids)
 
         if force_refresh or show.show_total_seasons is None:
             value = _as_int(details.get("number_of_seasons"))
@@ -472,7 +531,7 @@ def _enrich_one_show(
                 title_html = None
         if title_html:
             parsed = parse_imdb_title_html(title_html, imdb_id=imdb_id)
-            imdb_series = _build_imdb_series_upsert(parsed, imdb_id=imdb_id, show_id=show.id, fetched_at=fetched_at)
+            show_update.update(_build_imdb_show_patch(parsed, fetched_at=fetched_at))
             imdb_sources.append("title")
 
             if parsed.get("genres"):
@@ -588,13 +647,13 @@ def _enrich_one_show(
 
     if not (
         show_update
-        or imdb_series
-        or tmdb_series
         or genres
         or keywords
         or tags
         or networks
         or streaming_providers
+        or tmdb_network_ids
+        or tmdb_production_company_ids
         or show_images_rows
     ):
         return None
@@ -602,13 +661,13 @@ def _enrich_one_show(
     return ShowEnrichmentPatch(
         show_id=show.id,
         show_update=show_update,
-        imdb_series=imdb_series,
-        tmdb_series=tmdb_series,
         genres=genres,
         keywords=keywords,
         tags=tags,
         networks=networks,
         streaming_providers=streaming_providers,
+        tmdb_network_ids=sorted(set(tmdb_network_ids)) if tmdb_network_ids else None,
+        tmdb_production_company_ids=sorted(set(tmdb_production_company_ids)) if tmdb_production_company_ids else None,
         show_images_rows=show_images_rows,
     )
 
@@ -624,7 +683,7 @@ def enrich_shows_after_upsert(
     imdb_sleep_ms: int = 0,
 ) -> EnrichSummary:
     """
-    Build enrichment patches for core.shows + source tables + normalized child tables.
+    Build enrichment patches for core.shows + related tables (show_images).
 
     Network calls are performed here, but DB writes are performed by the caller.
     """

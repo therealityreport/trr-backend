@@ -67,12 +67,6 @@ from trr_backend.repositories.show_images import (
 )
 # Child table functions removed - data now written directly to core.shows array columns
 # from trr_backend.repositories.show_child_tables import (...)
-from trr_backend.repositories.imdb_series import upsert_imdb_series
-from trr_backend.repositories.tmdb_series import (
-    fetch_tmdb_series,
-    upsert_tmdb_series,
-    # upsert_tmdb_series_external_ids removed - external IDs now on core.shows
-)
 from trr_backend.repositories.show_cast import (
     assert_core_show_cast_table_exists,
     delete_show_cast_for_show,
@@ -122,6 +116,45 @@ def _dedupe_preserve_order(values: Sequence[str]) -> list[str]:
         out.append(value)
         seen.add(value)
     return out
+
+
+def _merge_str_arrays(existing: Sequence[Any] | None, incoming: Sequence[Any] | None) -> list[str] | None:
+    if not incoming:
+        return None
+    existing_values = [str(v).strip() for v in (existing or []) if isinstance(v, str) and str(v).strip()]
+    incoming_values = [str(v).strip() for v in incoming if isinstance(v, str) and str(v).strip()]
+    merged = sorted(set(existing_values) | set(incoming_values))
+    if not merged:
+        return None
+    if merged == sorted(existing_values):
+        return None
+    return merged
+
+
+def _merge_int_arrays(existing: Sequence[Any] | None, incoming: Sequence[Any] | None) -> list[int] | None:
+    if not incoming:
+        return None
+    existing_values = [_coerce_int(v) for v in (existing or [])]
+    incoming_values = [_coerce_int(v) for v in incoming]
+    merged = sorted({v for v in existing_values + incoming_values if v is not None})
+    if not merged:
+        return None
+    if merged == sorted({v for v in existing_values if v is not None}):
+        return None
+    return merged
+
+
+def _apply_patch_if_changed(
+    patch: dict[str, Any],
+    *,
+    existing: Mapping[str, Any],
+    updates: Mapping[str, Any],
+) -> None:
+    for key, value in updates.items():
+        if value is None:
+            continue
+        if existing.get(key) != value:
+            patch[key] = value
 
 
 def _coerce_str_list(value: Any) -> list[str]:
@@ -562,85 +595,140 @@ def _imdb_meta_from_list_item(item: ImdbListItem) -> dict[str, Any]:
     return meta
 
 
-def _extract_imdb_id_from_tmdb_meta(tmdb_meta: Mapping[str, Any] | None) -> str | None:
-    if not isinstance(tmdb_meta, Mapping):
-        return None
-    external_ids = tmdb_meta.get("external_ids")
-    if not isinstance(external_ids, Mapping):
-        return None
-    imdb_id = external_ids.get("imdb_id")
-    if isinstance(imdb_id, str) and imdb_id.strip():
-        return imdb_id.strip()
+def _merge_meta(existing: Mapping[str, Any] | None, incoming: Mapping[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(existing) if isinstance(existing, Mapping) else {}
+    for key, value in incoming.items():
+        if key not in merged or merged[key] is None:
+            merged[key] = value
+    return merged
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
     return None
 
 
-def _build_imdb_series_from_candidate(candidate: CandidateShow, *, show_id: str, fetched_at: str) -> dict[str, Any] | None:
-    if not candidate.imdb_id:
-        return None
-    meta = candidate.imdb_meta or {}
-    payload: dict[str, Any] = {
-        "imdb_id": candidate.imdb_id,
-        "show_id": show_id,
-        "title": meta.get("title") or candidate.title,
-        "fetched_at": fetched_at,
-    }
-    for key in (
-        "description",
-        "content_rating",
-        "rating_value",
-        "rating_count",
-        "date_published",
-        "end_year",
-        "total_seasons",
-        "total_episodes",
-        "runtime_minutes",
-        "trailer_url",
-        "poster_image_url",
-        "poster_image_caption",
-        "imdb_url",
-    ):
-        if key in meta:
-            payload[key] = meta.get(key)
-    cleaned: dict[str, Any] = {}
-    for key, value in payload.items():
-        if value is None and key not in {"imdb_id", "show_id", "fetched_at", "title"}:
-            continue
-        cleaned[key] = value
-    return cleaned
-
-
-def _tmdb_series_from_tv_details(
-    details: Mapping[str, Any],
+def _build_imdb_show_patch_from_meta(
+    meta: Mapping[str, Any],
     *,
-    show_id: str,
-    tmdb_id: int,
+    fallback_title: str | None,
     fetched_at: str,
 ) -> dict[str, Any]:
-    def value(key: str) -> Any:
-        return details.get(key)
+    patch: dict[str, Any] = {}
+    if not meta:
+        return patch
 
-    return {
-        "tmdb_id": int(tmdb_id),
-        "show_id": show_id,
-        "name": value("name"),
-        "original_name": value("original_name"),
-        "overview": value("overview"),
-        "tagline": value("tagline"),
-        "homepage": value("homepage"),
-        "original_language": value("original_language"),
-        "popularity": value("popularity"),
-        "vote_average": value("vote_average"),
-        "vote_count": value("vote_count"),
-        "first_air_date": value("first_air_date"),
-        "last_air_date": value("last_air_date"),
-        "status": value("status"),
-        "type": value("type"),
-        "in_production": value("in_production"),
-        "adult": value("adult"),
-        "number_of_seasons": value("number_of_seasons"),
-        "number_of_episodes": value("number_of_episodes"),
-        "fetched_at": fetched_at,
+    patch["imdb_meta"] = dict(meta)
+    patch["imdb_fetched_at"] = fetched_at
+
+    title = meta.get("title") or fallback_title
+    if isinstance(title, str) and title.strip():
+        patch["imdb_title"] = title.strip()
+
+    content_rating = meta.get("content_rating")
+    if isinstance(content_rating, str) and content_rating.strip():
+        patch["imdb_content_rating"] = content_rating.strip()
+
+    rating_value = _coerce_float(meta.get("rating_value") or meta.get("aggregate_rating_value"))
+    if rating_value is not None:
+        patch["imdb_rating_value"] = rating_value
+
+    rating_count = _coerce_int(meta.get("rating_count") or meta.get("aggregate_rating_count"))
+    if rating_count is not None:
+        patch["imdb_rating_count"] = rating_count
+
+    date_published = meta.get("date_published")
+    if isinstance(date_published, str) and date_published.strip():
+        patch["imdb_date_published"] = date_published.strip()
+
+    end_year = _coerce_int(meta.get("end_year"))
+    if end_year is not None:
+        patch["imdb_end_year"] = end_year
+
+    return patch
+
+
+def _extract_tmdb_networks(details: Mapping[str, Any]) -> tuple[list[str], list[int]]:
+    networks = details.get("networks")
+    if not isinstance(networks, list):
+        return [], []
+    names: list[str] = []
+    ids: list[int] = []
+    for item in networks:
+        if not isinstance(item, Mapping):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+        network_id = _coerce_int(item.get("id"))
+        if network_id is not None:
+            ids.append(network_id)
+    return names, ids
+
+
+def _extract_tmdb_production_company_ids(details: Mapping[str, Any]) -> list[int]:
+    companies = details.get("production_companies")
+    if not isinstance(companies, list):
+        return []
+    ids: list[int] = []
+    for item in companies:
+        if not isinstance(item, Mapping):
+            continue
+        company_id = _coerce_int(item.get("id"))
+        if company_id is not None:
+            ids.append(company_id)
+    return ids
+
+
+def _build_tmdb_show_patch(details: Mapping[str, Any], *, fetched_at: str) -> dict[str, Any]:
+    meta = _tmdb_meta_from_tv_details(details)
+    patch: dict[str, Any] = {
+        "tmdb_meta": meta,
+        "tmdb_fetched_at": fetched_at,
     }
+
+    name = details.get("name")
+    if isinstance(name, str) and name.strip():
+        patch["tmdb_name"] = name.strip()
+
+    status = details.get("status")
+    if isinstance(status, str) and status.strip():
+        patch["tmdb_status"] = status.strip()
+
+    series_type = details.get("type")
+    if isinstance(series_type, str) and series_type.strip():
+        patch["tmdb_type"] = series_type.strip()
+
+    first_air = details.get("first_air_date")
+    if isinstance(first_air, str) and first_air.strip():
+        patch["tmdb_first_air_date"] = first_air.strip()
+
+    last_air = details.get("last_air_date")
+    if isinstance(last_air, str) and last_air.strip():
+        patch["tmdb_last_air_date"] = last_air.strip()
+
+    vote_average = _coerce_float(details.get("vote_average"))
+    if vote_average is not None:
+        patch["tmdb_vote_average"] = vote_average
+
+    vote_count = _coerce_int(details.get("vote_count"))
+    if vote_count is not None:
+        patch["tmdb_vote_count"] = vote_count
+
+    popularity = _coerce_float(details.get("popularity"))
+    if popularity is not None:
+        patch["tmdb_popularity"] = popularity
+
+    return patch
 
 
 def _tmdb_external_ids_from_tv_details(details: Mapping[str, Any], *, tmdb_id: int) -> dict[str, Any] | None:
@@ -659,15 +747,15 @@ def _tmdb_external_ids_from_tv_details(details: Mapping[str, Any], *, tmdb_id: i
     }
 
 
-def _tmdb_series_is_fresh(
-    tmdb_series: Mapping[str, Any] | None,
+def _tmdb_details_is_fresh(
+    show_row: Mapping[str, Any] | None,
     *,
     max_age_days: int,
     now: datetime,
 ) -> bool:
-    if not isinstance(tmdb_series, Mapping):
+    if not isinstance(show_row, Mapping):
         return False
-    fetched_at_raw = tmdb_series.get("fetched_at")
+    fetched_at_raw = show_row.get("tmdb_fetched_at")
     fetched_at = _parse_iso8601_utc(fetched_at_raw)
     if fetched_at is None:
         return False
@@ -678,134 +766,9 @@ def _tmdb_series_is_fresh(
 
 
 def _tmdb_meta_from_tv_details(details: Mapping[str, Any]) -> dict[str, Any]:
-    meta: dict[str, Any] = {"_v": 1}
-
-    def copy_scalar(key: str) -> None:
-        value = details.get(key)
-        if value is None:
-            return
-        meta[key] = value
-
-    for key in (
-        "id",
-        "name",
-        "original_name",
-        "overview",
-        "first_air_date",
-        "last_air_date",
-        "in_production",
-        "status",
-        "type",
-        "tagline",
-        "homepage",
-        "original_language",
-        "origin_country",
-        "languages",
-        "episode_run_time",
-        "number_of_seasons",
-        "number_of_episodes",
-        "vote_average",
-        "vote_count",
-        "popularity",
-        "poster_path",
-        "backdrop_path",
-        "adult",
-    ):
-        copy_scalar(key)
-
-    def copy_list_of_dicts(key: str, allowed_keys: tuple[str, ...]) -> None:
-        raw = details.get(key)
-        if raw is None:
-            return
-        if not isinstance(raw, list):
-            return
-        out: list[dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, Mapping):
-                continue
-            filtered = {k: item.get(k) for k in allowed_keys if k in item}
-            out.append(filtered)
-        meta[key] = out
-
-    copy_list_of_dicts("genres", ("id", "name"))
-    copy_list_of_dicts("networks", ("id", "name", "logo_path", "origin_country"))
-    copy_list_of_dicts("created_by", ("id", "name", "gender", "profile_path", "credit_id"))
-    copy_list_of_dicts("production_companies", ("id", "name", "logo_path", "origin_country"))
-    copy_list_of_dicts("production_countries", ("iso_3166_1", "name"))
-    copy_list_of_dicts("spoken_languages", ("english_name", "iso_639_1", "name"))
-
-    seasons_raw = details.get("seasons")
-    if seasons_raw is not None and isinstance(seasons_raw, list):
-        seasons: list[dict[str, Any]] = []
-        for season in seasons_raw:
-            if not isinstance(season, Mapping):
-                continue
-            seasons.append(
-                {
-                    "id": season.get("id"),
-                    "season_number": season.get("season_number"),
-                    "name": season.get("name"),
-                    "air_date": season.get("air_date"),
-                    "episode_count": season.get("episode_count"),
-                    "overview": season.get("overview"),
-                    "poster_path": season.get("poster_path"),
-                    "vote_average": season.get("vote_average"),
-                }
-            )
-        meta["seasons"] = seasons
-
-    def copy_episode_obj(key: str) -> None:
-        raw = details.get(key)
-        if raw is None:
-            return
-        if not isinstance(raw, Mapping):
-            return
-        meta[key] = {
-            "id": raw.get("id"),
-            "name": raw.get("name"),
-            "air_date": raw.get("air_date"),
-            "season_number": raw.get("season_number"),
-            "episode_number": raw.get("episode_number"),
-            "overview": raw.get("overview"),
-            "vote_average": raw.get("vote_average"),
-            "vote_count": raw.get("vote_count"),
-            "still_path": raw.get("still_path"),
-        }
-
-    copy_episode_obj("last_episode_to_air")
-    copy_episode_obj("next_episode_to_air")
-
-    alt_raw = details.get("alternative_titles")
-    if isinstance(alt_raw, Mapping):
-        results = alt_raw.get("results")
-        if isinstance(results, list):
-            alt_titles: list[dict[str, Any]] = []
-            for item in results:
-                if not isinstance(item, Mapping):
-                    continue
-                alt_titles.append(
-                    {
-                        "iso_3166_1": item.get("iso_3166_1"),
-                        "title": item.get("title"),
-                        "type": item.get("type"),
-                    }
-                )
-            meta["alternative_titles"] = alt_titles
-
-    external_ids_raw = details.get("external_ids")
-    if isinstance(external_ids_raw, Mapping):
-        meta["external_ids"] = {
-            "imdb_id": external_ids_raw.get("imdb_id"),
-            "tvdb_id": external_ids_raw.get("tvdb_id"),
-            "wikidata_id": external_ids_raw.get("wikidata_id"),
-            "facebook_id": external_ids_raw.get("facebook_id"),
-            "instagram_id": external_ids_raw.get("instagram_id"),
-            "twitter_id": external_ids_raw.get("twitter_id"),
-            "tvrage_id": external_ids_raw.get("tvrage_id"),
-        }
-
-    # Certificate/rating is not part of the v3 TV details response. Leave it to IMDb/meta sources if needed.
-    return meta
+    if not isinstance(details, Mapping):
+        return {}
+    return dict(details)
 
 
 def _is_english_iso_639_1(value: Any) -> bool:
@@ -967,7 +930,7 @@ def _tmdb_meta_is_fresh(
     now: datetime,
 ) -> bool:
     """
-    Return True if an existing `external_ids["tmdb_meta"]` is usable without refetching.
+    Return True if an existing `core.shows.tmdb_meta` payload is usable without refetching.
     """
 
     meta_id = tmdb_meta.get("id")
@@ -1182,9 +1145,9 @@ def upsert_candidates_into_supabase(
             tmdb_details_processed += 1
             should_fetch = True
             if db is not None:
-                existing_tmdb_series = fetch_tmdb_series(db, tmdb_id=tmdb_id)
-                if _tmdb_series_is_fresh(
-                    existing_tmdb_series,
+                existing_tmdb_row = existing_by_tmdb or existing_by_imdb
+                if _tmdb_details_is_fresh(
+                    existing_tmdb_row,
                     max_age_days=int(tmdb_details_max_age_days or 0),
                     now=now,
                 ):
@@ -1245,6 +1208,15 @@ def upsert_candidates_into_supabase(
                         file=sys.stderr,
                     )
 
+        tmdb_show_patch: dict[str, Any] = {}
+        tmdb_network_names: list[str] = []
+        tmdb_network_ids: list[int] = []
+        tmdb_production_company_ids: list[int] = []
+        if tmdb_details:
+            tmdb_show_patch = _build_tmdb_show_patch(tmdb_details, fetched_at=fetched_at)
+            tmdb_network_names, tmdb_network_ids = _extract_tmdb_networks(tmdb_details)
+            tmdb_production_company_ids = _extract_tmdb_production_company_ids(tmdb_details)
+
         needs_imdb_resolution = tmdb_id is not None and not resolved_imdb_id
         needs_tmdb_resolution = resolved_imdb_id is not None and tmdb_id is None
         show_upsert = _candidate_to_show_upsert(
@@ -1269,6 +1241,7 @@ def upsert_candidates_into_supabase(
                     )
                 existing = existing_by_imdb
 
+        created_now = False
         if existing is None:
             if dry_run:
                 print(
@@ -1276,6 +1249,7 @@ def upsert_candidates_into_supabase(
                     f"name={candidate.title!r}"
                 )
                 created += 1
+                created_now = True
                 upserted_show_rows.append(
                     {
                         "id": str(uuid4()),
@@ -1290,6 +1264,7 @@ def upsert_candidates_into_supabase(
             else:
                 inserted = insert_show(db, show_upsert)
                 created += 1
+                created_now = True
                 upserted_show_rows.append(inserted)
                 print(f"CREATED show id={inserted.get('id')} name={inserted.get('name')!r}")
             existing = upserted_show_rows[-1]
@@ -1308,14 +1283,45 @@ def upsert_candidates_into_supabase(
 
             # Union listed_on arrays
             if show_upsert.listed_on:
-                existing_listed_on = existing.get("listed_on") or []
-                merged_listed_on = sorted(set(existing_listed_on) | set(show_upsert.listed_on))
-                if merged_listed_on != sorted(existing_listed_on):
+                merged_listed_on = _merge_str_arrays(existing.get("listed_on"), show_upsert.listed_on)
+                if merged_listed_on is not None:
                     patch["listed_on"] = merged_listed_on
 
-            # Merge genres if we have new ones and existing is empty
-            if show_upsert.genres and not existing.get("genres"):
-                patch["genres"] = show_upsert.genres
+            # Merge genres if we have new ones
+            if show_upsert.genres:
+                merged_genres = _merge_str_arrays(existing.get("genres"), show_upsert.genres)
+                if merged_genres is not None:
+                    patch["genres"] = merged_genres
+
+            if tmdb_network_names:
+                merged_networks = _merge_str_arrays(existing.get("networks"), tmdb_network_names)
+                if merged_networks is not None:
+                    patch["networks"] = merged_networks
+
+            merged_tmdb_network_ids = _merge_int_arrays(existing.get("tmdb_network_ids"), tmdb_network_ids)
+            if merged_tmdb_network_ids is not None:
+                patch["tmdb_network_ids"] = merged_tmdb_network_ids
+
+            merged_tmdb_company_ids = _merge_int_arrays(
+                existing.get("tmdb_production_company_ids"), tmdb_production_company_ids
+            )
+            if merged_tmdb_company_ids is not None:
+                patch["tmdb_production_company_ids"] = merged_tmdb_company_ids
+
+            if candidate.imdb_meta:
+                existing_imdb_meta = (
+                    existing.get("imdb_meta") if isinstance(existing.get("imdb_meta"), Mapping) else None
+                )
+                merged_imdb_meta = _merge_meta(existing_imdb_meta, candidate.imdb_meta)
+                imdb_patch = _build_imdb_show_patch_from_meta(
+                    merged_imdb_meta,
+                    fallback_title=candidate.title,
+                    fetched_at=fetched_at,
+                )
+                _apply_patch_if_changed(patch, existing=existing, updates=imdb_patch)
+
+            if tmdb_show_patch:
+                _apply_patch_if_changed(patch, existing=existing, updates=tmdb_show_patch)
 
             # Add external IDs from TMDb if available and existing is missing them
             if tmdb_external_ids:
@@ -1344,25 +1350,32 @@ def upsert_candidates_into_supabase(
                 existing = updated_row
                 print(f"UPDATED show id={updated_row.get('id')} name={updated_row.get('name')!r}")
 
-        if db is not None and not dry_run:
-            show_id = str(existing.get("id"))
-            imdb_series_row = _build_imdb_series_from_candidate(
-                candidate,
-                show_id=show_id,
-                fetched_at=fetched_at,
-            )
-            if imdb_series_row:
-                upsert_imdb_series(db, [imdb_series_row])
-            if tmdb_details:
-                tmdb_series_row = _tmdb_series_from_tv_details(
-                    tmdb_details,
-                    show_id=show_id,
-                    tmdb_id=tmdb_id,
+        if created_now:
+            post_patch: dict[str, Any] = {}
+            if candidate.imdb_meta:
+                imdb_patch = _build_imdb_show_patch_from_meta(
+                    candidate.imdb_meta,
+                    fallback_title=candidate.title,
                     fetched_at=fetched_at,
                 )
-                upsert_tmdb_series(db, [tmdb_series_row])
-                # External IDs are now written directly to core.shows in the patch above
-                # (tmdb_series_external_ids table will be dropped in migration 0039)
+                _apply_patch_if_changed(post_patch, existing=existing, updates=imdb_patch)
+            if tmdb_show_patch:
+                _apply_patch_if_changed(post_patch, existing=existing, updates=tmdb_show_patch)
+            if tmdb_network_names:
+                post_patch["networks"] = sorted(set(tmdb_network_names))
+            if tmdb_network_ids:
+                post_patch["tmdb_network_ids"] = sorted(set(tmdb_network_ids))
+            if tmdb_production_company_ids:
+                post_patch["tmdb_production_company_ids"] = sorted(set(tmdb_production_company_ids))
+
+            if post_patch:
+                if dry_run:
+                    existing = {**existing, **post_patch}
+                    upserted_show_rows[-1] = existing
+                elif db is not None:
+                    updated_row = update_show(db, existing["id"], post_patch)
+                    existing = updated_row
+                    upserted_show_rows[-1] = updated_row
 
     # If a show appears in multiple list sources (or TMDb external id resolution is skipped),
     # we can end up with duplicate entries in `upserted_show_rows`. Downstream pipelines
@@ -1576,11 +1589,15 @@ def upsert_candidates_into_supabase(
                     if tmdb_id_int is None:
                         print(f"TMDb seasons: skipping show_id={show_id} (missing tmdb_series_id)", file=sys.stderr)
                     else:
-                        # Get external_ids from row (legacy) or use empty dict
-                        external_ids = row.get("external_ids")
-                        external_ids_map = external_ids if isinstance(external_ids, dict) else {}
-                        tmdb_meta = external_ids_map.get("tmdb_meta")
-                        tmdb_meta_map = tmdb_meta if isinstance(tmdb_meta, Mapping) else {}
+                        tmdb_meta_map: Mapping[str, Any] = {}
+                        tmdb_meta = row.get("tmdb_meta")
+                        if isinstance(tmdb_meta, Mapping):
+                            tmdb_meta_map = tmdb_meta
+                        else:
+                            external_ids = row.get("external_ids")
+                            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
+                            legacy_meta = external_ids_map.get("tmdb_meta")
+                            tmdb_meta_map = legacy_meta if isinstance(legacy_meta, Mapping) else {}
                         raw_seasons = tmdb_meta_map.get("seasons")
                         season_numbers: list[int] = []
                         if isinstance(raw_seasons, list):
@@ -1850,9 +1867,18 @@ def upsert_candidates_into_supabase(
                 continue
 
             tmdb_id_val = row.get("tmdb_id")
+            tmdb_id_int: int | None = None
             if isinstance(tmdb_id_val, int):
                 tmdb_id_int = tmdb_id_val
-            else:
+            elif isinstance(tmdb_id_val, str) and tmdb_id_val.strip().isdigit():
+                tmdb_id_int = int(tmdb_id_val.strip())
+
+            if tmdb_id_int is None:
+                tmdb_meta = row.get("tmdb_meta")
+                if isinstance(tmdb_meta, Mapping):
+                    tmdb_id_int = _coerce_int(tmdb_meta.get("id"))
+
+            if tmdb_id_int is None:
                 external_ids = row.get("external_ids")
                 external_ids_map = external_ids if isinstance(external_ids, dict) else {}
                 tmdb_id_val = external_ids_map.get("tmdb")
@@ -1861,14 +1887,11 @@ def upsert_candidates_into_supabase(
                 elif isinstance(tmdb_id_val, str) and tmdb_id_val.strip().isdigit():
                     tmdb_id_int = int(tmdb_id_val.strip())
                 else:
-                    tmdb_meta = external_ids_map.get("tmdb_meta")
-                    tmdb_id_int = _coerce_int(tmdb_meta.get("id")) if isinstance(tmdb_meta, Mapping) else None
-                    if tmdb_id_int is None:
-                        continue
+                    legacy_meta = external_ids_map.get("tmdb_meta")
+                    tmdb_id_int = _coerce_int(legacy_meta.get("id")) if isinstance(legacy_meta, Mapping) else None
 
-            external_ids = row.get("external_ids")
-            external_ids_map = external_ids if isinstance(external_ids, dict) else {}
-            # (external_ids_map reused below for tmdb_meta if needed)
+            if tmdb_id_int is None:
+                continue
 
             tmdb_images_processed += 1
 
@@ -1953,7 +1976,7 @@ def upsert_candidates_into_supabase(
                 file=sys.stderr,
             )
 
-    # Stage 2 enrichment: populate external_ids.show_meta.
+    # Stage 2 enrichment: populate core.shows metadata columns.
     if enrich_show_metadata:
         show_records: list[ShowRecord] = []
         by_id: dict[str, dict[str, Any]] = {}
@@ -2023,6 +2046,36 @@ def upsert_candidates_into_supabase(
             for key, value in (patch.show_update or {}).items():
                 if row.get(key) != value:
                     update_patch[key] = value
+
+            merged_genres = _merge_str_arrays(row.get("genres"), patch.genres)
+            if merged_genres is not None:
+                update_patch["genres"] = merged_genres
+
+            merged_keywords = _merge_str_arrays(row.get("keywords"), patch.keywords)
+            if merged_keywords is not None:
+                update_patch["keywords"] = merged_keywords
+
+            merged_tags = _merge_str_arrays(row.get("tags"), patch.tags)
+            if merged_tags is not None:
+                update_patch["tags"] = merged_tags
+
+            merged_networks = _merge_str_arrays(row.get("networks"), patch.networks)
+            if merged_networks is not None:
+                update_patch["networks"] = merged_networks
+
+            merged_streaming = _merge_str_arrays(row.get("streaming_providers"), patch.streaming_providers)
+            if merged_streaming is not None:
+                update_patch["streaming_providers"] = merged_streaming
+
+            merged_tmdb_network_ids = _merge_int_arrays(row.get("tmdb_network_ids"), patch.tmdb_network_ids)
+            if merged_tmdb_network_ids is not None:
+                update_patch["tmdb_network_ids"] = merged_tmdb_network_ids
+
+            merged_tmdb_company_ids = _merge_int_arrays(
+                row.get("tmdb_production_company_ids"), patch.tmdb_production_company_ids
+            )
+            if merged_tmdb_company_ids is not None:
+                update_patch["tmdb_production_company_ids"] = merged_tmdb_company_ids
 
             if patch.show_images_rows:
                 if dry_run:

@@ -97,12 +97,10 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     patch = summary.patches[0]
     # Check show_update contains expected fields
     assert patch.show_update.get("tmdb_id") == 12345
-
-    # Check tmdb_series contains TMDb metadata
-    assert patch.tmdb_series is not None
-    assert patch.tmdb_series.get("name") == "RuPaul's Drag Race"
-    assert patch.tmdb_series.get("number_of_seasons") == 16
-    assert patch.tmdb_series.get("number_of_episodes") == 250
+    assert patch.show_update.get("tmdb_name") == "RuPaul's Drag Race"
+    assert patch.show_update.get("tmdb_meta", {}).get("number_of_seasons") == 16
+    assert patch.show_update.get("tmdb_meta", {}).get("number_of_episodes") == 250
+    assert patch.tmdb_network_ids == [1]
 
 
 def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,10 +140,10 @@ def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch
     assert summary.updated == 1
 
     patch = summary.patches[0]
-    # Check imdb_series contains IMDb metadata
-    assert patch.imdb_series is not None
-    assert patch.imdb_series.get("title") == "Sample Show"
-    # total_seasons/episodes are in show_update (from HTML parsing), not imdb_series (from JSON-LD)
+    # Check imdb meta fields
+    assert patch.show_update.get("imdb_title") == "Sample Show"
+    assert patch.show_update.get("imdb_meta", {}).get("title") == "Sample Show"
+    # total_seasons/episodes are in show_update (from HTML parsing), not imdb_meta (from JSON-LD)
     assert patch.show_update.get("show_total_seasons") == 3
     assert patch.show_update.get("show_total_episodes") == 20
 
@@ -185,9 +183,8 @@ def test_enrich_shows_after_upsert_imdb_meta(monkeypatch: pytest.MonkeyPatch) ->
     assert summary.updated == 1
 
     patch = summary.patches[0]
-    # Check imdb_series contains IMDb metadata
-    imdb_series = patch.imdb_series or {}
-    assert imdb_series.get("description") == (
+    imdb_meta = patch.show_update.get("imdb_meta") or {}
+    assert imdb_meta.get("description") == (
         "U.S. version of the British show 'Love Island' where a group of singles come to stay in a villa for a few "
         "weeks and have to couple up with one another."
     )

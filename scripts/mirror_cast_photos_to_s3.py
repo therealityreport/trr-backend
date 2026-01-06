@@ -9,6 +9,9 @@ Usage:
     # Mirror TMDb photos for a specific person
     PYTHONPATH=. python scripts/mirror_cast_photos_to_s3.py --source tmdb --imdb-person-id nm11883948
 
+    # Mirror Fandom gallery photos for a specific person
+    PYTHONPATH=. python scripts/mirror_cast_photos_to_s3.py --source fandom-gallery --imdb-person-id nm11883948
+
     # Mirror and prune orphaned S3 objects
     PYTHONPATH=. python scripts/mirror_cast_photos_to_s3.py --source all --prune --imdb-person-id nm11883948
 """
@@ -19,7 +22,11 @@ import sys
 from typing import Any
 
 from trr_backend.db.supabase import create_supabase_admin_client
-from trr_backend.media.s3_mirror import mirror_cast_photo_row, prune_orphaned_cast_photo_objects
+from trr_backend.media.s3_mirror import (
+    get_cdn_base_url,
+    mirror_cast_photo_row,
+    prune_orphaned_cast_photo_objects,
+)
 from trr_backend.repositories.cast_photos import (
     assert_core_cast_photos_table_exists,
     fetch_cast_photos_missing_hosted,
@@ -37,7 +44,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--source",
         default="fandom",
-        choices=["fandom", "imdb", "tmdb", "all"],
+        choices=["fandom", "imdb", "tmdb", "fandom-gallery", "all"],
         help="Image source to mirror (default: fandom).",
     )
     parser.add_argument("--person-id", action="append", default=[], help="core.people id (UUID). Repeatable.")
@@ -87,12 +94,14 @@ def main(argv: list[str] | None = None) -> int:
                 if imdb:
                     imdb_to_person[imdb] = pid
 
+    cdn_base_url = None if args.force else get_cdn_base_url()
     rows = fetch_cast_photos_missing_hosted(
         db,
         source=args.source,
         person_ids=person_ids or None,
         limit=args.limit,
-        include_hosted=bool(args.force),
+        include_hosted=True,
+        cdn_base_url=cdn_base_url,
     )
 
     if not rows:

@@ -2,10 +2,9 @@
 Tests for TMDb TV details persistence.
 
 NOTE: Many tests in this file were written for the legacy external_ids JSONB schema.
-After schema normalization (migrations 0028-0036), data is stored in:
-- core.shows typed columns (imdb_id, tmdb_id)
-- core.tmdb_series source table
-- core.imdb_series source table
+After schema normalization (migrations 0028-0048), data is stored in:
+- core.shows typed columns (imdb_id, tmdb_id, tmdb_* / imdb_* fields)
+- core.shows tmdb_meta / imdb_meta payloads
 
 Tests that check external_ids["tmdb_meta"], external_ids["show_meta"], etc. need to be
 rewritten to check the new normalized tables/columns.
@@ -26,7 +25,7 @@ from trr_backend.models.shows import ShowRecord
 @pytest.mark.skip(reason="Legacy test: external_ids JSONB removed in schema normalization")
 def test_stage1_tmdb_list_ingestion_persists_tv_details_into_tmdb_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     # This test checked that tv_details were stored in external_ids.tmdb_meta JSONB.
-    # After normalization, TMDb data goes to core.tmdb_series table.
+    # After normalization, TMDb data goes to core.shows.tmdb_meta / tmdb_* columns.
     pass
 
 
@@ -64,8 +63,8 @@ def test_stage2_multiple_shows_does_not_refetch_tv_details_when_tmdb_meta_presen
     pass
 
 
-def test_enricher_produces_tmdb_series_patch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that the enricher produces tmdb_series data for the normalized table."""
+def test_enricher_produces_tmdb_show_patch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that the enricher produces tmdb_* metadata for core.shows."""
     repo_root = Path(__file__).resolve().parents[3]
     find_payload = json.loads(
         (repo_root / "tests" / "fixtures" / "tmdb" / "find_by_imdb_id_sample.json").read_text()
@@ -110,8 +109,6 @@ def test_enricher_produces_tmdb_series_patch(monkeypatch: pytest.MonkeyPatch) ->
     assert summary.updated == 1
 
     patch = summary.patches[0]
-    # New normalized structure: tmdb_series dict for core.tmdb_series table
-    assert patch.tmdb_series is not None
-    assert patch.tmdb_series.get("name") == "RuPaul's Drag Race"
-    assert patch.tmdb_series.get("number_of_seasons") == 16
-    assert patch.tmdb_series.get("number_of_episodes") == 250
+    assert patch.show_update.get("tmdb_name") == "RuPaul's Drag Race"
+    assert patch.show_update.get("tmdb_meta", {}).get("number_of_seasons") == 16
+    assert patch.show_update.get("tmdb_meta", {}).get("number_of_episodes") == 250

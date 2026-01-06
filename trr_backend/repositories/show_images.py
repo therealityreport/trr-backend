@@ -202,48 +202,70 @@ def fetch_show_images_missing_hosted(
     kind: str | None = None,
     limit: int = 200,
     include_hosted: bool = False,
+    cdn_base_url: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetch show images that are missing hosted URLs (for S3 mirroring).
 
     Joins with shows table to get show metadata for S3 path building.
     """
-    query = db.schema("core").table("show_images").select(
-        "id,show_id,source,source_image_id,kind,file_path,url,url_path,"
-        "width,height,caption,position,image_type,tmdb_id,"
-        "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
-        "shows:show_id(title,imdb_id,tmdb_id)"
-    )
+    def _base_query():
+        return db.schema("core").table("show_images").select(
+            "id,show_id,source,source_image_id,kind,file_path,url,url_path,"
+            "width,height,caption,position,image_type,tmdb_id,"
+            "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
+            "shows:show_id(name,imdb_id,tmdb_id)"
+        )
 
-    if source and source != "all":
-        query = query.eq("source", source)
-    if show_id:
-        query = query.eq("show_id", show_id)
-    if imdb_id:
-        # Filter via the joined shows table
-        query = query.eq("shows.imdb_id", imdb_id)
-    if tmdb_id is not None:
-        query = query.eq("tmdb_id", int(tmdb_id))
-    if kind:
-        query = query.eq("kind", kind)
-    if not include_hosted:
-        query = query.is_("hosted_url", "null")
-    if limit is not None:
-        query = query.limit(max(0, int(limit)))
+    def _apply_filters(query):
+        if source and source != "all":
+            query = query.eq("source", source)
+        if show_id:
+            query = query.eq("show_id", show_id)
+        if imdb_id:
+            # Filter via the joined shows table
+            query = query.eq("shows.imdb_id", imdb_id)
+        if tmdb_id is not None:
+            query = query.eq("tmdb_id", int(tmdb_id))
+        if kind:
+            query = query.eq("kind", kind)
+        if limit is not None:
+            query = query.limit(max(0, int(limit)))
+        return query
 
-    for attempt in range(_PGRST204_MAX_RETRIES + 1):
-        try:
-            response = query.execute()
-            break
-        except Exception as exc:
-            if _handle_pgrst204_with_retry(exc, attempt, "fetching show images missing hosted"):
-                continue
-            raise ShowImageRepositoryError(f"Supabase error fetching show images: {exc}") from exc
+    queries = []
+    base = (cdn_base_url or "").strip().rstrip("/")
+    if include_hosted:
+        if base:
+            missing_query = _apply_filters(_base_query()).is_("hosted_url", "null")
+            mismatch_query = _apply_filters(_base_query()).not_.is_("hosted_url", "null").not_.like(
+                "hosted_url",
+                f"{base}/%",
+            )
+            queries.extend([missing_query, mismatch_query])
+        else:
+            queries.append(_apply_filters(_base_query()))
+    else:
+        queries.append(_apply_filters(_base_query()).is_("hosted_url", "null"))
 
-    if hasattr(response, "error") and response.error:
-        raise ShowImageRepositoryError(f"Supabase error fetching show images: {response.error}")
-    data = response.data or []
-    return data if isinstance(data, list) else []
+    rows: list[dict[str, Any]] = []
+    for query in queries:
+        for attempt in range(_PGRST204_MAX_RETRIES + 1):
+            try:
+                response = query.execute()
+                break
+            except Exception as exc:
+                if _handle_pgrst204_with_retry(exc, attempt, "fetching show images missing hosted"):
+                    continue
+                raise ShowImageRepositoryError(f"Supabase error fetching show images: {exc}") from exc
+
+        if hasattr(response, "error") and response.error:
+            raise ShowImageRepositoryError(f"Supabase error fetching show images: {response.error}")
+        data = response.data or []
+        if isinstance(data, list):
+            rows.extend(data)
+
+    return rows
 
 
 def update_show_image_hosted_fields(
@@ -279,3 +301,25 @@ def update_show_image_hosted_fields(
     if isinstance(data, list) and data:
         return data[0]
     raise ShowImageRepositoryError("Supabase show image update returned no data.")
+
+
+def fetch_hosted_keys_for_show(
+    db: Client,
+    *,
+    show_id: str,
+) -> set[str]:
+    """
+    Fetch all hosted_key values for a show's images.
+    """
+    response = (
+        db.schema("core")
+        .table("show_images")
+        .select("hosted_key")
+        .eq("show_id", show_id)
+        .not_.is_("hosted_key", "null")
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise ShowImageRepositoryError(f"Supabase error fetching hosted keys: {response.error}")
+    data = response.data or []
+    return {row.get("hosted_key") for row in data if row.get("hosted_key")}

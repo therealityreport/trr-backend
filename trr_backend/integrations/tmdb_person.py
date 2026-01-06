@@ -15,9 +15,9 @@ from trr_backend.utils.env import load_env
 def _get_bearer_token() -> str:
     """Get TMDb bearer token from environment."""
     load_env()
-    token = (os.getenv("TMDB_BEARER") or "").strip()
+    token = (os.getenv("TMDB_BEARER_TOKEN") or os.getenv("TMDB_BEARER") or "").strip()
     if not token:
-        raise RuntimeError("TMDB_BEARER environment variable is required")
+        raise RuntimeError("TMDB_BEARER_TOKEN or TMDB_BEARER environment variable is required")
     return token
 
 
