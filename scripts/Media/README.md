@@ -7,13 +7,17 @@ store hosted URLs back into Supabase.
 Required environment variables
 ------------------------------
 
-- AWS_REGION
+- AWS_REGION (or AWS_DEFAULT_REGION)
 - AWS_ACCESS_KEY_ID
 - AWS_SECRET_ACCESS_KEY
 - AWS_S3_BUCKET
 - AWS_S3_PREFIX (example: dev, prod)
-- AWS_CDN_BASE_URL (example: https://d123.cloudfront.net)
+- AWS_CDN_BASE_URL (example: https://cdn.example.com)
 - TRR_MEDIA_MIRROR_TO_S3 (optional, feature flag for future ingestion hooks)
+
+Notes:
+- AWS_CDN_BASE_URL must start with https:// and must not contain placeholder domains (e.g., dxxxx).
+- If AWS_PROFILE or AWS_DEFAULT_PROFILE is set, boto3 uses that profile.
 
 Example usage
 -------------

@@ -13,8 +13,6 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mod, "upsert_imdb_series", lambda *args, **kwargs: [])
-    monkeypatch.setattr(mod, "upsert_tmdb_series", lambda *args, **kwargs: [])
 
     insert_mock = MagicMock(return_value={"id": "00000000-0000-0000-0000-000000000001", "name": "New Show"})
     update_mock = MagicMock()
@@ -45,8 +43,6 @@ def test_upsert_candidates_updates_show_columns_without_clobber(monkeypatch):
     from trr_backend.ingestion import show_importer as mod
 
     monkeypatch.setattr(mod, "assert_core_shows_table_exists", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mod, "upsert_imdb_series", lambda *args, **kwargs: [])
-    monkeypatch.setattr(mod, "upsert_tmdb_series", lambda *args, **kwargs: [])
     existing = {
         "id": "00000000-0000-0000-0000-000000000002",
         "name": "Existing Show",

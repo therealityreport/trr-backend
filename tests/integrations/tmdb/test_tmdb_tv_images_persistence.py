@@ -26,8 +26,7 @@ def test_stage1_tmdb_fetch_images_upserts_show_images_and_sets_primary_paths(mon
         "name": "RuPaul's Drag Race",
         "description": None,
         "premiere_date": None,
-        "tmdb_series_id": 12345,
-        "external_ids": {"tmdb": 12345},
+        "tmdb_id": 12345,
     }
     monkeypatch.setattr(mod, "insert_show", lambda *args, **kwargs: dict(inserted_row))
 

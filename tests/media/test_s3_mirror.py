@@ -24,6 +24,35 @@ def test_build_cast_photo_s3_key_structure() -> None:
     assert key == "images/people/32ddc0a5-2bea-4a62-ba53-eda033af8efd/photos/tmdb/xyz789.jpg"
 
 
+def test_build_show_image_s3_key_structure() -> None:
+    key = s3_mirror.build_show_image_s3_key("tt1234567", "poster", "tmdb", "abc123", ".jpg")
+    assert key == "images/shows/tt1234567/poster/tmdb/abc123.jpg"
+
+    key = s3_mirror.build_show_image_s3_key(
+        "2c0c9d84-77c2-4c4f-a2b9-6a8e3a42db5c",
+        "backdrop",
+        "imdb",
+        "def456",
+        ".webp",
+    )
+    assert key == "images/shows/2c0c9d84-77c2-4c4f-a2b9-6a8e3a42db5c/backdrop/imdb/def456.webp"
+
+
+def test_build_season_image_s3_key_structure() -> None:
+    key = s3_mirror.build_season_image_s3_key("tt7654321", 3, "tmdb", "aaa111", ".png")
+    assert key == "images/seasons/tt7654321/season-3/tmdb/aaa111.png"
+
+
+def test_build_episode_image_s3_key_structure() -> None:
+    key = s3_mirror.build_episode_image_s3_key("tt9876543", "tmdb", "bbb222", ".jpg")
+    assert key == "images/episodes/tt9876543/tmdb/bbb222.jpg"
+
+
+def test_build_logo_s3_key_structure() -> None:
+    key = s3_mirror.build_logo_s3_key("networks", 123, "abc123", ".png")
+    assert key == "images/logos/networks/123/abc123.png"
+
+
 def test_get_person_s3_prefix() -> None:
     """Test S3 prefix generation for prune operations."""
     prefix = s3_mirror.get_person_s3_prefix("nm11883948")
@@ -31,6 +60,26 @@ def test_get_person_s3_prefix() -> None:
 
     prefix = s3_mirror.get_person_s3_prefix("uuid-123")
     assert prefix == "images/people/uuid-123/photos/"
+
+
+def test_get_show_s3_prefix() -> None:
+    prefix = s3_mirror.get_show_s3_prefix("tt1234567")
+    assert prefix == "images/shows/tt1234567/"
+
+
+def test_build_hosted_url_normalizes_slashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com/")
+    assert s3_mirror.build_hosted_url("/images/test.png") == "https://cdn.example.com/images/test.png"
+
+
+def test_cdn_base_url_rejects_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://dxxxx.cloudfront.net")
+    with pytest.raises(RuntimeError):
+        s3_mirror.get_cdn_base_url()
 
 
 def test_sha256_stability() -> None:
@@ -88,6 +137,53 @@ def test_mirror_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -
     assert result["hosted_bytes"] == 123
     assert result["hosted_etag"] == "etag"
     assert result["hosted_url"].startswith("https://cdn.example.com/")
+
+
+def test_mirror_tmdb_logo_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    fake_s3 = MagicMock()
+    fake_s3.head_object.return_value = {
+        "ContentType": "image/png",
+        "ContentLength": 321,
+        "ETag": "\"etag-logo\"",
+    }
+
+    monkeypatch.setattr(s3_mirror, "download_image", lambda *args, **kwargs: (b"data", "image/png"))
+    monkeypatch.setattr(
+        s3_mirror,
+        "upload_bytes_to_s3",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("upload called")),
+    )
+
+    row = {
+        "id": 42,
+        "tmdb_logo_path": "/logo.png",
+    }
+
+    result = s3_mirror.mirror_tmdb_logo_row(row, kind="networks", s3_client=fake_s3)
+    assert result is not None
+    assert result["hosted_logo_bytes"] == 321
+    assert result["hosted_logo_etag"] == "etag-logo"
+    assert result["hosted_logo_url"].startswith("https://cdn.example.com/")
+    assert result["logo_path"].endswith(".png")
+
+
+def test_mirror_tmdb_logo_skips_when_already_hosted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    row = {
+        "id": 99,
+        "tmdb_logo_path": "/logo.png",
+        "hosted_logo_url": "https://cdn.example.com/images/logos/networks/99/abc.png",
+    }
+
+    result = s3_mirror.mirror_tmdb_logo_row(row, kind="networks")
+    assert result is None
 
 
 # ---------------------------------------------------------------------------

@@ -41,19 +41,12 @@ def test_show_importer_applies_show_update_patches(monkeypatch):
                 show_update={
                     "description": "Updated description",
                 },
-                imdb_series={
-                    "title": "Existing Show",
-                    "imdb_id": "tt1234567",
-                },
             )
         ],
         failures=[],
     )
 
     monkeypatch.setattr(mod, "enrich_shows_after_upsert", lambda *args, **kwargs: summary)
-    monkeypatch.setattr(mod, "upsert_imdb_series", MagicMock(return_value=[]))
-    monkeypatch.setattr(mod, "upsert_tmdb_series", MagicMock(return_value=[]))
-
     fake_db = object()
     candidates = [CandidateShow(imdb_id="tt1234567", tmdb_id=None, title="Existing Show")]
     result = upsert_candidates_into_supabase(

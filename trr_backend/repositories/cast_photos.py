@@ -189,27 +189,49 @@ def fetch_cast_photos_missing_hosted(
     person_ids: list[str] | None = None,
     limit: int = 200,
     include_hosted: bool = False,
+    cdn_base_url: str | None = None,
 ) -> list[dict[str, Any]]:
     # Join with people table to get person name for S3 path
-    query = db.schema("core").table("cast_photos").select(
-        "id,person_id,imdb_person_id,source,source_page_url,image_url,url,thumb_url,"
-        "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
-        "people:person_id(full_name,external_ids)"
-    )
-    if source and source != "all":
-        query = query.eq("source", source)
-    if person_ids:
-        query = query.in_("person_id", person_ids)
-    if not include_hosted:
-        query = query.is_("hosted_url", "null")
-    if limit is not None:
-        query = query.limit(max(0, int(limit)))
+    def _base_query():
+        return db.schema("core").table("cast_photos").select(
+            "id,person_id,imdb_person_id,source,source_page_url,image_url,url,thumb_url,"
+            "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
+            "people:person_id(full_name,external_ids)"
+        )
 
-    response = query.execute()
-    if hasattr(response, "error") and response.error:
-        raise CastPhotoRepositoryError(f"Supabase error listing cast photos: {response.error}")
-    data = response.data or []
-    return data if isinstance(data, list) else []
+    def _apply_filters(query):
+        if source and source != "all":
+            query = query.eq("source", source)
+        if person_ids:
+            query = query.in_("person_id", person_ids)
+        if limit is not None:
+            query = query.limit(max(0, int(limit)))
+        return query
+
+    queries = []
+    base = (cdn_base_url or "").strip().rstrip("/")
+    if include_hosted:
+        if base:
+            missing_query = _apply_filters(_base_query()).is_("hosted_url", "null")
+            mismatch_query = _apply_filters(_base_query()).not_.is_("hosted_url", "null").not_.like(
+                "hosted_url",
+                f"{base}/%",
+            )
+            queries.extend([missing_query, mismatch_query])
+        else:
+            queries.append(_apply_filters(_base_query()))
+    else:
+        queries.append(_apply_filters(_base_query()).is_("hosted_url", "null"))
+
+    rows: list[dict[str, Any]] = []
+    for query in queries:
+        response = query.execute()
+        if hasattr(response, "error") and response.error:
+            raise CastPhotoRepositoryError(f"Supabase error listing cast photos: {response.error}")
+        data = response.data or []
+        if isinstance(data, list):
+            rows.extend(data)
+    return rows
 
 
 def fetch_hosted_keys_for_person(

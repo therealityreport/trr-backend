@@ -50,7 +50,7 @@ The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system 
 
 4. **Add credentials**
    - Place your Google service account JSON in `keys/`
-   - Set API keys in `.env`: `TMDB_API_KEY`, `IMDB_API_KEY`, `GEMINI_API_KEY`
+   - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `IMDB_API_KEY`, `GEMINI_API_KEY`
    - Configure spreadsheet name: `SPREADSHEET_NAME=Realitease2025Data`
 
 5. **Run the pipeline**
@@ -67,38 +67,51 @@ The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system 
 These scripts read the list of shows from `core.shows` (Supabase) and update tables directly. They load `.env` from the repo root.
 
 ```bash
-# Shows
-python -m scripts.sync_shows --all
+# Shows (metadata + entities + watch providers)
+PYTHONPATH=. python scripts/sync_shows_all.py --all --verbose
 
-# Seasons (TMDb season enrichment)
-python -m scripts.sync_seasons --all
+# Seasons + episodes
+PYTHONPATH=. python scripts/sync_seasons_episodes.py --all --verbose
 
-# Episodes (IMDb episode enumeration)
-python -m scripts.sync_episodes --all
+# People + cast/credits
+PYTHONPATH=. python scripts/sync_people.py --all --verbose
 
-# People (cast members, Self-only)
-python -m scripts.sync_people --all
+# Show images
+PYTHONPATH=. python scripts/sync_show_images.py --all --verbose
 
-# Show cast mapping
-python -m scripts.sync_show_cast --all
+# Season/episode images
+PYTHONPATH=. python scripts/sync_season_episode_images.py --all --verbose
 
-# Episode appearances (aggregated per person/show)
-python -m scripts.sync_episode_appearances --all
+# People photos (multi-source)
+PYTHONPATH=. python scripts/sync_cast_photos.py --imdb-person-id nm11883948 --verbose
+
+# TMDb resolution + backfill (shows)
+PYTHONPATH=. python scripts/resolve_tmdb_ids_via_find.py --all --verbose
+PYTHONPATH=. python scripts/backfill_tmdb_show_details.py --all --verbose
 ```
 
-Or run everything in order:
+Legacy composite runner:
 
 ```bash
 python -m scripts.sync_all_tables --all
-python -m scripts.sync_all_tables --tables shows,episodes,episode_appearances --imdb-series-id tt1234567
+python -m scripts.sync_all_tables --tables shows,episodes,episode_appearances --imdb-id tt1234567
 ```
 
-Common filters: `--show-id`, `--tmdb-show-id`, `--imdb-series-id`, `--limit`, `--dry-run`, `--verbose`.
+Common filters: `--show-id`, `--tmdb-id`, `--imdb-id`, `--limit`, `--dry-run`, `--verbose`.
+
+Media mirroring requires `AWS_S3_BUCKET`, `AWS_REGION` (or `AWS_DEFAULT_REGION`), and `AWS_CDN_BASE_URL` (must start with https:// and not contain placeholders like dxxxx). Optional: `AWS_PROFILE`/`AWS_DEFAULT_PROFILE`.
+Schema verification uses `SUPABASE_DB_URL` (remote Supabase only).
+
+TMDb backfill flow: resolve missing `tmdb_id` via `/find` using IMDb ids, then backfill `/tv/{id}` details into `core.shows` (typed columns + `tmdb_meta`). Both scripts are idempotent; omit `--all` for incremental updates.
 
 Incremental/resume flags: `--incremental/--no-incremental`, `--resume/--no-resume`, `--force`, `--since`.
 Incremental mode uses `core.sync_state` + `shows.most_recent_episode` to skip unchanged shows and retry failures.
 After seasons/episodes sync, `shows.show_total_seasons` is normalized to the count of seasons with `season_number > 0`.
 Per-show progress is stored in `core.sync_state` (one row per show + table).
+
+## 🔐 Security
+
+Never commit API keys, AWS credentials, or private keys. Rotate any exposed credentials immediately.
 
 ## 📦 Repo Layout
 
@@ -225,6 +238,7 @@ Copy `.env.example` to `.env` (never commit `.env`):
 
 ```bash
 # API Keys
+TMDB_BEARER_TOKEN=your_tmdb_bearer_token
 TMDB_API_KEY=your_tmdb_api_key
 IMDB_API_KEY=your_imdb_api_key  
 GEMINI_API_KEY=your_gemini_api_key

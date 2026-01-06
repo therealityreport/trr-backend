@@ -40,6 +40,32 @@ def _extract_tmdb_id(row: dict[str, object]) -> int | None:
     return None
 
 
+def _merge_str_arrays(existing: object, incoming: list[str] | None) -> list[str] | None:
+    if not incoming:
+        return None
+    existing_values = [
+        str(v).strip()
+        for v in (existing if isinstance(existing, list) else [])
+        if isinstance(v, str) and str(v).strip()
+    ]
+    incoming_values = [str(v).strip() for v in incoming if isinstance(v, str) and str(v).strip()]
+    merged = sorted(set(existing_values) | set(incoming_values))
+    if not merged or merged == sorted(existing_values):
+        return None
+    return merged
+
+
+def _merge_int_arrays(existing: object, incoming: list[int] | None) -> list[int] | None:
+    if not incoming:
+        return None
+    existing_values = [v for v in (existing if isinstance(existing, list) else []) if isinstance(v, int)]
+    incoming_values = [v for v in incoming if isinstance(v, int)]
+    merged = sorted(set(existing_values) | set(incoming_values))
+    if not merged or merged == sorted(existing_values):
+        return None
+    return merged
+
+
 def _build_show_records(show_rows: list[dict[str, object]]) -> list[ShowRecord]:
     records: list[ShowRecord] = []
     for row in show_rows:
@@ -98,6 +124,36 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in (patch.show_update or {}).items():
             if row.get(key) != value:
                 update_patch[key] = value
+
+        merged_genres = _merge_str_arrays(row.get("genres"), patch.genres)
+        if merged_genres is not None:
+            update_patch["genres"] = merged_genres
+
+        merged_keywords = _merge_str_arrays(row.get("keywords"), patch.keywords)
+        if merged_keywords is not None:
+            update_patch["keywords"] = merged_keywords
+
+        merged_tags = _merge_str_arrays(row.get("tags"), patch.tags)
+        if merged_tags is not None:
+            update_patch["tags"] = merged_tags
+
+        merged_networks = _merge_str_arrays(row.get("networks"), patch.networks)
+        if merged_networks is not None:
+            update_patch["networks"] = merged_networks
+
+        merged_streaming = _merge_str_arrays(row.get("streaming_providers"), patch.streaming_providers)
+        if merged_streaming is not None:
+            update_patch["streaming_providers"] = merged_streaming
+
+        merged_tmdb_network_ids = _merge_int_arrays(row.get("tmdb_network_ids"), patch.tmdb_network_ids)
+        if merged_tmdb_network_ids is not None:
+            update_patch["tmdb_network_ids"] = merged_tmdb_network_ids
+
+        merged_tmdb_company_ids = _merge_int_arrays(
+            row.get("tmdb_production_company_ids"), patch.tmdb_production_company_ids
+        )
+        if merged_tmdb_company_ids is not None:
+            update_patch["tmdb_production_company_ids"] = merged_tmdb_company_ids
 
         if patch.show_images_rows:
             try:

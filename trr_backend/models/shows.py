@@ -10,7 +10,7 @@ class ShowRecord:
     """
     Canonical show record (maps to `core.shows`).
 
-    Note: core.shows is the canonical surface; vendor payloads live in source tables.
+    Note: core.shows is the canonical surface; vendor payloads live in tmdb_meta/imdb_meta.
     """
 
     id: UUID
@@ -110,50 +110,3 @@ class ShowUpsert:
     facebook_id: str | None = None
     instagram_id: str | None = None
     twitter_id: str | None = None
-
-
-@dataclass(frozen=True)
-class ImdbSeriesUpsert:
-    """Data for inserting/updating IMDb-specific series metadata."""
-
-    imdb_id: str
-    show_id: UUID
-    title: str | None = None
-    description: str | None = None
-    content_rating: str | None = None
-    rating_value: float | None = None
-    rating_count: int | None = None
-    date_published: str | None = None  # YYYY-MM-DD
-    end_year: int | None = None
-    total_seasons: int | None = None
-    total_episodes: int | None = None
-    runtime_minutes: int | None = None
-    trailer_url: str | None = None
-    poster_image_url: str | None = None
-    poster_image_caption: str | None = None
-    imdb_url: str | None = None
-
-
-@dataclass(frozen=True)
-class TmdbSeriesUpsert:
-    """Data for inserting/updating TMDb-specific series metadata."""
-
-    tmdb_id: int
-    show_id: UUID
-    name: str | None = None
-    original_name: str | None = None
-    overview: str | None = None
-    tagline: str | None = None
-    homepage: str | None = None
-    original_language: str | None = None
-    popularity: float | None = None
-    vote_average: float | None = None
-    vote_count: int | None = None
-    first_air_date: str | None = None  # YYYY-MM-DD
-    last_air_date: str | None = None  # YYYY-MM-DD
-    status: str | None = None
-    type: str | None = None
-    in_production: bool | None = None
-    adult: bool | None = None
-    number_of_seasons: int | None = None
-    number_of_episodes: int | None = None

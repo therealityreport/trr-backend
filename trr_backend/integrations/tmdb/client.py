@@ -55,23 +55,50 @@ def resolve_api_key(api_key: str | None = None) -> str | None:
     return resolved or None
 
 
+def resolve_bearer_token(token: str | None = None) -> str | None:
+    """
+    Best-effort TMDb v4 bearer token resolution.
+    """
+
+    resolved = (token or os.getenv("TMDB_BEARER_TOKEN") or os.getenv("TMDB_BEARER") or "").strip()
+    return resolved or None
+
+
+def _require_tmdb_auth(api_key: str | None, bearer_token: str | None) -> tuple[str | None, str | None]:
+    bearer = resolve_bearer_token(bearer_token)
+    if bearer:
+        return None, bearer
+    api_key = resolve_api_key(api_key)
+    if api_key:
+        return api_key, None
+    raise RuntimeError("TMDB_API_KEY or TMDB_BEARER_TOKEN is not set.")
+
+
 def _request_json(
     session: requests.Session,
     url: str,
     *,
     params: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
     timeout_seconds: float = 20.0,
 ) -> dict[str, Any]:
-    headers = {
+    base_headers = {
         "accept": "application/json",
         "user-agent": "Mozilla/5.0",
     }
+    merged_headers = dict(base_headers)
+    if headers:
+        merged_headers.update({str(k): str(v) for k, v in headers.items()})
+    if "Authorization" not in merged_headers:
+        auth = session.headers.get("Authorization")
+        if auth:
+            merged_headers["Authorization"] = auth
     max_attempts = 3
 
     last_response: requests.Response | None = None
     for attempt in range(max_attempts):
         try:
-            resp = session.get(url, params=params, headers=headers, timeout=timeout_seconds)
+            resp = session.get(url, params=params, headers=merged_headers, timeout=timeout_seconds)
         except requests.RequestException as exc:
             if attempt < max_attempts - 1:
                 delay = 1.0 * (2**attempt)
@@ -118,10 +145,30 @@ def _request_json(
     return payload
 
 
+def _request_tmdb_json(
+    session: requests.Session,
+    url: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+    api_key: str | None = None,
+    bearer_token: str | None = None,
+    timeout_seconds: float = 20.0,
+) -> dict[str, Any]:
+    api_key_resolved, bearer = _require_tmdb_auth(api_key, bearer_token)
+    merged_params = dict(params or {})
+    if api_key_resolved:
+        merged_params["api_key"] = api_key_resolved
+    headers: dict[str, str] = {}
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    return _request_json(session, url, params=merged_params, headers=headers, timeout_seconds=timeout_seconds)
+
+
 def fetch_list_items(
     list_id: str | int,
     *,
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -131,7 +178,6 @@ def fetch_list_items(
     `media_type` as needed.
     """
 
-    api_key = _require_api_key(api_key)
     list_id_int = parse_tmdb_list_id(list_id)
     session = session or requests.Session()
 
@@ -139,7 +185,7 @@ def fetch_list_items(
     page = 1
     while True:
         url = f"{TMDB_API_BASE_URL}/list/{list_id_int}"
-        payload = _request_json(session, url, params={"api_key": api_key, "page": page})
+        payload = _request_tmdb_json(session, url, params={"page": page}, api_key=api_key, bearer_token=bearer_token)
         page_items = payload.get("items")
         if isinstance(page_items, list):
             items.extend([i for i in page_items if isinstance(i, dict)])
@@ -161,6 +207,7 @@ def fetch_tv_external_ids(
     tv_id: int,
     *,
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
     cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
     language: str = "en-US",
@@ -187,17 +234,18 @@ def fetch_tv_external_ids(
             return dict(ext)
         raise TmdbClientError("TMDb response missing external_ids.")
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/external_ids"
-    return _request_json(session, url, params={"api_key": api_key})
+    return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)
 
 
 def find_by_imdb_id(
     imdb_id: str,
     *,
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
+    language: str = "en-US",
 ) -> dict[str, Any]:
     """
     Resolve a TMDb record from an IMDb id via `/find/{external_id}`.
@@ -205,10 +253,15 @@ def find_by_imdb_id(
     Callers should inspect `tv_results` (and optionally other *_results keys).
     """
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/find/{imdb_id}"
-    return _request_json(session, url, params={"api_key": api_key, "external_source": "imdb_id"})
+    return _request_tmdb_json(
+        session,
+        url,
+        params={"external_source": "imdb_id", "language": language},
+        api_key=api_key,
+        bearer_token=bearer_token,
+    )
 
 
 def fetch_tv_details(
@@ -216,6 +269,7 @@ def fetch_tv_details(
     *,
     language: str = "en-US",
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
     append_to_response: list[str] | None = None,
     cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
@@ -236,13 +290,12 @@ def fetch_tv_details(
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}"
-    params: dict[str, Any] = {"api_key": api_key, "language": language}
+    params: dict[str, Any] = {"language": language}
     if append_key:
         params["append_to_response"] = ",".join(append_key)
-    payload = _request_json(session, url, params=params)
+    payload = _request_tmdb_json(session, url, params=params, api_key=api_key, bearer_token=bearer_token)
     if cache is not None:
         cache[cache_key] = payload
     return payload
@@ -252,6 +305,7 @@ def fetch_tv_alternative_titles(
     tv_id: int,
     *,
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
     cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
     language: str = "en-US",
@@ -277,22 +331,21 @@ def fetch_tv_alternative_titles(
             return dict(alt)
         raise TmdbClientError("TMDb response missing alternative_titles.")
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/alternative_titles"
-    return _request_json(session, url, params={"api_key": api_key})
+    return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)
 
 
 def fetch_tv_watch_providers(
     tv_id: int,
     *,
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{int(tv_id)}/watch/providers"
-    return _request_json(session, url, params={"api_key": api_key})
+    return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)
 
 
 def fetch_tv_images(
@@ -301,6 +354,7 @@ def fetch_tv_images(
     language: str = "en-US",
     include_image_language: str = "en,null",
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
     cache: dict[tuple[int, str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -317,17 +371,17 @@ def fetch_tv_images(
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}/images"
-    payload = _request_json(
+    payload = _request_tmdb_json(
         session,
         url,
         params={
-            "api_key": api_key,
             "language": language,
             "include_image_language": include_image_language,
         },
+        api_key=api_key,
+        bearer_token=bearer_token,
     )
     if cache is not None:
         cache[cache_key] = payload
@@ -341,6 +395,7 @@ def fetch_tv_season_details(
     language: str = "en-US",
     include_image_language: str | None = None,
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
     append_to_response: list[str] | None = None,
     cache: dict[tuple[int, int, str, tuple[str, ...], str], dict[str, Any]] | None = None,
@@ -364,17 +419,16 @@ def fetch_tv_season_details(
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}/season/{season_number_int}"
 
-    params: dict[str, Any] = {"api_key": api_key, "language": language}
+    params: dict[str, Any] = {"language": language}
     if append_key:
         params["append_to_response"] = ",".join(append_key)
     if include_key:
         params["include_image_language"] = include_key
 
-    payload = _request_json(session, url, params=params)
+    payload = _request_tmdb_json(session, url, params=params, api_key=api_key, bearer_token=bearer_token)
     if cache is not None:
         cache[cache_key] = payload
     return payload
@@ -385,6 +439,7 @@ def fetch_person_details(
     *,
     language: str = "en-US",
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
     append_to_response: list[str] | None = None,
     cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
@@ -405,13 +460,12 @@ def fetch_person_details(
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/person/{person_id_int}"
-    params: dict[str, Any] = {"api_key": api_key, "language": language}
+    params: dict[str, Any] = {"language": language}
     if append_key:
         params["append_to_response"] = ",".join(append_key)
-    payload = _request_json(session, url, params=params)
+    payload = _request_tmdb_json(session, url, params=params, api_key=api_key, bearer_token=bearer_token)
     if cache is not None:
         cache[cache_key] = payload
     return payload
@@ -421,6 +475,7 @@ def fetch_person_images(
     person_id: int,
     *,
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
     cache: dict[tuple[int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -439,10 +494,9 @@ def fetch_person_images(
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/person/{person_id_int}/images"
-    payload = _request_json(session, url, params={"api_key": api_key})
+    payload = _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)
     if cache is not None:
         cache[cache_key] = payload
     return payload
@@ -452,6 +506,7 @@ def fetch_person_external_ids(
     person_id: int,
     *,
     api_key: str | None = None,
+    bearer_token: str | None = None,
     session: requests.Session | None = None,
     cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] | None = None,
     language: str = "en-US",
@@ -479,7 +534,6 @@ def fetch_person_external_ids(
             return dict(ext)
         raise TmdbClientError("TMDb response missing external_ids.")
 
-    api_key = _require_api_key(api_key)
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/person/{int(person_id)}/external_ids"
-    return _request_json(session, url, params={"api_key": api_key})
+    return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)

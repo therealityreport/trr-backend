@@ -69,9 +69,6 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
 
     monkeypatch.setattr(mod, "find_show_by_imdb_id", _find_by_imdb)
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", _find_by_tmdb)
-    monkeypatch.setattr(mod, "upsert_imdb_series", MagicMock(return_value=[]))
-    monkeypatch.setattr(mod, "upsert_tmdb_series", MagicMock(return_value=[]))
-    monkeypatch.setattr(mod, "fetch_tmdb_series", MagicMock(return_value=None))
 
     result = mod.upsert_candidates_into_supabase(
         [

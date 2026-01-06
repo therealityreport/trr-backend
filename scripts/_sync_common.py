@@ -13,14 +13,10 @@ from trr_backend.repositories.sync_state import assert_core_sync_state_table_exi
 from trr_backend.utils.env import load_env
 
 
-# Note: Column names depend on whether migration 0028 has been applied.
-# Old names: imdb_series_id, tmdb_series_id
-# New names: imdb_id, tmdb_id
-# We select both patterns and use whichever exists.
 SHOW_SELECT_FIELDS = (
     "id,name,description,premiere_date,"
-    "imdb_series_id,tmdb_series_id,"  # legacy column names (pre-0028)
-    "show_total_seasons,most_recent_episode"
+    "imdb_id,tmdb_id,"
+    "show_total_seasons,show_total_episodes,most_recent_episode"
 )
 
 
@@ -34,8 +30,22 @@ class SyncFilterResult:
 def add_show_filter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--all", action="store_true", help="Process all shows (default when no filters are set).")
     parser.add_argument("--show-id", action="append", default=[], help="core.shows id (UUID). Repeatable.")
-    parser.add_argument("--tmdb-show-id", action="append", default=[], help="TMDb series id. Repeatable.")
-    parser.add_argument("--imdb-series-id", action="append", default=[], help="IMDb series id (tt...). Repeatable.")
+    parser.add_argument(
+        "--tmdb-show-id",
+        "--tmdb-id",
+        dest="tmdb_show_id",
+        action="append",
+        default=[],
+        help="TMDb series id. Repeatable.",
+    )
+    parser.add_argument(
+        "--imdb-series-id",
+        "--imdb-id",
+        dest="imdb_series_id",
+        action="append",
+        default=[],
+        help="IMDb series id (tt...). Repeatable.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Optional cap on number of shows to process.")
     parser.add_argument("--dry-run", action="store_true", help="Run without writing to Supabase.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
@@ -384,11 +394,9 @@ def fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any]
     else:
         rows.extend(_fetch_by_in(db, column="id", values=show_ids))
         if tmdb_ids:
-            # Try new column name first, fall back to legacy
-            rows.extend(_fetch_by_in(db, column="tmdb_series_id", values=tmdb_ids))
+            rows.extend(_fetch_by_in(db, column="tmdb_id", values=tmdb_ids))
         if imdb_ids:
-            # Try new column name first, fall back to legacy
-            rows.extend(_fetch_by_in(db, column="imdb_series_id", values=imdb_ids))
+            rows.extend(_fetch_by_in(db, column="imdb_id", values=imdb_ids))
 
     rows = _dedupe_rows(rows)
     if args.limit is not None:

@@ -52,7 +52,7 @@ from trr_backend.ingestion.fandom_person_scraper import (
 from trr_backend.repositories.cast_fandom import upsert_cast_fandom
 from trr_backend.repositories.cast_photos import upsert_cast_photos
 from trr_backend.repositories.cast_tmdb import upsert_cast_tmdb, get_cast_tmdb_by_person_id
-from trr_backend.media.s3_mirror import mirror_cast_photo_row
+from trr_backend.media.s3_mirror import get_cdn_base_url, mirror_cast_photo_row
 from trr_backend.repositories.cast_photos import (
     fetch_cast_photos_missing_hosted,
     update_cast_photo_hosted_fields,
@@ -430,12 +430,14 @@ def _mirror_photos_to_s3(
 ) -> tuple[int, int]:
     """Mirror a person's photos to S3."""
     try:
+        cdn_base_url = None if force else get_cdn_base_url()
         rows = fetch_cast_photos_missing_hosted(
             db,
             source="fandom",
             person_ids=[person_id],
             limit=200,
-            include_hosted=force,
+            include_hosted=True,
+            cdn_base_url=cdn_base_url,
         )
 
         if not rows:

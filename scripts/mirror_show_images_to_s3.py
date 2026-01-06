@@ -12,7 +12,7 @@ from trr_backend.repositories.show_images import (
     fetch_show_images_missing_hosted,
     update_show_image_hosted_fields,
 )
-from trr_backend.media.s3_mirror import mirror_show_image_row
+from trr_backend.media.s3_mirror import get_cdn_base_url, mirror_show_image_row
 from trr_backend.utils.env import load_env
 
 
@@ -99,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
     # Fetch images for each filter combination
     all_rows: list[dict[str, Any]] = []
 
+    cdn_base_url = None if args.force else get_cdn_base_url()
+
     if show_ids:
         for sid in show_ids:
             rows = fetch_show_images_missing_hosted(
@@ -107,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
                 show_id=sid,
                 kind=args.kind,
                 limit=args.limit,
-                include_hosted=bool(args.force),
+                include_hosted=True,
+                cdn_base_url=cdn_base_url,
             )
             all_rows.extend(rows)
     elif imdb_ids:
@@ -118,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
                 imdb_id=iid,
                 kind=args.kind,
                 limit=args.limit,
-                include_hosted=bool(args.force),
+                include_hosted=True,
+                cdn_base_url=cdn_base_url,
             )
             all_rows.extend(rows)
     elif tmdb_ids:
@@ -129,7 +133,8 @@ def main(argv: list[str] | None = None) -> int:
                 tmdb_id=tid,
                 kind=args.kind,
                 limit=args.limit,
-                include_hosted=bool(args.force),
+                include_hosted=True,
+                cdn_base_url=cdn_base_url,
             )
             all_rows.extend(rows)
     else:
@@ -138,7 +143,8 @@ def main(argv: list[str] | None = None) -> int:
             source=args.source,
             kind=args.kind,
             limit=args.limit,
-            include_hosted=bool(args.force),
+            include_hosted=True,
+            cdn_base_url=cdn_base_url,
         )
 
     # Dedupe by id
@@ -163,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         scanned += 1
         row_id = row.get("id")
         show_data = row.get("shows") or {}
-        show_title = show_data.get("title") or row.get("show_id") or "unknown"
+        show_title = show_data.get("name") or row.get("show_id") or "unknown"
 
         try:
             patch = mirror_show_image_row(row, force=bool(args.force))

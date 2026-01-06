@@ -18,6 +18,7 @@ psycopg2-binary>=2.9.9
 
 # Media mirroring
 boto3>=1.35.0
+Pillow>=10.0.0
 
 # API server
 fastapi>=0.115.0
