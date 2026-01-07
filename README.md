@@ -88,6 +88,12 @@ PYTHONPATH=. python scripts/sync_cast_photos.py --imdb-person-id nm11883948 --ve
 # TMDb resolution + backfill (shows)
 PYTHONPATH=. python scripts/resolve_tmdb_ids_via_find.py --all --verbose
 PYTHONPATH=. python scripts/backfill_tmdb_show_details.py --all --verbose
+
+# TMDb entities (networks, production companies) + S3 logo mirroring
+PYTHONPATH=. python scripts/sync_tmdb_show_entities.py --all --verbose
+
+# TMDb watch providers + S3 logo mirroring
+PYTHONPATH=. python scripts/sync_tmdb_watch_providers.py --all --verbose
 ```
 
 Legacy composite runner:
@@ -102,7 +108,7 @@ Common filters: `--show-id`, `--tmdb-id`, `--imdb-id`, `--limit`, `--dry-run`, `
 Media mirroring requires `AWS_S3_BUCKET`, `AWS_REGION` (or `AWS_DEFAULT_REGION`), and `AWS_CDN_BASE_URL` (must start with https:// and not contain placeholders like dxxxx). Optional: `AWS_PROFILE`/`AWS_DEFAULT_PROFILE`.
 Schema verification uses `SUPABASE_DB_URL` (remote Supabase only).
 
-TMDb backfill flow: resolve missing `tmdb_id` via `/find` using IMDb ids, then backfill `/tv/{id}` details into `core.shows` (typed columns + `tmdb_meta`). Both scripts are idempotent; omit `--all` for incremental updates.
+TMDb backfill flow: resolve missing `tmdb_id` via `/find` using IMDb ids, then backfill `/tv/{id}` details into `core.shows` (typed columns + `tmdb_meta`). Both scripts are idempotent; omit `--all` for incremental updates. See `docs/architecture.md` for the full TMDb enrichment pipeline documentation.
 
 Incremental/resume flags: `--incremental/--no-incremental`, `--resume/--no-resume`, `--force`, `--since`.
 Incremental mode uses `core.sync_state` + `shows.most_recent_episode` to skip unchanged shows and retry failures.
