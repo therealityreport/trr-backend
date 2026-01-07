@@ -27,6 +27,25 @@ Survey definitions, user responses, user answers, and live aggregates for near-r
 
 Relationship chain: `shows -> seasons -> episodes`, with cast connected via `cast_memberships` and `episode_cast`.
 
+## TMDb entity tables
+
+These tables store normalized TMDb entities with S3-mirrored logos:
+
+- `core.networks`: TV network dimension table (id, name, origin_country, hosted_logo_*)
+- `core.production_companies`: Production company dimension table (same structure as networks)
+- `core.watch_providers`: Streaming/rental provider dimension table (provider_id, provider_name, display_priority, hosted_logo_*)
+- `core.show_watch_providers`: Junction table linking shows to providers by region and offer type
+
+Key columns for dimension tables:
+- `name` / `provider_name`: Display name
+- `tmdb_logo_path`: Original TMDb logo path
+- `hosted_logo_*`: S3-hosted logo metadata (key, url, sha256, content_type, bytes, etag, at)
+- `tmdb_meta`: Raw TMDb API response (JSONB)
+
+The `show_watch_providers` junction table has a composite primary key: `(show_id, region, offer_type, provider_id)`.
+
+See `docs/architecture.md` for the full TMDb enrichment pipeline.
+
 ## `games` tables
 
 - `games.games`: A game scoped to a show/season/episode (`show_id` required; `season_id`/`episode_id` optional).
