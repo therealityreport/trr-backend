@@ -1,0 +1,4 @@
+# Placeholder to keep directory in git
+# Generated files will be created here by:
+# - make repo-map (local)
+# - .github/workflows/repo_map.yml (CI)

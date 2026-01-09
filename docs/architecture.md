@@ -147,3 +147,9 @@ Entity objects include full `hosted_logo_*` metadata for direct CDN URLs.
 - IMDb entity sync not implemented (only TMDb sources)
 - No automated prune for orphaned S3 logo objects
 - No scheduled job runner (scripts run manually or via cron)
+
+---
+
+## Repository Structure
+
+For detailed repository organization, module dependency graphs, and data flow diagrams, see [docs/Repository/README.md](Repository/README.md).

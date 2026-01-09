@@ -128,6 +128,8 @@ Never commit API keys, AWS credentials, or private keys. Rotate any exposed cred
 - `supabase/`: Database schema, migrations, and seeds
 - `docs/`: Architecture and operating docs
 
+For detailed repository structure, module dependency graphs, and architecture diagrams, see [docs/Repository/README.md](docs/Repository/README.md).
+
 ## 📁 Pipeline Architecture
 
 The data pipeline is organized into 5 sequential stages, each building upon the previous stage's output:

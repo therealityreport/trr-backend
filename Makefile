@@ -1,6 +1,6 @@
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-.PHONY: schema-docs schema-docs-check ci-local
+.PHONY: schema-docs schema-docs-check ci-local repo-map repo-map-check
 
 schema-docs:
 	@$(PYTHON) scripts/supabase/generate_schema_docs.py
@@ -17,3 +17,16 @@ ci-local:
 	supabase db reset --yes; \
 	"$(PYTHON)" -m pytest; \
 	$(MAKE) schema-docs-check'
+
+repo-map:
+	@$(PYTHON) scripts/generate_repo_mermaid.py
+
+repo-map-check:
+	@$(PYTHON) scripts/generate_repo_mermaid.py
+	@if git diff --quiet docs/Repository/generated/; then \
+		echo "✅ Repository maps are up to date"; \
+	else \
+		echo "❌ Repository maps are out of date. Run 'make repo-map' and commit."; \
+		git diff docs/Repository/generated/; \
+		exit 1; \
+	fi
