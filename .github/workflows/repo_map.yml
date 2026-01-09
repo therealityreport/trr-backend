@@ -84,13 +84,20 @@ jobs:
         run: |
           mkdir -p docs/Repository/generated/rendered
 
+          # Create puppeteer config for mermaid-cli
+          cat > /tmp/puppeteer-config.json <<EOF
+          {
+            "args": ["--no-sandbox", "--disable-setuid-sandbox"]
+          }
+          EOF
+
           # Find all .md files with mermaid blocks
           find docs/Repository -name "*.md" -type f | while read -r file; do
             filename=$(basename "$file" .md)
             # Extract mermaid blocks and render to SVG
             if grep -q '```mermaid' "$file"; then
               # Simple approach: render entire file if it contains mermaid
-              mmdc -i "$file" -o "docs/Repository/generated/rendered/${filename}.svg" --puppeteerConfigFile /dev/null -p '{"args": ["--no-sandbox", "--disable-setuid-sandbox"]}' || true
+              mmdc -i "$file" -o "docs/Repository/generated/rendered/${filename}.svg" --puppeteerConfigFile /tmp/puppeteer-config.json || true
             fi
           done
 
