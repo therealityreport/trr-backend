@@ -29,3 +29,7 @@ supabase>=2.10.0
 # Dev / test
 pytest>=8.0.0
 httpx>=0.28.0
+
+# Repository map generation
+tree-sitter>=0.21.0
+tree-sitter-python>=0.21.0
