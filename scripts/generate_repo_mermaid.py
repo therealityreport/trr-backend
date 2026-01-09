@@ -297,14 +297,20 @@ def ensure_git_workflow_template(diagrams_dir: Path) -> None:
 This diagram shows our standard branching strategy.
 
 ```mermaid
-gitgraph
-    commit id: "Initial commit"
-    branch feature/new-feature
-    commit id: "Add feature"
-    commit id: "Add tests"
-    checkout main
-    merge feature/new-feature id: "Merge PR"
-    commit id: "Deploy"
+flowchart TB
+    main1[main branch] --> branch[Create feature branch]
+    branch --> dev1[Develop & commit]
+    dev1 --> dev2[Add tests]
+    dev2 --> pr[Open Pull Request]
+    pr --> ci[CI checks run]
+    ci --> review[Code review]
+    review --> merge[Merge to main]
+    merge --> main2[main branch updated]
+
+    style main1 fill:#90EE90
+    style main2 fill:#90EE90
+    style pr fill:#87CEEB
+    style merge fill:#FFD700
 ```
 
 ## Branching Strategy
