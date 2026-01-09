@@ -90,7 +90,7 @@ jobs:
             # Extract mermaid blocks and render to SVG
             if grep -q '```mermaid' "$file"; then
               # Simple approach: render entire file if it contains mermaid
-              mmdc -i "$file" -o "docs/Repository/generated/rendered/${filename}.svg" || true
+              mmdc -i "$file" -o "docs/Repository/generated/rendered/${filename}.svg" --puppeteerConfigFile /dev/null -p '{"args": ["--no-sandbox", "--disable-setuid-sandbox"]}' || true
             fi
           done
 
