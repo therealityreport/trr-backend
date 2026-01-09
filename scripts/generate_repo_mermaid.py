@@ -17,7 +17,10 @@ from pathlib import Path
 import tree_sitter_python as tspython
 from tree_sitter import Language, Parser
 
-EXCLUDE_DIRS = {".venv", "__pycache__", ".git", "node_modules", ".cache", "logs", "debug_html"}
+EXCLUDE_DIRS = {
+    ".venv", "venv", "__pycache__", ".git", "node_modules", ".cache", "logs",
+    "debug_html", "site-packages", "dist-packages", ".eggs", "build", "dist",
+}
 INTERNAL_PACKAGES = {"trr_backend", "scripts", "api"}
 
 
@@ -181,7 +184,8 @@ def find_entrypoints(scripts_dir: Path) -> list[Path]:
         except OSError:
             continue
 
-    return sorted(entrypoints, key=lambda p: p.name)
+    # Sort by full path string for deterministic ordering
+    return sorted(entrypoints, key=lambda p: str(p))
 
 
 def generate_scripts_flow(scripts_dir: Path, parser: Parser) -> str:
@@ -209,9 +213,10 @@ def generate_scripts_flow(scripts_dir: Path, parser: Parser) -> str:
             script_groups[group] = []
         script_groups[group].append(script)
 
-    # Generate subgraphs for each directory
+    # Generate subgraphs for each directory (sorted by group name)
     node_id = 0
     script_ids: dict[Path, str] = {}
+    subgraph_id = 0
 
     for group in sorted(script_groups.keys()):
         if group == "(root)":
@@ -219,23 +224,28 @@ def generate_scripts_flow(scripts_dir: Path, parser: Parser) -> str:
         else:
             subgraph_label = f"scripts/{group}"
 
-        lines.append(f'    subgraph sg{node_id}["{subgraph_label}"]')
-        for script in sorted(script_groups[group], key=lambda p: p.name):
+        lines.append(f'    subgraph sg{subgraph_id}["{subgraph_label}"]')
+        # Sort scripts by full path string for determinism
+        for script in sorted(script_groups[group], key=lambda p: str(p)):
             sid = f"s{node_id}"
             script_ids[script] = sid
             lines.append(f'        {sid}["{script.stem}"]')
             node_id += 1
         lines.append("    end")
+        subgraph_id += 1
 
-    # Add trr_backend subgraph
+    # Add trr_backend subgraph with consistent ordering
     lines.append('    subgraph trr["trr_backend/"]')
-    lines.append('        repos["repositories"]')
-    lines.append('        integrations["integrations"]')
     lines.append('        ingestion["ingestion"]')
+    lines.append('        integrations["integrations"]')
     lines.append('        media["media"]')
+    lines.append('        repos["repositories"]')
     lines.append("    end")
 
-    # For each script, find its trr_backend imports and draw edges
+    # Collect all edges as tuples for deterministic sorting
+    edges: list[tuple[str, str]] = []
+    target_submodules = {"ingestion", "integrations", "media", "repositories"}
+
     for script in entrypoints:
         try:
             source = script.read_bytes()
@@ -249,13 +259,30 @@ def generate_scripts_flow(scripts_dir: Path, parser: Parser) -> str:
         if not sid:
             continue
 
-        # Map imports to submodules
+        # Map imports to submodules and collect edges
+        script_targets: set[str] = set()
         for imp in trr_imports:
             parts = imp.split(".")
             if len(parts) >= 2:
                 submod = parts[1]
-                if submod in ("repositories", "integrations", "ingestion", "media"):
-                    lines.append(f"    {sid} --> {submod}")
+                if submod in target_submodules:
+                    # Map "repositories" to "repos" for the node ID
+                    target = "repos" if submod == "repositories" else submod
+                    script_targets.add(target)
+
+        # Add edges for this script (sorted targets)
+        for target in sorted(script_targets):
+            edges.append((sid, target))
+
+    # Emit edges in deterministic order (sorted numerically by source node ID, then target)
+    def edge_sort_key(edge: tuple[str, str]) -> tuple[int, str]:
+        src, dst = edge
+        # Extract numeric part from node ID (e.g., "s123" -> 123)
+        src_num = int(src[1:]) if src[1:].isdigit() else 0
+        return (src_num, dst)
+
+    for src, dst in sorted(edges, key=edge_sort_key):
+        lines.append(f"    {src} --> {dst}")
 
     lines.extend(["```", ""])
     return "\n".join(lines)

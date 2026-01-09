@@ -23,11 +23,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Generate repo structure
-        uses: PGSch/graph-git-repo@v1
+        uses: PGSch/graph-git-repo@v1.0.0
         with:
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          exclude_patterns: '.git,.venv,__pycache__,node_modules,*.pyc,.cache,logs,debug_html,*.egg-info,.env,keys'
+          exclude_patterns: '.git|.venv|__pycache__|node_modules|*.pyc|.cache|logs|debug_html|*.egg-info|.env|keys'
           depth: 5
           create_pr: false
 
