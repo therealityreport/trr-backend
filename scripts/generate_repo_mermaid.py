@@ -288,26 +288,145 @@ def generate_scripts_flow(scripts_dir: Path, parser: Parser) -> str:
     return "\n".join(lines)
 
 
+def ensure_git_workflow_template(diagrams_dir: Path) -> None:
+    """Ensure git_workflow.md exists with stable template content."""
+    git_workflow_path = diagrams_dir / "git_workflow.md"
+
+    template = """# Git Workflow
+
+This diagram shows our standard branching strategy.
+
+```mermaid
+gitgraph
+    commit id: "Initial commit"
+    branch feature/new-feature
+    commit id: "Add feature"
+    commit id: "Add tests"
+    checkout main
+    merge feature/new-feature id: "Merge PR"
+    commit id: "Deploy"
+```
+
+## Branching Strategy
+
+- **main**: Primary branch, always deployable
+- **feature/\***: New features and enhancements
+- **fix/\***: Bug fixes
+- **docs/\***: Documentation updates
+- **chore/\***: Maintenance and tooling
+
+## Workflow
+
+1. Create branch from `main`
+2. Make changes and commit
+3. Open Pull Request
+4. CI checks pass
+5. Code review
+6. Merge to `main`
+"""
+
+    git_workflow_path.write_text(template)
+
+
+def ensure_system_maps_template(diagrams_dir: Path) -> None:
+    """Ensure system_maps.md exists with stable template content."""
+    system_maps_path = diagrams_dir / "system_maps.md"
+
+    template = """# System Architecture Maps
+
+## Module Boundaries
+
+```mermaid
+flowchart TB
+    subgraph scripts["scripts/"]
+        s1["ShowInfo"]
+        s2["CastInfo"]
+        s3["RealiteaseInfo"]
+        s4["WWHLInfo"]
+        s5["FinalList"]
+    end
+
+    subgraph api["api/"]
+        routers["routers/"]
+        realtime["realtime/"]
+        auth["auth.py"]
+    end
+
+    subgraph trr["trr_backend/"]
+        repos["repositories/"]
+        integrations["integrations/"]
+        ingestion["ingestion/"]
+        media["media/"]
+    end
+
+    subgraph external["External APIs"]
+        tmdb["TMDb"]
+        imdb["IMDb"]
+        fandom["Fandom"]
+    end
+
+    scripts --> repos
+    scripts --> ingestion
+    api --> repos
+    ingestion --> integrations
+    integrations --> external
+    repos --> db[(Supabase)]
+    media --> s3[(S3)]
+```
+
+## Data Flow
+
+```mermaid
+flowchart LR
+    lists["IMDb/TMDb Lists"] --> resolve["resolve_tmdb_ids"]
+    resolve --> backfill["backfill_tmdb_details"]
+    backfill --> sync["sync_entities"]
+    sync --> providers["sync_watch_providers"]
+    providers --> api["API serves ShowDetail"]
+```
+
+## Key Components
+
+- **scripts/**: Data ingestion and enrichment pipelines
+- **api/**: FastAPI REST endpoints and WebSocket realtime
+- **trr_backend/**: Core business logic and data access
+- **integrations/**: External API clients (TMDb, IMDb, etc.)
+"""
+
+    system_maps_path.write_text(template)
+
+
 def main() -> int:
     """Generate Mermaid diagrams and write to docs/Repository/generated/."""
     root = Path(__file__).parent.parent
-    output_dir = root / "docs" / "Repository" / "generated"
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create directories
+    generated_dir = root / "docs" / "Repository" / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+
+    diagrams_dir = root / "docs" / "Repository" / "diagrams"
+    diagrams_dir.mkdir(parents=True, exist_ok=True)
 
     parser = get_parser()
 
-    # Generate import graph at package level (depth=2 for readability)
+    # Generate Tree-sitter diagrams (existing)
     module_graph = build_import_graph(root / "trr_backend", parser)
     pkg_graph = build_package_graph(module_graph, depth=2)
     import_md = generate_mermaid_flowchart(pkg_graph, "trr_backend Internal Import Graph")
-    (output_dir / "CODE_IMPORT_GRAPH.md").write_text(import_md)
-    print(f"Wrote {output_dir / 'CODE_IMPORT_GRAPH.md'} ({len(pkg_graph)} packages)")
+    (generated_dir / "CODE_IMPORT_GRAPH.md").write_text(import_md)
+    print(f"Wrote {generated_dir / 'CODE_IMPORT_GRAPH.md'} ({len(pkg_graph)} packages)")
 
-    # Generate scripts flow
     scripts_flow = generate_scripts_flow(root / "scripts", parser)
-    (output_dir / "SCRIPTS_FLOW.md").write_text(scripts_flow)
+    (generated_dir / "SCRIPTS_FLOW.md").write_text(scripts_flow)
     entrypoint_count = len(find_entrypoints(root / "scripts"))
-    print(f"Wrote {output_dir / 'SCRIPTS_FLOW.md'} ({entrypoint_count} entrypoints)")
+    print(f"Wrote {generated_dir / 'SCRIPTS_FLOW.md'} ({entrypoint_count} entrypoints)")
+
+    # Ensure curated diagram templates exist (NEW)
+    ensure_git_workflow_template(diagrams_dir)
+    print(f"Wrote {diagrams_dir / 'git_workflow.md'} (template)")
+
+    ensure_system_maps_template(diagrams_dir)
+    print(f"Wrote {diagrams_dir / 'system_maps.md'} (template)")
 
     return 0
 

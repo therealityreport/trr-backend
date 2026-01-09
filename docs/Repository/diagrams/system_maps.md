@@ -5,11 +5,17 @@
 ```mermaid
 flowchart TB
     subgraph scripts["scripts/"]
-        sync["sync_*.py"]
-        import["import_*.py"]
-        enrich["enrich_*.py"]
-        resolve["resolve_*.py"]
-        backfill["backfill_*.py"]
+        s1["ShowInfo"]
+        s2["CastInfo"]
+        s3["RealiteaseInfo"]
+        s4["WWHLInfo"]
+        s5["FinalList"]
+    end
+
+    subgraph api["api/"]
+        routers["routers/"]
+        realtime["realtime/"]
+        auth["auth.py"]
     end
 
     subgraph trr["trr_backend/"]
@@ -17,12 +23,6 @@ flowchart TB
         integrations["integrations/"]
         ingestion["ingestion/"]
         media["media/"]
-        utils["utils/"]
-    end
-
-    subgraph api["api/"]
-        routers["routers/"]
-        schemas["schemas/"]
     end
 
     subgraph external["External APIs"]
@@ -33,7 +33,6 @@ flowchart TB
 
     scripts --> repos
     scripts --> ingestion
-    scripts --> media
     api --> repos
     ingestion --> integrations
     integrations --> external
@@ -41,65 +40,20 @@ flowchart TB
     media --> s3[(S3)]
 ```
 
-## TMDb Enrichment Pipeline
+## Data Flow
 
 ```mermaid
 flowchart LR
     lists["IMDb/TMDb Lists"] --> resolve["resolve_tmdb_ids"]
     resolve --> backfill["backfill_tmdb_details"]
-    backfill --> entities["sync_entities"]
-    entities --> providers["sync_watch_providers"]
+    backfill --> sync["sync_entities"]
+    sync --> providers["sync_watch_providers"]
     providers --> api["API serves ShowDetail"]
 ```
 
-## Data Flow Overview
+## Key Components
 
-```mermaid
-flowchart TB
-    subgraph sources["Data Sources"]
-        tmdb_api["TMDb API"]
-        imdb_api["IMDb API"]
-        fandom_wiki["Fandom Wikis"]
-    end
-
-    subgraph pipeline["Sync Pipeline"]
-        sync_shows["sync_shows"]
-        sync_seasons["sync_seasons_episodes"]
-        sync_people["sync_people"]
-        sync_images["sync_*_images"]
-    end
-
-    subgraph storage["Storage"]
-        supabase[(Supabase DB)]
-        s3[(S3 CDN)]
-    end
-
-    subgraph api_layer["API Layer"]
-        fastapi["FastAPI"]
-        ws["WebSocket"]
-    end
-
-    sources --> pipeline
-    pipeline --> supabase
-    pipeline --> s3
-    supabase --> api_layer
-    s3 --> api_layer
-```
-
-## S3 Media Storage Layout
-
-```mermaid
-flowchart LR
-    bucket["trr-media bucket"]
-
-    subgraph images["images/"]
-        logos["logos/{kind}/{id}/{sha256}.ext"]
-        cast["cast_photos/{person_id}/{sha256}.ext"]
-        shows["show_images/{show_id}/{sha256}.ext"]
-        seasons["season_images/{season_id}/{sha256}.ext"]
-    end
-
-    bucket --> images
-```
-
-All media is content-addressed using SHA256 hashes for deduplication and immutable caching.
+- **scripts/**: Data ingestion and enrichment pipelines
+- **api/**: FastAPI REST endpoints and WebSocket realtime
+- **trr_backend/**: Core business logic and data access
+- **integrations/**: External API clients (TMDb, IMDb, etc.)

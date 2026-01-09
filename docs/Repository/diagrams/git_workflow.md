@@ -1,41 +1,31 @@
 # Git Workflow
 
+This diagram shows our standard branching strategy.
+
 ```mermaid
 gitgraph
-    commit id: "main"
-    branch feature/my-feature
-    commit id: "implement"
-    commit id: "tests"
+    commit id: "Initial commit"
+    branch feature/new-feature
+    commit id: "Add feature"
+    commit id: "Add tests"
     checkout main
-    merge feature/my-feature id: "PR merge"
-    commit id: "CI passes"
+    merge feature/new-feature id: "Merge PR"
+    commit id: "Deploy"
 ```
 
 ## Branching Strategy
 
-- `main` is the default branch and deployment target
-- Feature branches: `feature/<name>`
-- Bug fixes: `fix/<name>`
-- Documentation: `docs/<name>`
-- All changes via PR with CI checks
+- **main**: Primary branch, always deployable
+- **feature/\***: New features and enhancements
+- **fix/\***: Bug fixes
+- **docs/\***: Documentation updates
+- **chore/\***: Maintenance and tooling
 
-## Pull Request Process
+## Workflow
 
-1. Create feature branch from `main`
-2. Implement changes with tests
-3. Open PR targeting `main`
-4. CI runs: tests, schema-docs-check
-5. Code review and approval
-6. Squash and merge
-
-## Commit Message Format
-
-```
-<type>(<scope>): <description>
-
-[optional body]
-
-Co-Authored-By: Claude <noreply@anthropic.com>
-```
-
-Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
+1. Create branch from `main`
+2. Make changes and commit
+3. Open Pull Request
+4. CI checks pass
+5. Code review
+6. Merge to `main`
