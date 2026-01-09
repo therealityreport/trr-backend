@@ -39,6 +39,8 @@ trr-backend
 │   │   └── generated
 │   │       ├── .gitkeep
 │   │       ├── CODE_IMPORT_GRAPH.md
+│   │       ├── REPO_STRUCTURE.md
+│   │       ├── REPO_STRUCTURE.mermaid.md
 │   │       └── SCRIPTS_FLOW.md
 │   ├── SHEET_EDIT_MAPPING.md
 │   ├── api
