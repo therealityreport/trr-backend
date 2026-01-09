@@ -44,6 +44,7 @@ jobs:
           create_pr: false
 
       - name: Move generated files to docs
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p docs/Repository/generated
           [ -f REPO_STRUCTURE.md ] && mv REPO_STRUCTURE.md docs/Repository/generated/
