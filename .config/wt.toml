@@ -1,0 +1,219 @@
+# Worktrunk configuration for TRR-Backend
+# https://worktrunk.dev/docs/configuration
+
+[worktree]
+# Default worktree naming pattern (sibling directories)
+# Example: main repo at trr-backend/, feature at trr-backend-my-feature/
+path_pattern = "../${repo_name}-${branch_name_suffix}"
+
+[hooks.post-create]
+# Runs after creating new worktree
+# Prefer symlinking .env (single source of truth), copy as fallback
+script = """
+#!/bin/bash
+set -e
+
+echo "🌳 Setting up TRR-Backend worktree environment..."
+
+# Handle .env: prefer symlink (safer), copy as fallback
+if [ -f "../trr-backend/.env" ]; then
+    # Try symlinking first (single source of truth, no duplication)
+    if ln -s "../trr-backend/.env" ".env" 2>/dev/null; then
+        echo "✅ Symlinked .env from main worktree (shared config)"
+    else
+        # Symlink failed (Windows?), copy instead
+        cp "../trr-backend/.env" ".env"
+        echo "⚠️  Copied .env from main worktree"
+        echo "   WARNING: Changes here won't sync to other worktrees!"
+        echo "   Edit ../trr-backend/.env instead for consistency"
+    fi
+elif [ -f ".env.example" ]; then
+    cp ".env.example" ".env"
+    echo "📝 Created .env from .env.example"
+    echo "⚠️  REMINDER: Edit .env with your credentials before running scripts"
+    echo "⚠️  NEVER commit .env (already in .gitignore)"
+else
+    echo "⚠️  WARNING: No .env or .env.example found"
+    echo "   Create .env manually or copy from another worktree"
+fi
+
+# Handle .venv: detect, don't auto-create
+if [ ! -d ".venv" ] && [ ! -L ".venv" ]; then
+    echo ""
+    echo "📦 Python virtual environment not found"
+    echo "   If you share .venv across worktrees (symlink), run:"
+    echo "     ln -s ../trr-backend/.venv .venv"
+    echo "   Or create a fresh venv for this worktree:"
+    echo "     python3 -m venv .venv"
+    echo "     source .venv/bin/activate"
+    echo "     pip install -r requirements.txt"
+fi
+
+echo ""
+echo "📋 Next steps:"
+echo "  1. source .venv/bin/activate        # Activate virtual environment"
+echo "  2. pytest                           # Verify tests pass"
+echo "  3. ruff check .                     # Verify linting passes"
+echo ""
+echo "💡 Start working:"
+echo "  /trr-spec    # Write specification"
+echo "  /trr-impl    # Start implementing"
+echo ""
+echo "🚀 Worktree ready!"
+"""
+
+[hooks.pre-merge]
+# Runs before merging branch back to default branch
+# STRICT validation (blocks on failure per user preference)
+# Only runs conditional checks if relevant files changed
+script = """
+#!/bin/bash
+set -e  # Exit on any error (strict mode)
+
+echo "🔍 Running pre-merge validation (STRICT MODE)..."
+echo ""
+
+# Resolve default branch dynamically (portable)
+DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+if [ -z "$DEFAULT_BRANCH" ]; then
+    DEFAULT_BRANCH="main"
+fi
+echo "📍 Merging to: $DEFAULT_BRANCH"
+echo ""
+
+# Ensure venv is activated
+if [ -z "$VIRTUAL_ENV" ]; then
+    echo "⚠️  No virtual environment detected. Attempting to activate..."
+    if [ -f ".venv/bin/activate" ]; then
+        source .venv/bin/activate
+    else
+        echo "❌ ERROR: Cannot find .venv/bin/activate"
+        echo "   Create venv first: python3 -m venv .venv && source .venv/bin/activate"
+        exit 1
+    fi
+fi
+
+# Fast validation (ruff + pytest) - ALWAYS RUN
+echo "🧹 Running ruff linting..."
+ruff check . || {
+    echo "❌ BLOCKED: ruff linting failed"
+    echo "   Fix issues with: ruff check . --fix"
+    exit 1
+}
+
+echo "✨ Running ruff formatting check..."
+ruff format --check . || {
+    echo "❌ BLOCKED: Code formatting issues found"
+    echo "   Auto-fix with: ruff format ."
+    exit 1
+}
+
+echo "🧪 Running pytest (unit tests)..."
+pytest || {
+    echo "❌ BLOCKED: Tests failing"
+    echo "   Fix tests before merging"
+    exit 1
+}
+
+# Conditional: Schema validation (only if schema/migrations changed)
+CHANGED_FILES=$(git diff --name-only "$DEFAULT_BRANCH"...HEAD 2>/dev/null || git diff --name-only --cached)
+if echo "$CHANGED_FILES" | grep -qE "supabase/migrations/|supabase/schema_docs/|docs/db/"; then
+    echo ""
+    echo "📊 Detected schema changes, running schema-docs-check..."
+    if command -v make >/dev/null 2>&1 && make -n schema-docs-check >/dev/null 2>&1; then
+        make schema-docs-check || {
+            echo "⚠️  Schema docs out of sync"
+            echo "   Regenerate with: make schema-docs && git add supabase/schema_docs/ && git commit --amend --no-edit"
+            exit 1
+        }
+    else
+        echo "⚠️  make schema-docs-check not available, skipping"
+    fi
+fi
+
+# Conditional: Repo map validation (only if Python structure changed)
+if echo "$CHANGED_FILES" | grep -qE "trr_backend/.*\\.py$|scripts/.*\\.py$"; then
+    echo ""
+    echo "🗺️  Detected Python structure changes, running repo-map-check..."
+    if command -v make >/dev/null 2>&1 && make -n repo-map-check >/dev/null 2>&1; then
+        make repo-map-check || {
+            echo "⚠️  Repo maps out of sync"
+            echo "   Regenerate with: make repo-map && git add docs/Repository/generated/ && git commit --amend --no-edit"
+            exit 1
+        }
+    else
+        echo "⚠️  make repo-map-check not available, skipping"
+    fi
+fi
+
+echo ""
+echo "✅ Pre-merge validation PASSED!"
+echo "💡 Safe to merge to $DEFAULT_BRANCH"
+echo ""
+echo "📝 Note: Full CI (make ci-local) runs on GitHub Actions"
+echo "   If you want to run it locally: make ci-local (requires Docker)"
+"""
+
+[hooks.pre-delete]
+# Runs before deleting worktree
+# Safety check to prevent accidental data loss
+script = """
+#!/bin/bash
+
+echo "🗑️  Preparing to delete worktree..."
+
+# Check for uncommitted changes
+if ! git diff-index --quiet HEAD --; then
+    echo ""
+    echo "⚠️  WARNING: Uncommitted changes detected!"
+    echo ""
+    git status --short
+    echo ""
+    read -p "❓ Continue with deletion? Uncommitted work will be LOST. (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "❌ Deletion cancelled. Commit your work first:"
+        echo "   git add . && git commit -m 'your message'"
+        exit 1
+    fi
+fi
+
+# Check if branch is pushed to remote
+if ! git rev-parse --abbrev-ref --symbolic-full-name @{u} > /dev/null 2>&1; then
+    echo ""
+    echo "⚠️  WARNING: Branch is not pushed to remote!"
+    echo "   Your commits exist only on this machine."
+    echo ""
+    read -p "❓ Continue with deletion? Commits will be LOST if not backed up. (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "❌ Deletion cancelled. Push your branch first:"
+        echo "   git push -u origin $(git branch --show-current)"
+        exit 1
+    fi
+fi
+
+# Check if branch is merged to default branch
+CURRENT_BRANCH=$(git branch --show-current)
+DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+if [ -z "$DEFAULT_BRANCH" ]; then
+    DEFAULT_BRANCH="main"
+fi
+
+if ! git branch --merged "$DEFAULT_BRANCH" | grep -q "^..${CURRENT_BRANCH}$" && \
+   ! git branch -r --merged "origin/$DEFAULT_BRANCH" | grep -q "origin/${CURRENT_BRANCH}"; then
+    echo ""
+    echo "⚠️  WARNING: Branch '${CURRENT_BRANCH}' is not merged to $DEFAULT_BRANCH!"
+    echo "   Your work may not be integrated yet."
+    echo ""
+    read -p "❓ Continue with deletion? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "❌ Deletion cancelled. Merge to $DEFAULT_BRANCH first (create PR):"
+        echo "   /trr-pr"
+        exit 1
+    fi
+fi
+
+echo "✅ Safe to delete worktree (all checks passed)"
+"""
