@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict
-from typing import Any, Iterable, Mapping
+from typing import Any
 from uuid import UUID
 
 from supabase import Client
-
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
 from trr_backend.models.cast_photos import CastPhotoUpsert
 
@@ -28,7 +28,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
         hint = (
             f"\n\nPostgREST schema cache may still be stale after retry during {context}. "
             "Wait 30-60s and try again, or run:\n"
-            "  psql \"$SUPABASE_DB_URL\" -f scripts/db/reload_postgrest_schema.sql"
+            '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
         )
         raise CastPhotoRepositoryError(f"{exc}{hint}") from exc
 
@@ -193,10 +193,14 @@ def fetch_cast_photos_missing_hosted(
 ) -> list[dict[str, Any]]:
     # Join with people table to get person name for S3 path
     def _base_query():
-        return db.schema("core").table("cast_photos").select(
-            "id,person_id,imdb_person_id,source,source_page_url,image_url,url,thumb_url,"
-            "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
-            "people:person_id(full_name,external_ids)"
+        return (
+            db.schema("core")
+            .table("cast_photos")
+            .select(
+                "id,person_id,imdb_person_id,source,source_page_url,image_url,url,thumb_url,"
+                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
+                "people:person_id(full_name,external_ids)"
+            )
         )
 
     def _apply_filters(query):
@@ -213,9 +217,13 @@ def fetch_cast_photos_missing_hosted(
     if include_hosted:
         if base:
             missing_query = _apply_filters(_base_query()).is_("hosted_url", "null")
-            mismatch_query = _apply_filters(_base_query()).not_.is_("hosted_url", "null").not_.like(
-                "hosted_url",
-                f"{base}/%",
+            mismatch_query = (
+                _apply_filters(_base_query())
+                .not_.is_("hosted_url", "null")
+                .not_.like(
+                    "hosted_url",
+                    f"{base}/%",
+                )
             )
             queries.extend([missing_query, mismatch_query])
         else:
@@ -299,12 +307,7 @@ def fetch_cast_photos_for_person(
     Returns:
         List of cast photo records
     """
-    query = (
-        db.schema("core")
-        .table("cast_photos")
-        .select("*")
-        .eq("person_id", person_id)
-    )
+    query = db.schema("core").table("cast_photos").select("*").eq("person_id", person_id)
 
     if sources:
         query = query.in_("source", sources)

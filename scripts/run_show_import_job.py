@@ -184,7 +184,9 @@ def main(argv: list[str]) -> int:
             return 2
 
     if tmdb_lists and not _require_env("TMDB_API_KEY"):
-        print("Missing required environment variable: TMDB_API_KEY (required for TMDb list ingestion).", file=sys.stderr)
+        print(
+            "Missing required environment variable: TMDB_API_KEY (required for TMDb list ingestion).", file=sys.stderr
+        )
         return 2
 
     # Pre-flight DB check: verify connection and reload PostgREST schema cache
@@ -247,7 +249,7 @@ def main(argv: list[str]) -> int:
             if attempt < retries:
                 sleep_s = min(30, 2**attempt)
                 print(
-                    f"IMDb pass failed (exit {rc}); retrying in {sleep_s}s (attempt {attempt+1}/{retries})…",
+                    f"IMDb pass failed (exit {rc}); retrying in {sleep_s}s (attempt {attempt + 1}/{retries})…",
                     file=sys.stderr,
                 )
                 time.sleep(sleep_s)
@@ -299,7 +301,7 @@ def main(argv: list[str]) -> int:
         if attempt < retries:
             sleep_s = min(30, 2**attempt)
             print(
-                f"IMDb pass failed (exit {rc}); retrying in {sleep_s}s (attempt {attempt+1}/{retries})…",
+                f"IMDb pass failed (exit {rc}); retrying in {sleep_s}s (attempt {attempt + 1}/{retries})…",
                 file=sys.stderr,
             )
             time.sleep(sleep_s)

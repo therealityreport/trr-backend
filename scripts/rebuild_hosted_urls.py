@@ -4,15 +4,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Iterable
+from collections.abc import Iterable
 
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
 except ImportError as exc:  # pragma: no cover - depends on local environment
-    raise SystemExit(
-        "Missing psycopg2; install deps (e.g., `pip install -r requirements.txt`)."
-    ) from exc
+    raise SystemExit("Missing psycopg2; install deps (e.g., `pip install -r requirements.txt`).") from exc
 
 from trr_backend.media.s3_mirror import build_hosted_url, get_cdn_base_url
 from trr_backend.utils.env import load_env
@@ -82,11 +80,7 @@ def _fetch_rows(
             conditions.append("show_id = ANY(%s)")
             params.append(show_ids)
 
-    sql = (
-        f"select id, hosted_key, hosted_url "
-        f"from core.{table} "
-        f"where {' and '.join(conditions)}"
-    )
+    sql = f"select id, hosted_key, hosted_url from core.{table} where {' and '.join(conditions)}"
     if limit is not None:
         sql += " limit %s"
         params.append(int(limit))

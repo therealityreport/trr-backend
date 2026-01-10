@@ -12,8 +12,9 @@ fixtures and validate normalization helpers directly.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
 import requests
 
@@ -22,9 +23,7 @@ ImdbNameId = str  # e.g. "nm0000148"
 
 IMDB_GRAPHQL_BASE_URL = "https://caching.graphql.imdb.com"
 IMDB_GRAPHQL_OPERATION_TITLE_EPISODE_BOTTOM_SHEET_CREDITS = "TitleEpisodeBottomSheetCredits"
-IMDB_GRAPHQL_PERSISTED_QUERY_SHA256 = (
-    "8af4e7a49ccd298796aec3d0aa5699c05a6b9efb23721f7eae98bb19b72eafa3"
-)
+IMDB_GRAPHQL_PERSISTED_QUERY_SHA256 = "8af4e7a49ccd298796aec3d0aa5699c05a6b9efb23721f7eae98bb19b72eafa3"
 
 # Example job category id (used by debug harness and as an optional default).
 IMDB_JOB_CATEGORY_SELF = "amzn1.imdb.concept.name_credit_group.7caf7d16-5db9-4f4f-8864-d4c6e711c686"

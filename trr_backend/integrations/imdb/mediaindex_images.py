@@ -4,11 +4,12 @@ import gzip
 import json
 import re
 import time
-from dataclasses import dataclass, field
-from typing import Any, Mapping
-from urllib.parse import quote, urlparse
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
+from urllib.parse import quote, urlparse
 
 try:
     import requests

@@ -10,9 +10,7 @@ from trr_backend.integrations.imdb.fullcredits_cast_parser import (
 
 def test_parse_fullcredits_cast_html_extracts_cast_rows() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    html = (repo_root / "tests" / "fixtures" / "imdb" / "fullcredits_cast_sample.html").read_text(
-        encoding="utf-8"
-    )
+    html = (repo_root / "tests" / "fixtures" / "imdb" / "fullcredits_cast_sample.html").read_text(encoding="utf-8")
 
     rows = parse_fullcredits_cast_html(html, series_id="tt1234567")
     assert len(rows) == 3
@@ -30,9 +28,7 @@ def test_parse_fullcredits_cast_html_extracts_cast_rows() -> None:
 
 def test_filter_self_cast_rows_only_keeps_self_roles() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    html = (repo_root / "tests" / "fixtures" / "imdb" / "fullcredits_cast_sample.html").read_text(
-        encoding="utf-8"
-    )
+    html = (repo_root / "tests" / "fixtures" / "imdb" / "fullcredits_cast_sample.html").read_text(encoding="utf-8")
 
     rows = parse_fullcredits_cast_html(html, series_id="tt1234567")
     self_rows = filter_self_cast_rows(rows)

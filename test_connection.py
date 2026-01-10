@@ -59,5 +59,6 @@ def test_connection() -> None:
 
         traceback.print_exc()
 
+
 if __name__ == "__main__":
     test_connection()

@@ -9,13 +9,12 @@ After schema normalization (migrations 0028-0048), data is stored in:
 Tests that check external_ids["tmdb_meta"], external_ids["show_meta"], etc. need to be
 rewritten to check the new normalized tables/columns.
 """
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 from uuid import UUID
-from datetime import datetime, timezone
 
 import pytest
 
@@ -66,12 +65,8 @@ def test_stage2_multiple_shows_does_not_refetch_tv_details_when_tmdb_meta_presen
 def test_enricher_produces_tmdb_show_patch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that the enricher produces tmdb_* metadata for core.shows."""
     repo_root = Path(__file__).resolve().parents[3]
-    find_payload = json.loads(
-        (repo_root / "tests" / "fixtures" / "tmdb" / "find_by_imdb_id_sample.json").read_text()
-    )
-    details_payload = json.loads(
-        (repo_root / "tests" / "fixtures" / "tmdb" / "tv_details_sample.json").read_text()
-    )
+    find_payload = json.loads((repo_root / "tests" / "fixtures" / "tmdb" / "find_by_imdb_id_sample.json").read_text())
+    details_payload = json.loads((repo_root / "tests" / "fixtures" / "tmdb" / "tv_details_sample.json").read_text())
     providers_payload = json.loads(
         (repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text()
     )

@@ -6,8 +6,9 @@ import json
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from datetime import date, datetime
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import quote, unquote, urlparse, urlunparse
 
 try:
@@ -39,7 +40,9 @@ def fetch_fandom_person_html(
         parsed = urlparse(page_url)
         page = parsed.path.split("/wiki/")[-1] if "/wiki/" in parsed.path else parsed.path.rsplit("/", 1)[-1]
         page = unquote(page)
-        api_url = f"{parsed.scheme}://{parsed.netloc}/api.php?action=parse&page={quote(page)}&prop=text|revid&format=json"
+        api_url = (
+            f"{parsed.scheme}://{parsed.netloc}/api.php?action=parse&page={quote(page)}&prop=text|revid&format=json"
+        )
         api_req = urllib.request.Request(api_url, headers=merged)
         with urllib.request.urlopen(api_req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -200,10 +203,7 @@ def _extract_list_values(container: BeautifulSoup) -> list[str]:
         if items:
             return items
 
-    items = [
-        _normalize_text(link.get_text(" ", strip=True))
-        for link in container.find_all("a")
-    ]
+    items = [_normalize_text(link.get_text(" ", strip=True)) for link in container.find_all("a")]
     items = [item for item in items if item]
     if items:
         return items
@@ -416,7 +416,9 @@ def _collect_section_images(
     return photos
 
 
-def _parse_infobox(article_root: BeautifulSoup, source_page_url: str) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+def _parse_infobox(
+    article_root: BeautifulSoup, source_page_url: str
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     infobox = article_root.select_one("aside.portable-infobox") or article_root.select_one(".portable-infobox")
     if not infobox:
         return {}, {}, []
@@ -536,10 +538,7 @@ def _parse_taglines(
     if not rows:
         return taglines, photos
 
-    headers = [
-        _normalize_text(th.get_text(" ", strip=True)) or ""
-        for th in rows[0].find_all(["th", "td"])
-    ]
+    headers = [_normalize_text(th.get_text(" ", strip=True)) or "" for th in rows[0].find_all(["th", "td"])]
 
     for idx, row in enumerate(rows[1:], start=1):
         cells = row.find_all(["td", "th"])
@@ -594,10 +593,7 @@ def _parse_reunion_seating(
     if not rows:
         return seating, photos
 
-    headers = [
-        _normalize_text(th.get_text(" ", strip=True)) or ""
-        for th in rows[0].find_all(["th", "td"])
-    ]
+    headers = [_normalize_text(th.get_text(" ", strip=True)) or "" for th in rows[0].find_all(["th", "td"])]
 
     for idx, row in enumerate(rows[1:], start=1):
         cells = row.find_all(["td", "th"])
@@ -639,10 +635,7 @@ def _parse_trivia(article_root: BeautifulSoup) -> list[str] | None:
     list_node = heading.find_next(["ul", "ol"])
     if not list_node:
         return None
-    items = [
-        _normalize_text(li.get_text(" ", strip=True))
-        for li in list_node.find_all("li")
-    ]
+    items = [_normalize_text(li.get_text(" ", strip=True)) for li in list_node.find_all("li")]
     items = [item for item in items if item]
     return items or None
 

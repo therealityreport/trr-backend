@@ -119,7 +119,13 @@ def test_fetch_tmdb_list_items_parses_tv_items_and_external_ids(monkeypatch: pyt
         mod,
         "fetch_list_items",
         lambda *args, **kwargs: [
-            {"media_type": "tv", "id": 100, "name": "TMDb Show", "first_air_date": "2019-01-01", "origin_country": ["US"]},
+            {
+                "media_type": "tv",
+                "id": 100,
+                "name": "TMDb Show",
+                "first_air_date": "2019-01-01",
+                "origin_country": ["US"],
+            },
             {"media_type": "movie", "id": 200, "title": "Ignore Movie"},
         ],
     )

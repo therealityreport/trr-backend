@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any
 
+from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_season_details, resolve_api_key
 from trr_backend.media.s3_mirror import (
     get_cdn_base_url,
@@ -19,8 +21,6 @@ from trr_backend.repositories.season_images import (
     update_season_image_hosted_fields,
     upsert_season_images,
 )
-
-from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -42,17 +42,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _fetch_show_seasons(db, show_id: str) -> list[dict[str, Any]]:
-    response = (
-        db.schema("core")
-        .table("seasons")
-        .select("id,season_number")
-        .eq("show_id", show_id)
-        .execute()
-    )
+    response = db.schema("core").table("seasons").select("id,season_number").eq("show_id", show_id).execute()
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error listing seasons: {response.error}")
     data = response.data or []

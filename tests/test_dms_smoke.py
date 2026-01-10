@@ -4,6 +4,7 @@ Smoke tests for the Direct Messages API.
 These tests verify basic functionality with mocked Supabase.
 All DM endpoints require authentication.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -11,8 +12,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from api import auth, deps
 from api.main import app
-from api import deps, auth
 
 
 def create_chainable_mock(return_data=None, single_data=None):
@@ -103,6 +104,7 @@ MOCK_READ_RECEIPT = {
 
 # --- Fixtures ---
 
+
 @pytest.fixture
 def mock_supabase():
     """Create a mock Supabase client."""
@@ -119,6 +121,7 @@ def client(mock_supabase):
 
 
 # --- Auth requirement tests ---
+
 
 class TestAuthRequired:
     """Test that all DM endpoints require authentication."""
@@ -164,6 +167,7 @@ class TestAuthRequired:
 
 
 # --- Validation tests ---
+
 
 class TestValidation:
     """Test request validation (with auth, since auth check happens first)."""
@@ -215,6 +219,7 @@ class TestValidation:
 
 
 # --- Success path tests ---
+
 
 class TestCreateConversation:
     """Test conversation creation."""
@@ -380,6 +385,7 @@ class TestReadReceipts:
 
 
 # --- Route registration tests ---
+
 
 class TestRouteRegistration:
     """Test that all DM routes are registered."""

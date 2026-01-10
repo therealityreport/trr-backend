@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 import gzip
 import json
 import re
 import time
-from typing import Mapping
-from urllib.parse import quote, unquote, urlencode, urlparse
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 try:
     import requests
@@ -67,6 +67,7 @@ class FandomSourceRecord:
 @dataclass(frozen=True)
 class FandomGalleryImage:
     """A single image from a Fandom gallery page."""
+
     url: str
     thumb_url: str | None
     caption: str | None
@@ -76,6 +77,7 @@ class FandomGalleryImage:
 @dataclass(frozen=True)
 class FandomGalleryResult:
     """Result of parsing a Fandom gallery page."""
+
     source: str
     url: str
     person_name: str
@@ -465,12 +467,14 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
             if caption_el:
                 caption = caption_el.get_text(" ", strip=True) or None
 
-            images.append(FandomGalleryImage(
-                url=full_url,
-                thumb_url=thumb if thumb != full_url else None,
-                caption=caption,
-                source_page_url=url,
-            ))
+            images.append(
+                FandomGalleryImage(
+                    url=full_url,
+                    thumb_url=thumb if thumb != full_url else None,
+                    caption=caption,
+                    source_page_url=url,
+                )
+            )
 
     # Method 2: Look for images inside gallery tags
     for gallery in soup.select(".gallery, .wikia-gallery"):
@@ -489,12 +493,14 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
             if caption and caption.lower() in ("image", "photo", "gallery"):
                 caption = None
 
-            images.append(FandomGalleryImage(
-                url=full_url,
-                thumb_url=thumb if thumb != full_url else None,
-                caption=caption,
-                source_page_url=url,
-            ))
+            images.append(
+                FandomGalleryImage(
+                    url=full_url,
+                    thumb_url=thumb if thumb != full_url else None,
+                    caption=caption,
+                    source_page_url=url,
+                )
+            )
 
     # Method 3: Look for any article images (broader search)
     article = soup.select_one(".mw-parser-output") or soup.select_one("#mw-content-text")
@@ -521,12 +527,14 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
             if caption and caption.lower() in ("image", "photo", "gallery"):
                 caption = None
 
-            images.append(FandomGalleryImage(
-                url=full_url,
-                thumb_url=thumb if thumb != full_url else None,
-                caption=caption,
-                source_page_url=url,
-            ))
+            images.append(
+                FandomGalleryImage(
+                    url=full_url,
+                    thumb_url=thumb if thumb != full_url else None,
+                    caption=caption,
+                    source_page_url=url,
+                )
+            )
 
     return FandomGalleryResult(
         source="fandom",
@@ -569,10 +577,7 @@ def _fetch_fandom_page_via_api(
             page = parsed.path.rsplit("/", 1)[-1]
         page = unquote(page)
 
-        api_url = (
-            f"{parsed.scheme}://{parsed.netloc}/api.php"
-            f"?action=parse&page={quote(page)}&prop=text&format=json"
-        )
+        api_url = f"{parsed.scheme}://{parsed.netloc}/api.php?action=parse&page={quote(page)}&prop=text&format=json"
 
         headers = {**_DEFAULT_HEADERS, "accept": "application/json"}
         api_req = urllib.request.Request(api_url, headers=headers)

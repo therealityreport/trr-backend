@@ -6,12 +6,12 @@ import sys
 from typing import Any
 
 import requests
-from supabase import Client
 
+from scripts._sync_common import load_env_and_db
+from supabase import Client
 from trr_backend.ingestion.tmdb_show_backfill import resolve_tmdb_id_from_find_payload
 from trr_backend.integrations.tmdb.client import TmdbClientError, find_by_imdb_id, resolve_api_key, resolve_bearer_token
 from trr_backend.repositories.shows import update_show
-from scripts._sync_common import load_env_and_db
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -48,13 +48,7 @@ def _fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any
         if isinstance(data, list):
             rows.extend(data)
     else:
-        query = (
-            db.schema("core")
-            .table("shows")
-            .select(fields)
-            .not_.is_("imdb_id", "null")
-            .is_("tmdb_id", "null")
-        )
+        query = db.schema("core").table("shows").select(fields).not_.is_("imdb_id", "null").is_("tmdb_id", "null")
         if args.limit is not None:
             query = query.limit(max(0, int(args.limit)))
         response = query.execute()

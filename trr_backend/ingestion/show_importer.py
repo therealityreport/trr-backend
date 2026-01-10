@@ -4,14 +4,15 @@ import json
 import os
 import re
 import sys
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 import requests
-from supabase import Client
 
+from supabase import Client
 from trr_backend.db.supabase import create_supabase_admin_client
 from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.ingestion.showinfo_overrides import (
@@ -29,13 +30,18 @@ from trr_backend.ingestion.shows_from_lists import (
     parse_imdb_list_id,
 )
 from trr_backend.integrations.imdb.credits_client import ImdbCreditsClientError, fetch_title_credits
-from trr_backend.integrations.imdb.episodic_client import HttpImdbEpisodicClient, IMDB_JOB_CATEGORY_SELF
+from trr_backend.integrations.imdb.episodic_client import IMDB_JOB_CATEGORY_SELF, HttpImdbEpisodicClient
 from trr_backend.integrations.imdb.title_metadata_client import (
     HttpImdbTitleMetadataClient,
     parse_imdb_episodes_page,
     parse_imdb_season_episodes_page,
 )
-from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_details, fetch_tv_images, fetch_tv_season_details
+from trr_backend.integrations.tmdb.client import (
+    TmdbClientError,
+    fetch_tv_details,
+    fetch_tv_images,
+    fetch_tv_season_details,
+)
 from trr_backend.models.shows import ShowRecord, ShowUpsert
 from trr_backend.repositories.episodes import (
     assert_core_episodes_table_exists,
@@ -60,17 +66,18 @@ from trr_backend.repositories.seasons import (
     fetch_seasons_by_show,
     upsert_seasons,
 )
-from trr_backend.repositories.show_images import (
-    assert_core_show_images_table_exists,
-    delete_tmdb_show_images,
-    upsert_show_images,
-)
+
 # Child table functions removed - data now written directly to core.shows array columns
 # from trr_backend.repositories.show_child_tables import (...)
 from trr_backend.repositories.show_cast import (
     assert_core_show_cast_table_exists,
     delete_show_cast_for_show,
     upsert_show_cast,
+)
+from trr_backend.repositories.show_images import (
+    assert_core_show_images_table_exists,
+    delete_tmdb_show_images,
+    upsert_show_images,
 )
 from trr_backend.repositories.shows import (
     assert_core_shows_table_exists,
@@ -442,19 +449,14 @@ def _ingest_imdb_cast(
                     print(f"IMDb cast: skipping imdb_id={imdb_id} (HTTP {status})", file=sys.stderr)
                 else:
                     print(
-                        f"IMDb cast: failed imdb_id={imdb_id} "
-                        f"(HTTP {status if status is not None else 'unknown'})",
+                        f"IMDb cast: failed imdb_id={imdb_id} (HTTP {status if status is not None else 'unknown'})",
                         file=sys.stderr,
                     )
                 continue
             credits = _normalize_imdb_cast_credits(credits_payload.credits)
             credits_cache[imdb_id] = credits
 
-        eligible = [
-            credit
-            for credit in credits
-            if credit.episode_count >= min_episodes and credit.episode_count > 0
-        ]
+        eligible = [credit for credit in credits if credit.episode_count >= min_episodes and credit.episode_count > 0]
         if not eligible:
             print(
                 f"IMDb cast: no eligible credits show_id={show_id} imdb_id={imdb_id} min_episodes={min_episodes}",
@@ -531,6 +533,7 @@ def _ingest_imdb_cast(
             f"skipped_override={skipped_override} failed={failed_credits}",
             file=sys.stderr,
         )
+
 
 def _candidate_to_show_upsert(
     candidate: CandidateShow,
@@ -891,7 +894,7 @@ def _tmdb_show_images_rows(
 
 
 def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -917,8 +920,8 @@ def _parse_iso8601_utc(value: Any) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def _tmdb_meta_is_fresh(
@@ -1117,7 +1120,7 @@ def upsert_candidates_into_supabase(
     tmdb_details_session = requests.Session()
     tmdb_details_append = ("alternative_titles", "external_ids")
     tmdb_details_cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] = {}
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for idx, candidate in enumerate(candidates_list, start=1):
         tmdb_id = int(candidate.tmdb_id) if candidate.tmdb_id is not None else None
@@ -1198,7 +1201,11 @@ def upsert_candidates_into_supabase(
                     print(f"TMDb details: failed tmdb_id={tmdb_id} (unexpected error)", file=sys.stderr)
 
             if tmdb_details_total:
-                if tmdb_details_processed == 1 or tmdb_details_processed % 10 == 0 or tmdb_details_processed == tmdb_details_total:
+                if (
+                    tmdb_details_processed == 1
+                    or tmdb_details_processed % 10 == 0
+                    or tmdb_details_processed == tmdb_details_total
+                ):
                     print(
                         f"TMDb details: processed {tmdb_details_processed}/{tmdb_details_total} "
                         f"(fetched={tmdb_details_fetched} "
@@ -1244,10 +1251,7 @@ def upsert_candidates_into_supabase(
         created_now = False
         if existing is None:
             if dry_run:
-                print(
-                    f"CREATE show imdb_id={resolved_imdb_id or ''} tmdb_id={tmdb_id or ''} "
-                    f"name={candidate.title!r}"
-                )
+                print(f"CREATE show imdb_id={resolved_imdb_id or ''} tmdb_id={tmdb_id or ''} name={candidate.title!r}")
                 created += 1
                 created_now = True
                 upserted_show_rows.append(
@@ -1274,9 +1278,15 @@ def upsert_candidates_into_supabase(
                 patch["imdb_id"] = resolved_imdb_id
             if tmdb_id is not None and existing.get("tmdb_id") is None:
                 patch["tmdb_id"] = tmdb_id
-            if show_upsert.needs_imdb_resolution is not None and existing.get("needs_imdb_resolution") != show_upsert.needs_imdb_resolution:
+            if (
+                show_upsert.needs_imdb_resolution is not None
+                and existing.get("needs_imdb_resolution") != show_upsert.needs_imdb_resolution
+            ):
                 patch["needs_imdb_resolution"] = show_upsert.needs_imdb_resolution
-            if show_upsert.needs_tmdb_resolution is not None and existing.get("needs_tmdb_resolution") != show_upsert.needs_tmdb_resolution:
+            if (
+                show_upsert.needs_tmdb_resolution is not None
+                and existing.get("needs_tmdb_resolution") != show_upsert.needs_tmdb_resolution
+            ):
                 patch["needs_tmdb_resolution"] = show_upsert.needs_tmdb_resolution
             if not existing.get("premiere_date") and show_upsert.premiere_date:
                 patch["premiere_date"] = show_upsert.premiere_date
@@ -1523,7 +1533,9 @@ def upsert_candidates_into_supabase(
                                         if cache_key in imdb_html_cache:
                                             season_html = imdb_html_cache[cache_key]
                                         else:
-                                            season_html = imdb_client.fetch_episodes_page(imdb_series_id_str, season=season_no)
+                                            season_html = imdb_client.fetch_episodes_page(
+                                                imdb_series_id_str, season=season_no
+                                            )
                                             imdb_html_cache[cache_key] = season_html
 
                                         episodes = parse_imdb_season_episodes_page(season_html, season=season_no)
@@ -1554,7 +1566,9 @@ def upsert_candidates_into_supabase(
                                             if ep.imdb_primary_image_url:
                                                 episode_row["imdb_primary_image_url"] = ep.imdb_primary_image_url
                                             if ep.imdb_primary_image_caption:
-                                                episode_row["imdb_primary_image_caption"] = ep.imdb_primary_image_caption
+                                                episode_row["imdb_primary_image_caption"] = (
+                                                    ep.imdb_primary_image_caption
+                                                )
                                             if ep.imdb_primary_image_width is not None:
                                                 episode_row["imdb_primary_image_width"] = ep.imdb_primary_image_width
                                             if ep.imdb_primary_image_height is not None:
@@ -1611,7 +1625,10 @@ def upsert_candidates_into_supabase(
                                     season_numbers.append(int(sn.strip()))
                         season_numbers = sorted({n for n in season_numbers if 0 <= n <= 50})
                         if not season_numbers:
-                            print(f"TMDb seasons: no seasons found show_id={show_id} tmdb_id={tmdb_id_int}", file=sys.stderr)
+                            print(
+                                f"TMDb seasons: no seasons found show_id={show_id} tmdb_id={tmdb_id_int}",
+                                file=sys.stderr,
+                            )
                         else:
                             upsert_seasons(
                                 db,
@@ -1664,25 +1681,44 @@ def upsert_candidates_into_supabase(
                                         "show_id": show_id,
                                         "season_number": int(season_no),
                                         "tmdb_series_id": int(tmdb_id_int),
-                                        "tmdb_season_id": payload.get("id") if isinstance(payload.get("id"), int) else None,
-                                        "tmdb_season_object_id": payload.get("_id") if isinstance(payload.get("_id"), str) else None,
+                                        "tmdb_season_id": payload.get("id")
+                                        if isinstance(payload.get("id"), int)
+                                        else None,
+                                        "tmdb_season_object_id": payload.get("_id")
+                                        if isinstance(payload.get("_id"), str)
+                                        else None,
                                         "name": payload.get("name") if isinstance(payload.get("name"), str) else None,
-                                        "overview": payload.get("overview") if isinstance(payload.get("overview"), str) else None,
-                                        "air_date": payload.get("air_date") if isinstance(payload.get("air_date"), str) else None,
-                                        "poster_path": payload.get("poster_path") if isinstance(payload.get("poster_path"), str) else None,
-                                        "external_tvdb_id": ext_map.get("tvdb_id") if isinstance(ext_map.get("tvdb_id"), int) else None,
-                                        "external_wikidata_id": ext_map.get("wikidata_id") if isinstance(ext_map.get("wikidata_id"), str) else None,
+                                        "overview": payload.get("overview")
+                                        if isinstance(payload.get("overview"), str)
+                                        else None,
+                                        "air_date": payload.get("air_date")
+                                        if isinstance(payload.get("air_date"), str)
+                                        else None,
+                                        "poster_path": payload.get("poster_path")
+                                        if isinstance(payload.get("poster_path"), str)
+                                        else None,
+                                        "external_tvdb_id": ext_map.get("tvdb_id")
+                                        if isinstance(ext_map.get("tvdb_id"), int)
+                                        else None,
+                                        "external_wikidata_id": ext_map.get("wikidata_id")
+                                        if isinstance(ext_map.get("wikidata_id"), str)
+                                        else None,
                                         "language": tmdb_season_language,
                                         "fetched_at": fetched_at,
                                     }
                                     if isinstance(season_patch.get("name"), str) and season_patch["name"].strip():
                                         season_patch["title"] = season_patch["name"]
-                                    if isinstance(season_patch.get("air_date"), str) and season_patch["air_date"].strip():
+                                    if (
+                                        isinstance(season_patch.get("air_date"), str)
+                                        and season_patch["air_date"].strip()
+                                    ):
                                         season_patch["premiere_date"] = season_patch["air_date"]
 
                                     upsert_seasons(db, [season_patch])
 
-                                    existing_eps = fetch_episodes_for_show_season(db, show_id=show_id, season_number=int(season_no))
+                                    existing_eps = fetch_episodes_for_show_season(
+                                        db, show_id=show_id, season_number=int(season_no)
+                                    )
                                     existing_by_number: dict[int, dict[str, Any]] = {}
                                     for e in existing_eps:
                                         ep_no = e.get("episode_number")
@@ -1705,13 +1741,21 @@ def upsert_candidates_into_supabase(
                                             existing_air_date = existing.get("air_date")
 
                                             tmdb_title = ep.get("name") if isinstance(ep.get("name"), str) else None
-                                            tmdb_overview = ep.get("overview") if isinstance(ep.get("overview"), str) else None
-                                            tmdb_air = ep.get("air_date") if isinstance(ep.get("air_date"), str) else None
+                                            tmdb_overview = (
+                                                ep.get("overview") if isinstance(ep.get("overview"), str) else None
+                                            )
+                                            tmdb_air = (
+                                                ep.get("air_date") if isinstance(ep.get("air_date"), str) else None
+                                            )
 
                                             title_val = (
                                                 existing_title.strip()
                                                 if isinstance(existing_title, str) and existing_title.strip()
-                                                else (tmdb_title.strip() if isinstance(tmdb_title, str) and tmdb_title.strip() else None)
+                                                else (
+                                                    tmdb_title.strip()
+                                                    if isinstance(tmdb_title, str) and tmdb_title.strip()
+                                                    else None
+                                                )
                                             )
                                             overview_val = (
                                                 existing_overview.strip()
@@ -1725,7 +1769,11 @@ def upsert_candidates_into_supabase(
                                             air_val = (
                                                 existing_air_date
                                                 if isinstance(existing_air_date, str) and existing_air_date.strip()
-                                                else (tmdb_air.strip() if isinstance(tmdb_air, str) and tmdb_air.strip() else None)
+                                                else (
+                                                    tmdb_air.strip()
+                                                    if isinstance(tmdb_air, str) and tmdb_air.strip()
+                                                    else None
+                                                )
                                             )
 
                                             episode_row: dict[str, Any] = {
@@ -1746,9 +1794,15 @@ def upsert_candidates_into_supabase(
 
                                             if isinstance(ep.get("id"), int):
                                                 episode_row["tmdb_episode_id"] = ep.get("id")
-                                            if isinstance(ep.get("episode_type"), str) and ep.get("episode_type").strip():
+                                            if (
+                                                isinstance(ep.get("episode_type"), str)
+                                                and ep.get("episode_type").strip()
+                                            ):
                                                 episode_row["episode_type"] = ep.get("episode_type")
-                                            if isinstance(ep.get("production_code"), str) and ep.get("production_code").strip():
+                                            if (
+                                                isinstance(ep.get("production_code"), str)
+                                                and ep.get("production_code").strip()
+                                            ):
                                                 episode_row["production_code"] = ep.get("production_code")
                                             if isinstance(ep.get("runtime"), int):
                                                 episode_row["runtime"] = ep.get("runtime")
@@ -1825,7 +1879,11 @@ def upsert_candidates_into_supabase(
                                         file=sys.stderr,
                                     )
 
-                                if season_numbers and (seasons_fetched == 1 or seasons_fetched % 5 == 0 or seasons_fetched == len(season_numbers)):
+                                if season_numbers and (
+                                    seasons_fetched == 1
+                                    or seasons_fetched % 5 == 0
+                                    or seasons_fetched == len(season_numbers)
+                                ):
                                     print(
                                         f"TMDb seasons: processed {seasons_fetched}/{len(season_numbers)} show_id={show_id} tmdb_id={tmdb_id_int} "
                                         f"(failed={seasons_failed})",
@@ -1960,7 +2018,11 @@ def upsert_candidates_into_supabase(
                 print(f"TMDb images: failed tmdb_id={tmdb_id_int} (unexpected error)", file=sys.stderr)
 
             if tmdb_images_total:
-                if tmdb_images_processed == 1 or tmdb_images_processed % 10 == 0 or tmdb_images_processed == tmdb_images_total:
+                if (
+                    tmdb_images_processed == 1
+                    or tmdb_images_processed % 10 == 0
+                    or tmdb_images_processed == tmdb_images_total
+                ):
                     print(
                         f"TMDb images: processed {tmdb_images_processed}/{tmdb_images_total} "
                         f"(fetched={tmdb_images_fetched} cached={tmdb_images_skipped_cached} failed={tmdb_images_failed})",
@@ -1997,14 +2059,8 @@ def upsert_candidates_into_supabase(
                     name=str(row.get("name") or ""),
                     description=row.get("description") if isinstance(row.get("description"), str) else None,
                     premiere_date=row.get("premiere_date") if isinstance(row.get("premiere_date"), str) else None,
-                    imdb_id=(
-                        row.get("imdb_id") if isinstance(row.get("imdb_id"), str) else None
-                    ),
-                    tmdb_id=(
-                        int(row.get("tmdb_id"))
-                        if isinstance(row.get("tmdb_id"), int)
-                        else None
-                    ),
+                    imdb_id=(row.get("imdb_id") if isinstance(row.get("imdb_id"), str) else None),
+                    tmdb_id=(int(row.get("tmdb_id")) if isinstance(row.get("tmdb_id"), int) else None),
                 )
             )
 
@@ -2079,10 +2135,7 @@ def upsert_candidates_into_supabase(
 
             if patch.show_images_rows:
                 if dry_run:
-                    print(
-                        f"ENRICH images show_id={patch.show_id} "
-                        f"rows={len(patch.show_images_rows)} source=imdb"
-                    )
+                    print(f"ENRICH images show_id={patch.show_id} rows={len(patch.show_images_rows)} source=imdb")
                 elif supabase_client is not None:
                     try:
                         upsert_show_images(supabase_client, patch.show_images_rows)

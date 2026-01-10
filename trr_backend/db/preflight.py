@@ -4,6 +4,7 @@ Database preflight checks for TRR Backend.
 Use these helpers to fail fast with clear errors when migrations or scripts
 target the wrong database (e.g., missing core schema).
 """
+
 from __future__ import annotations
 
 import os
@@ -24,7 +25,8 @@ def _is_missing_schema_error(message: str) -> bool:
     msg = (message or "").casefold()
     return (
         "3f000" in msg  # invalid_schema_name
-        or "schema" in msg and "does not exist" in msg
+        or "schema" in msg
+        and "does not exist" in msg
         or "pgrst106" in msg  # postgrest invalid schema
         or ("invalid schema" in msg and "core" in msg)
     )
@@ -49,13 +51,7 @@ def assert_core_schema_exists(db: Client) -> None:
     This prevents accidental migrations against the wrong database.
     """
     try:
-        response = (
-            db.schema("core")
-            .table("shows")
-            .select("id")
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("shows").select("id").limit(1).execute()
     except Exception as exc:
         msg = str(exc)
         if _is_missing_schema_error(msg):
@@ -114,8 +110,7 @@ def assert_migration_safe(*, require_core_schema: bool = True) -> None:
 
     if not db_url and not supabase_url:
         raise DatabasePreflightError(
-            "No database URL configured.\n"
-            "Set DATABASE_URL, TRR_DB_URL, or SUPABASE_URL environment variable."
+            "No database URL configured.\nSet DATABASE_URL, TRR_DB_URL, or SUPABASE_URL environment variable."
         )
 
     if require_core_schema and db_url:
@@ -123,6 +118,5 @@ def assert_migration_safe(*, require_core_schema: bool = True) -> None:
         if "localhost" in db_url or "127.0.0.1" in db_url:
             if "supabase" not in db_url.lower():
                 print(
-                    "WARNING: DATABASE_URL points to localhost. "
-                    "Ensure `core` schema exists before running migrations."
+                    "WARNING: DATABASE_URL points to localhost. Ensure `core` schema exists before running migrations."
                 )

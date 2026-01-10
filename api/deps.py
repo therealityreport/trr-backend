@@ -1,6 +1,7 @@
 """
 Dependency injection for Supabase client and other shared resources.
 """
+
 from __future__ import annotations
 
 import logging
@@ -9,11 +10,13 @@ from functools import lru_cache
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException
+
 from supabase import Client, create_client
 
 # Load environment variables if running standalone
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
@@ -67,6 +70,7 @@ SupabaseAdminClient = Annotated[Client, Depends(get_supabase_admin_client)]
 
 class SupabaseError(Exception):
     """Wrapper for Supabase errors."""
+
     def __init__(self, message: str, status_code: int = 500):
         self.message = message
         self.status_code = status_code
@@ -85,14 +89,11 @@ def raise_for_supabase_error(response: Any, context: str = "database operation")
         HTTPException: 502 for Supabase connectivity/server errors, 500 for other errors
     """
     # Check if response indicates an error
-    if hasattr(response, 'error') and response.error:
+    if hasattr(response, "error") and response.error:
         error_msg = str(response.error)
         logger.error(f"Supabase error during {context}: {error_msg}")
         # Don't leak internal error details to client
-        raise HTTPException(
-            status_code=502,
-            detail=f"Database error during {context}"
-        )
+        raise HTTPException(status_code=502, detail=f"Database error during {context}")
 
 
 def require_single_result(response: Any, entity_name: str = "Resource") -> dict:

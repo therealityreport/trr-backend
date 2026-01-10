@@ -8,9 +8,10 @@ All events follow a consistent envelope format:
     "payload": { ... }
 }
 """
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -51,11 +52,11 @@ class Event(BaseModel):
     payload: dict[str, Any]
 
     @classmethod
-    def create(cls, event_type: EventType, payload: dict[str, Any]) -> "Event":
+    def create(cls, event_type: EventType, payload: dict[str, Any]) -> Event:
         """Create an event with current timestamp."""
         return cls(
             type=event_type,
-            ts=datetime.now(timezone.utc).isoformat(),
+            ts=datetime.now(UTC).isoformat(),
             payload=payload,
         )
 

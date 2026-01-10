@@ -4,15 +4,16 @@ Authentication utilities for FastAPI.
 Extracts user information from Supabase JWT tokens.
 All writes must use the user-scoped client to enforce RLS.
 """
+
 from __future__ import annotations
 
 import logging
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
-from supabase import create_client, Client
 
-from api.deps import get_supabase_url, get_supabase_anon_key
+from api.deps import get_supabase_anon_key, get_supabase_url
+from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
 

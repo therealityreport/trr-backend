@@ -96,12 +96,8 @@ def test_needs_tmdb_enrichment_checks_required_fields() -> None:
 
 def test_resolve_then_enrich_flow_with_fixtures() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    find_payload = json.loads(
-        (repo_root / "tests" / "fixtures" / "tmdb" / "find_by_imdb_id_sample.json").read_text()
-    )
-    details_payload = json.loads(
-        (repo_root / "tests" / "fixtures" / "tmdb" / "tv_details_sample.json").read_text()
-    )
+    find_payload = json.loads((repo_root / "tests" / "fixtures" / "tmdb" / "find_by_imdb_id_sample.json").read_text())
+    details_payload = json.loads((repo_root / "tests" / "fixtures" / "tmdb" / "tv_details_sample.json").read_text())
 
     tmdb_id, reason = resolve_tmdb_id_from_find_payload(
         find_payload,

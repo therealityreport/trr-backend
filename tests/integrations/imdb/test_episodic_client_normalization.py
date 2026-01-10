@@ -5,7 +5,6 @@ from trr_backend.integrations.imdb.episodic_client import (
     _parse_episode_credits_page_from_payload,
 )
 
-
 SAMPLE_PAYLOAD: dict = {
     "data": {
         "title": {
@@ -47,9 +46,7 @@ SAMPLE_PAYLOAD: dict = {
                                                             "text": "Self",
                                                             "category": {"text": "Self"},
                                                             "attributes": [{"text": "as Britani"}],
-                                                            "characters": {
-                                                                "edges": [{"node": {"name": "Self"}}]
-                                                            },
+                                                            "characters": {"edges": [{"node": {"name": "Self"}}]},
                                                         }
                                                     }
                                                 ]
@@ -153,4 +150,3 @@ def test_parse_episode_credits_page_from_payload_normalizes_credits() -> None:
     assert c3.episode.episode_number is None
     assert c3.episode.episode_code is None
     assert c3.episode.year is None
-

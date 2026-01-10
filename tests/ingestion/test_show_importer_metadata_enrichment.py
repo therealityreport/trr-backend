@@ -3,8 +3,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 from uuid import UUID
 
-from trr_backend.ingestion.show_metadata_enricher import EnrichSummary, ShowEnrichmentPatch
 from trr_backend.ingestion.show_importer import upsert_candidates_into_supabase
+from trr_backend.ingestion.show_metadata_enricher import EnrichSummary, ShowEnrichmentPatch
 from trr_backend.ingestion.shows_from_lists import CandidateShow
 
 

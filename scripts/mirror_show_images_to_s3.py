@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Mirror core.show_images to S3 and store hosted_url."""
+
 from __future__ import annotations
 
 import argparse
@@ -7,12 +8,12 @@ import sys
 from typing import Any
 
 from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.media.s3_mirror import get_cdn_base_url, mirror_show_image_row
 from trr_backend.repositories.show_images import (
     assert_core_show_images_table_exists,
     fetch_show_images_missing_hosted,
     update_show_image_hosted_fields,
 )
-from trr_backend.media.s3_mirror import get_cdn_base_url, mirror_show_image_row
 from trr_backend.utils.env import load_env
 
 

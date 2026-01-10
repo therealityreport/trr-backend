@@ -4,6 +4,14 @@ from __future__ import annotations
 import argparse
 import sys
 
+from scripts._sync_common import (
+    add_show_filter_args,
+    extract_imdb_series_id,
+    extract_most_recent_episode,
+    fetch_show_rows,
+    filter_show_rows_for_sync,
+    load_env_and_db,
+)
 from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env
 from trr_backend.integrations.imdb.fullcredits_cast_parser import fetch_fullcredits_cast, filter_self_cast_rows
 from trr_backend.repositories.people import assert_core_people_table_exists, fetch_people_by_imdb_ids, insert_people
@@ -13,15 +21,6 @@ from trr_backend.repositories.sync_state import (
     mark_sync_state_failed,
     mark_sync_state_in_progress,
     mark_sync_state_success,
-)
-
-from scripts._sync_common import (
-    add_show_filter_args,
-    extract_imdb_series_id,
-    extract_most_recent_episode,
-    fetch_show_rows,
-    filter_show_rows_for_sync,
-    load_env_and_db,
 )
 
 

@@ -1,0 +1,44 @@
+# Ruff configuration for TRR-Backend
+# https://docs.astral.sh/ruff/configuration/
+
+# Exclude archive and legacy paths from linting
+exclude = [
+    "scripts/archives/**",
+    "scripts/1-ShowInfo/**",
+    "scripts/2-CastInfo/**",
+    "scripts/3-RealiteaseInfo/**",
+    "scripts/4-WWHLInfo/**",
+    "scripts/5-FinalList/**",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".git",
+]
+
+# Target Python 3.11+
+target-version = "py311"
+
+# Line length
+line-length = 120
+
+[lint]
+# Enable recommended rules
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+
+# Ignore specific rules if needed
+ignore = []
+
+[format]
+# Use double quotes
+quote-style = "double"
+
+# Indent with 4 spaces
+indent-style = "space"
