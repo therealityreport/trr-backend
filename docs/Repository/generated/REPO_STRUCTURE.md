@@ -1,6 +1,19 @@
 # Repository Structure
 ```markdown
 trr-backend
+├── .claude
+│   ├── commands
+│   │   ├── trr-impl.md
+│   │   ├── trr-plan.md
+│   │   ├── trr-pr.md
+│   │   ├── trr-spec.md
+│   │   ├── trr-validate.md
+│   │   └── trr-wt-new.md
+│   └── hooks
+│       ├── before-bash.md
+│       └── on-stop.md
+├── .config
+│   └── wt.toml
 ├── .env.example
 ├── .github
 │   └── workflows
@@ -8,6 +21,7 @@ trr-backend
 │       └── repo_map.yml
 ├── .gitignore
 ├── .python-version
+├── CLAUDE.md
 ├── Makefile
 ├── README.md
 ├── REPO_STRUCTURE.md
@@ -41,7 +55,13 @@ trr-backend
 │   │       ├── CODE_IMPORT_GRAPH.md
 │   │       ├── REPO_STRUCTURE.md
 │   │       ├── REPO_STRUCTURE.mermaid.md
-│   │       └── SCRIPTS_FLOW.md
+│   │       ├── SCRIPTS_FLOW.md
+│   │       └── rendered
+│   │           ├── CODE_IMPORT_GRAPH-1.svg
+│   │           ├── SCRIPTS_FLOW-1.svg
+│   │           ├── git_workflow-1.svg
+│   │           ├── system_maps-1.svg
+│   │           └── system_maps-2.svg
 │   ├── SHEET_EDIT_MAPPING.md
 │   ├── api
 │   │   └── run.md
@@ -58,79 +78,19 @@ trr-backend
 │   │   └── verification.md
 │   ├── images
 │   │   └── debug_imdb_credits.png
-│   └── runbooks
-│       └── show_import_job.md
+│   ├── runbooks
+│   │   └── show_import_job.md
+│   └── workflows
+│       └── VIBE_CODING.md
 ├── pytest.ini
 ├── requirements.txt
 ├── resolve_tmdb_ids_via_find.py
+├── ruff.toml
 ├── scripts
-│   ├── 1-ShowInfo
-│   │   ├── README.md
-│   │   └── showinfo_step1.py
-│   ├── 2-CastInfo
-│   │   ├── CastInfo_ArchiveStep.py
-│   │   ├── CastInfo_Step1.py
-│   │   ├── CastInfo_Step2.py
-│   │   └── README.md
-│   ├── 3-RealiteaseInfo
-│   │   ├── README.md
-│   │   ├── RealiteaseInfo_BackfillTMDb.py
-│   │   ├── RealiteaseInfo_Step1.py
-│   │   ├── RealiteaseInfo_Step2.py
-│   │   ├── RealiteaseInfo_Step3.py
-│   │   ├── RealiteaseInfo_Step4.py
-│   │   ├── RealiteaseInfo_archive.py
-│   │   ├── realiteaseinfo_birthdays_archive.py
-│   │   └── ultimate_reality_tv_scraper.py
-│   ├── 4-WWHLInfo
-│   │   ├── README.md
-│   │   ├── WWHLInfo_Checker_Step4.py
-│   │   ├── WWHLInfo_Gemini_Step3.py
-│   │   ├── WWHLInfo_IMDb_Step2.py
-│   │   └── WWHLInfo_TMDb_Step1.py
-│   ├── 5-FinalList
-│   │   ├── FinalInfo_Step1.py
-│   │   ├── FinalInfo_Step2.py
-│   │   ├── FinalInfo_Step3.py
-│   │   ├── FinalList_Builder.py
-│   │   ├── Firebase_Uploader.py
-│   │   └── verify_finallist_snapshot.py
 │   ├── Media
 │   │   └── README.md
 │   ├── README.md
-│   ├── RealiteaseInfo
-│   │   └── README.md
 │   ├── _sync_common.py
-│   ├── archives
-│   │   ├── add_tmdb_cast_ids.py
-│   │   ├── add_tmdb_ids_batch.py
-│   │   ├── build_realitease_info.py
-│   │   ├── enhance_realitease_bio_data.py
-│   │   ├── enhance_realitease_famous_birthdays.py
-│   │   ├── fetch_WWHL_info.py
-│   │   ├── fetch_WWHL_info_clean.py
-│   │   ├── fetch_WWHL_info_imdb_api.py
-│   │   ├── fetch_WWHL_info_imdb_chatgpt.py
-│   │   ├── fetch_WWHL_info_imdb_fast.py
-│   │   ├── fetch_missing_person_info.py
-│   │   ├── fetch_person_details.py
-│   │   ├── find_missing_cast_selective.py
-│   │   ├── smart_cast_filter.py
-│   │   ├── test_new_structure.py
-│   │   ├── test_update.py
-│   │   ├── tmdb_api_test_no_key.py
-│   │   ├── tmdb_corrected_extractor.py
-│   │   ├── tmdb_credit_id_test.py
-│   │   ├── tmdb_episode_details.py
-│   │   ├── tmdb_extractor_v6.py
-│   │   ├── tmdb_final_extractor.py
-│   │   ├── tmdb_focused_extractor.py
-│   │   ├── tmdb_imdb_conversion_test.py
-│   │   ├── tmdb_other_shows_extractor.py
-│   │   ├── tmdb_quick_test.py
-│   │   ├── tmdb_rupaul_extractor.py
-│   │   ├── tmdb_season_extractor_test.py
-│   │   └── tmdb_simple_test.py
 │   ├── backfill_tmdb_show_details.py
 │   ├── db
 │   │   ├── README.md
@@ -235,16 +195,26 @@ trr-backend
 │   │   └── 0051_season_images_add_hosted_fields.sql
 │   ├── schema_docs
 │   │   ├── INDEX.md
+│   │   ├── core.cast_fandom.json
+│   │   ├── core.cast_fandom.md
 │   │   ├── core.cast_memberships.json
 │   │   ├── core.cast_memberships.md
+│   │   ├── core.cast_photos.json
+│   │   ├── core.cast_photos.md
+│   │   ├── core.cast_tmdb.json
+│   │   ├── core.cast_tmdb.md
 │   │   ├── core.episode_appearances.json
 │   │   ├── core.episode_appearances.md
 │   │   ├── core.episode_cast.json
 │   │   ├── core.episode_cast.md
 │   │   ├── core.episodes.json
 │   │   ├── core.episodes.md
+│   │   ├── core.networks.json
+│   │   ├── core.networks.md
 │   │   ├── core.people.json
 │   │   ├── core.people.md
+│   │   ├── core.production_companies.json
+│   │   ├── core.production_companies.md
 │   │   ├── core.season_images.json
 │   │   ├── core.season_images.md
 │   │   ├── core.seasons.json
@@ -253,10 +223,14 @@ trr-backend
 │   │   ├── core.show_cast.md
 │   │   ├── core.show_images.json
 │   │   ├── core.show_images.md
+│   │   ├── core.show_watch_providers.json
+│   │   ├── core.show_watch_providers.md
 │   │   ├── core.shows.json
 │   │   ├── core.shows.md
 │   │   ├── core.sync_state.json
-│   │   └── core.sync_state.md
+│   │   ├── core.sync_state.md
+│   │   ├── core.watch_providers.json
+│   │   └── core.watch_providers.md
 │   └── seed.sql
 ├── test_connection.py
 ├── tests
