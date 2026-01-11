@@ -545,7 +545,7 @@ def _parse_taglines(
         if not cells:
             continue
         values = [_normalize_text(cell.get_text(" ", strip=True)) for cell in cells]
-        data = dict(zip(headers, values))
+        data = dict(zip(headers, values, strict=False))
 
         season = _extract_season_number(data.get("Season") or values[0] if values else None)
         opening_order = data.get("Opening Order") or data.get("Order")
@@ -600,7 +600,7 @@ def _parse_reunion_seating(
         if not cells:
             continue
         values = [_normalize_text(cell.get_text(" ", strip=True)) for cell in cells]
-        data = dict(zip(headers, values))
+        data = dict(zip(headers, values, strict=False))
 
         season = _extract_season_number(data.get("Season") or values[0] if values else None)
         side = data.get("Side") or (values[1] if len(values) > 1 else None)

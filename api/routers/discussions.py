@@ -219,7 +219,7 @@ def get_thread(db: SupabaseClient, thread_id: UUID) -> dict:
 def list_thread_posts(
     db: SupabaseClient,
     thread_id: UUID,
-    parent_post_id: UUID | None = Query(default=None),
+    parent_post_id: UUID | None = Query(default=None),  # noqa: B008
     limit: int = Query(default=50, le=100),
     cursor: str | None = Query(default=None, description="created_at cursor for pagination"),
 ) -> list[dict]:

@@ -36,13 +36,13 @@ def mock_supabase():
 
     # Set up chain-able mock for query builder pattern
     # List queries (order -> range -> execute)
-    mock_client.schema.return_value.table.return_value.select.return_value.order.return_value.range.return_value.execute.return_value = empty_list_response
+    mock_client.schema.return_value.table.return_value.select.return_value.order.return_value.range.return_value.execute.return_value = empty_list_response  # noqa: E501
 
     # Single queries (eq -> single -> execute)
-    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = none_response
+    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = none_response  # noqa: E501
 
     # Filtered list queries (eq -> order -> range -> execute)
-    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.order.return_value.range.return_value.execute.return_value = empty_list_response
+    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.order.return_value.range.return_value.execute.return_value = empty_list_response  # noqa: E501
 
     # Simple filtered queries (eq -> execute)
     mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.execute.return_value = (
@@ -50,10 +50,10 @@ def mock_supabase():
     )
 
     # Double eq queries (eq -> eq -> single -> execute) for season lookups
-    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = none_response
+    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = none_response  # noqa: E501
 
     # Desc order queries
-    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = empty_list_response
+    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = empty_list_response  # noqa: E501
 
     return mock_client
 

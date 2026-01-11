@@ -59,7 +59,7 @@ def assert_core_cast_fandom_table_exists(db: Client) -> None:
     def help_message() -> str:
         return (
             "Database table `core.cast_fandom` is missing. "
-            "Run `supabase db push` to apply migrations (see `supabase/migrations/0041_create_cast_fandom_and_extend_cast_photos.sql`), "
+            "Run `supabase db push` to apply migrations (see `supabase/migrations/0041_create_cast_fandom_and_extend_cast_photos.sql`), "  # noqa: E501
             "then re-run the import job."
         )
 
@@ -67,7 +67,7 @@ def assert_core_cast_fandom_table_exists(db: Client) -> None:
         return (
             "Supabase API does not expose schema `core`, so the importer cannot access `core.cast_fandom`. "
             "Add `core` to `supabase/config.toml` under `[api].schemas` and run `supabase config push` "
-            "(or enable `core` in Supabase Dashboard -> Settings -> API -> Exposed schemas), then re-run the import job."
+            "(or enable `core` in Supabase Dashboard -> Settings -> API -> Exposed schemas), then re-run the import job."  # noqa: E501
         )
 
     try:

@@ -270,7 +270,7 @@ def send_message(
 
     # Update conversation's last_message_at
     # Note: This uses user client, will only work if user is member (RLS)
-    update_response = (
+    (
         user_db.schema("social")
         .table("dm_conversations")
         .update({"last_message_at": message["created_at"]})

@@ -14,7 +14,7 @@ def test_parse_imdb_title_page_metadata_from_fixture() -> None:
     assert result["title"] == "Love Island USA"
     assert (
         result["description"]
-        == "U.S. version of the British show 'Love Island' where a group of singles come to stay in a villa for a few weeks and have to couple up with one another."
+        == "U.S. version of the British show 'Love Island' where a group of singles come to stay in a villa for a few weeks and have to couple up with one another."  # noqa: E501
     )
     assert "Reality TV" in result["tags"]
     assert "Reality TV Dating" in result["tags"]

@@ -141,7 +141,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--tmdb-refresh-seasons",
         action="store_true",
-        help="When fetching TMDb seasons, delete existing season/episode/season_image rows for each tmdb_id before upserting.",
+        help="When fetching TMDb seasons, delete existing season/episode/season_image rows for each tmdb_id before upserting.",  # noqa: E501
     )
     parser.add_argument(
         "--tmdb-details-max-age-days",

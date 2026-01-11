@@ -44,7 +44,7 @@ def assert_core_people_table_exists(db: Client) -> None:
         return (
             "Supabase API does not expose schema `core`, so the importer cannot access `core.people`. "
             "Add `core` to `supabase/config.toml` under `[api].schemas` and run `supabase config push` "
-            "(or enable `core` in Supabase Dashboard -> Settings -> API -> Exposed schemas), then re-run the import job."
+            "(or enable `core` in Supabase Dashboard -> Settings -> API -> Exposed schemas), then re-run the import job."  # noqa: E501
         )
 
     try:

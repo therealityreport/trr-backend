@@ -27,7 +27,7 @@ def test_connection() -> None:
         if not creds_path.exists():
             raise FileNotFoundError(
                 "Google service account JSON not found. "
-                "Set GOOGLE_APPLICATION_CREDENTIALS (or GOOGLE_SERVICE_ACCOUNT_FILE) or place it at keys/service-account.json."
+                "Set GOOGLE_APPLICATION_CREDENTIALS (or GOOGLE_SERVICE_ACCOUNT_FILE) or place it at keys/service-account.json."  # noqa: E501
             )
 
         gc = gspread.service_account(filename=str(creds_path))

@@ -250,6 +250,6 @@ def validate_supabase_connection(database_url: str | None = None) -> bool:
             raise DatabaseConnectionError(f"Database connection failed:\n{stderr}")
         return True
     except FileNotFoundError:
-        raise DatabaseConnectionError("psql command not found. Install PostgreSQL client tools.")
+        raise DatabaseConnectionError("psql command not found. Install PostgreSQL client tools.") from None
     except subprocess.TimeoutExpired:
-        raise DatabaseConnectionError("Database connection timed out. Check network and credentials.")
+        raise DatabaseConnectionError("Database connection timed out. Check network and credentials.") from None

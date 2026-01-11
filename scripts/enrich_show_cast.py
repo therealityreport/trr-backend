@@ -510,7 +510,6 @@ def main(argv: list[str] | None = None) -> int:
     total_gallery_photos = 0
     total_s3_mirrored = 0
     total_s3_failed = 0
-    total_errors = 0
 
     for idx, person in enumerate(cast):
         person_id = person.get("id")
