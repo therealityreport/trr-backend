@@ -21,23 +21,27 @@ tags = ["key", "google", "gemini"]
 
 [[rules]]
 id = "tmdb-bearer-token"
-description = "TMDB Bearer Token"
-regex = '''eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
-tags = ["token", "tmdb"]
+description = "TMDB Bearer Token (JWT format)"
+# More precise: JWT must have exactly 3 parts separated by dots
+regex = '''eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{40,}'''
+tags = ["token", "tmdb", "jwt"]
 
 # Allowlist: Safe patterns that should not trigger alerts
 [[allowlist]]
-description = "Placeholder values in .env.example"
+description = "Placeholder values in .env.example and documentation only"
+# Restrict to specific safe files
 paths = [
-  '''.env.example$''',
-  '''README\.md$''',
-  '''docs/.*\.md$''',
+  '''^\.env\.example$''',
+  '''^README\.md$''',
+  '''^docs/SECURITY\.md$''',
+  '''^docs/HISTORY_PURGE\.md$''',
 ]
+# Only allow obvious placeholder patterns
 regexes = [
-  '''your_.*_key''',
-  '''your_.*_token''',
-  '''fc-your-key-here''',
-  '''your_gemini_api_key''',
+  '''your_[a-z_]+_key''',  # Must be lowercase with underscores only
+  '''your_[a-z_]+_token''',
+  '''fc-your-key-here''',  # Exact match only
+  '''your_gemini_api_key''',  # Exact match only
 ]
 
 [[allowlist]]
