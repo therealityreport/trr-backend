@@ -50,7 +50,8 @@ pytest                                # Unit tests
 
 ### Testing & Validation (Medium - Pre-PR)
 ```bash
-make schema-docs-check                # If schema changed
+make schema-docs-check                # If schema changed (requires fresh DB)
+make schema-docs-reset-check          # Reset DB + verify schema docs (convenience)
 make repo-map-check                   # If structure changed
 ```
 
