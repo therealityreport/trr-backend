@@ -20,6 +20,7 @@ except ImportError as exc:  # pragma: no cover - depends on local environment
     raise SystemExit("Missing psycopg2; install dev deps (e.g., `pip install -r requirements.txt`).") from exc
 
 _OUTPUT_DIR = Path("supabase/schema_docs")
+_DIAGRAM_DIR = _OUTPUT_DIR / "diagrams"
 _SCHEMAS = ("core",)
 _SENSITIVE_KEYS = ("password", "token", "secret", "api_key", "access_key", "refresh_key", "session")
 
@@ -388,10 +389,71 @@ def _write_table_docs(schema: str, table: str, payload: dict[str, Any]) -> None:
     md_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _generate_table_mermaid(schema: str, table: str, columns: list[ColumnInfo]) -> str:
+    """Generate Mermaid ER diagram for a single table.
+
+    Format:
+    ```mermaid
+    erDiagram
+        SCHEMA_TABLE {
+            column_type column_name
+            ...
+        }
+    ```
+
+    Columns sorted by ordinal position (already sorted in columns list).
+    Data types normalized for Mermaid compatibility.
+    """
+    lines = ["```mermaid", "erDiagram"]
+
+    # Entity name: SCHEMA_TABLE (uppercase, underscore separator)
+    entity_name = f"{schema.upper()}_{table.upper()}"
+    lines.append(f"    {entity_name} {{")
+
+    if not columns:
+        lines.append("        %% No columns defined")
+    else:
+        # Add columns: data_type column_name
+        for col in columns:
+            # Normalize data type for Mermaid (remove special chars, simplify arrays)
+            data_type = col.data_type.replace(" ", "_").replace("[]", "_ARRAY").upper()
+            if data_type == "ARRAY":  # Generic array from udt_name check
+                data_type = f"{col.udt_name.lstrip('_').upper()}_ARRAY"
+
+            # Mermaid format: type name (no extra spaces)
+            lines.append(f"        {data_type} {col.name}")
+
+    lines.append("    }")
+    lines.append("```")
+
+    return "\n".join(lines)
+
+
+def _write_table_diagram(schema: str, table: str, columns: list[ColumnInfo]) -> None:
+    """Write Mermaid diagram for a single table."""
+    diagram_path = _DIAGRAM_DIR / f"{schema}.{table}.mermaid.md"
+
+    # Generate diagram content
+    mermaid_content = _generate_table_mermaid(schema, table, columns)
+
+    # Add header for context
+    header = [
+        f"# {schema}.{table} - Table Structure Diagram",
+        "",
+        "Auto-generated schema diagram showing columns and data types.",
+        "",
+    ]
+
+    content = "\n".join(header) + mermaid_content + "\n"
+
+    diagram_path.write_text(content, encoding="utf-8")
+
+
 def _write_index(entries: list[dict[str, str]]) -> None:
     lines = ["# Schema Docs Index", ""]
     for entry in entries:
-        lines.append(f"- [{entry['schema']}.{entry['table']}]({entry['filename']})")
+        diagram_link = f"diagrams/{entry['schema']}.{entry['table']}.mermaid.md"
+        lines.append(f"- [{entry['schema']}.{entry['table']}]({entry['filename']}) ([diagram]({diagram_link}))")
     (_OUTPUT_DIR / "INDEX.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -413,6 +475,7 @@ def main() -> int:
     if _OUTPUT_DIR.exists():
         shutil.rmtree(_OUTPUT_DIR)
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _DIAGRAM_DIR.mkdir(parents=True, exist_ok=True)
 
     entries: list[dict[str, str]] = []
     with _connect() as conn:
@@ -449,11 +512,13 @@ def main() -> int:
                         ),
                     }
                     _write_table_docs(schema, table, payload)
+                    _write_table_diagram(schema, table, columns)
                     filename = f"{schema}.{table}.md"
                     entries.append({"schema": schema, "table": table, "filename": filename})
 
     _write_index(entries)
     print(f"Wrote schema docs for {len(entries)} tables to {_OUTPUT_DIR}")
+    print(f"Wrote {len(entries)} diagrams to {_DIAGRAM_DIR}")
     return 0
 
 
