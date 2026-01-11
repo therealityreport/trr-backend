@@ -33,6 +33,21 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.head_ref || '' }}
 
+      - name: Detect changes
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            schema:
+              - 'supabase/migrations/**'
+              - 'scripts/supabase/generate_schema_docs.py'
+              - 'supabase/schema_docs/**'
+            repo_map:
+              - '**/*.py'
+              - 'scripts/generate_repo_mermaid.py'
+              - 'docs/Repository/**'
+              - '.github/workflows/repo_map.yml'
+
       - name: Generate repo structure
         if: github.event_name != 'pull_request'
         uses: PGSch/graph-git-repo@v1.0.0
@@ -60,7 +75,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install tree-sitter tree-sitter-python
 
+      - name: Set up Supabase CLI
+        if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.70.5
+
+      - name: Install psycopg2 for schema docs
+        if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
+        run: pip install psycopg2-binary
+
+      - name: Start Supabase and Generate Schema Docs
+        if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
+        run: |
+          # Start minimal Supabase (DB only)
+          supabase start --exclude gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
+
+          # Reset database to apply all migrations
+          supabase db reset --yes
+
+          # Generate schema docs (includes diagrams)
+          make schema-docs
+
       - name: Generate code diagrams
+        if: steps.changes.outputs.repo_map == 'true' || github.event_name != 'pull_request'
         run: python scripts/generate_repo_mermaid.py
 
       - name: Upload repository maps artifact
@@ -70,6 +108,14 @@ jobs:
           path: |
             docs/Repository/generated/
             docs/Repository/diagrams/
+          if-no-files-found: error
+
+      - name: Upload schema docs artifact
+        if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-docs
+          path: supabase/schema_docs/
           if-no-files-found: error
 
       - name: Setup Node.js
@@ -83,6 +129,7 @@ jobs:
       - name: Render Mermaid diagrams
         run: |
           mkdir -p docs/Repository/generated/rendered
+          mkdir -p .artifacts/schema-diagrams-rendered
 
           # Create puppeteer config for mermaid-cli
           cat > /tmp/puppeteer-config.json <<EOF
@@ -91,21 +138,47 @@ jobs:
           }
           EOF
 
-          # Find all .md files with mermaid blocks
+          # Determine rendering failure behavior
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RENDER_OPTS="|| true"  # Tolerant on PRs
+          else
+            RENDER_OPTS=""  # Strict on schedule/manual
+          fi
+
+          # Render repository diagrams
           find docs/Repository -name "*.md" -type f | while read -r file; do
             filename=$(basename "$file" .md)
-            # Extract mermaid blocks and render to SVG
             if grep -q '```mermaid' "$file"; then
-              # Simple approach: render entire file if it contains mermaid
-              mmdc -i "$file" -o "docs/Repository/generated/rendered/${filename}.svg" --puppeteerConfigFile /tmp/puppeteer-config.json || true
+              eval "mmdc -i \"$file\" -o \"docs/Repository/generated/rendered/${filename}.svg\" --puppeteerConfigFile /tmp/puppeteer-config.json $RENDER_OPTS"
             fi
           done
+
+          # Render schema diagrams (if generated)
+          if [ -d "supabase/schema_docs/diagrams" ]; then
+            find supabase/schema_docs/diagrams -name "*.mermaid.md" -type f | while read -r file; do
+              # Sanitize filename: replace / with __ and remove .mermaid.md suffix
+              relpath="${file#supabase/schema_docs/diagrams/}"
+              sanitized="${relpath//\//__}"
+              sanitized="${sanitized%.mermaid.md}"
+              if grep -q '```mermaid' "$file"; then
+                eval "mmdc -i \"$file\" -o \".artifacts/schema-diagrams-rendered/${sanitized}.svg\" --puppeteerConfigFile /tmp/puppeteer-config.json $RENDER_OPTS"
+              fi
+            done
+          fi
 
       - name: Upload rendered diagrams to artifact
         uses: actions/upload-artifact@v4
         with:
           name: repository-maps-rendered
           path: docs/Repository/generated/rendered/
+          if-no-files-found: warn
+
+      - name: Upload schema diagrams rendered to artifact
+        if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-diagrams-rendered
+          path: .artifacts/schema-diagrams-rendered/
           if-no-files-found: warn
 
       - name: Commit changes to PR branch
@@ -117,8 +190,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Stage all changes in docs/Repository/
+          # Stage all changes in docs/Repository/ and supabase/schema_docs/
           git add docs/Repository/
+          git add supabase/schema_docs/
 
           # Check if there are changes
           if git diff --staged --quiet; then
@@ -127,7 +201,7 @@ jobs:
           fi
 
           # Commit and push
-          git commit -m "docs(repo-map): auto-update repository maps"
+          git commit -m "docs: auto-update repository maps and schema diagrams"
           git push origin HEAD:${{ github.head_ref }}
 
       - name: Create Pull Request
@@ -136,21 +210,30 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: chore/repo-map
-          commit-message: "docs(repo-map): refresh generated repository map"
-          title: "docs(repo-map): refresh generated repository map"
+          commit-message: "docs: refresh generated repository map and schema diagrams"
+          title: "docs: refresh generated repository map and schema diagrams"
           body: |
-            Auto-generated repository structure and code diagrams.
+            Auto-generated repository structure, code diagrams, and schema diagrams.
 
             **Generated files:**
             - REPO_STRUCTURE.md (directory tree)
             - REPO_STRUCTURE.mermaid.md (visual diagram)
             - CODE_IMPORT_GRAPH.md (Tree-sitter import graph)
             - SCRIPTS_FLOW.md (Tree-sitter script entrypoints)
+            - supabase/schema_docs/diagrams/*.mermaid.md (per-table ER diagrams)
 
             **Curated diagrams:**
             - git_workflow.md (Git branching visualization)
             - system_maps.md (Architecture diagrams)
 
+            **Artifacts:**
+            - schema-docs (Mermaid sources)
+            - schema-diagrams-rendered (SVG renders)
+            - repository-maps
+            - repository-maps-rendered
+
             Generated by the [Repository Map workflow](https://github.com/${{ github.repository }}/actions/workflows/repo_map.yml).
           labels: documentation
-          add-paths: docs/Repository/
+          add-paths: |
+            docs/Repository/
+            supabase/schema_docs/
