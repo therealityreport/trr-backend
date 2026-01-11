@@ -113,6 +113,70 @@
       "default": "now()",
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_key",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bucket",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_content_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_etag",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -184,6 +248,14 @@
     "width": 0,
     "height": 0,
     "aspect_ratio": 0,
-    "fetched_at": "1970-01-01T00:00:00Z"
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "hosted_url": "example",
+    "hosted_sha256": "example",
+    "hosted_key": "example",
+    "hosted_bucket": "example",
+    "hosted_content_type": "example",
+    "hosted_bytes": 0,
+    "hosted_etag": "example",
+    "hosted_at": "1970-01-01T00:00:00Z"
   }
 }

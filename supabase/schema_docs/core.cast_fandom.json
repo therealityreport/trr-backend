@@ -1,0 +1,321 @@
+{
+  "schema": "core",
+  "table": "cast_fandom",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_url",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "page_title",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "page_revision_id",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "scraped_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "full_name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "birthdate",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "birthdate_display",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "gender",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "resides_in",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hair_color",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "eye_color",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "height_display",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "weight_display",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "romances",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "family",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "friends",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "enemies",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "installment",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "installment_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "main_seasons_display",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "summary",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "taglines",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "reunion_seating",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "trivia",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "infobox_raw",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "raw_html_sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "cast_fandom_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "person_id",
+      "source"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "cast_fandom_person_source_key",
+      "columns": [
+        "person_id",
+        "source"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_fandom_person_source_key ON core.cast_fandom USING btree (person_id, source)"
+    },
+    {
+      "name": "cast_fandom_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_fandom_pkey ON core.cast_fandom USING btree (id)"
+    },
+    {
+      "name": "core_cast_fandom_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_cast_fandom_person_id_idx ON core.cast_fandom USING btree (person_id)"
+    },
+    {
+      "name": "core_cast_fandom_source_idx",
+      "columns": [
+        "source"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_cast_fandom_source_idx ON core.cast_fandom USING btree (source)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "source": "example",
+    "source_url": "example",
+    "page_title": "example",
+    "page_revision_id": 0,
+    "scraped_at": "1970-01-01T00:00:00Z",
+    "full_name": "example",
+    "birthdate": "1970-01-01",
+    "birthdate_display": "example",
+    "gender": "example",
+    "resides_in": "example",
+    "hair_color": "example",
+    "eye_color": "example",
+    "height_display": "example",
+    "weight_display": "example",
+    "romances": [],
+    "family": {},
+    "friends": {},
+    "enemies": {},
+    "installment": "example",
+    "installment_url": "example",
+    "main_seasons_display": "example",
+    "summary": "example",
+    "taglines": {},
+    "reunion_seating": {},
+    "trivia": {},
+    "infobox_raw": {},
+    "raw_html_sha256": "example"
+  }
+}

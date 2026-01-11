@@ -169,6 +169,86 @@
       "default": "now()",
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "fetch_method",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_from_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bucket",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_key",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_content_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_etag",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -181,7 +261,19 @@
       "references": "core.shows.id"
     }
   ],
-  "unique_constraints": [],
+  "unique_constraints": [
+    [
+      "show_id",
+      "source",
+      "source_image_id"
+    ],
+    [
+      "tmdb_id",
+      "source",
+      "kind",
+      "file_path"
+    ]
+  ],
   "indexes": [
     {
       "name": "core_show_images_kind_lang_idx",
@@ -219,16 +311,6 @@
       "definition": "CREATE INDEX core_show_images_source_show_idx ON core.show_images USING btree (source, show_id)"
     },
     {
-      "name": "core_show_images_source_unique",
-      "columns": [
-        "show_id",
-        "source",
-        "source_image_id"
-      ],
-      "unique": true,
-      "definition": "CREATE UNIQUE INDEX core_show_images_source_unique ON core.show_images USING btree (show_id, source, source_image_id)"
-    },
-    {
       "name": "core_show_images_tmdb_kind_idx",
       "columns": [
         "tmdb_id",
@@ -248,12 +330,66 @@
       "definition": "CREATE INDEX core_show_images_tmdb_kind_lang_idx ON core.show_images USING btree (tmdb_id, kind, iso_639_1) WHERE (tmdb_id IS NOT NULL)"
     },
     {
+      "name": "idx_show_images_hosted_at",
+      "columns": [
+        "hosted_at) WHERE (hosted_at IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_show_images_hosted_at ON core.show_images USING btree (hosted_at) WHERE (hosted_at IS NOT NULL)"
+    },
+    {
+      "name": "idx_show_images_hosted_sha256",
+      "columns": [
+        "hosted_sha256) WHERE (hosted_sha256 IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_show_images_hosted_sha256 ON core.show_images USING btree (hosted_sha256) WHERE (hosted_sha256 IS NOT NULL)"
+    },
+    {
+      "name": "idx_show_images_missing_hosted",
+      "columns": [
+        "source",
+        "show_id) WHERE (hosted_url IS NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_show_images_missing_hosted ON core.show_images USING btree (source, show_id) WHERE (hosted_url IS NULL)"
+    },
+    {
+      "name": "show_images_fetch_method_idx",
+      "columns": [
+        "fetch_method"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX show_images_fetch_method_idx ON core.show_images USING btree (fetch_method)"
+    },
+    {
       "name": "show_images_pkey",
       "columns": [
         "id"
       ],
       "unique": true,
       "definition": "CREATE UNIQUE INDEX show_images_pkey ON core.show_images USING btree (id)"
+    },
+    {
+      "name": "show_images_show_source_source_image_id_key",
+      "columns": [
+        "show_id",
+        "source",
+        "source_image_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_images_show_source_source_image_id_key ON core.show_images USING btree (show_id, source, source_image_id)"
+    },
+    {
+      "name": "show_images_tmdb_source_kind_file_path_key",
+      "columns": [
+        "tmdb_id",
+        "source",
+        "kind",
+        "file_path"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_images_tmdb_source_kind_file_path_key ON core.show_images USING btree (tmdb_id, source, kind, file_path)"
     }
   ],
   "rls_enabled": true,
@@ -278,6 +414,16 @@
     "metadata": {},
     "image_type": "example",
     "created_at": "1970-01-01T00:00:00Z",
-    "updated_at": "1970-01-01T00:00:00Z"
+    "updated_at": "1970-01-01T00:00:00Z",
+    "fetch_method": "example",
+    "fetched_from_url": "example",
+    "hosted_bucket": "example",
+    "hosted_key": "example",
+    "hosted_url": "example",
+    "hosted_sha256": "example",
+    "hosted_content_type": "example",
+    "hosted_bytes": 0,
+    "hosted_etag": "example",
+    "hosted_at": "1970-01-01T00:00:00Z"
   }
 }
