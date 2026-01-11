@@ -2,9 +2,11 @@ PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
 .PHONY: schema-docs schema-docs-check ci-local repo-map repo-map-check
 
+# Generate schema docs (JSON, MD) and diagrams (Mermaid) from database
 schema-docs:
 	@$(PYTHON) scripts/supabase/generate_schema_docs.py
 
+# Verify schema docs and diagrams are in sync with database
 schema-docs-check:
 	@$(PYTHON) scripts/supabase/generate_schema_docs.py
 	git diff --exit-code supabase/schema_docs
