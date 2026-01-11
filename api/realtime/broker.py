@@ -207,7 +207,7 @@ class RedisBroker(Broker):
             self._listener_task = asyncio.create_task(self._listen())
             logger.info(f"RedisBroker connected to {self._redis_url}")
         except ImportError:
-            raise RuntimeError("redis package not installed. Run: pip install redis")
+            raise RuntimeError("redis package not installed. Run: pip install redis") from None
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise

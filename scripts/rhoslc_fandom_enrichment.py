@@ -14,7 +14,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from trr_backend.integrations.fandom import (
+from trr_backend.integrations.fandom import (  # noqa: E402
     FandomInfoboxResult,
     build_real_housewives_wiki_url_from_name,
     fetch_fandom_page,
@@ -23,7 +23,7 @@ from trr_backend.integrations.fandom import (
     parse_fandom_infobox_html,
     search_real_housewives_wiki,
 )
-from trr_backend.utils.episode_appearances import AggregatedCastMember, aggregate_episode_appearances
+from trr_backend.utils.episode_appearances import AggregatedCastMember, aggregate_episode_appearances  # noqa: E402
 
 _DEFAULT_IMDB_ID = "tt11363282"
 _DEFAULT_PAGE_SIZE = 1000

@@ -372,7 +372,7 @@ class TestWebSocketEndpoints:
         # The endpoint requires token=... query param
         # TestClient will raise an exception or the WS will close immediately
         try:
-            with client.websocket_connect(f"/api/v1/ws/dms/{conversation_id}") as ws:
+            with client.websocket_connect(f"/api/v1/ws/dms/{conversation_id}"):
                 # If we get here, connection was accepted but should close
                 pass
         except Exception:
@@ -382,6 +382,6 @@ class TestWebSocketEndpoints:
     def test_dm_websocket_rejects_invalid_token(self, client):
         """DM WebSocket rejects invalid tokens."""
         conversation_id = str(uuid4())
-        with pytest.raises(Exception):
-            with client.websocket_connect(f"/api/v1/ws/dms/{conversation_id}?token=invalid_token") as ws:
+        with pytest.raises(Exception):  # noqa: B017
+            with client.websocket_connect(f"/api/v1/ws/dms/{conversation_id}?token=invalid_token"):
                 pass

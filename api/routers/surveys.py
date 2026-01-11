@@ -105,7 +105,7 @@ class SubmissionResponse(BaseModel):
 @router.get("", response_model=list[Survey])
 def list_surveys(
     db: SupabaseClient,
-    show_id: UUID | None = Query(default=None),
+    show_id: UUID | None = Query(default=None),  # noqa: B008
     status: str = Query(default="published"),
     limit: int = Query(default=50, le=100),
     offset: int = Query(default=0, ge=0),

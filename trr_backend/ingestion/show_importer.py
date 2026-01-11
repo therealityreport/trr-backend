@@ -1097,9 +1097,8 @@ def upsert_candidates_into_supabase(
     if db is not None:
         assert_core_shows_table_exists(db)
 
-    seasons_by_imdb_id: dict[str, list[int]] = {}
     if annotate_imdb_episodic and imdb_episodic_probe_name_id:
-        seasons_by_imdb_id = annotate_candidates_imdb_episodic(
+        annotate_candidates_imdb_episodic(
             candidates_list,
             probe_name_id=imdb_episodic_probe_name_id,
             probe_job_category_id=imdb_episodic_probe_job_category_id,
@@ -1122,7 +1121,7 @@ def upsert_candidates_into_supabase(
     tmdb_details_cache: dict[tuple[int, str, tuple[str, ...]], dict[str, Any]] = {}
     now = datetime.now(UTC)
 
-    for idx, candidate in enumerate(candidates_list, start=1):
+    for idx, candidate in enumerate(candidates_list, start=1):  # noqa: B007
         tmdb_id = int(candidate.tmdb_id) if candidate.tmdb_id is not None else None
         resolved_imdb_id = candidate.imdb_id.strip() if isinstance(candidate.imdb_id, str) else None
 
@@ -1581,7 +1580,7 @@ def upsert_candidates_into_supabase(
                                     except Exception:
                                         seasons_failed += 1
                                         print(
-                                            f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} season={season_no}",
+                                            f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} season={season_no}",  # noqa: E501
                                             file=sys.stderr,
                                         )
 
@@ -1594,7 +1593,7 @@ def upsert_candidates_into_supabase(
                                 )
                         except Exception:
                             print(
-                                f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} (unexpected error)",
+                                f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} (unexpected error)",  # noqa: E501
                                 file=sys.stderr,
                             )
 
@@ -1875,7 +1874,7 @@ def upsert_candidates_into_supabase(
                                 except Exception:
                                     seasons_failed += 1
                                     print(
-                                        f"TMDb seasons: failed tmdb_id={tmdb_id_int} season={season_no} (unexpected error)",
+                                        f"TMDb seasons: failed tmdb_id={tmdb_id_int} season={season_no} (unexpected error)",  # noqa: E501
                                         file=sys.stderr,
                                     )
 
@@ -1885,7 +1884,7 @@ def upsert_candidates_into_supabase(
                                     or seasons_fetched == len(season_numbers)
                                 ):
                                     print(
-                                        f"TMDb seasons: processed {seasons_fetched}/{len(season_numbers)} show_id={show_id} tmdb_id={tmdb_id_int} "
+                                        f"TMDb seasons: processed {seasons_fetched}/{len(season_numbers)} show_id={show_id} tmdb_id={tmdb_id_int} "  # noqa: E501
                                         f"(failed={seasons_failed})",
                                         file=sys.stderr,
                                     )
@@ -1918,7 +1917,7 @@ def upsert_candidates_into_supabase(
         tmdb_images_skipped_cached = 0
         tmdb_images_failed = 0
 
-        for i, row in enumerate(upserted_show_rows, start=1):
+        for _i, row in enumerate(upserted_show_rows, start=1):
             row_id = row.get("id")
             show_id = str(row_id) if row_id is not None else ""
             if not show_id:
@@ -2025,7 +2024,7 @@ def upsert_candidates_into_supabase(
                 ):
                     print(
                         f"TMDb images: processed {tmdb_images_processed}/{tmdb_images_total} "
-                        f"(fetched={tmdb_images_fetched} cached={tmdb_images_skipped_cached} failed={tmdb_images_failed})",
+                        f"(fetched={tmdb_images_fetched} cached={tmdb_images_skipped_cached} failed={tmdb_images_failed})",  # noqa: E501
                         file=sys.stderr,
                     )
 
