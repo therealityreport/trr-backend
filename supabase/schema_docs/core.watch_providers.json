@@ -1,0 +1,194 @@
+{
+  "schema": "core",
+  "table": "watch_providers",
+  "columns": [
+    {
+      "name": "provider_id",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "provider_name",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "display_priority",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_logo_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_key",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_content_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_etag",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "logo_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_meta",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_meta",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "provider_id"
+  ],
+  "foreign_keys": [],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "tmdb_watch_providers_name_idx",
+      "columns": [
+        "provider_name"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX tmdb_watch_providers_name_idx ON core.watch_providers USING btree (provider_name)"
+    },
+    {
+      "name": "tmdb_watch_providers_pkey",
+      "columns": [
+        "provider_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX tmdb_watch_providers_pkey ON core.watch_providers USING btree (provider_id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "provider_id": 0,
+    "provider_name": "example",
+    "display_priority": 0,
+    "tmdb_logo_path": "example",
+    "hosted_logo_key": "example",
+    "hosted_logo_url": "example",
+    "hosted_logo_sha256": "example",
+    "hosted_logo_content_type": "example",
+    "hosted_logo_bytes": 0,
+    "hosted_logo_etag": "example",
+    "hosted_logo_at": "1970-01-01T00:00:00Z",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z",
+    "logo_path": "example",
+    "tmdb_meta": {},
+    "tmdb_fetched_at": "1970-01-01T00:00:00Z",
+    "imdb_meta": {},
+    "imdb_fetched_at": "1970-01-01T00:00:00Z"
+  }
+}

@@ -18,6 +18,14 @@
 | height | integer | NO |  | NO | NEVER |
 | aspect_ratio | numeric | NO |  | NO | NEVER |
 | fetched_at | timestamp with time zone | NO | now() | NO | NEVER |
+| hosted_url | text | YES |  | NO | NEVER |
+| hosted_sha256 | text | YES |  | NO | NEVER |
+| hosted_key | text | YES |  | NO | NEVER |
+| hosted_bucket | text | YES |  | NO | NEVER |
+| hosted_content_type | text | YES |  | NO | NEVER |
+| hosted_bytes | bigint | YES |  | NO | NEVER |
+| hosted_etag | text | YES |  | NO | NEVER |
+| hosted_at | timestamp with time zone | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -60,6 +68,14 @@ true
   "width": 0,
   "height": 0,
   "aspect_ratio": 0,
-  "fetched_at": "1970-01-01T00:00:00Z"
+  "fetched_at": "1970-01-01T00:00:00Z",
+  "hosted_url": "example",
+  "hosted_sha256": "example",
+  "hosted_key": "example",
+  "hosted_bucket": "example",
+  "hosted_content_type": "example",
+  "hosted_bytes": 0,
+  "hosted_etag": "example",
+  "hosted_at": "1970-01-01T00:00:00Z"
 }
 ```

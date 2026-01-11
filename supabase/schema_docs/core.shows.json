@@ -11,22 +11,6 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "network",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "streaming",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
       "name": "show_total_seasons",
       "data_type": "integer",
       "is_nullable": "YES",
@@ -43,7 +27,7 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "imdb_series_id",
+      "name": "imdb_id",
       "data_type": "text",
       "is_nullable": "YES",
       "default": null,
@@ -51,7 +35,7 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "tmdb_series_id",
+      "name": "tmdb_id",
       "data_type": "integer",
       "is_nullable": "YES",
       "default": null,
@@ -91,38 +75,6 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "external_ids",
-      "data_type": "jsonb",
-      "is_nullable": "NO",
-      "default": "'{}'::jsonb",
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "primary_tmdb_poster_path",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "primary_tmdb_backdrop_path",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "primary_tmdb_logo_path",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
       "name": "created_at",
       "data_type": "timestamp with time zone",
       "is_nullable": "NO",
@@ -139,8 +91,336 @@
       "is_generated": "NEVER"
     },
     {
+      "name": "most_recent_episode_season",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "most_recent_episode_number",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "most_recent_episode_title",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "most_recent_episode_air_date",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "most_recent_episode_imdb_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "primary_poster_image_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "primary_backdrop_image_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "primary_logo_image_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "needs_imdb_resolution",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "false",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "genres",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "keywords",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tags",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "networks",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "streaming_providers",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "listed_on",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tvdb_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tvrage_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "wikidata_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "facebook_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "instagram_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "twitter_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "needs_tmdb_resolution",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "false",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_status",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_first_air_date",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_last_air_date",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_vote_average",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_vote_count",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_popularity",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_title",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_content_rating",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_rating_value",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_rating_count",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_date_published",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_end_year",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_meta",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
       "name": "imdb_meta",
       "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_network_ids",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_production_company_ids",
+      "data_type": "ARRAY",
       "is_nullable": "YES",
       "default": null,
       "is_identity": "NO",
@@ -150,50 +430,104 @@
   "primary_key": [
     "id"
   ],
-  "foreign_keys": [],
+  "foreign_keys": [
+    {
+      "constraint": "shows_primary_backdrop_image_id_fkey",
+      "column": "primary_backdrop_image_id",
+      "references": "core.show_images.id"
+    },
+    {
+      "constraint": "shows_primary_logo_image_id_fkey",
+      "column": "primary_logo_image_id",
+      "references": "core.show_images.id"
+    },
+    {
+      "constraint": "shows_primary_poster_image_id_fkey",
+      "column": "primary_poster_image_id",
+      "references": "core.show_images.id"
+    }
+  ],
   "unique_constraints": [],
   "indexes": [
     {
-      "name": "core_shows_external_ids_gin",
+      "name": "core_shows_genres_gin",
       "columns": [
-        "external_ids"
+        "genres"
       ],
       "unique": false,
-      "definition": "CREATE INDEX core_shows_external_ids_gin ON core.shows USING gin (external_ids)"
+      "definition": "CREATE INDEX core_shows_genres_gin ON core.shows USING gin (genres)"
     },
     {
-      "name": "core_shows_external_ids_imdb_unique",
+      "name": "core_shows_imdb_id_unique",
       "columns": [
-        "((external_ids ->> 'imdb'::text))) WHERE (COALESCE((external_ids ->> 'imdb'::text)",
-        "''::text) <> ''::text"
+        "imdb_id) WHERE ((imdb_id IS NOT NULL) AND (btrim(imdb_id) <> ''::text)"
       ],
       "unique": true,
-      "definition": "CREATE UNIQUE INDEX core_shows_external_ids_imdb_unique ON core.shows USING btree (((external_ids ->> 'imdb'::text))) WHERE (COALESCE((external_ids ->> 'imdb'::text), ''::text) <> ''::text)"
+      "definition": "CREATE UNIQUE INDEX core_shows_imdb_id_unique ON core.shows USING btree (imdb_id) WHERE ((imdb_id IS NOT NULL) AND (btrim(imdb_id) <> ''::text))"
     },
     {
-      "name": "core_shows_external_ids_tmdb_unique",
+      "name": "core_shows_keywords_gin",
       "columns": [
-        "((external_ids ->> 'tmdb'::text))) WHERE (COALESCE((external_ids ->> 'tmdb'::text)",
-        "''::text) <> ''::text"
+        "keywords"
       ],
-      "unique": true,
-      "definition": "CREATE UNIQUE INDEX core_shows_external_ids_tmdb_unique ON core.shows USING btree (((external_ids ->> 'tmdb'::text))) WHERE (COALESCE((external_ids ->> 'tmdb'::text), ''::text) <> ''::text)"
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_keywords_gin ON core.shows USING gin (keywords)"
     },
     {
-      "name": "core_shows_imdb_series_id_unique",
+      "name": "core_shows_listed_on_gin",
       "columns": [
-        "imdb_series_id) WHERE ((imdb_series_id IS NOT NULL) AND (btrim(imdb_series_id) <> ''::text)"
+        "listed_on"
       ],
-      "unique": true,
-      "definition": "CREATE UNIQUE INDEX core_shows_imdb_series_id_unique ON core.shows USING btree (imdb_series_id) WHERE ((imdb_series_id IS NOT NULL) AND (btrim(imdb_series_id) <> ''::text))"
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_listed_on_gin ON core.shows USING gin (listed_on)"
     },
     {
-      "name": "core_shows_tmdb_series_id_unique",
+      "name": "core_shows_networks_gin",
       "columns": [
-        "tmdb_series_id) WHERE (tmdb_series_id IS NOT NULL"
+        "networks"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_networks_gin ON core.shows USING gin (networks)"
+    },
+    {
+      "name": "core_shows_streaming_providers_gin",
+      "columns": [
+        "streaming_providers"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_streaming_providers_gin ON core.shows USING gin (streaming_providers)"
+    },
+    {
+      "name": "core_shows_tags_gin",
+      "columns": [
+        "tags"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_tags_gin ON core.shows USING gin (tags)"
+    },
+    {
+      "name": "core_shows_tmdb_id_unique",
+      "columns": [
+        "tmdb_id) WHERE (tmdb_id IS NOT NULL"
       ],
       "unique": true,
-      "definition": "CREATE UNIQUE INDEX core_shows_tmdb_series_id_unique ON core.shows USING btree (tmdb_series_id) WHERE (tmdb_series_id IS NOT NULL)"
+      "definition": "CREATE UNIQUE INDEX core_shows_tmdb_id_unique ON core.shows USING btree (tmdb_id) WHERE (tmdb_id IS NOT NULL)"
+    },
+    {
+      "name": "core_shows_tmdb_network_ids_gin",
+      "columns": [
+        "tmdb_network_ids"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_tmdb_network_ids_gin ON core.shows USING gin (tmdb_network_ids)"
+    },
+    {
+      "name": "core_shows_tmdb_production_company_ids_gin",
+      "columns": [
+        "tmdb_production_company_ids"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_tmdb_production_company_ids_gin ON core.shows USING gin (tmdb_production_company_ids)"
     },
     {
       "name": "shows_pkey",
@@ -207,22 +541,57 @@
   "rls_enabled": true,
   "example_row": {
     "name": "example",
-    "network": "example",
-    "streaming": "example",
     "show_total_seasons": 0,
     "show_total_episodes": 0,
-    "imdb_series_id": "example",
-    "tmdb_series_id": 0,
+    "imdb_id": "example",
+    "tmdb_id": 0,
     "most_recent_episode": "example",
     "id": "00000000-0000-0000-0000-000000000000",
     "description": "example",
     "premiere_date": "1970-01-01",
-    "external_ids": {},
-    "primary_tmdb_poster_path": "example",
-    "primary_tmdb_backdrop_path": "example",
-    "primary_tmdb_logo_path": "example",
     "created_at": "1970-01-01T00:00:00Z",
     "updated_at": "1970-01-01T00:00:00Z",
-    "imdb_meta": {}
+    "most_recent_episode_season": 0,
+    "most_recent_episode_number": 0,
+    "most_recent_episode_title": "example",
+    "most_recent_episode_air_date": "1970-01-01",
+    "most_recent_episode_imdb_id": "example",
+    "primary_poster_image_id": "00000000-0000-0000-0000-000000000000",
+    "primary_backdrop_image_id": "00000000-0000-0000-0000-000000000000",
+    "primary_logo_image_id": "00000000-0000-0000-0000-000000000000",
+    "needs_imdb_resolution": false,
+    "genres": [],
+    "keywords": [],
+    "tags": [],
+    "networks": [],
+    "streaming_providers": [],
+    "listed_on": [],
+    "tvdb_id": 0,
+    "tvrage_id": 0,
+    "wikidata_id": "example",
+    "facebook_id": "example",
+    "instagram_id": "example",
+    "twitter_id": "example",
+    "needs_tmdb_resolution": false,
+    "tmdb_name": "example",
+    "tmdb_status": "example",
+    "tmdb_type": "example",
+    "tmdb_first_air_date": "1970-01-01",
+    "tmdb_last_air_date": "1970-01-01",
+    "tmdb_vote_average": 0,
+    "tmdb_vote_count": 0,
+    "tmdb_popularity": 0,
+    "imdb_title": "example",
+    "imdb_content_rating": "example",
+    "imdb_rating_value": 0,
+    "imdb_rating_count": 0,
+    "imdb_date_published": "1970-01-01",
+    "imdb_end_year": 0,
+    "tmdb_fetched_at": "1970-01-01T00:00:00Z",
+    "imdb_fetched_at": "1970-01-01T00:00:00Z",
+    "tmdb_meta": {},
+    "imdb_meta": {},
+    "tmdb_network_ids": [],
+    "tmdb_production_company_ids": []
   }
 }

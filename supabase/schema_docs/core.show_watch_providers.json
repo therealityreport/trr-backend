@@ -1,0 +1,154 @@
+{
+  "schema": "core",
+  "table": "show_watch_providers",
+  "columns": [
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "region",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "offer_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "provider_id",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "display_priority",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "link",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "show_id",
+    "region",
+    "offer_type",
+    "provider_id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "show_watch_providers_provider_id_fkey",
+      "column": "provider_id",
+      "references": "core.watch_providers.provider_id"
+    },
+    {
+      "constraint": "show_watch_providers_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "show_watch_providers_offer_type_idx",
+      "columns": [
+        "offer_type"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX show_watch_providers_offer_type_idx ON core.show_watch_providers USING btree (offer_type)"
+    },
+    {
+      "name": "show_watch_providers_pkey",
+      "columns": [
+        "show_id",
+        "region",
+        "offer_type",
+        "provider_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_watch_providers_pkey ON core.show_watch_providers USING btree (show_id, region, offer_type, provider_id)"
+    },
+    {
+      "name": "show_watch_providers_provider_id_idx",
+      "columns": [
+        "provider_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX show_watch_providers_provider_id_idx ON core.show_watch_providers USING btree (provider_id)"
+    },
+    {
+      "name": "show_watch_providers_region_idx",
+      "columns": [
+        "region"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX show_watch_providers_region_idx ON core.show_watch_providers USING btree (region)"
+    },
+    {
+      "name": "show_watch_providers_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX show_watch_providers_show_id_idx ON core.show_watch_providers USING btree (show_id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "region": "example",
+    "offer_type": "example",
+    "provider_id": 0,
+    "display_priority": 0,
+    "link": "example",
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

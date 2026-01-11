@@ -1,0 +1,480 @@
+{
+  "schema": "core",
+  "table": "cast_photos",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_person_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'imdb'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_image_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "viewer_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "mediaindex_url_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "mediaviewer_url_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "width",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "height",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "caption",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "gallery_index",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "gallery_total",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "people_imdb_ids",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "people_names",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "title_imdb_ids",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "title_names",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "metadata",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_page_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "image_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "thumb_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "file_name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "alt_text",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "context_section",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "context_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "season",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "position",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "image_url_canonical",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bucket",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_key",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_content_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bytes",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_etag",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "cast_photos_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "person_id",
+      "source",
+      "image_url_canonical"
+    ],
+    [
+      "person_id",
+      "source",
+      "source_image_id"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "cast_photos_hosted_at_idx",
+      "columns": [
+        "hosted_at) WHERE (hosted_at IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX cast_photos_hosted_at_idx ON core.cast_photos USING btree (hosted_at) WHERE (hosted_at IS NOT NULL)"
+    },
+    {
+      "name": "cast_photos_hosted_sha_idx",
+      "columns": [
+        "hosted_sha256) WHERE (hosted_sha256 IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX cast_photos_hosted_sha_idx ON core.cast_photos USING btree (hosted_sha256) WHERE (hosted_sha256 IS NOT NULL)"
+    },
+    {
+      "name": "cast_photos_person_source_idx",
+      "columns": [
+        "person_id",
+        "source"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX cast_photos_person_source_idx ON core.cast_photos USING btree (person_id, source)"
+    },
+    {
+      "name": "cast_photos_person_source_image_url_canonical_key",
+      "columns": [
+        "person_id",
+        "source",
+        "image_url_canonical"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_photos_person_source_image_url_canonical_key ON core.cast_photos USING btree (person_id, source, image_url_canonical)"
+    },
+    {
+      "name": "cast_photos_person_source_source_image_id_key",
+      "columns": [
+        "person_id",
+        "source",
+        "source_image_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_photos_person_source_source_image_id_key ON core.cast_photos USING btree (person_id, source, source_image_id)"
+    },
+    {
+      "name": "cast_photos_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_photos_pkey ON core.cast_photos USING btree (id)"
+    },
+    {
+      "name": "core_cast_photos_imdb_person_id_idx",
+      "columns": [
+        "imdb_person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_cast_photos_imdb_person_id_idx ON core.cast_photos USING btree (imdb_person_id)"
+    },
+    {
+      "name": "core_cast_photos_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_cast_photos_person_id_idx ON core.cast_photos USING btree (person_id)"
+    },
+    {
+      "name": "core_cast_photos_source_source_image_id_idx",
+      "columns": [
+        "source",
+        "source_image_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_cast_photos_source_source_image_id_idx ON core.cast_photos USING btree (source, source_image_id)"
+    },
+    {
+      "name": "idx_cast_photos_source_tmdb",
+      "columns": [
+        "person_id",
+        "source) WHERE (source = 'tmdb'::text"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_cast_photos_source_tmdb ON core.cast_photos USING btree (person_id, source) WHERE (source = 'tmdb'::text)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "imdb_person_id": "example",
+    "source": "example",
+    "source_image_id": "example",
+    "viewer_id": "example",
+    "mediaindex_url_path": "example",
+    "mediaviewer_url_path": "example",
+    "url": "example",
+    "url_path": "example",
+    "width": 0,
+    "height": 0,
+    "caption": "example",
+    "gallery_index": 0,
+    "gallery_total": 0,
+    "people_imdb_ids": [],
+    "people_names": [],
+    "title_imdb_ids": [],
+    "title_names": [],
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z",
+    "metadata": {},
+    "source_page_url": "example",
+    "image_url": "example",
+    "thumb_url": "example",
+    "file_name": "example",
+    "alt_text": "example",
+    "context_section": "example",
+    "context_type": "example",
+    "season": 0,
+    "position": 0,
+    "image_url_canonical": "example",
+    "hosted_bucket": "example",
+    "hosted_key": "example",
+    "hosted_url": "example",
+    "hosted_sha256": "example",
+    "hosted_content_type": "example",
+    "hosted_bytes": 0,
+    "hosted_etag": "example",
+    "hosted_at": "1970-01-01T00:00:00Z"
+  }
+}
