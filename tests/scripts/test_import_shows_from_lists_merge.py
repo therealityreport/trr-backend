@@ -58,4 +58,3 @@ def test_merge_candidates_strict_title_year_merge_when_no_ids() -> None:
     assert merged_titles == ["Different Title", "Same Title"]
     same = next(c for c in merged if c.title == "Same Title")
     assert same.source_tags == {"imdb-list:ls1"}
-

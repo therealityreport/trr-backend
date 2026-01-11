@@ -4,10 +4,11 @@ import gzip
 import random
 import re
 import time
-from typing import Any, Mapping
-from urllib.parse import quote, urlparse
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
+from typing import Any
+from urllib.parse import quote, urlparse
 
 try:
     import requests
@@ -382,9 +383,7 @@ def _extract_caption(soup: BeautifulSoup) -> str | None:
 def _extract_section_links(soup: BeautifulSoup, label: str, pattern: re.Pattern[str]) -> tuple[list[str], list[str]]:
     label_lower = label.strip().casefold()
     label_nodes = [
-        node
-        for node in soup.find_all(["span", "div", "h3"])
-        if node.get_text(strip=True).casefold() == label_lower
+        node for node in soup.find_all(["span", "div", "h3"]) if node.get_text(strip=True).casefold() == label_lower
     ]
 
     for node in label_nodes:

@@ -7,6 +7,7 @@ Provides:
 - Typing indicators
 - Presence heartbeats
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,24 +16,23 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ValidationError
-from supabase import create_client
 
-from api.deps import get_supabase_url, get_supabase_anon_key
+from api.deps import get_supabase_anon_key, get_supabase_url
 from api.realtime.broker import get_broker
 from api.realtime.events import (
     Event,
-    EventType,
     error_event,
-    subscribed_event,
-    typing_event,
-    presence_event,
     get_discussion_room,
     get_dm_room,
-    get_typing_key,
     get_presence_key,
+    get_typing_key,
+    presence_event,
+    subscribed_event,
+    typing_event,
 )
+from supabase import create_client
 
 logger = logging.getLogger(__name__)
 
@@ -226,9 +226,7 @@ async def dm_websocket(
         return
 
     # Verify membership
-    is_member = await check_dm_membership(
-        user["id"], str(conversation_id), user["token"]
-    )
+    is_member = await check_dm_membership(user["id"], str(conversation_id), user["token"])
     if not is_member:
         await websocket.close(code=4003, reason="Not a member of this conversation")
         return
@@ -296,7 +294,7 @@ async def dm_websocket(
                     await broker.set_ephemeral(presence_key, "online", PRESENCE_TTL_SECONDS)
                     last_heartbeat = asyncio.get_event_loop().time()
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Check if we should close due to missing heartbeats
                 elapsed = asyncio.get_event_loop().time() - last_heartbeat
                 if elapsed > PRESENCE_TTL_SECONDS:

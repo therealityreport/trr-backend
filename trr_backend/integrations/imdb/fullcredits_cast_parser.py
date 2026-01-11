@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
 
 from trr_backend.integrations.imdb.episodic_client import IMDB_JOB_CATEGORY_SELF
-
 
 _IMDB_NAME_ID_RE = re.compile(r"(nm\d+)", re.IGNORECASE)
 _IMDB_TITLE_ID_RE = re.compile(r"^tt\d+$", re.IGNORECASE)

@@ -21,11 +21,13 @@ Usage:
     # Dry run (no mutations)
     PYTHONPATH=. python scripts/sync_cast_photos.py --imdb-person-id nm11883948 --dry-run
 """
+
 from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 try:
     import requests
@@ -217,14 +219,7 @@ def _get_tmdb_person_id(db, person_id: str) -> int | None:
 
     # Fall back to people.external_ids
     try:
-        response = (
-            db.schema("core")
-            .table("people")
-            .select("external_ids")
-            .eq("id", person_id)
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("people").select("external_ids").eq("id", person_id).limit(1).execute()
         if response.data and isinstance(response.data, list) and response.data:
             external_ids = response.data[0].get("external_ids") or {}
             tmdb_id = external_ids.get("tmdb_id") or external_ids.get("tmdb")
@@ -393,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         name = str(person.get("full_name") or "").strip()
 
         if args.verbose:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Person: {name or person_id}")
             if imdb_person_id:
                 print(f"  IMDb ID: {imdb_person_id}")
@@ -490,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
             total_pruned += pruned
 
     # Summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Summary")
     print(f"  People processed: {len(people_map)}")
     print(f"  Sources: {', '.join(sources)}")

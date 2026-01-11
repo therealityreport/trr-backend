@@ -19,9 +19,7 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
     monkeypatch.setattr(mod, "insert_show", insert_mock)
     monkeypatch.setattr(mod, "update_show", update_mock)
 
-    candidates = [
-        CandidateShow(imdb_id="tt1111111", tmdb_id=123, title="New Show", source_tags={"imdb-list:ls1"})
-    ]
+    candidates = [CandidateShow(imdb_id="tt1111111", tmdb_id=123, title="New Show", source_tags={"imdb-list:ls1"})]
 
     result = upsert_candidates_into_supabase(
         candidates,

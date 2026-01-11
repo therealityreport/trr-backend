@@ -4,6 +4,7 @@ Survey endpoints with instant live results.
 The key feature is that after submitting a survey response, the user
 immediately gets the current aggregate results across all respondents.
 """
+
 from __future__ import annotations
 
 from collections import Counter
@@ -15,18 +16,18 @@ from pydantic import BaseModel
 
 from api.auth import OptionalUser
 from api.deps import (
-    SupabaseClient,
     SupabaseAdminClient,
+    SupabaseClient,
     get_list_result,
     raise_for_supabase_error,
     require_single_result,
 )
 
-
 router = APIRouter(prefix="/surveys", tags=["surveys"])
 
 
 # --- Pydantic models ---
+
 
 class SurveyOption(BaseModel):
     id: UUID
@@ -76,6 +77,7 @@ class SurveySubmission(BaseModel):
     The server derives user identity from authentication (when implemented)
     or uses NULL for anonymous submissions.
     """
+
     answers: list[AnswerSubmission]
 
 
@@ -99,6 +101,7 @@ class SubmissionResponse(BaseModel):
 
 # --- Endpoints ---
 
+
 @router.get("", response_model=list[Survey])
 def list_surveys(
     db: SupabaseClient,
@@ -118,12 +121,7 @@ def list_surveys(
     if status:
         query = query.eq("status", status)
 
-    response = (
-        query
-        .order("created_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
-    )
+    response = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
     return get_list_result(response, "listing surveys")
 
 
@@ -133,14 +131,7 @@ def get_survey(db: SupabaseClient, survey_id: UUID) -> dict:
     Get a survey with all its questions and options.
     """
     # Get survey
-    survey_response = (
-        db.schema("surveys")
-        .table("surveys")
-        .select("*")
-        .eq("id", str(survey_id))
-        .single()
-        .execute()
-    )
+    survey_response = db.schema("surveys").table("surveys").select("*").eq("id", str(survey_id)).single().execute()
     survey = require_single_result(survey_response, "Survey")
 
     # Get questions with options
@@ -199,12 +190,7 @@ def submit_survey(
     """
     # Verify survey exists and is published
     survey_response = (
-        db.schema("surveys")
-        .table("surveys")
-        .select("id, status")
-        .eq("id", str(survey_id))
-        .single()
-        .execute()
+        db.schema("surveys").table("surveys").select("id, status").eq("id", str(survey_id)).single().execute()
     )
     survey = require_single_result(survey_response, "Survey")
 
@@ -218,12 +204,7 @@ def submit_survey(
         response_data["user_id"] = user["id"]
 
     # Create response record using admin client to bypass RLS for anonymous submissions
-    response_record = (
-        admin_db.schema("surveys")
-        .table("responses")
-        .insert(response_data)
-        .execute()
-    )
+    response_record = admin_db.schema("surveys").table("responses").insert(response_data).execute()
     raise_for_supabase_error(response_record, "creating survey response")
 
     if not response_record.data:
@@ -243,12 +224,7 @@ def submit_survey(
     ]
 
     if answers_to_insert:
-        answers_response = (
-            admin_db.schema("surveys")
-            .table("answers")
-            .insert(answers_to_insert)
-            .execute()
-        )
+        answers_response = admin_db.schema("surveys").table("answers").insert(answers_to_insert).execute()
         raise_for_supabase_error(answers_response, "saving survey answers")
 
     # Compute and return live results
@@ -269,21 +245,13 @@ def _compute_survey_results(db: SupabaseClient, survey_id: UUID) -> dict:
     """
     # Get all answers for this survey
     answers_response = (
-        db.schema("surveys")
-        .table("answers")
-        .select("question_id, answer")
-        .eq("survey_id", str(survey_id))
-        .execute()
+        db.schema("surveys").table("answers").select("question_id, answer").eq("survey_id", str(survey_id)).execute()
     )
     answers = get_list_result(answers_response, "fetching survey answers")
 
     # Get questions for context
     questions_response = (
-        db.schema("surveys")
-        .table("questions")
-        .select("id, question_type")
-        .eq("survey_id", str(survey_id))
-        .execute()
+        db.schema("surveys").table("questions").select("id, question_type").eq("survey_id", str(survey_id)).execute()
     )
     questions_list = get_list_result(questions_response, "fetching survey questions")
     questions = {q["id"]: q for q in questions_list}
@@ -297,13 +265,7 @@ def _compute_survey_results(db: SupabaseClient, survey_id: UUID) -> dict:
         question_answers[qid].append(ans["answer"])
 
     # Get unique response count
-    responses_response = (
-        db.schema("surveys")
-        .table("responses")
-        .select("id")
-        .eq("survey_id", str(survey_id))
-        .execute()
-    )
+    responses_response = db.schema("surveys").table("responses").select("id").eq("survey_id", str(survey_id)).execute()
     responses_list = get_list_result(responses_response, "counting survey responses")
     total_responses = len(responses_list)
 
@@ -370,16 +332,21 @@ def _update_aggregates(
     Uses upsert to handle both insert and update cases.
     """
     for question_result in results["questions"]:
-        response = admin_db.schema("surveys").table("aggregates").upsert(
-            {
-                "survey_id": str(survey_id),
-                "question_id": question_result["question_id"],
-                "aggregate": {
-                    "total_responses": question_result["total_responses"],
-                    "distribution": question_result["distribution"],
-                    "percentages": question_result["percentages"],
+        response = (
+            admin_db.schema("surveys")
+            .table("aggregates")
+            .upsert(
+                {
+                    "survey_id": str(survey_id),
+                    "question_id": question_result["question_id"],
+                    "aggregate": {
+                        "total_responses": question_result["total_responses"],
+                        "distribution": question_result["distribution"],
+                        "percentages": question_result["percentages"],
+                    },
                 },
-            },
-            on_conflict="survey_id,question_id",
-        ).execute()
+                on_conflict="survey_id,question_id",
+            )
+            .execute()
+        )
         raise_for_supabase_error(response, "updating survey aggregates")

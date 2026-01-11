@@ -3,21 +3,26 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
-from supabase import Client
 
+from scripts._sync_common import load_env_and_db
+from supabase import Client
 from trr_backend.ingestion.tmdb_show_backfill import (
     build_tmdb_show_patch,
     extract_tmdb_network_ids,
     extract_tmdb_production_company_ids,
     needs_tmdb_enrichment,
 )
-from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_details, resolve_api_key, resolve_bearer_token
+from trr_backend.integrations.tmdb.client import (
+    TmdbClientError,
+    fetch_tv_details,
+    resolve_api_key,
+    resolve_bearer_token,
+)
 from trr_backend.repositories.shows import update_show
-from scripts._sync_common import load_env_and_db
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -84,7 +89,7 @@ def _merge_int_arrays(existing: object, incoming: list[int]) -> list[int] | None
 
 
 def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -155,8 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         update_show(db, show_id, patch)
 
     print(
-        "backfill_tmdb_show_details: "
-        f"scanned={scanned} enriched={enriched} skipped={skipped} api_errors={api_errors}"
+        f"backfill_tmdb_show_details: scanned={scanned} enriched={enriched} skipped={skipped} api_errors={api_errors}"
     )
     return 0
 

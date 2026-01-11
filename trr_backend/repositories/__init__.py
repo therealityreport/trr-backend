@@ -17,4 +17,3 @@ __all__ = [
     "insert_show",
     "update_show",
 ]
-

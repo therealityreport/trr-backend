@@ -30,4 +30,3 @@ def create_supabase_admin_client(*, url: str | None = None, service_role_key: st
     """
 
     return create_client(url or get_supabase_url(), service_role_key or get_supabase_service_key())
-

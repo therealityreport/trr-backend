@@ -6,11 +6,12 @@ RLS policies enforce member-only access to conversations.
 
 Events are published to WebSocket subscribers after successful writes.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
@@ -25,9 +26,9 @@ from api.deps import (
 )
 from api.realtime.broker import get_broker
 from api.realtime.events import (
-    get_dm_room,
     dm_message_created_event,
     dm_read_updated_event,
+    get_dm_room,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,8 +55,10 @@ def publish_event_sync(room: str, event: dict) -> None:
 
 # --- Pydantic models ---
 
+
 class ConversationCreate(BaseModel):
     """Create/get a 1:1 DM conversation."""
+
     other_user_id: UUID
 
 
@@ -75,6 +78,7 @@ class Conversation(BaseModel):
 
 class ConversationSummary(BaseModel):
     """Conversation with preview info for listing."""
+
     id: UUID
     is_group: bool
     created_at: str
@@ -83,6 +87,7 @@ class ConversationSummary(BaseModel):
 
 class MessageCreate(BaseModel):
     """Message creation payload. sender_id is server-derived."""
+
     body: str
 
 
@@ -96,6 +101,7 @@ class Message(BaseModel):
 
 class ReadReceiptUpdate(BaseModel):
     """Update read receipt to mark messages as read."""
+
     last_read_message_id: UUID
 
 
@@ -107,6 +113,7 @@ class ReadReceipt(BaseModel):
 
 
 # --- Endpoints ---
+
 
 @router.post("", response_model=Conversation)
 def create_or_get_conversation(
@@ -124,10 +131,7 @@ def create_or_get_conversation(
     user_db = get_user_supabase_client(user)
 
     # Call the RPC function to get or create conversation
-    response = user_db.rpc(
-        "get_or_create_direct_conversation",
-        {"other_user_id": str(payload.other_user_id)}
-    ).execute()
+    response = user_db.rpc("get_or_create_direct_conversation", {"other_user_id": str(payload.other_user_id)}).execute()
 
     if response.data is None:
         raise HTTPException(status_code=500, detail="Failed to create conversation")
@@ -136,12 +140,7 @@ def create_or_get_conversation(
 
     # Fetch the conversation details with members
     conv_response = (
-        user_db.schema("social")
-        .table("dm_conversations")
-        .select("*")
-        .eq("id", conversation_id)
-        .single()
-        .execute()
+        user_db.schema("social").table("dm_conversations").select("*").eq("id", conversation_id).single().execute()
     )
     conversation = require_single_result(conv_response, "Conversation")
 
@@ -205,22 +204,12 @@ def list_messages(
     user_db = get_user_supabase_client(user)
 
     # Verify user has access (RLS will block if not a member)
-    query = (
-        user_db.schema("social")
-        .table("dm_messages")
-        .select("*")
-        .eq("conversation_id", str(conversation_id))
-    )
+    query = user_db.schema("social").table("dm_messages").select("*").eq("conversation_id", str(conversation_id))
 
     if cursor:
         query = query.gt("created_at", cursor)
 
-    response = (
-        query
-        .order("created_at", desc=False)
-        .limit(limit)
-        .execute()
-    )
+    response = query.order("created_at", desc=False).limit(limit).execute()
 
     messages = get_list_result(response, "listing messages")
 
@@ -236,10 +225,7 @@ def list_messages(
             .execute()
         )
         if conv_response.data is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Conversation not found or you don't have access"
-            )
+            raise HTTPException(status_code=404, detail="Conversation not found or you don't have access")
 
     return messages
 
@@ -266,11 +252,13 @@ def send_message(
     message_response = (
         user_db.schema("social")
         .table("dm_messages")
-        .insert({
-            "conversation_id": str(conversation_id),
-            "sender_id": user["id"],
-            "body": payload.body,
-        })
+        .insert(
+            {
+                "conversation_id": str(conversation_id),
+                "sender_id": user["id"],
+                "body": payload.body,
+            }
+        )
         .execute()
     )
     raise_for_supabase_error(message_response, "sending message")
@@ -326,22 +314,22 @@ def update_read_receipt(
     )
 
     if message_response.data is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Message not found in this conversation"
-        )
+        raise HTTPException(status_code=404, detail="Message not found in this conversation")
 
     # Update the read receipt (upsert in case it doesn't exist)
     # RLS enforces that user can only update their own read receipt
     update_response = (
         user_db.schema("social")
         .table("dm_read_receipts")
-        .upsert({
-            "conversation_id": str(conversation_id),
-            "user_id": user["id"],
-            "last_read_message_id": str(payload.last_read_message_id),
-            "last_read_at": datetime.now(timezone.utc).isoformat(),
-        }, on_conflict="conversation_id,user_id")
+        .upsert(
+            {
+                "conversation_id": str(conversation_id),
+                "user_id": user["id"],
+                "last_read_message_id": str(payload.last_read_message_id),
+                "last_read_at": datetime.now(UTC).isoformat(),
+            },
+            on_conflict="conversation_id,user_id",
+        )
         .execute()
     )
     raise_for_supabase_error(update_response, "updating read receipt")

@@ -5,11 +5,11 @@ import random
 import re
 import sys
 import time
-from pathlib import Path
-from typing import Iterable, Mapping
-from urllib.parse import quote, urlparse
 import urllib.error
 import urllib.request
+from collections.abc import Iterable, Mapping
+from pathlib import Path
+from urllib.parse import quote, urlparse
 
 try:
     import requests

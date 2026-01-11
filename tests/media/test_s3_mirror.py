@@ -113,7 +113,7 @@ def test_mirror_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -
     fake_s3.head_object.return_value = {
         "ContentType": "image/webp",
         "ContentLength": 123,
-        "ETag": "\"etag\"",
+        "ETag": '"etag"',
     }
 
     monkeypatch.setattr(s3_mirror, "download_image", lambda *args, **kwargs: (b"data", "image/webp"))
@@ -148,7 +148,7 @@ def test_mirror_tmdb_logo_skips_upload_if_object_exists(monkeypatch: pytest.Monk
     fake_s3.head_object.return_value = {
         "ContentType": "image/png",
         "ContentLength": 321,
-        "ETag": "\"etag-logo\"",
+        "ETag": '"etag-logo"',
     }
 
     monkeypatch.setattr(s3_mirror, "download_image", lambda *args, **kwargs: (b"data", "image/png"))
@@ -203,9 +203,7 @@ def test_list_s3_objects_under_prefix() -> None:
     ]
     fake_s3.get_paginator.return_value = fake_paginator
 
-    keys = s3_mirror.list_s3_objects_under_prefix(
-        fake_s3, "bucket", "images/people/nm123/photos/"
-    )
+    keys = s3_mirror.list_s3_objects_under_prefix(fake_s3, "bucket", "images/people/nm123/photos/")
 
     assert len(keys) == 2
     assert "images/people/nm123/photos/fandom/abc.webp" in keys
@@ -249,9 +247,7 @@ def test_delete_s3_objects_batch() -> None:
 def test_delete_s3_objects_partial_failure() -> None:
     """Test batch deletion with some failures."""
     fake_s3 = MagicMock()
-    fake_s3.delete_objects.return_value = {
-        "Errors": [{"Key": "key2", "Code": "AccessDenied"}]
-    }
+    fake_s3.delete_objects.return_value = {"Errors": [{"Key": "key2", "Code": "AccessDenied"}]}
 
     keys = ["key1", "key2", "key3"]
     count = s3_mirror.delete_s3_objects(fake_s3, "bucket", keys)
@@ -269,10 +265,12 @@ def test_prune_orphaned_cast_photo_objects_no_orphans(monkeypatch: pytest.Monkey
     fake_s3 = MagicMock()
     fake_paginator = MagicMock()
     fake_paginator.paginate.return_value = [
-        {"Contents": [
-            {"Key": "images/people/nm123/photos/fandom/abc.webp"},
-            {"Key": "images/people/nm123/photos/tmdb/xyz.jpg"},
-        ]}
+        {
+            "Contents": [
+                {"Key": "images/people/nm123/photos/fandom/abc.webp"},
+                {"Key": "images/people/nm123/photos/tmdb/xyz.jpg"},
+            ]
+        }
     ]
     fake_s3.get_paginator.return_value = fake_paginator
 
@@ -285,9 +283,7 @@ def test_prune_orphaned_cast_photo_objects_no_orphans(monkeypatch: pytest.Monkey
             "images/people/nm123/photos/tmdb/xyz.jpg",
         }
 
-        orphaned = s3_mirror.prune_orphaned_cast_photo_objects(
-            fake_db, "nm123", s3_client=fake_s3
-        )
+        orphaned = s3_mirror.prune_orphaned_cast_photo_objects(fake_db, "nm123", s3_client=fake_s3)
 
     assert orphaned == []
     fake_s3.delete_objects.assert_not_called()
@@ -302,11 +298,13 @@ def test_prune_orphaned_cast_photo_objects_with_orphans(monkeypatch: pytest.Monk
     fake_s3 = MagicMock()
     fake_paginator = MagicMock()
     fake_paginator.paginate.return_value = [
-        {"Contents": [
-            {"Key": "images/people/nm123/photos/fandom/abc.webp"},
-            {"Key": "images/people/nm123/photos/fandom/orphan1.jpg"},
-            {"Key": "images/people/nm123/photos/tmdb/orphan2.png"},
-        ]}
+        {
+            "Contents": [
+                {"Key": "images/people/nm123/photos/fandom/abc.webp"},
+                {"Key": "images/people/nm123/photos/fandom/orphan1.jpg"},
+                {"Key": "images/people/nm123/photos/tmdb/orphan2.png"},
+            ]
+        }
     ]
     fake_s3.get_paginator.return_value = fake_paginator
     fake_s3.delete_objects.return_value = {"Errors": []}
@@ -317,9 +315,7 @@ def test_prune_orphaned_cast_photo_objects_with_orphans(monkeypatch: pytest.Monk
     with patch("trr_backend.repositories.cast_photos.fetch_hosted_keys_for_person") as mock_fetch:
         mock_fetch.return_value = {"images/people/nm123/photos/fandom/abc.webp"}
 
-        orphaned = s3_mirror.prune_orphaned_cast_photo_objects(
-            fake_db, "nm123", s3_client=fake_s3
-        )
+        orphaned = s3_mirror.prune_orphaned_cast_photo_objects(fake_db, "nm123", s3_client=fake_s3)
 
     assert len(orphaned) == 2
     assert "images/people/nm123/photos/fandom/orphan1.jpg" in orphaned
@@ -335,9 +331,7 @@ def test_prune_orphaned_cast_photo_objects_dry_run(monkeypatch: pytest.MonkeyPat
 
     fake_s3 = MagicMock()
     fake_paginator = MagicMock()
-    fake_paginator.paginate.return_value = [
-        {"Contents": [{"Key": "images/people/nm123/photos/fandom/orphan.jpg"}]}
-    ]
+    fake_paginator.paginate.return_value = [{"Contents": [{"Key": "images/people/nm123/photos/fandom/orphan.jpg"}]}]
     fake_s3.get_paginator.return_value = fake_paginator
 
     fake_db = MagicMock()
@@ -345,9 +339,7 @@ def test_prune_orphaned_cast_photo_objects_dry_run(monkeypatch: pytest.MonkeyPat
     with patch("trr_backend.repositories.cast_photos.fetch_hosted_keys_for_person") as mock_fetch:
         mock_fetch.return_value = set()  # No DB references = all orphans
 
-        orphaned = s3_mirror.prune_orphaned_cast_photo_objects(
-            fake_db, "nm123", dry_run=True, s3_client=fake_s3
-        )
+        orphaned = s3_mirror.prune_orphaned_cast_photo_objects(fake_db, "nm123", dry_run=True, s3_client=fake_s3)
 
     assert len(orphaned) == 1
     assert "images/people/nm123/photos/fandom/orphan.jpg" in orphaned

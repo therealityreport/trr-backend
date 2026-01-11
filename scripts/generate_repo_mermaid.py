@@ -9,6 +9,7 @@ Output files are written to docs/Repository/generated/:
 - CODE_IMPORT_GRAPH.md - Internal import dependency graph
 - SCRIPTS_FLOW.md - Script entrypoints and their dependencies
 """
+
 from __future__ import annotations
 
 import sys
@@ -18,8 +19,28 @@ import tree_sitter_python as tspython
 from tree_sitter import Language, Parser
 
 EXCLUDE_DIRS = {
-    ".venv", "venv", "__pycache__", ".git", "node_modules", ".cache", "logs",
-    "debug_html", "site-packages", "dist-packages", ".eggs", "build", "dist",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".git",
+    "node_modules",
+    ".cache",
+    "logs",
+    "debug_html",
+    "site-packages",
+    "dist-packages",
+    ".eggs",
+    "build",
+    "dist",
+    # Legacy scripts (archived, excluded from repo-map)
+    "archives",
+    "1-ShowInfo",
+    "2-CastInfo",
+    "3-RealiteaseInfo",
+    "4-WWHLInfo",
+    "5-FinalList",
+    "BravoTalent",
+    "RealiteaseInfo",
 }
 INTERNAL_PACKAGES = {"trr_backend", "scripts", "api"}
 

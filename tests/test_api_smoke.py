@@ -4,15 +4,16 @@ Smoke tests for the TRR API.
 These tests verify basic functionality without requiring a live database.
 For integration tests against Supabase, see test_api_integration.py.
 """
+
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from api.main import app
 from api import deps
+from api.main import app
 
 
 # Mock Supabase client for testing without database connection
@@ -44,7 +45,9 @@ def mock_supabase():
     mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.order.return_value.range.return_value.execute.return_value = empty_list_response
 
     # Simple filtered queries (eq -> execute)
-    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.execute.return_value = empty_list_response
+    mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.execute.return_value = (
+        empty_list_response
+    )
 
     # Double eq queries (eq -> eq -> single -> execute) for season lookups
     mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.eq.return_value.single.return_value.execute.return_value = none_response

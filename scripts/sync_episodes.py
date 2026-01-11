@@ -4,14 +4,6 @@ from __future__ import annotations
 import argparse
 import sys
 
-from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env, upsert_candidates_into_supabase
-from trr_backend.repositories.sync_state import (
-    assert_core_sync_state_table_exists,
-    mark_sync_state_failed,
-    mark_sync_state_in_progress,
-    mark_sync_state_success,
-)
-
 from scripts._sync_common import (
     add_show_filter_args,
     build_candidates,
@@ -21,6 +13,13 @@ from scripts._sync_common import (
     filter_show_rows_for_sync,
     load_env_and_db,
     reconcile_show_total_seasons,
+)
+from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env, upsert_candidates_into_supabase
+from trr_backend.repositories.sync_state import (
+    assert_core_sync_state_table_exists,
+    mark_sync_state_failed,
+    mark_sync_state_in_progress,
+    mark_sync_state_success,
 )
 
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Any
 
 from supabase import Client
 
@@ -90,7 +91,7 @@ def _truncate_error(value: object, *, max_length: int = 1000) -> str | None:
     text = str(value)
     if not text:
         return None
-    return text[:max(1, int(max_length))]
+    return text[: max(1, int(max_length))]
 
 
 def fetch_sync_state_map(
@@ -111,17 +112,13 @@ def fetch_sync_state_map(
         response = (
             db.schema("core")
             .table("sync_state")
-            .select(
-                "show_id,table_name,status,last_success_at,last_seen_most_recent_episode,last_error"
-            )
+            .select("show_id,table_name,status,last_success_at,last_seen_most_recent_episode,last_error")
             .eq("table_name", table_name)
             .in_("show_id", chunk)
             .execute()
         )
         if hasattr(response, "error") and response.error:
-            raise SyncStateRepositoryError(
-                f"Supabase error listing sync_state rows for {table_name}: {response.error}"
-            )
+            raise SyncStateRepositoryError(f"Supabase error listing sync_state rows for {table_name}: {response.error}")
         data = response.data or []
         if not isinstance(data, list):
             continue
@@ -174,7 +171,7 @@ def mark_sync_state_success(
     show_id: str,
     last_seen_most_recent_episode: str | None,
 ) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     _upsert_sync_state(
         db,
         table_name=table_name,

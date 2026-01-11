@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Sync TMDb person profile images to cast_photos table."""
+
 from __future__ import annotations
 
 import argparse
@@ -81,14 +82,7 @@ def _get_tmdb_person_id(db, person_id: str) -> int | None:
 
     # Fall back to people.external_ids
     try:
-        response = (
-            db.schema("core")
-            .table("people")
-            .select("external_ids")
-            .eq("id", person_id)
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("people").select("external_ids").eq("id", person_id).limit(1).execute()
         if response.data and isinstance(response.data, list) and response.data:
             external_ids = response.data[0].get("external_ids") or {}
             tmdb_id = external_ids.get("tmdb_id") or external_ids.get("tmdb")
@@ -103,14 +97,7 @@ def _get_tmdb_person_id(db, person_id: str) -> int | None:
 def _get_imdb_person_id(db, person_id: str) -> str | None:
     """Get IMDb person ID from people.external_ids."""
     try:
-        response = (
-            db.schema("core")
-            .table("people")
-            .select("external_ids")
-            .eq("id", person_id)
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("people").select("external_ids").eq("id", person_id).limit(1).execute()
         if response.data and isinstance(response.data, list) and response.data:
             external_ids = response.data[0].get("external_ids") or {}
             return external_ids.get("imdb")

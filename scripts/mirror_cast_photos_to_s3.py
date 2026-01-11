@@ -15,11 +15,11 @@ Usage:
     # Mirror and prune orphaned S3 objects
     PYTHONPATH=. python scripts/mirror_cast_photos_to_s3.py --source all --prune --imdb-person-id nm11883948
 """
+
 from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
 
 from trr_backend.db.supabase import create_supabase_admin_client
 from trr_backend.media.s3_mirror import (

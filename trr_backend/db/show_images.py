@@ -22,14 +22,7 @@ def list_tmdb_show_images(
     This intentionally queries by `core.shows.tmdb_id`, not `core.show_images.show_id`, to avoid mismatches.
     """
 
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("tmdb_id")
-        .eq("id", str(show_id))
-        .single()
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("tmdb_id").eq("id", str(show_id)).single().execute()
     if hasattr(response, "error") and response.error:
         raise ShowImagesError(f"Supabase error reading show tmdb_id: {response.error}")
     show_row = response.data or {}
@@ -40,13 +33,7 @@ def list_tmdb_show_images(
     if not isinstance(tmdb_id, int):
         return []
 
-    query = (
-        db.schema("core")
-        .table("v_show_images")
-        .select("*")
-        .eq("tmdb_id", tmdb_id)
-        .eq("source", "tmdb")
-    )
+    query = db.schema("core").table("v_show_images").select("*").eq("tmdb_id", tmdb_id).eq("source", "tmdb")
     if kind:
         query = query.eq("kind", kind)
     images_response = query.execute()

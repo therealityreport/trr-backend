@@ -28,4 +28,3 @@ def __getattr__(name: str):
 
         return getattr(client, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

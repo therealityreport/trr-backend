@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import re
 import sys
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from threading import Lock
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -72,7 +73,7 @@ class EnrichSummary:
 
 
 def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 _IMDB_IMAGE_BASE_RE = re.compile(r"^(?P<base>.+?)\._V\d+_", re.IGNORECASE)

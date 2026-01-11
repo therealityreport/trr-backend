@@ -1,10 +1,11 @@
 """TMDb Person API integration for fetching person details and external IDs."""
+
 from __future__ import annotations
 
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import requests
@@ -24,16 +25,19 @@ def _get_bearer_token() -> str:
 def _get_session() -> requests.Session:
     """Create a requests session with TMDb auth headers."""
     session = requests.Session()
-    session.headers.update({
-        "Authorization": f"Bearer {_get_bearer_token()}",
-        "accept": "application/json",
-    })
+    session.headers.update(
+        {
+            "Authorization": f"Bearer {_get_bearer_token()}",
+            "accept": "application/json",
+        }
+    )
     return session
 
 
 @dataclass
 class TMDbPersonDetails:
     """TMDb person details from /3/person/{id}."""
+
     tmdb_id: int
     name: str | None = None
     also_known_as: list[str] = field(default_factory=list)
@@ -52,6 +56,7 @@ class TMDbPersonDetails:
 @dataclass
 class TMDbExternalIds:
     """TMDb external IDs from /3/person/{id}/external_ids."""
+
     tmdb_id: int
     imdb_id: str | None = None
     freebase_mid: str | None = None
@@ -68,9 +73,10 @@ class TMDbExternalIds:
 @dataclass
 class TMDbPersonFull:
     """Combined TMDb person details and external IDs."""
+
     details: TMDbPersonDetails
     external_ids: TMDbExternalIds
-    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def to_cast_tmdb_row(self, person_id: str) -> dict[str, Any]:
         """Convert to a row for the cast_tmdb table."""
@@ -144,13 +150,13 @@ def fetch_tmdb_person_details(
 
             if resp.status_code == 429:
                 # Rate limited - wait and retry
-                wait = backoff * (2 ** attempt)
+                wait = backoff * (2**attempt)
                 time.sleep(wait)
                 continue
 
             if resp.status_code >= 500:
                 # Server error - retry
-                wait = backoff * (2 ** attempt)
+                wait = backoff * (2**attempt)
                 time.sleep(wait)
                 continue
 
@@ -175,7 +181,7 @@ def fetch_tmdb_person_details(
 
         except requests.RequestException:
             if attempt < retries - 1:
-                wait = backoff * (2 ** attempt)
+                wait = backoff * (2**attempt)
                 time.sleep(wait)
                 continue
             raise
@@ -213,12 +219,12 @@ def fetch_tmdb_external_ids(
                 return None
 
             if resp.status_code == 429:
-                wait = backoff * (2 ** attempt)
+                wait = backoff * (2**attempt)
                 time.sleep(wait)
                 continue
 
             if resp.status_code >= 500:
-                wait = backoff * (2 ** attempt)
+                wait = backoff * (2**attempt)
                 time.sleep(wait)
                 continue
 
@@ -241,7 +247,7 @@ def fetch_tmdb_external_ids(
 
         except requests.RequestException:
             if attempt < retries - 1:
-                wait = backoff * (2 ** attempt)
+                wait = backoff * (2**attempt)
                 time.sleep(wait)
                 continue
             raise
@@ -272,17 +278,13 @@ def fetch_tmdb_person_full(
     """
     session = session or _get_session()
 
-    details = fetch_tmdb_person_details(
-        tmdb_id, session=session, retries=retries, backoff=backoff
-    )
+    details = fetch_tmdb_person_details(tmdb_id, session=session, retries=retries, backoff=backoff)
     if not details:
         return None
 
     time.sleep(delay_between_requests)
 
-    external_ids = fetch_tmdb_external_ids(
-        tmdb_id, session=session, retries=retries, backoff=backoff
-    )
+    external_ids = fetch_tmdb_external_ids(tmdb_id, session=session, retries=retries, backoff=backoff)
     if not external_ids:
         # Create empty external IDs if fetch failed
         external_ids = TMDbExternalIds(tmdb_id=tmdb_id)
@@ -290,5 +292,5 @@ def fetch_tmdb_person_full(
     return TMDbPersonFull(
         details=details,
         external_ids=external_ids,
-        fetched_at=datetime.now(timezone.utc),
+        fetched_at=datetime.now(UTC),
     )

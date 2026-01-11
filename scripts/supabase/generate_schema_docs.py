@@ -8,17 +8,16 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
 except ImportError as exc:  # pragma: no cover - depends on local environment
-    raise SystemExit(
-        "Missing psycopg2; install dev deps (e.g., `pip install -r requirements.txt`)."
-    ) from exc
+    raise SystemExit("Missing psycopg2; install dev deps (e.g., `pip install -r requirements.txt`).") from exc
 
 _OUTPUT_DIR = Path("supabase/schema_docs")
 _SCHEMAS = ("core",)
@@ -93,8 +92,7 @@ def _connect() -> psycopg2.extensions.connection:
         return psycopg2.connect(_resolve_db_url(), cursor_factory=RealDictCursor)
     except psycopg2.OperationalError as exc:
         raise RuntimeError(
-            "Failed to connect to database. Start Supabase or export SUPABASE_DB_URL "
-            "then run `make schema-docs`."
+            "Failed to connect to database. Start Supabase or export SUPABASE_DB_URL then run `make schema-docs`."
         ) from exc
 
 

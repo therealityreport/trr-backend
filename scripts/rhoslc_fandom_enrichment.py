@@ -5,8 +5,8 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 

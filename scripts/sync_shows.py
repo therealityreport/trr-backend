@@ -5,12 +5,11 @@ import argparse
 import sys
 from uuid import UUID
 
+from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.models.shows import ShowRecord
-from trr_backend.repositories.shows import update_show
 from trr_backend.repositories.show_images import upsert_show_images
-
-from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
+from trr_backend.repositories.shows import update_show
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

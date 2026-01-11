@@ -76,9 +76,7 @@ def _run_script(python_exe: str, script_dir: Path, script_name: str, passthrough
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(REPO_ROOT), env.get("PYTHONPATH", "")]
-        if env.get("PYTHONPATH")
-        else [str(REPO_ROOT)]
+        [str(REPO_ROOT), env.get("PYTHONPATH", "")] if env.get("PYTHONPATH") else [str(REPO_ROOT)]
     )
 
     cmd = [python_exe, script_name, *passthrough]
