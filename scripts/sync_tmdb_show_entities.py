@@ -4,11 +4,17 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any
 
+from scripts._sync_common import (
+    add_show_filter_args,
+    extract_most_recent_episode,
+    filter_show_rows_for_sync,
+    load_env_and_db,
+)
 from supabase import Client
-
 from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_details, resolve_api_key
 from trr_backend.media.s3_mirror import mirror_tmdb_logo_row
 from trr_backend.repositories.shows import update_show
@@ -19,14 +25,6 @@ from trr_backend.repositories.sync_state import (
     mark_sync_state_success,
 )
 from trr_backend.utils.env import load_env
-
-from scripts._sync_common import (
-    add_show_filter_args,
-    extract_most_recent_episode,
-    filter_show_rows_for_sync,
-    load_env_and_db,
-)
-
 
 NETWORK_FIELDS = (
     "id,name,origin_country,tmdb_logo_path,logo_path,hosted_logo_key,hosted_logo_url,hosted_logo_sha256,"
@@ -50,7 +48,7 @@ def _require_supabase_db_url() -> None:
 
 
 def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _coerce_int_list(values: list[str]) -> list[int]:

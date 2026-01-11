@@ -64,7 +64,10 @@ def test_fetch_imdb_list_items_graphql_paginates_via_jump_to_position(monkeypatc
                 "releaseYear": {"year": 2000, "endYear": None},
                 "episodes": {"episodes": {"total": 10}},
                 "titleType": {"id": "tvSeries"},
-                "primaryImage": {"url": "https://m.media-amazon.com/images/M/sample.jpg", "caption": {"plainText": "cap"}},
+                "primaryImage": {
+                    "url": "https://m.media-amazon.com/images/M/sample.jpg",
+                    "caption": {"plainText": "cap"},
+                },
                 "certificate": {"rating": "TV-14"},
                 "runtime": {"seconds": 3600},
                 "titleGenres": {"genres": [{"genre": {"text": "Reality-TV"}}]},
@@ -132,4 +135,3 @@ def test_fetch_imdb_list_items_falls_back_to_html_when_graphql_fails(monkeypatch
     items = mod.fetch_imdb_list_items("ls123456789", session=session, max_pages=1, use_graphql=True)
     assert {i.imdb_id for i in items} == {"tt1111111", "tt2222222", "tt3333333"}
     assert all(i.extra.get("source") == "jsonld" for i in items)
-

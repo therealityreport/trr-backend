@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from supabase import Client
 
@@ -120,12 +121,17 @@ def fetch_season_images_missing_hosted(
     """
     Fetch season images missing hosted URLs (for S3 mirroring).
     """
+
     def _base_query():
-        return db.schema("core").table("season_images").select(
-            "id,show_id,season_id,season_number,source,file_path,url_original,"
-            "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
-            "hosted_bytes,hosted_etag,hosted_at,"
-            "shows:show_id(imdb_id)"
+        return (
+            db.schema("core")
+            .table("season_images")
+            .select(
+                "id,show_id,season_id,season_number,source,file_path,url_original,"
+                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
+                "hosted_bytes,hosted_etag,hosted_at,"
+                "shows:show_id(imdb_id)"
+            )
         )
 
     def _apply_filters(query):
@@ -146,9 +152,13 @@ def fetch_season_images_missing_hosted(
     if include_hosted:
         if base:
             missing_query = _apply_filters(_base_query()).is_("hosted_url", "null")
-            mismatch_query = _apply_filters(_base_query()).not_.is_("hosted_url", "null").not_.like(
-                "hosted_url",
-                f"{base}/%",
+            mismatch_query = (
+                _apply_filters(_base_query())
+                .not_.is_("hosted_url", "null")
+                .not_.like(
+                    "hosted_url",
+                    f"{base}/%",
+                )
             )
             queries.extend([missing_query, mismatch_query])
         else:

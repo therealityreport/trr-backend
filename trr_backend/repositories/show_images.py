@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from supabase import Client
-
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
 
 
@@ -31,7 +31,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
         hint = (
             f"\n\nPostgREST schema cache may still be stale after retry during {context}. "
             "Wait 30-60s and try again, or run:\n"
-            "  psql \"$SUPABASE_DB_URL\" -f scripts/db/reload_postgrest_schema.sql"
+            '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
         )
         raise ShowImageRepositoryError(f"{exc}{hint}") from exc
 
@@ -162,9 +162,7 @@ def upsert_show_images(
                     f"Supabase error upserting show images (tmdb constraint): {exc}"
                 ) from exc
         if hasattr(response, "error") and response.error:
-            raise ShowImageRepositoryError(
-                f"Supabase error upserting show images (tmdb constraint): {response.error}"
-            )
+            raise ShowImageRepositoryError(f"Supabase error upserting show images (tmdb constraint): {response.error}")
         data = response.data or []
         if isinstance(data, list):
             results.extend(data)
@@ -209,12 +207,17 @@ def fetch_show_images_missing_hosted(
 
     Joins with shows table to get show metadata for S3 path building.
     """
+
     def _base_query():
-        return db.schema("core").table("show_images").select(
-            "id,show_id,source,source_image_id,kind,file_path,url,url_path,"
-            "width,height,caption,position,image_type,tmdb_id,"
-            "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
-            "shows:show_id(name,imdb_id,tmdb_id)"
+        return (
+            db.schema("core")
+            .table("show_images")
+            .select(
+                "id,show_id,source,source_image_id,kind,file_path,url,url_path,"
+                "width,height,caption,position,image_type,tmdb_id,"
+                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
+                "shows:show_id(name,imdb_id,tmdb_id)"
+            )
         )
 
     def _apply_filters(query):
@@ -238,9 +241,13 @@ def fetch_show_images_missing_hosted(
     if include_hosted:
         if base:
             missing_query = _apply_filters(_base_query()).is_("hosted_url", "null")
-            mismatch_query = _apply_filters(_base_query()).not_.is_("hosted_url", "null").not_.like(
-                "hosted_url",
-                f"{base}/%",
+            mismatch_query = (
+                _apply_filters(_base_query())
+                .not_.is_("hosted_url", "null")
+                .not_.like(
+                    "hosted_url",
+                    f"{base}/%",
+                )
             )
             queries.extend([missing_query, mismatch_query])
         else:
@@ -282,13 +289,7 @@ def update_show_image_hosted_fields(
 
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
-            response = (
-                db.schema("core")
-                .table("show_images")
-                .update(payload)
-                .eq("id", str(image_id))
-                .execute()
-            )
+            response = db.schema("core").table("show_images").update(payload).eq("id", str(image_id)).execute()
             break
         except Exception as exc:
             if _handle_pgrst204_with_retry(exc, attempt, "updating show image hosted fields"):

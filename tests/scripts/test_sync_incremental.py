@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from scripts._sync_common import should_sync_show
 
@@ -103,7 +103,7 @@ def test_should_skip_failed_when_resume_disabled() -> None:
 def test_should_sync_on_since_cutoff() -> None:
     show = _base_show()
     state = _base_state(marker="S1E1", status="success")
-    since = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    since = datetime(2024, 2, 1, tzinfo=UTC)
     should_sync, reason = should_sync_show(
         show=show,
         state=state,

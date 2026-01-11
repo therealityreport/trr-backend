@@ -40,9 +40,7 @@ def test_fandom_person_parsing_infobox_taglines_reunion_images() -> None:
     assert len(photos) == len(set(canonical_urls))
     assert len(photos) == 6
 
-    reunion_photo = next(
-        photo for photo in photos if photo.get("context_section") == "reunion_seating"
-    )
+    reunion_photo = next(photo for photo in photos if photo.get("context_section") == "reunion_seating")
     assert reunion_photo["image_url"].endswith("Lisa_reunion_s1.jpg/revision/latest?cb=444")
 
     contexts = {(photo.get("context_section"), photo.get("context_type")) for photo in photos}

@@ -52,8 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
 
     from scripts import (
-        sync_episodes,
         sync_episode_appearances,
+        sync_episodes,
         sync_people,
         sync_seasons,
         sync_show_cast,

@@ -6,6 +6,7 @@ user_id is always server-derived from the auth token, never from client.
 
 Events are published to WebSocket subscribers after successful writes.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,9 +26,9 @@ from api.deps import (
 from api.realtime.broker import get_broker
 from api.realtime.events import (
     get_discussion_room,
-    thread_created_event,
     post_created_event,
     reaction_toggled_event,
+    thread_created_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ VALID_REACTION_TYPES = ("upvote", "downvote", "lol", "shade", "fire", "heart")
 
 # --- Pydantic models ---
 
+
 class Thread(BaseModel):
     id: UUID
     episode_id: UUID
@@ -77,6 +79,7 @@ class ThreadCreate(BaseModel):
     Thread creation payload.
     Note: created_by is server-derived from auth token, not from client.
     """
+
     title: str
     type: str  # episode_live, post_episode, spoilers, general
 
@@ -96,6 +99,7 @@ class PostCreate(BaseModel):
     Post creation payload.
     Note: user_id is server-derived from auth token, not from client.
     """
+
     body: str
     parent_post_id: UUID | None = None
 
@@ -112,6 +116,7 @@ class ReactionToggle(BaseModel):
     Reaction toggle payload.
     Note: user_id is server-derived from auth token, not from client.
     """
+
     reaction: str  # upvote, downvote, lol, shade, fire, heart
 
 
@@ -120,6 +125,7 @@ class PostWithReactions(Post):
 
 
 # --- Thread endpoints ---
+
 
 @router.get("/episodes/{episode_id}/threads", response_model=list[Thread])
 def list_episode_threads(
@@ -159,19 +165,11 @@ def create_thread(
     # Validate thread type
     if thread.type not in VALID_THREAD_TYPES:
         raise HTTPException(
-            status_code=400,
-            detail=f"Invalid thread type. Must be one of: {', '.join(VALID_THREAD_TYPES)}"
+            status_code=400, detail=f"Invalid thread type. Must be one of: {', '.join(VALID_THREAD_TYPES)}"
         )
 
     # Verify episode exists (public read)
-    episode_response = (
-        db.schema("core")
-        .table("episodes")
-        .select("id")
-        .eq("id", str(episode_id))
-        .single()
-        .execute()
-    )
+    episode_response = db.schema("core").table("episodes").select("id").eq("id", str(episode_id)).single().execute()
     require_single_result(episode_response, "Episode")
 
     # Create thread using user-scoped client (RLS enforces created_by = auth.uid())
@@ -179,12 +177,14 @@ def create_thread(
     response = (
         user_db.schema("social")
         .table("threads")
-        .insert({
-            "episode_id": str(episode_id),
-            "title": thread.title,
-            "type": thread.type,
-            "created_by": user["id"],
-        })
+        .insert(
+            {
+                "episode_id": str(episode_id),
+                "title": thread.title,
+                "type": thread.type,
+                "created_by": user["id"],
+            }
+        )
         .execute()
     )
     raise_for_supabase_error(response, "creating thread")
@@ -208,18 +208,12 @@ def get_thread(db: SupabaseClient, thread_id: UUID) -> dict:
     Get a specific thread by ID.
     Public endpoint - no auth required.
     """
-    response = (
-        db.schema("social")
-        .table("threads")
-        .select("*")
-        .eq("id", str(thread_id))
-        .single()
-        .execute()
-    )
+    response = db.schema("social").table("threads").select("*").eq("id", str(thread_id)).single().execute()
     return require_single_result(response, "Thread")
 
 
 # --- Post endpoints ---
+
 
 @router.get("/threads/{thread_id}/posts", response_model=list[PostWithReactions])
 def list_thread_posts(
@@ -238,12 +232,7 @@ def list_thread_posts(
     If parent_post_id is provided, returns replies to that post.
     """
     # Build query
-    query = (
-        db.schema("social")
-        .table("posts")
-        .select("*")
-        .eq("thread_id", str(thread_id))
-    )
+    query = db.schema("social").table("posts").select("*").eq("thread_id", str(thread_id))
 
     # Filter by parent
     if parent_post_id is None:
@@ -255,23 +244,14 @@ def list_thread_posts(
     if cursor:
         query = query.gt("created_at", cursor)
 
-    response = (
-        query
-        .order("created_at", desc=False)
-        .limit(limit)
-        .execute()
-    )
+    response = query.order("created_at", desc=False).limit(limit).execute()
     posts = get_list_result(response, "listing posts")
 
     # Fetch reaction counts for all posts
     if posts:
         post_ids = [p["id"] for p in posts]
         reactions_response = (
-            db.schema("social")
-            .table("reactions")
-            .select("post_id, reaction")
-            .in_("post_id", post_ids)
-            .execute()
+            db.schema("social").table("reactions").select("post_id, reaction").in_("post_id", post_ids).execute()
         )
         reactions = get_list_result(reactions_response, "fetching reactions")
 
@@ -332,10 +312,7 @@ def create_post(
 
         # Ensure parent post is in the same thread
         if parent["thread_id"] != str(thread_id):
-            raise HTTPException(
-                status_code=400,
-                detail="Parent post is not in this thread"
-            )
+            raise HTTPException(status_code=400, detail="Parent post is not in this thread")
 
     # Create post using user-scoped client (RLS enforces user_id = auth.uid())
     user_db = get_user_supabase_client(user)
@@ -347,12 +324,7 @@ def create_post(
     if post.parent_post_id:
         insert_data["parent_post_id"] = str(post.parent_post_id)
 
-    response = (
-        user_db.schema("social")
-        .table("posts")
-        .insert(insert_data)
-        .execute()
-    )
+    response = user_db.schema("social").table("posts").insert(insert_data).execute()
     raise_for_supabase_error(response, "creating post")
 
     if not response.data:
@@ -369,6 +341,7 @@ def create_post(
 
 
 # --- Reaction endpoints ---
+
 
 @router.post("/posts/{post_id}/reactions", response_model=dict)
 def toggle_reaction(
@@ -387,19 +360,11 @@ def toggle_reaction(
     # Validate reaction type
     if reaction_toggle.reaction not in VALID_REACTION_TYPES:
         raise HTTPException(
-            status_code=400,
-            detail=f"Invalid reaction type. Must be one of: {', '.join(VALID_REACTION_TYPES)}"
+            status_code=400, detail=f"Invalid reaction type. Must be one of: {', '.join(VALID_REACTION_TYPES)}"
         )
 
     # Verify post exists and get thread info to check lock status
-    post_response = (
-        db.schema("social")
-        .table("posts")
-        .select("id, thread_id")
-        .eq("id", str(post_id))
-        .single()
-        .execute()
-    )
+    post_response = db.schema("social").table("posts").select("id, thread_id").eq("id", str(post_id)).single().execute()
     post_data = require_single_result(post_response, "Post")
 
     # Check if thread is locked and get episode_id for room
@@ -448,9 +413,7 @@ def toggle_reaction(
         raise_for_supabase_error(delete_response, "removing reaction")
 
         # Publish event
-        event = reaction_toggled_event(
-            str(post_id), user["id"], reaction_toggle.reaction, "removed"
-        )
+        event = reaction_toggled_event(str(post_id), user["id"], reaction_toggle.reaction, "removed")
         background_tasks.add_task(publish_event_sync, room, event.to_dict())
 
         return {"action": "removed", "reaction": reaction_toggle.reaction}
@@ -459,19 +422,19 @@ def toggle_reaction(
         insert_response = (
             user_db.schema("social")
             .table("reactions")
-            .insert({
-                "post_id": str(post_id),
-                "user_id": user["id"],
-                "reaction": reaction_toggle.reaction,
-            })
+            .insert(
+                {
+                    "post_id": str(post_id),
+                    "user_id": user["id"],
+                    "reaction": reaction_toggle.reaction,
+                }
+            )
             .execute()
         )
         raise_for_supabase_error(insert_response, "adding reaction")
 
         # Publish event
-        event = reaction_toggled_event(
-            str(post_id), user["id"], reaction_toggle.reaction, "added"
-        )
+        event = reaction_toggled_event(str(post_id), user["id"], reaction_toggle.reaction, "added")
         background_tasks.add_task(publish_event_sync, room, event.to_dict())
 
         return {"action": "added", "reaction": reaction_toggle.reaction}
@@ -484,24 +447,11 @@ def get_post_reactions(db: SupabaseClient, post_id: UUID) -> dict:
     Public endpoint - no auth required.
     """
     # Verify post exists
-    post_response = (
-        db.schema("social")
-        .table("posts")
-        .select("id")
-        .eq("id", str(post_id))
-        .single()
-        .execute()
-    )
+    post_response = db.schema("social").table("posts").select("id").eq("id", str(post_id)).single().execute()
     require_single_result(post_response, "Post")
 
     # Get reactions
-    reactions_response = (
-        db.schema("social")
-        .table("reactions")
-        .select("reaction")
-        .eq("post_id", str(post_id))
-        .execute()
-    )
+    reactions_response = db.schema("social").table("reactions").select("reaction").eq("post_id", str(post_id)).execute()
     reactions = get_list_result(reactions_response, "fetching reactions")
 
     # Count by type

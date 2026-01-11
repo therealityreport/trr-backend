@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
 import requests
+from botocore.exceptions import ClientError
 
 _DEFAULT_HEADERS = {
     "accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -295,8 +296,9 @@ def _ensure_png_bytes(
         return data, "image/png", ".png"
 
     try:
-        from PIL import Image  # type: ignore
         import io
+
+        from PIL import Image  # type: ignore
     except Exception:
         return None
 
@@ -419,7 +421,7 @@ def mirror_cast_photo_row(
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
-    hosted_at = datetime.now(timezone.utc).isoformat()
+    hosted_at = datetime.now(UTC).isoformat()
 
     return {
         "hosted_bucket": bucket,
@@ -509,7 +511,7 @@ def mirror_tmdb_logo_row(
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
-    hosted_at = datetime.now(timezone.utc).isoformat()
+    hosted_at = datetime.now(UTC).isoformat()
 
     return {
         "logo_path": key,
@@ -608,7 +610,7 @@ def mirror_show_image_row(
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
-    hosted_at = datetime.now(timezone.utc).isoformat()
+    hosted_at = datetime.now(UTC).isoformat()
 
     return {
         "hosted_bucket": bucket,
@@ -701,7 +703,7 @@ def mirror_season_image_row(
         hosted_etag = _sanitize_etag(head.get("ETag"))
 
     hosted_url = build_hosted_url(key)
-    hosted_at = datetime.now(timezone.utc).isoformat()
+    hosted_at = datetime.now(UTC).isoformat()
 
     return {
         "hosted_bucket": bucket,

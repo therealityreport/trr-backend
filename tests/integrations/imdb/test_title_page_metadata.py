@@ -7,9 +7,7 @@ from trr_backend.integrations.imdb.title_page_metadata import parse_imdb_title_h
 
 def test_parse_imdb_title_page_metadata_from_fixture() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_tt8819906_sample.html").read_text(
-        encoding="utf-8"
-    )
+    html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_tt8819906_sample.html").read_text(encoding="utf-8")
 
     result = parse_imdb_title_html(html, imdb_id="tt8819906")
 

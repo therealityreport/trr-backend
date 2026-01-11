@@ -8,6 +8,7 @@ Provides endpoints for:
 - Direct messages (1:1 DMs)
 - Real-time WebSocket updates
 """
+
 from __future__ import annotations
 
 import logging
@@ -17,8 +18,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import discussions, dms, shows, surveys, ws
 from api.realtime.broker import init_broker, shutdown_broker
+from api.routers import discussions, dms, shows, surveys, ws
 
 logger = logging.getLogger(__name__)
 
@@ -86,4 +87,6 @@ def root():
 def health():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
 # test

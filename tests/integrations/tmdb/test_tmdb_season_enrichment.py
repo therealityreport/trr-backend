@@ -34,9 +34,7 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
             "description": show_upsert.description,
             "premiere_date": show_upsert.premiere_date,
             "imdb_id": show_upsert.imdb_id,
-            "tmdb_id": (
-                int(show_upsert.tmdb_id) if show_upsert.tmdb_id is not None else None
-            ),
+            "tmdb_id": (int(show_upsert.tmdb_id) if show_upsert.tmdb_id is not None else None),
             "tmdb_meta": {"seasons": [{"season_number": 1}]},
         }
 

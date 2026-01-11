@@ -7,9 +7,7 @@ from trr_backend.integrations.fandom import parse_fandom_infobox_html
 
 def test_parse_fandom_infobox_html_lisa_barlow() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    html = (repo_root / "tests" / "fixtures" / "fandom" / "lisa_barlow_infobox.html").read_text(
-        encoding="utf-8"
-    )
+    html = (repo_root / "tests" / "fixtures" / "fandom" / "lisa_barlow_infobox.html").read_text(encoding="utf-8")
 
     result = parse_fandom_infobox_html(
         html,

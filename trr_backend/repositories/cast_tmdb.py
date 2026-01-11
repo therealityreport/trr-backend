@@ -1,6 +1,8 @@
 """Repository for cast_tmdb table operations."""
+
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Any
 from uuid import UUID
 
@@ -9,6 +11,7 @@ from supabase import Client
 
 class CastTMDbRepositoryError(RuntimeError):
     """Error during cast_tmdb repository operations."""
+
     pass
 
 
@@ -46,12 +49,7 @@ def upsert_cast_tmdb(
         raise CastTMDbRepositoryError("tmdb_id is required")
 
     try:
-        response = (
-            db.schema("core")
-            .table("cast_tmdb")
-            .upsert(payload, on_conflict="person_id")
-            .execute()
-        )
+        response = db.schema("core").table("cast_tmdb").upsert(payload, on_conflict="person_id").execute()
     except Exception as exc:
         raise CastTMDbRepositoryError(f"Supabase error upserting cast_tmdb: {exc}") from exc
 
@@ -79,14 +77,7 @@ def get_cast_tmdb_by_person_id(
         The record or None if not found
     """
     try:
-        response = (
-            db.schema("core")
-            .table("cast_tmdb")
-            .select("*")
-            .eq("person_id", str(person_id))
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("cast_tmdb").select("*").eq("person_id", str(person_id)).limit(1).execute()
     except Exception as exc:
         raise CastTMDbRepositoryError(f"Supabase error fetching cast_tmdb: {exc}") from exc
 
@@ -114,14 +105,7 @@ def get_cast_tmdb_by_tmdb_id(
         The record or None if not found
     """
     try:
-        response = (
-            db.schema("core")
-            .table("cast_tmdb")
-            .select("*")
-            .eq("tmdb_id", int(tmdb_id))
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("cast_tmdb").select("*").eq("tmdb_id", int(tmdb_id)).limit(1).execute()
     except Exception as exc:
         raise CastTMDbRepositoryError(f"Supabase error fetching cast_tmdb: {exc}") from exc
 
@@ -186,11 +170,7 @@ def fetch_people_missing_tmdb(
     person_ids = [p["id"] for p in people_with_tmdb]
     try:
         existing_response = (
-            db.schema("core")
-            .table("cast_tmdb")
-            .select("person_id")
-            .in_("person_id", person_ids)
-            .execute()
+            db.schema("core").table("cast_tmdb").select("person_id").in_("person_id", person_ids).execute()
         )
     except Exception as exc:
         raise CastTMDbRepositoryError(f"Supabase error checking cast_tmdb: {exc}") from exc
@@ -221,9 +201,9 @@ def fetch_cast_tmdb_needing_refresh(
     Returns:
         List of cast_tmdb records
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days_old)
+    cutoff = datetime.now(UTC) - timedelta(days=days_old)
     cutoff_str = cutoff.isoformat()
 
     try:

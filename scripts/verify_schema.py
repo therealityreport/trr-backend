@@ -2,15 +2,13 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable
+from collections.abc import Iterable
 
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
 except ImportError as exc:  # pragma: no cover - depends on local environment
-    raise SystemExit(
-        "Missing psycopg2; install deps (e.g., `pip install -r requirements.txt`)."
-    ) from exc
+    raise SystemExit("Missing psycopg2; install deps (e.g., `pip install -r requirements.txt`).") from exc
 
 from trr_backend.utils.env import load_env
 
@@ -178,7 +176,10 @@ def main(argv: list[str] | None = None) -> int:
             def_lower = definition.lower()
             ok &= _report(
                 "core.v_show_images_served served_url coalesce(hosted_url, url)",
-                "coalesce" in def_lower and "hosted_url" in def_lower and "url" in def_lower and "served_url" in def_lower,
+                "coalesce" in def_lower
+                and "hosted_url" in def_lower
+                and "url" in def_lower
+                and "served_url" in def_lower,
             )
 
         v_cast = _fetch_relkind(cur, "core", "v_cast_photos")

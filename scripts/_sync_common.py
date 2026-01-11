@@ -1,22 +1,19 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 from supabase import Client
-
 from trr_backend.db.supabase import create_supabase_admin_client
 from trr_backend.repositories.shows import assert_core_shows_table_exists, update_show
 from trr_backend.repositories.sync_state import assert_core_sync_state_table_exists, fetch_sync_state_map
 from trr_backend.utils.env import load_env
 
-
 SHOW_SELECT_FIELDS = (
-    "id,name,description,premiere_date,"
-    "imdb_id,tmdb_id,"
-    "show_total_seasons,show_total_episodes,most_recent_episode"
+    "id,name,description,premiere_date,imdb_id,tmdb_id,show_total_seasons,show_total_episodes,most_recent_episode"
 )
 
 
@@ -151,7 +148,7 @@ def _parse_datetime(value: object) -> datetime | None:
         try:
             parsed = datetime.fromisoformat(normalized)
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed = parsed.replace(tzinfo=UTC)
             return parsed
         except ValueError:
             return None
@@ -170,7 +167,7 @@ def _parse_since(value: object) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(f"{text}T00:00:00")
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
         return parsed
     except ValueError:
         return None
@@ -202,13 +199,7 @@ def fetch_show_season_counts(
 
     buckets: dict[str, set[int]] = {}
     for chunk in _chunked(ids, chunk_size):
-        response = (
-            db.schema("core")
-            .table("seasons")
-            .select("show_id,season_number")
-            .in_("show_id", chunk)
-            .execute()
-        )
+        response = db.schema("core").table("seasons").select("show_id,season_number").in_("show_id", chunk).execute()
         if hasattr(response, "error") and response.error:
             raise RuntimeError(f"Supabase error listing seasons for sync check: {response.error}")
         data = response.data or []
@@ -228,22 +219,14 @@ def fetch_show_season_count(db: Client, *, show_id: str) -> int | None:
     show_id = str(show_id or "").strip()
     if not show_id:
         return None
-    response = (
-        db.schema("core")
-        .table("seasons")
-        .select("season_number")
-        .eq("show_id", show_id)
-        .execute()
-    )
+    response = db.schema("core").table("seasons").select("season_number").eq("show_id", show_id).execute()
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error listing seasons for show_id={show_id}: {response.error}")
     data = response.data or []
     if not isinstance(data, list):
         return None
     season_numbers = {
-        number
-        for row in data
-        if (number := _coerce_int(row.get("season_number"))) is not None and number > 0
+        number for row in data if (number := _coerce_int(row.get("season_number"))) is not None and number > 0
     }
     if not season_numbers:
         return None
@@ -422,7 +405,7 @@ def extract_tmdb_series_id(show: dict[str, Any]) -> int | None:
     return None
 
 
-def build_candidates(show_rows: Iterable[dict[str, Any]]) -> list["CandidateShow"]:
+def build_candidates(show_rows: Iterable[dict[str, Any]]) -> list[CandidateShow]:
     from trr_backend.ingestion.shows_from_lists import CandidateShow
 
     candidates: list[CandidateShow] = []

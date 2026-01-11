@@ -3,6 +3,7 @@ Smoke tests for the discussions API (threads, posts, reactions).
 
 These tests verify basic functionality with mocked Supabase.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -10,8 +11,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from api import auth, deps
 from api.main import app
-from api import deps, auth
 
 
 def create_chainable_mock(return_data=None, single_data=None):
@@ -113,6 +114,7 @@ MOCK_EPISODE = {
 
 
 # --- Fixtures ---
+
 
 @pytest.fixture
 def mock_supabase_with_threads():
@@ -223,6 +225,7 @@ def authenticated_client():
 
 # --- Thread tests ---
 
+
 class TestListThreads:
     """Test listing episode threads."""
 
@@ -290,6 +293,7 @@ class TestGetThread:
 
 
 # --- Post tests ---
+
 
 class TestListPosts:
     """Test listing posts in a thread."""
@@ -366,6 +370,7 @@ class TestCreatePost:
 
 # --- Reaction tests ---
 
+
 class TestReactions:
     """Test reaction endpoints."""
 
@@ -440,6 +445,7 @@ class TestReactions:
 
 
 # --- Route registration tests ---
+
 
 class TestRouteRegistration:
     """Test that all discussion routes are registered."""

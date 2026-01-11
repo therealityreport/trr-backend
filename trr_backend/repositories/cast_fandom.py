@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from supabase import Client
-
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
 
 
@@ -24,7 +24,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
         hint = (
             f"\n\nPostgREST schema cache may still be stale after retry during {context}. "
             "Wait 30-60s and try again, or run:\n"
-            "  psql \"$SUPABASE_DB_URL\" -f scripts/db/reload_postgrest_schema.sql"
+            '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
         )
         raise CastFandomRepositoryError(f"{exc}{hint}") from exc
 
@@ -105,12 +105,7 @@ def upsert_cast_fandom(db: Client, row: Mapping[str, Any]) -> dict[str, Any]:
 
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
-            response = (
-                db.schema("core")
-                .table("cast_fandom")
-                .upsert(payload, on_conflict="person_id,source")
-                .execute()
-            )
+            response = db.schema("core").table("cast_fandom").upsert(payload, on_conflict="person_id,source").execute()
             break
         except Exception as exc:
             if _handle_pgrst204_with_retry(exc, attempt, "upserting cast_fandom"):

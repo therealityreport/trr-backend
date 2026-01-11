@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import json
 import html as html_lib
+import json
 import re
 import sys
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping
+from typing import Any
 from urllib.parse import urljoin
 
 import requests
@@ -60,7 +61,7 @@ class CandidateShow:
     imdb_meta: dict[str, Any] = field(default_factory=dict)
     source_tags: set[str] = field(default_factory=set)
 
-    def merge(self, other: "CandidateShow") -> "CandidateShow":
+    def merge(self, other: CandidateShow) -> CandidateShow:
         self.source_tags |= other.source_tags
         self.imdb_id = self.imdb_id or other.imdb_id
         self.tmdb_id = self.tmdb_id or other.tmdb_id
@@ -149,7 +150,9 @@ def _dedupe_preserve_order(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _parse_imdb_title_list_main_page_payload(payload: Mapping[str, Any], *, list_id: str) -> tuple[int | None, list[ImdbListItem]]:
+def _parse_imdb_title_list_main_page_payload(
+    payload: Mapping[str, Any], *, list_id: str
+) -> tuple[int | None, list[ImdbListItem]]:
     data = payload.get("data")
     if not isinstance(data, Mapping):
         raise RuntimeError("IMDb GraphQL response missing `data`.")
@@ -476,8 +479,10 @@ def parse_imdb_list_page(html: str) -> list[ImdbListItem]:
         name = getattr(container, "name", "")
         return name in {"html", "body", "main"}
 
-    containers = soup.select("li.ipc-metadata-list-summary-item") or soup.select("div.lister-item") or soup.select(
-        "div.lister-item-content"
+    containers = (
+        soup.select("li.ipc-metadata-list-summary-item")
+        or soup.select("div.lister-item")
+        or soup.select("div.lister-item-content")
     )
 
     def parse_container(container: Any) -> None:

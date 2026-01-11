@@ -54,7 +54,9 @@ def test_assert_core_shows_table_exists_passes_when_no_error() -> None:
 
 
 def test_assert_core_shows_table_exists_raises_on_missing_relation_error_code() -> None:
-    client = _FakeClient(response=_FakeResponse(error=_FakeError(code="42P01", message='relation "core.shows" does not exist')))
+    client = _FakeClient(
+        response=_FakeResponse(error=_FakeError(code="42P01", message='relation "core.shows" does not exist'))
+    )
     with pytest.raises(ShowRepositoryError) as excinfo:
         assert_core_shows_table_exists(client)
     msg = str(excinfo.value)
@@ -69,4 +71,3 @@ def test_assert_core_shows_table_exists_raises_on_missing_relation_exception() -
     msg = str(excinfo.value)
     assert "supabase db push" in msg
     assert "supabase/migrations/0004_core_shows.sql" in msg
-

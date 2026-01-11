@@ -11,9 +11,9 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
     from trr_backend.ingestion.shows_from_lists import CandidateShow
 
     repo_root = Path(__file__).resolve().parents[3]
-    overview_html = (repo_root / "tests" / "fixtures" / "imdb" / "episodes_page_overview_one_season_sample.html").read_text(
-        encoding="utf-8"
-    )
+    overview_html = (
+        repo_root / "tests" / "fixtures" / "imdb" / "episodes_page_overview_one_season_sample.html"
+    ).read_text(encoding="utf-8")
     season_html = (repo_root / "tests" / "fixtures" / "imdb" / "episodes_page_season1_next_data_sample.html").read_text(
         encoding="utf-8"
     )

@@ -1,5 +1,14 @@
 # Realitease 2025 Data Pipeline
 
+> **⚠️ Note on Legacy Scripts:**
+> The following directories contain archived/legacy scripts and are excluded from linting, formatting, and repo-map generation:
+> - `scripts/archives/` - Old archived scripts
+> - `scripts/1-ShowInfo/`, `2-CastInfo/`, `3-RealiteaseInfo/`, `4-WWHLInfo/`, `5-FinalList/` - Legacy numbered pipeline
+> - `scripts/BravoTalent/`, `scripts/RealiteaseInfo/` - Deprecated modules
+>
+> **Git history preserves these files**; do not rely on them for current development.
+> For the current, maintained scripts, see the root-level scripts in this directory.
+
 ## 📋 Complete Pipeline Overview
 
 This streamlined collection contains **only the essential scripts** for the complete Realitease data processing pipeline from show addition to final output.

@@ -8,9 +8,7 @@ import scripts.sync_tmdb_watch_providers as mod
 
 def test_parse_watch_providers_payload_builds_rows() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    payload = json.loads(
-        (repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text()
-    )
+    payload = json.loads((repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text())
 
     provider_rows, show_provider_rows, ids_by_group = mod._parse_watch_providers_payload(
         payload,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from supabase import Client
 
@@ -74,9 +75,7 @@ def assert_core_episode_appearances_table_exists(db: Client) -> None:
         raise EpisodeAppearancesRepositoryError(schema_help_message())
     if is_missing_relation(combined):
         raise EpisodeAppearancesRepositoryError(help_message())
-    raise EpisodeAppearancesRepositoryError(
-        f"Supabase error during core.episode_appearances preflight: {combined}"
-    )
+    raise EpisodeAppearancesRepositoryError(f"Supabase error during core.episode_appearances preflight: {combined}")
 
 
 def upsert_episode_appearances(

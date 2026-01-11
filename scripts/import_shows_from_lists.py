@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -269,8 +269,8 @@ def run_from_cli(args: argparse.Namespace) -> None:
 
     imdb_probe_name_id = (os.getenv("IMDB_EPISODIC_PROBE_NAME_ID") or "").strip() or None
     imdb_probe_job_category_id = (
-        (os.getenv("IMDB_EPISODIC_PROBE_JOB_CATEGORY_ID") or "").strip() or IMDB_JOB_CATEGORY_SELF
-    )
+        os.getenv("IMDB_EPISODIC_PROBE_JOB_CATEGORY_ID") or ""
+    ).strip() or IMDB_JOB_CATEGORY_SELF
     imdb_extra_headers = parse_imdb_headers_json_env()
 
     result = upsert_candidates_into_supabase(

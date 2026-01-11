@@ -1,14 +1,14 @@
 """
 Core browse endpoints for shows, seasons, episodes, and cast.
 """
+
 from __future__ import annotations
 
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from fastapi import HTTPException
 
 from api.deps import (
     SupabaseClient,
@@ -17,11 +17,11 @@ from api.deps import (
 )
 from trr_backend.db.show_images import ShowImagesError, list_tmdb_show_images
 
-
 router = APIRouter(prefix="/shows", tags=["shows"])
 
 
 # --- Pydantic models ---
+
 
 class Show(BaseModel):
     id: UUID
@@ -223,6 +223,7 @@ def _group_watch_providers(rows: list[dict]) -> list[dict]:
 
 # --- Endpoints ---
 
+
 @router.get("", response_model=list[Show])
 def list_shows(
     db: SupabaseClient,
@@ -230,28 +231,14 @@ def list_shows(
     offset: int = Query(default=0, ge=0),
 ) -> list[dict]:
     """List all shows with pagination."""
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("*")
-        .order("name")
-        .range(offset, offset + limit - 1)
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("*").order("name").range(offset, offset + limit - 1).execute()
     return get_list_result(response, "listing shows")
 
 
 @router.get("/{show_id}", response_model=ShowDetail)
 def get_show(db: SupabaseClient, show_id: UUID) -> dict:
     """Get a specific show by ID."""
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("*")
-        .eq("id", str(show_id))
-        .single()
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("*").eq("id", str(show_id)).single().execute()
     show = require_single_result(response, "Show")
 
     network_ids = show.get("tmdb_network_ids") or []
@@ -416,12 +403,5 @@ def list_show_cast(
 @router.get("/people/{person_id}", response_model=Person)
 def get_person(db: SupabaseClient, person_id: UUID) -> dict:
     """Get a specific person by ID."""
-    response = (
-        db.schema("core")
-        .table("people")
-        .select("*")
-        .eq("id", str(person_id))
-        .single()
-        .execute()
-    )
+    response = db.schema("core").table("people").select("*").eq("id", str(person_id)).single().execute()
     return require_single_result(response, "Person")

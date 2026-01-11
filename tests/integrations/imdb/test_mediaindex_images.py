@@ -7,9 +7,7 @@ from trr_backend.integrations.imdb.mediaindex_images import parse_imdb_mediainde
 
 def test_parse_imdb_mediaindex_html() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    html = (repo_root / "tests" / "fixtures" / "imdb" / "mediaindex_tt8819906_sample.html").read_text(
-        encoding="utf-8"
-    )
+    html = (repo_root / "tests" / "fixtures" / "imdb" / "mediaindex_tt8819906_sample.html").read_text(encoding="utf-8")
 
     images, page_info = parse_imdb_mediaindex_images(html, imdb_id="tt8819906")
     assert page_info["has_next_page"] is True
@@ -31,13 +29,9 @@ def test_parse_imdb_mediaindex_html() -> None:
 
 def test_parse_imdb_mediaindex_graphql_payload() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    html = (
-        repo_root
-        / "tests"
-        / "fixtures"
-        / "imdb"
-        / "mediaindex_viewer_graphql_tt8819906_sample.html"
-    ).read_text(encoding="utf-8")
+    html = (repo_root / "tests" / "fixtures" / "imdb" / "mediaindex_viewer_graphql_tt8819906_sample.html").read_text(
+        encoding="utf-8"
+    )
 
     images, page_info = parse_imdb_mediaindex_images(html, imdb_id="tt8819906")
     assert page_info["has_next_page"] is False

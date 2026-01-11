@@ -24,39 +24,39 @@ Usage:
     # Skip TMDb enrichment
     PYTHONPATH=. python scripts/enrich_show_cast.py --imdb-id tt1628033 --skip-tmdb
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from trr_backend.db.supabase import create_supabase_admin_client
-from trr_backend.integrations.fandom import (
-    build_real_housewives_wiki_url_from_name,
-    fetch_fandom_gallery,
-    fetch_fandom_page,
-    is_fandom_page_missing,
-    search_real_housewives_wiki,
-)
-from trr_backend.integrations.tmdb_person import (
-    fetch_tmdb_person_full,
-    TMDbPersonFull,
-)
 from trr_backend.ingestion.fandom_person_scraper import (
     fetch_fandom_person_html,
     parse_fandom_person_html,
 )
-from trr_backend.repositories.cast_fandom import upsert_cast_fandom
-from trr_backend.repositories.cast_photos import upsert_cast_photos
-from trr_backend.repositories.cast_tmdb import upsert_cast_tmdb, get_cast_tmdb_by_person_id
+from trr_backend.integrations.fandom import (
+    build_real_housewives_wiki_url_from_name,
+    fetch_fandom_gallery,
+    is_fandom_page_missing,
+    search_real_housewives_wiki,
+)
+from trr_backend.integrations.tmdb_person import (
+    TMDbPersonFull,
+    fetch_tmdb_person_full,
+)
 from trr_backend.media.s3_mirror import get_cdn_base_url, mirror_cast_photo_row
+from trr_backend.repositories.cast_fandom import upsert_cast_fandom
 from trr_backend.repositories.cast_photos import (
     fetch_cast_photos_missing_hosted,
     update_cast_photo_hosted_fields,
+    upsert_cast_photos,
 )
+from trr_backend.repositories.cast_tmdb import get_cast_tmdb_by_person_id, upsert_cast_tmdb
 from trr_backend.utils.env import load_env
 
 
@@ -135,14 +135,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def _find_show_by_imdb_id(db, imdb_id: str) -> dict[str, Any] | None:
     """Find a show by IMDb ID."""
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("id,name,imdb_id")
-        .eq("imdb_id", imdb_id)
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("id,name,imdb_id").eq("imdb_id", imdb_id).limit(1).execute()
     if response.data:
         return response.data[0]
     return None
@@ -150,14 +143,7 @@ def _find_show_by_imdb_id(db, imdb_id: str) -> dict[str, Any] | None:
 
 def _find_show_by_name(db, name: str) -> dict[str, Any] | None:
     """Find a show by name (fuzzy search)."""
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("id,name,imdb_id")
-        .ilike("name", f"%{name}%")
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("id,name,imdb_id").ilike("name", f"%{name}%").limit(1).execute()
     if response.data:
         return response.data[0]
     return None
@@ -301,7 +287,7 @@ def _enrich_tmdb_profile(
             return None
 
         # Build row for cast_tmdb table
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         row = {
             "person_id": str(person_id),
             "tmdb_id": tmdb_id,
@@ -382,7 +368,7 @@ def _import_gallery_photos(
 
         if not gallery.images:
             if verbose:
-                print(f"    No gallery images found")
+                print("    No gallery images found")
             return 0
 
         images_to_import = gallery.images[:limit]
@@ -392,20 +378,22 @@ def _import_gallery_photos(
             return len(images_to_import)
 
         # Convert to cast_photo rows
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         rows = []
         for img in images_to_import:
-            rows.append({
-                "person_id": person_id,
-                "source": "fandom",
-                "source_page_url": img.source_page_url,
-                "source_image_id": f"fandom-gallery-{_url_hash(img.url)}",
-                "image_url": img.url,
-                "thumb_url": img.thumb_url,
-                "image_url_canonical": _canonical_url(img.url),
-                "caption": img.caption,
-                "fetched_at": now,
-            })
+            rows.append(
+                {
+                    "person_id": person_id,
+                    "source": "fandom",
+                    "source_page_url": img.source_page_url,
+                    "source_image_id": f"fandom-gallery-{_url_hash(img.url)}",
+                    "image_url": img.url,
+                    "thumb_url": img.thumb_url,
+                    "image_url_canonical": _canonical_url(img.url),
+                    "caption": img.caption,
+                    "fetched_at": now,
+                }
+            )
 
         result = upsert_cast_photos(db, rows, dedupe_on="image_url_canonical")
         imported_count = len(result) if result else 0
@@ -442,7 +430,7 @@ def _mirror_photos_to_s3(
 
         if not rows:
             if verbose:
-                print(f"    No photos to mirror")
+                print("    No photos to mirror")
             return 0, 0
 
         mirrored = 0
@@ -489,14 +477,7 @@ def main(argv: list[str] | None = None) -> int:
     # Find the show
     show = None
     if args.show_id:
-        response = (
-            db.schema("core")
-            .table("shows")
-            .select("id,name,imdb_id")
-            .eq("id", args.show_id)
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("shows").select("id,name,imdb_id").eq("id", args.show_id).limit(1).execute()
         if response.data:
             show = response.data[0]
     elif args.imdb_id:
@@ -505,7 +486,7 @@ def main(argv: list[str] | None = None) -> int:
         show = _find_show_by_name(db, args.show_name)
 
     if not show:
-        print(f"Error: Show not found")
+        print("Error: Show not found")
         return 1
 
     show_id = show.get("id")
@@ -519,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.limit > 0:
-        cast = cast[:args.limit]
+        cast = cast[: args.limit]
 
     print(f"Processing {len(cast)} cast members...")
 
@@ -586,9 +567,9 @@ def main(argv: list[str] | None = None) -> int:
             total_s3_failed += failed
 
     # Summary
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print("SUMMARY")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
     print(f"Show: {show_name}")
     print(f"Cast members processed: {len(cast)}")
     print(f"Fandom profiles enriched: {total_fandom_profiles}")

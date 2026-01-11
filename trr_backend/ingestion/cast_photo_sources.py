@@ -10,10 +10,11 @@ All rows include:
 - image_url_canonical (for deduplication)
 - source-specific fields
 """
+
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -102,9 +103,7 @@ def fetch_imdb_cast_photos(
 
         if viewer_id:
             try:
-                viewer_html = fetch_imdb_person_mediaviewer_html(
-                    imdb_person_id, viewer_id, session=session
-                )
+                viewer_html = fetch_imdb_person_mediaviewer_html(imdb_person_id, viewer_id, session=session)
                 details = parse_imdb_person_mediaviewer_details(viewer_html, viewer_id=viewer_id)
             except Exception as exc:
                 if verbose:
@@ -130,29 +129,31 @@ def fetch_imdb_cast_photos(
         if not source_image_id:
             continue
 
-        rows.append({
-            "person_id": str(person_id),
-            "imdb_person_id": imdb_person_id,
-            "source": "imdb",
-            "source_image_id": source_image_id,
-            "viewer_id": viewer_id,
-            "mediaindex_url_path": mediaindex_url_path,
-            "mediaviewer_url_path": image.get("mediaviewer_url_path"),
-            "url": url,
-            "url_path": url_path,
-            "image_url": url,
-            "image_url_canonical": _canonical_url(url),
-            "width": width,
-            "height": height,
-            "caption": details.get("caption"),
-            "gallery_index": details.get("gallery_index"),
-            "gallery_total": details.get("gallery_total"),
-            "people_imdb_ids": details.get("people_imdb_ids"),
-            "people_names": details.get("people_names"),
-            "title_imdb_ids": details.get("title_imdb_ids"),
-            "title_names": details.get("title_names"),
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-        })
+        rows.append(
+            {
+                "person_id": str(person_id),
+                "imdb_person_id": imdb_person_id,
+                "source": "imdb",
+                "source_image_id": source_image_id,
+                "viewer_id": viewer_id,
+                "mediaindex_url_path": mediaindex_url_path,
+                "mediaviewer_url_path": image.get("mediaviewer_url_path"),
+                "url": url,
+                "url_path": url_path,
+                "image_url": url,
+                "image_url_canonical": _canonical_url(url),
+                "width": width,
+                "height": height,
+                "caption": details.get("caption"),
+                "gallery_index": details.get("gallery_index"),
+                "gallery_total": details.get("gallery_total"),
+                "people_imdb_ids": details.get("people_imdb_ids"),
+                "people_names": details.get("people_names"),
+                "title_imdb_ids": details.get("title_imdb_ids"),
+                "title_names": details.get("title_names"),
+                "fetched_at": datetime.now(UTC).isoformat(),
+            }
+        )
 
     return rows
 
@@ -202,7 +203,7 @@ def fetch_tmdb_cast_photos(
 
     images = images[:limit] if limit else images
     rows: list[dict[str, Any]] = []
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     for idx, img in enumerate(images):
         file_path = img.get("file_path")
@@ -211,28 +212,30 @@ def fetch_tmdb_cast_photos(
 
         full_url = build_tmdb_image_url(file_path)
 
-        rows.append({
-            "person_id": str(person_id),
-            "imdb_person_id": imdb_person_id,
-            "source": "tmdb",
-            "source_image_id": file_path,
-            "url": full_url,
-            "url_path": file_path,
-            "image_url": full_url,
-            "image_url_canonical": full_url,
-            "width": img.get("width"),
-            "height": img.get("height"),
-            "position": idx + 1,
-            "gallery_index": idx + 1,
-            "gallery_total": len(images),
-            "fetched_at": now,
-            "metadata": {
-                "tmdb_person_id": tmdb_person_id,
-                "aspect_ratio": img.get("aspect_ratio"),
-                "vote_average": img.get("vote_average"),
-                "vote_count": img.get("vote_count"),
-            },
-        })
+        rows.append(
+            {
+                "person_id": str(person_id),
+                "imdb_person_id": imdb_person_id,
+                "source": "tmdb",
+                "source_image_id": file_path,
+                "url": full_url,
+                "url_path": file_path,
+                "image_url": full_url,
+                "image_url_canonical": full_url,
+                "width": img.get("width"),
+                "height": img.get("height"),
+                "position": idx + 1,
+                "gallery_index": idx + 1,
+                "gallery_total": len(images),
+                "fetched_at": now,
+                "metadata": {
+                    "tmdb_person_id": tmdb_person_id,
+                    "aspect_ratio": img.get("aspect_ratio"),
+                    "vote_average": img.get("vote_average"),
+                    "vote_count": img.get("vote_count"),
+                },
+            }
+        )
 
     return rows
 
@@ -287,7 +290,7 @@ def fetch_fandom_person_cast_photos(
 
     photos = photos[:limit] if limit else photos
     rows: list[dict[str, Any]] = []
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     for photo in photos:
         image_url = photo.get("url") or photo.get("image_url")
@@ -298,26 +301,28 @@ def fetch_fandom_person_cast_photos(
         url_value = image_url
         url_path = photo.get("url_path") or _url_path_with_query(image_url) or image_url
 
-        rows.append({
-            "person_id": str(person_id),
-            "imdb_person_id": imdb_person_id,
-            "source": "fandom",
-            "source_image_id": f"fandom-person-{_url_hash(image_url)}",
-            "source_page_url": source_page_url,
-            "url": url_value,
-            "url_path": url_path,
-            "image_url": image_url,
-            "thumb_url": photo.get("thumb_url"),
-            "image_url_canonical": _canonical_url(image_url),
-            "width": photo.get("width"),
-            "height": photo.get("height"),
-            "caption": photo.get("caption") or photo.get("alt_text"),
-            "context_section": photo.get("context_section"),
-            "context_type": photo.get("context_type"),
-            "season": photo.get("season"),
-            "position": photo.get("position"),
-            "fetched_at": now,
-        })
+        rows.append(
+            {
+                "person_id": str(person_id),
+                "imdb_person_id": imdb_person_id,
+                "source": "fandom",
+                "source_image_id": f"fandom-person-{_url_hash(image_url)}",
+                "source_page_url": source_page_url,
+                "url": url_value,
+                "url_path": url_path,
+                "image_url": image_url,
+                "thumb_url": photo.get("thumb_url"),
+                "image_url_canonical": _canonical_url(image_url),
+                "width": photo.get("width"),
+                "height": photo.get("height"),
+                "caption": photo.get("caption") or photo.get("alt_text"),
+                "context_section": photo.get("context_section"),
+                "context_type": photo.get("context_type"),
+                "season": photo.get("season"),
+                "position": photo.get("position"),
+                "fetched_at": now,
+            }
+        )
 
     return rows
 
@@ -367,7 +372,7 @@ def fetch_fandom_gallery_cast_photos(
 
     images = gallery.images[:limit] if limit else gallery.images
     rows: list[dict[str, Any]] = []
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     for image in images:
         image_url = image.url
@@ -378,20 +383,22 @@ def fetch_fandom_gallery_cast_photos(
         url_value = image_url
         url_path = _url_path_with_query(image_url) or image_url
 
-        rows.append({
-            "person_id": str(person_id),
-            "imdb_person_id": imdb_person_id,
-            "source": "fandom",
-            "source_image_id": f"fandom-gallery-{_url_hash(image_url)}",
-            "source_page_url": image.source_page_url or gallery.url,
-            "url": url_value,
-            "url_path": url_path,
-            "image_url": image_url,
-            "thumb_url": image.thumb_url,
-            "image_url_canonical": _canonical_url(image_url),
-            "caption": image.caption,
-            "fetched_at": now,
-        })
+        rows.append(
+            {
+                "person_id": str(person_id),
+                "imdb_person_id": imdb_person_id,
+                "source": "fandom",
+                "source_image_id": f"fandom-gallery-{_url_hash(image_url)}",
+                "source_page_url": image.source_page_url or gallery.url,
+                "url": url_value,
+                "url_path": url_path,
+                "image_url": image_url,
+                "thumb_url": image.thumb_url,
+                "image_url_canonical": _canonical_url(image_url),
+                "caption": image.caption,
+                "fetched_at": now,
+            }
+        )
 
     return rows
 

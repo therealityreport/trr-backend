@@ -4,6 +4,7 @@ PostgREST Schema Cache Management.
 This module provides utilities for reloading the PostgREST schema cache,
 which is necessary after schema migrations to avoid PGRST204 errors.
 """
+
 from __future__ import annotations
 
 import time
@@ -116,7 +117,7 @@ def with_schema_cache_retry(
                 hint = (
                     "\n\nPostgREST schema cache may still be stale after retry. "
                     "Wait 30-60s and try again, or run:\n"
-                    "  psql \"$SUPABASE_DB_URL\" -f scripts/db/reload_postgrest_schema.sql"
+                    '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
                 )
                 raise type(e)(f"{e}{hint}") from e
 

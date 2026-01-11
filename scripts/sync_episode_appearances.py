@@ -3,15 +3,23 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
-from typing import Sequence
 
+from scripts._sync_common import (
+    add_show_filter_args,
+    extract_imdb_series_id,
+    extract_most_recent_episode,
+    fetch_show_rows,
+    filter_show_rows_for_sync,
+    load_env_and_db,
+)
 from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env
 from trr_backend.integrations.imdb.episodic_client import (
-    HttpImdbEpisodicClient,
     IMDB_JOB_CATEGORY_SELF,
+    HttpImdbEpisodicClient,
     ImdbEpisodeCredit,
 )
 from trr_backend.integrations.imdb.fullcredits_cast_parser import (
@@ -38,15 +46,6 @@ from trr_backend.repositories.sync_state import (
     mark_sync_state_failed,
     mark_sync_state_in_progress,
     mark_sync_state_success,
-)
-
-from scripts._sync_common import (
-    add_show_filter_args,
-    extract_imdb_series_id,
-    extract_most_recent_episode,
-    fetch_show_rows,
-    filter_show_rows_for_sync,
-    load_env_and_db,
 )
 
 
@@ -130,11 +129,7 @@ def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
 
 def _fetch_season_tmdb_ids(db, *, show_id: str) -> dict[int, int]:
     response = (
-        db.schema("core")
-        .table("seasons")
-        .select("season_number,tmdb_season_id")
-        .eq("show_id", show_id)
-        .execute()
+        db.schema("core").table("seasons").select("season_number,tmdb_season_id").eq("show_id", show_id).execute()
     )
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error listing seasons for show_id={show_id}: {response.error}")
@@ -352,8 +347,7 @@ def main(argv: list[str] | None = None) -> int:
                     new_people_map.setdefault(key, row.name)
 
                 new_people_rows = [
-                    {"full_name": name, "external_ids": {"imdb": imdb_id}}
-                    for imdb_id, name in new_people_map.items()
+                    {"full_name": name, "external_ids": {"imdb": imdb_id}} for imdb_id, name in new_people_map.items()
                 ]
                 if new_people_rows and not args.dry_run:
                     inserted = insert_people(db, new_people_rows)
@@ -442,9 +436,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{imdb_series_id}: {exc}")
             if not args.dry_run:
-                mark_sync_state_failed(
-                    db, table_name="episode_appearances", show_id=show_id, error=exc
-                )
+                mark_sync_state_failed(db, table_name="episode_appearances", show_id=show_id, error=exc)
             continue
 
     print("Summary")

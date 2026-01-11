@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 from uuid import UUID
 
 from supabase import Client
@@ -102,7 +103,13 @@ def fetch_seasons_by_show(
     if not numbers:
         return []
 
-    query = db.schema("core").table("seasons").select("id,season_number").eq("show_id", str(show_id)).in_("season_number", numbers)
+    query = (
+        db.schema("core")
+        .table("seasons")
+        .select("id,season_number")
+        .eq("show_id", str(show_id))
+        .in_("season_number", numbers)
+    )
     response = query.execute()
     if hasattr(response, "error") and response.error:
         raise SeasonRepositoryError(f"Supabase error listing seasons: {response.error}")
@@ -113,5 +120,6 @@ def fetch_seasons_by_show(
 def delete_seasons_for_tmdb_series(db: Client, *, tmdb_series_id: int) -> None:
     response = db.schema("core").table("seasons").delete().eq("tmdb_series_id", str(int(tmdb_series_id))).execute()
     if hasattr(response, "error") and response.error:
-        raise SeasonRepositoryError(f"Supabase error deleting seasons for tmdb_series_id={tmdb_series_id}: {response.error}")
-
+        raise SeasonRepositoryError(
+            f"Supabase error deleting seasons for tmdb_series_id={tmdb_series_id}: {response.error}"
+        )

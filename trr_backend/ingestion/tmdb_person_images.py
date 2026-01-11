@@ -1,7 +1,8 @@
 """Fetch and transform TMDb person images for cast_photos table."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -53,7 +54,7 @@ def build_tmdb_cast_photo_rows(
     Returns:
         List of CastPhotoUpsert objects ready for database upsert
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows: list[CastPhotoUpsert] = []
 
     for idx, img in enumerate(images):

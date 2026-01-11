@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 from uuid import UUID
 
 from supabase import Client
-
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
 from trr_backend.models.shows import ShowUpsert
 
@@ -41,7 +41,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
         hint = (
             f"\n\nPostgREST schema cache may still be stale after retry during {context}. "
             "Wait 30-60s and try again, or run:\n"
-            "  psql \"$SUPABASE_DB_URL\" -f scripts/db/reload_postgrest_schema.sql"
+            '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
         )
         raise ShowRepositoryError(f"{exc}{hint}") from exc
 
@@ -128,14 +128,7 @@ def _raise_for_supabase_error(response: Any, context: str) -> None:
 
 
 def find_show_by_imdb_id(db: Client, imdb_id: str) -> dict[str, Any] | None:
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("*")
-        .eq("imdb_id", imdb_id)
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("*").eq("imdb_id", imdb_id).limit(1).execute()
     _raise_for_supabase_error(response, "finding show by imdb id")
     data = response.data or []
     if isinstance(data, list) and data:
@@ -144,14 +137,7 @@ def find_show_by_imdb_id(db: Client, imdb_id: str) -> dict[str, Any] | None:
 
 
 def find_show_by_tmdb_id(db: Client, tmdb_id: int) -> dict[str, Any] | None:
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("*")
-        .eq("tmdb_id", int(tmdb_id))
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("*").eq("tmdb_id", int(tmdb_id)).limit(1).execute()
     _raise_for_supabase_error(response, "finding show by tmdb id")
     data = response.data or []
     if isinstance(data, list) and data:
@@ -259,14 +245,7 @@ def update_show(db: Client, show_id: UUID | str, patch: Mapping[str, Any]) -> di
             if missing and missing in payload:
                 payload.pop(missing, None)
                 if not payload:
-                    response = (
-                        db.schema("core")
-                        .table("shows")
-                        .select("*")
-                        .eq("id", str(show_id))
-                        .limit(1)
-                        .execute()
-                    )
+                    response = db.schema("core").table("shows").select("*").eq("id", str(show_id)).limit(1).execute()
                     _raise_for_supabase_error(response, "finding show after missing column skip")
                     data = response.data or []
                     if isinstance(data, list) and data:

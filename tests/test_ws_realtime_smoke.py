@@ -3,36 +3,34 @@ Smoke tests for WebSocket real-time functionality.
 
 Tests the broker abstraction, event types, and WebSocket endpoints.
 """
+
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, AsyncMock, patch
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from api.realtime.broker import InMemoryBroker, get_broker
+from api.realtime.broker import InMemoryBroker
 from api.realtime.events import (
     Event,
     EventType,
-    thread_created_event,
-    post_created_event,
-    reaction_toggled_event,
     dm_message_created_event,
     dm_read_updated_event,
-    typing_event,
-    presence_event,
     error_event,
-    subscribed_event,
     get_discussion_room,
     get_dm_room,
-    get_typing_key,
     get_presence_key,
+    get_typing_key,
+    post_created_event,
+    presence_event,
+    reaction_toggled_event,
+    subscribed_event,
+    thread_created_event,
+    typing_event,
 )
-
 
 # --- InMemoryBroker Tests ---
 
@@ -47,16 +45,19 @@ class TestInMemoryBroker:
 
     def test_connect_disconnect(self):
         """Broker connects and disconnects cleanly."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
             assert broker._cleanup_task is not None
             await broker.disconnect()
             assert broker._cleanup_task.cancelled() or broker._cleanup_task.done()
+
         _run_async(_test())
 
     def test_publish_subscribe(self):
         """Subscribers receive published events."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
@@ -73,10 +74,12 @@ class TestInMemoryBroker:
             assert received[0]["data"] == "hello"
 
             await broker.disconnect()
+
         _run_async(_test())
 
     def test_unsubscribe(self):
         """Unsubscribed callbacks no longer receive events."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
@@ -91,10 +94,12 @@ class TestInMemoryBroker:
 
             assert len(received) == 0
             await broker.disconnect()
+
         _run_async(_test())
 
     def test_multiple_subscribers(self):
         """Multiple subscribers in same room all receive events."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
@@ -115,10 +120,12 @@ class TestInMemoryBroker:
             assert len(received1) == 1
             assert len(received2) == 1
             await broker.disconnect()
+
         _run_async(_test())
 
     def test_room_isolation(self):
         """Events are only received by subscribers in the same room."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
@@ -139,6 +146,7 @@ class TestInMemoryBroker:
             assert len(received1) == 1
             assert len(received2) == 0
             await broker.disconnect()
+
         _run_async(_test())
 
 
@@ -147,6 +155,7 @@ class TestInMemoryBrokerEphemeral:
 
     def test_set_get_ephemeral(self):
         """Can set and get ephemeral keys."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
@@ -154,10 +163,12 @@ class TestInMemoryBrokerEphemeral:
             value = await broker.get_ephemeral("key1")
             assert value == "value1"
             await broker.disconnect()
+
         _run_async(_test())
 
     def test_delete_ephemeral(self):
         """Can delete ephemeral keys."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
@@ -166,20 +177,24 @@ class TestInMemoryBrokerEphemeral:
             value = await broker.get_ephemeral("key1")
             assert value is None
             await broker.disconnect()
+
         _run_async(_test())
 
     def test_get_nonexistent_key(self):
         """Getting nonexistent key returns None."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
             value = await broker.get_ephemeral("nonexistent")
             assert value is None
             await broker.disconnect()
+
         _run_async(_test())
 
     def test_get_keys_by_pattern(self):
         """Can find keys by prefix pattern."""
+
         async def _test():
             broker = InMemoryBroker()
             await broker.connect()
@@ -192,6 +207,7 @@ class TestInMemoryBrokerEphemeral:
             assert "typing:conv1:user1" in keys
             assert "typing:conv1:user2" in keys
             await broker.disconnect()
+
         _run_async(_test())
 
 
@@ -367,7 +383,5 @@ class TestWebSocketEndpoints:
         """DM WebSocket rejects invalid tokens."""
         conversation_id = str(uuid4())
         with pytest.raises(Exception):
-            with client.websocket_connect(
-                f"/api/v1/ws/dms/{conversation_id}?token=invalid_token"
-            ) as ws:
+            with client.websocket_connect(f"/api/v1/ws/dms/{conversation_id}?token=invalid_token") as ws:
                 pass

@@ -4,6 +4,7 @@ Pub/sub broker abstraction for real-time events.
 Uses Redis pub/sub when REDIS_URL is set, otherwise falls back
 to in-process pub/sub (fine for local dev, not multi-instance).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,8 +13,9 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +138,7 @@ class InMemoryBroker(Broker):
 
     async def set_ephemeral(self, key: str, value: str, ttl_seconds: int) -> None:
         """Set ephemeral key with TTL."""
-        expires_at = datetime.now(timezone.utc).timestamp() + ttl_seconds
+        expires_at = datetime.now(UTC).timestamp() + ttl_seconds
         self._ephemeral[key] = (value, expires_at)
 
     async def get_ephemeral(self, key: str) -> str | None:
@@ -144,7 +146,7 @@ class InMemoryBroker(Broker):
         if key not in self._ephemeral:
             return None
         value, expires_at = self._ephemeral[key]
-        if datetime.now(timezone.utc).timestamp() > expires_at:
+        if datetime.now(UTC).timestamp() > expires_at:
             del self._ephemeral[key]
             return None
         return value
@@ -157,7 +159,7 @@ class InMemoryBroker(Broker):
         """Get keys matching pattern (simple glob: * at end)."""
         # Simple implementation: only supports prefix* pattern
         prefix = pattern.rstrip("*")
-        now = datetime.now(timezone.utc).timestamp()
+        now = datetime.now(UTC).timestamp()
         matching = []
         for key, (_, expires_at) in list(self._ephemeral.items()):
             if key.startswith(prefix) and expires_at > now:
@@ -169,7 +171,7 @@ class InMemoryBroker(Broker):
         while True:
             try:
                 await asyncio.sleep(10)  # Check every 10 seconds
-                now = datetime.now(timezone.utc).timestamp()
+                now = datetime.now(UTC).timestamp()
                 expired = [k for k, (_, exp) in self._ephemeral.items() if exp <= now]
                 for key in expired:
                     del self._ephemeral[key]
@@ -199,14 +201,13 @@ class RedisBroker(Broker):
         """Connect to Redis."""
         try:
             import redis.asyncio as aioredis
+
             self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
             self._pubsub = self._redis.pubsub()
             self._listener_task = asyncio.create_task(self._listen())
             logger.info(f"RedisBroker connected to {self._redis_url}")
         except ImportError:
-            raise RuntimeError(
-                "redis package not installed. Run: pip install redis"
-            )
+            raise RuntimeError("redis package not installed. Run: pip install redis")
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise

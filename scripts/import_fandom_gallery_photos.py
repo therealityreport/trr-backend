@@ -15,17 +15,18 @@ Usage:
     # Dry run (no DB writes)
     PYTHONPATH=. python scripts/import_fandom_gallery_photos.py --name "Lisa Barlow" --dry-run
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from trr_backend.db.supabase import create_supabase_admin_client
-from trr_backend.integrations.fandom import fetch_fandom_gallery, FandomGalleryImage
+from trr_backend.integrations.fandom import FandomGalleryImage, fetch_fandom_gallery
 from trr_backend.repositories.cast_photos import upsert_cast_photos
 from trr_backend.repositories.people import fetch_people_by_imdb_ids
 from trr_backend.utils.env import load_env
@@ -92,7 +93,7 @@ def _gallery_image_to_cast_photo(
     person_id: str,
 ) -> dict[str, Any]:
     """Convert a FandomGalleryImage to a cast_photos row."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     return {
         "person_id": person_id,
         "source": "fandom",
@@ -163,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         if not gallery.images:
-            print(f"  No images found in gallery")
+            print("  No images found in gallery")
             total_skipped += 1
             continue
 
@@ -174,12 +175,7 @@ def main(argv: list[str] | None = None) -> int:
             # Try to find person in DB by name
             try:
                 response = (
-                    db.schema("core")
-                    .table("people")
-                    .select("id")
-                    .ilike("full_name", f"%{name}%")
-                    .limit(1)
-                    .execute()
+                    db.schema("core").table("people").select("id").ilike("full_name", f"%{name}%").limit(1).execute()
                 )
                 if response.data:
                     person_id = str(response.data[0].get("id"))
@@ -196,10 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         images_to_import = gallery.images[: args.limit]
 
         # Convert to cast_photo rows
-        rows = [
-            _gallery_image_to_cast_photo(img, person_id=person_id)
-            for img in images_to_import
-        ]
+        rows = [_gallery_image_to_cast_photo(img, person_id=person_id) for img in images_to_import]
 
         if args.dry_run:
             print(f"  DRY RUN: Would import {len(rows)} photos")
@@ -219,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Error importing photos: {e}")
             total_failed += 1
 
-    print(f"\n{'='*40}")
+    print(f"\n{'=' * 40}")
     print("Summary")
     print(f"  Total imported: {total_imported}")
     print(f"  Total skipped: {total_skipped}")

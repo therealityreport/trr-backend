@@ -3,10 +3,11 @@ from __future__ import annotations
 import gzip
 import json
 import re
-from typing import Any, Mapping
-from urllib.parse import quote
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
+from typing import Any
+from urllib.parse import quote
 
 try:
     import requests
@@ -193,15 +194,11 @@ def _extract_interests(soup: BeautifulSoup) -> list[str]:
     if not container:
         return []
     chip_texts = [
-        node.get_text(" ", strip=True)
-        for node in container.select(".ipc-chip__text")
-        if node.get_text(strip=True)
+        node.get_text(" ", strip=True) for node in container.select(".ipc-chip__text") if node.get_text(strip=True)
     ]
     if not chip_texts:
         chip_texts = [
-            node.get_text(" ", strip=True)
-            for node in container.select("a, span")
-            if node.get_text(strip=True)
+            node.get_text(" ", strip=True) for node in container.select("a, span") if node.get_text(strip=True)
         ]
     return _dedupe_preserve_order([text for text in chip_texts if text])
 

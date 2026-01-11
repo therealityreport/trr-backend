@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from uuid import UUID
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 import pytest
 

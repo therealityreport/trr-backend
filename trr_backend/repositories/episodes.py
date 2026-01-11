@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 from uuid import UUID
 
 from supabase import Client
@@ -124,4 +125,3 @@ def delete_episodes_for_tmdb_series(db: Client, *, tmdb_series_id: int) -> None:
         raise EpisodeRepositoryError(
             f"Supabase error deleting episodes for tmdb_series_id={tmdb_series_id}: {response.error}"
         )
-

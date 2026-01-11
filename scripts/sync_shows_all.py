@@ -4,13 +4,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from trr_backend.db.postgrest_cache import PostgrestCacheError, reload_postgrest_schema
-from trr_backend.utils.env import load_env
-
-from scripts._sync_common import add_show_filter_args
 import scripts.sync_shows as sync_shows
 import scripts.sync_tmdb_show_entities as sync_tmdb_show_entities
 import scripts.sync_tmdb_watch_providers as sync_tmdb_watch_providers
+from scripts._sync_common import add_show_filter_args
+from trr_backend.db.postgrest_cache import PostgrestCacheError, reload_postgrest_schema
+from trr_backend.utils.env import load_env
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -65,7 +64,7 @@ def _maybe_reload_schema_cache(enabled: bool) -> None:
         print(
             "WARN: Failed to reload PostgREST schema cache."
             " If you hit PGRST204 errors, run:\n"
-            "  psql \"$SUPABASE_DB_URL\" -f scripts/db/reload_postgrest_schema.sql"
+            '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
         )
         print(f"  Details: {exc}")
 

@@ -5,13 +5,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trr_backend.db.postgrest_cache import is_pgrst204_error
+from trr_backend.models.shows import ShowUpsert
 from trr_backend.repositories.shows import (
     ShowRepositoryError,
     _handle_pgrst204_with_retry,
     insert_show,
     update_show,
 )
-from trr_backend.models.shows import ShowUpsert
 
 
 class _FakeResponse:

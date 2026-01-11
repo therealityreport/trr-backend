@@ -7,9 +7,8 @@ from typing import Any
 
 import scripts.sync_episodes as sync_episodes
 import scripts.sync_seasons as sync_seasons
-from trr_backend.repositories.shows import update_show
-
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
+from trr_backend.repositories.shows import update_show
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -80,13 +79,7 @@ def _build_most_recent_episode_string(ep: dict[str, Any]) -> str | None:
 
 
 def _fetch_season_numbers(db, show_id: str) -> list[int]:
-    response = (
-        db.schema("core")
-        .table("seasons")
-        .select("season_number")
-        .eq("show_id", show_id)
-        .execute()
-    )
+    response = db.schema("core").table("seasons").select("season_number").eq("show_id", show_id).execute()
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error listing seasons: {response.error}")
     data = response.data or []
@@ -169,15 +162,9 @@ def main(argv: list[str] | None = None) -> int:
             patch["most_recent_episode"] = _build_most_recent_episode_string(most_recent)
             patch["most_recent_episode_season"] = _as_int(most_recent.get("season_number"))
             patch["most_recent_episode_number"] = _as_int(most_recent.get("episode_number"))
-            patch["most_recent_episode_title"] = (
-                str(most_recent.get("title") or "").strip() or None
-            )
-            patch["most_recent_episode_air_date"] = (
-                str(most_recent.get("air_date") or "").strip() or None
-            )
-            patch["most_recent_episode_imdb_id"] = (
-                str(most_recent.get("imdb_episode_id") or "").strip() or None
-            )
+            patch["most_recent_episode_title"] = str(most_recent.get("title") or "").strip() or None
+            patch["most_recent_episode_air_date"] = str(most_recent.get("air_date") or "").strip() or None
+            patch["most_recent_episode_imdb_id"] = str(most_recent.get("imdb_episode_id") or "").strip() or None
 
         patch = {k: v for k, v in patch.items() if v is not None}
         if not patch:

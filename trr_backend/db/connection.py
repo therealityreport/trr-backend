@@ -4,6 +4,7 @@ Unified database connection resolution for TRR Backend.
 This module provides a single source of truth for resolving database URLs,
 with support for local Supabase development and remote production environments.
 """
+
 from __future__ import annotations
 
 import os
@@ -246,15 +247,9 @@ def validate_supabase_connection(database_url: str | None = None) -> bool:
                     "  - SUPABASE_DB_URL (should point to your Supabase project)\n"
                     "  - DATABASE_URL\n"
                 )
-            raise DatabaseConnectionError(
-                f"Database connection failed:\n{stderr}"
-            )
+            raise DatabaseConnectionError(f"Database connection failed:\n{stderr}")
         return True
     except FileNotFoundError:
-        raise DatabaseConnectionError(
-            "psql command not found. Install PostgreSQL client tools."
-        )
+        raise DatabaseConnectionError("psql command not found. Install PostgreSQL client tools.")
     except subprocess.TimeoutExpired:
-        raise DatabaseConnectionError(
-            "Database connection timed out. Check network and credentials."
-        )
+        raise DatabaseConnectionError("Database connection timed out. Check network and credentials.")
