@@ -250,7 +250,9 @@ def update_show(db: Client, show_id: UUID | str, patch: Mapping[str, Any]) -> di
                     data = response.data or []
                     if isinstance(data, list) and data:
                         return data[0]
-                    raise ShowRepositoryError("Supabase fetch returned no data for show after missing column skip.")
+                    raise ShowRepositoryError(
+                        "Supabase fetch returned no data for show after missing column skip."
+                    ) from None  # noqa: E501
                 response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
                 break
             else:

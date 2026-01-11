@@ -405,7 +405,7 @@ def extract_tmdb_series_id(show: dict[str, Any]) -> int | None:
     return None
 
 
-def build_candidates(show_rows: Iterable[dict[str, Any]]) -> list[CandidateShow]:
+def build_candidates(show_rows: Iterable[dict[str, Any]]) -> list["CandidateShow"]:  # noqa: F821, UP037
     from trr_backend.ingestion.shows_from_lists import CandidateShow
 
     candidates: list[CandidateShow] = []
