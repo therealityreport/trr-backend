@@ -1,15 +1,26 @@
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-.PHONY: schema-docs schema-docs-check ci-local repo-map repo-map-check
+.PHONY: schema-docs schema-docs-check schema-docs-reset-check ci-local repo-map repo-map-check
 
 # Generate schema docs (JSON, MD) and diagrams (Mermaid) from database
 schema-docs:
 	@$(PYTHON) scripts/supabase/generate_schema_docs.py
 
 # Verify schema docs and diagrams are in sync with database
+# IMPORTANT: Requires fresh DB state. If local DB has drifted, run:
+#   supabase start && supabase db reset --yes && make schema-docs-check
+# Or use the convenience target: make schema-docs-reset-check
 schema-docs-check:
 	@$(PYTHON) scripts/supabase/generate_schema_docs.py
 	git diff --exit-code supabase/schema_docs
+
+# Reset database to migrations and verify schema docs are in sync
+# This is a convenience target that ensures DB is fresh before checking
+schema-docs-reset-check:
+	@echo "Resetting database to migrations..."
+	@supabase db reset --yes
+	@echo "Verifying schema docs..."
+	@$(MAKE) schema-docs-check
 
 ci-local:
 	@bash -c 'set -euo pipefail; \
