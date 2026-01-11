@@ -10,8 +10,12 @@
 - `rm -rf /` or `rm -rf ~` - Filesystem destruction
 - `git push --force origin main` or `git push --force origin master` - Force push to protected branch
 - `echo "..." > .env` or `cat > .env` - Overwriting secrets file
-- `git add .env` or `git add keys/` - Staging secrets for commit
+- `git add .env` or `git add keys/` or `git add **/*.pem` - Staging secrets for commit
+- `git add worktree-backups*` or `git add **/backup*.patch` - Staging backup files (may contain secrets)
+- `git commit -a` without reviewing `git status` first - Blind commit (may include secrets)
 - `pip install` without venv check (`$VIRTUAL_ENV` unset) - Global package pollution
+- Commands outputting full API keys: `echo $FIRECRAWL_API_KEY` or `cat .env` - Exposing secrets in logs
+- `mv .env*` or `cp .env*` to tracked locations - Moving secrets into git tracking
 
 ### AWS Destructive Operations (BLOCK without confirmation)
 - `aws s3 rm` - S3 deletion
@@ -50,3 +54,22 @@ Safer alternatives:
 
 Confirm to proceed anyway? (y/N)
 ```
+
+## Secret Scanning (Automated)
+
+This repository uses automated secret scanning to catch leaked credentials:
+
+### Pre-commit Checks (Local)
+- `.claude/hooks/before-bash.md` - Blocks common secret-leaking commands
+- `.gitignore` - Excludes secrets directories: `.env`, `keys/`, `*.pem`, `worktree-backups*`
+
+### CI Checks (GitHub Actions)
+- **Gitleaks** (`.github/workflows/secret-scan.yml`) - Scans all commits for secrets
+- **Runs on:** All pull requests + pushes to main
+- **Fails build if:** Hardcoded API keys, tokens, or credentials detected
+
+### Verified Safe Patterns
+These are allowed in code/docs (references only, not actual values):
+- Environment variable names: `FIRECRAWL_API_KEY`, `GEMINI_API_KEY`, `TMDB_BEARER_TOKEN`
+- Placeholder values: `your_api_key_here`, `fc-your-key-here`
+- Documentation examples with `REDACTED` or `***`

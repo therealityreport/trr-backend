@@ -1,0 +1,65 @@
+# Gitleaks Configuration for TRR Backend
+# Scans for hardcoded secrets in commits and prevents leaks
+
+title = "TRR Backend Secret Scanning"
+
+[extend]
+# Use default gitleaks rules as base
+useDefault = true
+
+[[rules]]
+id = "firecrawl-api-key"
+description = "Firecrawl API Key"
+regex = '''fc-[a-zA-Z0-9]{32,}'''
+tags = ["key", "firecrawl"]
+
+[[rules]]
+id = "google-api-key"
+description = "Google API Key (Gemini, etc.)"
+regex = '''AIza[0-9A-Za-z_-]{35}'''
+tags = ["key", "google", "gemini"]
+
+[[rules]]
+id = "tmdb-bearer-token"
+description = "TMDB Bearer Token"
+regex = '''eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
+tags = ["token", "tmdb"]
+
+# Allowlist: Safe patterns that should not trigger alerts
+[[allowlist]]
+description = "Placeholder values in .env.example"
+paths = [
+  '''.env.example$''',
+  '''README\.md$''',
+  '''docs/.*\.md$''',
+]
+regexes = [
+  '''your_.*_key''',
+  '''your_.*_token''',
+  '''fc-your-key-here''',
+  '''your_gemini_api_key''',
+]
+
+[[allowlist]]
+description = "Environment variable references (not actual values)"
+regexes = [
+  '''os\.environ\.get\(['"]FIRECRAWL_API_KEY['"]\)''',
+  '''os\.environ\.get\(['"]GEMINI_API_KEY['"]\)''',
+  '''\$\{?FIRECRAWL_API_KEY\}?''',
+  '''\$\{?GEMINI_API_KEY\}?''',
+]
+
+[[allowlist]]
+description = "Redacted values in documentation"
+regexes = [
+  '''REDACTED''',
+  '''\*{3,}''',
+  '''•{3,}''',
+]
+
+[[allowlist]]
+description = "Test fixtures and mocks"
+paths = [
+  '''tests/.*''',
+  '''.*test.*\.py$''',
+]
