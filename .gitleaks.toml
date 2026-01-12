@@ -27,43 +27,36 @@ regex = '''eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{40,}'''
 tags = ["token", "tmdb", "jwt"]
 
 # Allowlist: Safe patterns that should not trigger alerts
-[[allowlist]]
-description = "Placeholder values in .env.example and documentation only"
-# Restrict to specific safe files
+# Consolidated allowlist with all safe paths and patterns
+[allowlist]
+description = "Safe patterns: placeholders, env var references, redacted values, test files"
+
+# Safe file paths (placeholders and test files only)
 paths = [
+  # Documentation with placeholder values only
   '''^\.env\.example$''',
   '''^README\.md$''',
   '''^docs/SECURITY\.md$''',
   '''^docs/HISTORY_PURGE\.md$''',
-]
-# Only allow obvious placeholder patterns
-regexes = [
-  '''your_[a-z_]+_key''',  # Must be lowercase with underscores only
-  '''your_[a-z_]+_token''',
-  '''fc-your-key-here''',  # Exact match only
-  '''your_gemini_api_key''',  # Exact match only
+  # Test files and fixtures
+  '''tests/.*''',
+  '''.*test.*\.py$''',
 ]
 
-[[allowlist]]
-description = "Environment variable references (not actual values)"
+# Safe regex patterns (references, not actual secrets)
 regexes = [
+  # Placeholder values (must be lowercase with underscores only)
+  '''your_[a-z_]+_key''',
+  '''your_[a-z_]+_token''',
+  '''fc-your-key-here''',
+  '''your_gemini_api_key''',
+  # Environment variable references (not actual values)
   '''os\.environ\.get\(['"]FIRECRAWL_API_KEY['"]\)''',
   '''os\.environ\.get\(['"]GEMINI_API_KEY['"]\)''',
   '''\$\{?FIRECRAWL_API_KEY\}?''',
   '''\$\{?GEMINI_API_KEY\}?''',
-]
-
-[[allowlist]]
-description = "Redacted values in documentation"
-regexes = [
+  # Redacted values in documentation
   '''REDACTED''',
   '''\*{3,}''',
   '''•{3,}''',
-]
-
-[[allowlist]]
-description = "Test fixtures and mocks"
-paths = [
-  '''tests/.*''',
-  '''.*test.*\.py$''',
 ]
