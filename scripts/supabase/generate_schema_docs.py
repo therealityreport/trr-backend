@@ -420,8 +420,12 @@ def _generate_table_mermaid(schema: str, table: str, columns: list[ColumnInfo]) 
             if data_type == "ARRAY":  # Generic array from udt_name check
                 data_type = f"{col.udt_name.lstrip('_').upper()}_ARRAY"
 
+            # Sanitize column name: Mermaid requires alphanumeric + underscore only
+            # Replace any non-alphanumeric (except underscore) with underscore
+            sanitized_name = re.sub(r'[^a-zA-Z0-9_]', '_', col.name)
+
             # Mermaid format: type name (no extra spaces)
-            lines.append(f"        {data_type} {col.name}")
+            lines.append(f"        {data_type} {sanitized_name}")
 
     lines.append("    }")
     lines.append("```")
