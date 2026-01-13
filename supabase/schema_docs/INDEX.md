@@ -1,11 +1,9 @@
 # Schema Docs Index
 
 - [core.cast_fandom](core.cast_fandom.md) ([diagram](diagrams/core.cast_fandom.mermaid.md))
-- [core.cast_memberships](core.cast_memberships.md) ([diagram](diagrams/core.cast_memberships.mermaid.md))
 - [core.cast_photos](core.cast_photos.md) ([diagram](diagrams/core.cast_photos.mermaid.md))
 - [core.cast_tmdb](core.cast_tmdb.md) ([diagram](diagrams/core.cast_tmdb.mermaid.md))
 - [core.episode_appearances](core.episode_appearances.md) ([diagram](diagrams/core.episode_appearances.mermaid.md))
-- [core.episode_cast](core.episode_cast.md) ([diagram](diagrams/core.episode_cast.mermaid.md))
 - [core.episodes](core.episodes.md) ([diagram](diagrams/core.episodes.mermaid.md))
 - [core.networks](core.networks.md) ([diagram](diagrams/core.networks.mermaid.md))
 - [core.people](core.people.md) ([diagram](diagrams/core.people.mermaid.md))

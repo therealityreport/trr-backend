@@ -403,14 +403,6 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "imdb_meta",
-      "data_type": "jsonb",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
       "name": "tmdb_network_ids",
       "data_type": "ARRAY",
       "is_nullable": "YES",
@@ -421,6 +413,14 @@
     {
       "name": "tmdb_production_company_ids",
       "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_meta",
+      "data_type": "jsonb",
       "is_nullable": "YES",
       "default": null,
       "is_identity": "NO",
@@ -590,8 +590,8 @@
     "tmdb_fetched_at": "1970-01-01T00:00:00Z",
     "imdb_fetched_at": "1970-01-01T00:00:00Z",
     "tmdb_meta": {},
-    "imdb_meta": {},
     "tmdb_network_ids": [],
-    "tmdb_production_company_ids": []
+    "tmdb_production_company_ids": [],
+    "imdb_meta": {}
   }
 }
