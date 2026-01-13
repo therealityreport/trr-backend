@@ -60,6 +60,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install tree-sitter tree-sitter-python
 
+      - name: Fix Mermaid subgraph conflicts
+        if: github.event_name != 'pull_request'
+        run: python scripts/fix_repo_structure_mermaid.py
+
       - name: Generate code diagrams
         run: python scripts/generate_repo_mermaid.py
 

@@ -38,8 +38,11 @@ make repo-map-check
 The [Repository Map workflow](../../.github/workflows/repo_map.yml) runs weekly (Sunday midnight UTC) and on manual trigger:
 
 1. Generates repo structure using PGSch/graph-git-repo
-2. Generates code diagrams using Tree-sitter
-3. Opens a PR with any changes
+2. Post-processes REPO_STRUCTURE.mermaid.md to fix Mermaid subgraph/node ID conflicts
+3. Generates code diagrams using Tree-sitter
+4. Opens a PR with any changes
+
+**Note:** The REPO_STRUCTURE.mermaid.md file is post-processed by `scripts/fix_repo_structure_mermaid.py` to resolve subgraph identifier conflicts that would cause Mermaid rendering errors.
 
 ## Generated vs Hand-Authored
 
