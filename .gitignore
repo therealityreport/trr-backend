@@ -94,6 +94,7 @@ scripts/**/debug_html/
 # Local / generated
 .mcp.json
 out/
+.artifacts/
 
 # Secrets
 *.pem
