@@ -31,7 +31,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     add_show_filter_args(parser)
     parser.add_argument("--no-s3", action="store_true", help="Skip S3 mirroring.")
     parser.add_argument("--no-prune", action="store_true", help="Skip S3 prune step.")
-    parser.add_argument("--force", action="store_true", help="Re-download and re-upload hosted images.")
+    # --force is already defined in add_show_filter_args
     parser.add_argument(
         "--mirror-limit",
         type=int,
