@@ -790,9 +790,11 @@ def _tmdb_image_sort_key(image: Mapping[str, Any]) -> tuple[int, int, float, str
     else:
         bucket = 2
 
-    vote_count = image.get("vote_count")
+    # vote data is now in image["raw"]["vote_count"] and image["raw"]["vote_average"]
+    raw = image.get("raw") if isinstance(image.get("raw"), Mapping) else {}
+    vote_count = raw.get("vote_count")
     vote_count_int = int(vote_count) if isinstance(vote_count, int) else 0
-    vote_average = image.get("vote_average")
+    vote_average = raw.get("vote_average")
     vote_avg_float = float(vote_average) if isinstance(vote_average, (int, float)) else 0.0
     file_path = str(image.get("file_path") or "")
     return (bucket, -vote_count_int, -vote_avg_float, file_path)
@@ -816,8 +818,7 @@ def _normalize_tmdb_images_list(raw: Any) -> list[dict[str, Any]]:
             "width": item.get("width") if isinstance(item.get("width"), int) else None,
             "height": item.get("height") if isinstance(item.get("height"), int) else None,
             "aspect_ratio": item.get("aspect_ratio") if isinstance(item.get("aspect_ratio"), (int, float)) else None,
-            "vote_average": item.get("vote_average") if isinstance(item.get("vote_average"), (int, float)) else None,
-            "vote_count": item.get("vote_count") if isinstance(item.get("vote_count"), int) else None,
+            # vote_average and vote_count are stored in metadata, not as columns
             "raw": dict(item),
         }
 
