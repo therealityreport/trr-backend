@@ -85,6 +85,7 @@ PYTHONPATH=. python scripts/sync_shows_all.py --all --verbose
 - ALWAYS activate venv before pip install
 - ALWAYS run fast checks (ruff + pytest) before committing
 - Check git status before destructive operations
+- Branch protection requires `test` + `gitleaks` on all PRs (see docs/SECURITY.md#branch-protection)
 
 ## Documentation
 - **Workflow Guide:** [docs/workflows/VIBE_CODING.md](docs/workflows/VIBE_CODING.md) (analogies, end-to-end loop)
