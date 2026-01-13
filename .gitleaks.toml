@@ -1,0 +1,73 @@
+# Gitleaks Configuration for TRR Backend
+# Scans for hardcoded secrets in commits and prevents leaks
+
+title = "TRR Backend Secret Scanning"
+
+[extend]
+# Use default gitleaks rules as base
+useDefault = true
+
+[[rules]]
+id = "firecrawl-api-key"
+description = "Firecrawl API Key"
+regex = '''fc-[a-zA-Z0-9]{32,}'''
+tags = ["key", "firecrawl"]
+
+[[rules]]
+id = "google-api-key"
+description = "Google API Key (Gemini, etc.)"
+regex = '''AIza[0-9A-Za-z_-]{35}'''
+tags = ["key", "google", "gemini"]
+
+[[rules]]
+id = "tmdb-bearer-token"
+description = "TMDB Bearer Token (JWT format)"
+# More precise: JWT must have exactly 3 parts separated by dots
+regex = '''eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{40,}'''
+tags = ["token", "tmdb", "jwt"]
+
+[[rules]]
+id = "google-service-account-key"
+description = "Google Cloud Service Account Private Key"
+regex = '''-----BEGIN PRIVATE KEY-----'''
+path = '''keys/.*\.json$'''
+tags = ["key", "google", "gcp", "service-account"]
+
+# Allowlist: Safe patterns that should not trigger alerts
+# Consolidated allowlist with all safe paths and patterns
+[allowlist]
+description = "Safe patterns: placeholders, env var references, redacted values, test files"
+
+# Safe file paths (placeholders and test files only)
+paths = [
+  # Documentation with placeholder values only
+  '''^\.env\.example$''',
+  '''^README\.md$''',
+  '''^docs/SECURITY\.md$''',
+  '''^docs/HISTORY_PURGE\.md$''',
+  # Test files and fixtures
+  '''tests/.*''',
+  '''.*test.*\.py$''',
+  # Scraped HTML from third-party sites (may contain public analytics keys)
+  # These are Fandom's public Amplitude keys, not our credentials
+  '''^debug_html/.*''',
+  '''^scripts/.*/debug_html/.*''',
+]
+
+# Safe regex patterns (references, not actual secrets)
+regexes = [
+  # Placeholder values (must be lowercase with underscores only)
+  '''your_[a-z_]+_key''',
+  '''your_[a-z_]+_token''',
+  '''fc-your-key-here''',
+  '''your_gemini_api_key''',
+  # Environment variable references (not actual values)
+  '''os\.environ\.get\(['"]FIRECRAWL_API_KEY['"]\)''',
+  '''os\.environ\.get\(['"]GEMINI_API_KEY['"]\)''',
+  '''\$\{?FIRECRAWL_API_KEY\}?''',
+  '''\$\{?GEMINI_API_KEY\}?''',
+  # Redacted values in documentation
+  '''REDACTED''',
+  '''\*{3,}''',
+  '''•{3,}''',
+]
