@@ -435,9 +435,10 @@ def normalize_api_credits_to_cast_rows(
     rows: list[CastRow] = []
     for idx, credit in enumerate(credits_response.credits, start=1):
         # Extract fields from JSON API structure
-        # API returns: {"id": "nm0000148", "name": "...", "category": "self", "characters": [...]}
-        name_id = credit.get("id")  # e.g., "nm0000148"
-        name = credit.get("name")
+        # API returns: {"name": {"id": "nm0000148", "displayName": "..."}, "category": "self", "characters": [...]}
+        name_dict = credit.get("name") or {}
+        name_id = name_dict.get("id")  # e.g., "nm0000148"
+        name = name_dict.get("displayName")
         category = (credit.get("category") or "").strip().lower()
         characters = credit.get("characters") or []
 
