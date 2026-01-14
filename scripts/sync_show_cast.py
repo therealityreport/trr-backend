@@ -146,10 +146,7 @@ def main(argv: list[str] | None = None) -> int:
 
             if show_cast_rows and not args.dry_run:
                 # Inject source_type into each row dict (no repo signature change)
-                rows_with_source = [
-                    {**row, "source_type": source_type}
-                    for row in show_cast_rows
-                ]
+                rows_with_source = [{**row, "source_type": source_type} for row in show_cast_rows]
                 show_cast_upserted += len(upsert_show_cast(db, rows_with_source))
             elif show_cast_rows:
                 show_cast_upserted += len(show_cast_rows)
