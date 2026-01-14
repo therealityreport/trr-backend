@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import random
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -52,7 +57,26 @@ class HttpImdbFullCreditsClient:
         self._extra_headers = dict(extra_headers or {})
         self._timeout_seconds = timeout_seconds
 
-    def fetch_fullcredits_page(self, imdb_series_id: str) -> str:
+    def fetch_fullcredits_page(
+        self,
+        imdb_series_id: str,
+        *,
+        verbose: bool = False,
+    ) -> str:
+        """
+        Fetch IMDb full credits page HTML with retry logic for blocked requests.
+
+        Args:
+            imdb_series_id: IMDb title ID (e.g., "tt1720601")
+            verbose: If True, save debug HTML artifacts on blocked responses
+
+        Returns:
+            HTML content of full credits page
+
+        Raises:
+            ValueError: If imdb_series_id is invalid format
+            ImdbFullCreditsError: If request fails after retries (with is_blocked=True for 202/403/429)
+        """
         imdb_series_id = str(imdb_series_id or "").strip()
         if not _IMDB_TITLE_ID_RE.match(imdb_series_id):
             raise ValueError(f"Invalid IMDb id: {imdb_series_id!r}")
@@ -65,19 +89,87 @@ class HttpImdbFullCreditsClient:
             **self._extra_headers,
         }
 
-        try:
-            resp = self._session.get(url, headers=headers, timeout=self._timeout_seconds)
-        except requests.RequestException as exc:
-            raise ImdbFullCreditsError(f"IMDb request failed: {exc}") from exc
+        # Environment-configurable retry settings
+        # max_retries = additional attempts after first request
+        # So total attempts = 1 + max_retries
+        max_retries = int(os.getenv("IMDB_FULLCREDITS_MAX_RETRIES", "2"))  # Default 2 retries = 3 total attempts
+        base_delay = float(os.getenv("IMDB_FULLCREDITS_RETRY_BASE_DELAY_SEC", "5.0"))
 
-        if resp.status_code != 200:
+        last_response: requests.Response | None = None
+        last_exception: Exception | None = None
+
+        for attempt in range(1 + max_retries):  # 1 initial + N retries
+            try:
+                resp = self._session.get(url, headers=headers, timeout=self._timeout_seconds)
+                last_response = resp
+            except requests.RequestException as exc:
+                last_exception = exc
+                if attempt < max_retries:
+                    delay = base_delay * (2**attempt)
+                    jitter = random.uniform(0, delay * 0.25)
+                    time.sleep(delay + jitter)
+                    continue
+                # Exhausted retries on network error
+                raise ImdbFullCreditsError(f"IMDb request failed: {exc}") from exc
+
+            # Success case
+            if resp.status_code == 200:
+                return resp.text or ""
+
+            # Blocked/rate-limited responses (202=queued, 403=forbidden, 429=rate-limited)
+            is_blocked = resp.status_code in {202, 403, 429}
+
+            # Retry if blocked and have retries left
+            if is_blocked and attempt < max_retries:
+                # Exponential backoff with jitter
+                delay = base_delay * (2**attempt)
+                jitter = random.uniform(0, delay * 0.25)
+                time.sleep(delay + jitter)
+                continue
+
+            # Exhausted retries or non-retryable error
+            # Save debug artifact ONCE (on final blocked attempt)
+            if verbose and is_blocked:
+                self._save_debug_html(imdb_series_id, resp)
+
             raise ImdbFullCreditsError(
-                f"IMDb request failed with HTTP {resp.status_code}.",
+                f"IMDb fullcredits {'blocked/rate-limited' if is_blocked else 'request failed'} "
+                f"with HTTP {resp.status_code} (after {attempt + 1} attempt(s)).",
                 status_code=resp.status_code,
                 body_snippet=(resp.text or "")[:200],
+                is_blocked=is_blocked,
             )
 
-        return resp.text or ""
+        # Should never reach here, but satisfy type checker
+        if last_response:
+            raise ImdbFullCreditsError(
+                f"IMDb fullcredits request failed with HTTP {last_response.status_code}.",
+                status_code=last_response.status_code,
+                body_snippet=(last_response.text or "")[:200],
+                is_blocked=last_response.status_code in {202, 403, 429},
+            )
+        if last_exception:
+            raise ImdbFullCreditsError(f"IMDb request failed: {last_exception}") from last_exception
+        raise ImdbFullCreditsError("IMDb fullcredits request failed (no response).")
+
+    def _save_debug_html(self, imdb_series_id: str, resp: requests.Response) -> None:
+        """
+        Save blocked response HTML to debug_html/ directory (strips sensitive headers).
+
+        Uses Path.cwd() for testability (tests can monkeypatch.chdir).
+        """
+        debug_dir = Path.cwd() / "debug_html"
+        debug_dir.mkdir(exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"imdb_fullcredits_{imdb_series_id}_{timestamp}_http{resp.status_code}.html"
+        filepath = debug_dir / filename
+
+        try:
+            filepath.write_text(resp.text or "", encoding="utf-8")
+            print(f"Debug HTML saved: {filepath}")
+        except Exception as exc:
+            print(f"Warning: Failed to save debug HTML: {exc}")
 
 
 def _extract_imdb_name_id(value: str | None) -> str | None:
