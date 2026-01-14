@@ -432,17 +432,27 @@ def normalize_api_credits_to_cast_rows(
     if not isinstance(credits_response, ImdbTitleCredits):
         raise TypeError(f"Expected ImdbTitleCredits, got {type(credits_response).__name__}")
 
+    # Crew categories to exclude (we only want cast: actor/actress/self)
+    crew_categories = {
+        "writer", "producer", "director", "cinematographer", "editor",
+        "composer", "production_designer", "executive_producer", "co_producer"
+    }
+
     rows: list[CastRow] = []
     for idx, credit in enumerate(credits_response.credits, start=1):
         # Extract fields from JSON API structure
-        # API returns: {"name": {"id": "nm0000148", "displayName": "..."}, "category": "self", "characters": [...]}
+        # API returns: {"name": {"id": "nm0000148", "displayName": "..."}, "category": "actor", "characters": ["Self"]}
         name_dict = credit.get("name") or {}
         name_id = name_dict.get("id")  # e.g., "nm0000148"
         name = name_dict.get("displayName")
         category = (credit.get("category") or "").strip().lower()
         characters = credit.get("characters") or []
 
-        # Apply category filter if specified (use category, not role text)
+        # Filter out crew categories (only include cast: actor/actress/self)
+        if category in crew_categories:
+            continue
+
+        # Apply additional category filter if specified (e.g., job_category_filter="self")
         if job_category_filter and category != job_category_filter.lower():
             continue
 
@@ -455,9 +465,15 @@ def normalize_api_credits_to_cast_rows(
         if isinstance(characters, list) and characters:
             role_text = ", ".join(str(char) for char in characters if char)
 
-        # Map category to job_category_id (use category for self filtering)
+        # Map to job_category_id for filtering by filter_self_cast_rows()
+        # Check if category is "self" OR if "Self" appears in characters (for reality shows)
         job_category_id = None
-        if category == "self":
+        is_self = category == "self"
+        if not is_self and isinstance(characters, list):
+            # Check if any character contains "self" (case-insensitive)
+            is_self = any("self" in str(char).lower() for char in characters if char)
+
+        if is_self:
             job_category_id = IMDB_JOB_CATEGORY_SELF
 
         rows.append(
