@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
+import random
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from trr_backend.integrations.imdb.credits_client import ImdbTitleCredits
 
 import requests
 from bs4 import BeautifulSoup
@@ -23,10 +31,12 @@ class ImdbFullCreditsError(RuntimeError):
         *,
         status_code: int | None = None,
         body_snippet: str | None = None,
+        is_blocked: bool = False,  # Indicates 202/403/429 blocked/rate-limited
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.body_snippet = body_snippet
+        self.is_blocked = is_blocked
 
 
 @dataclass(frozen=True)
@@ -50,7 +60,26 @@ class HttpImdbFullCreditsClient:
         self._extra_headers = dict(extra_headers or {})
         self._timeout_seconds = timeout_seconds
 
-    def fetch_fullcredits_page(self, imdb_series_id: str) -> str:
+    def fetch_fullcredits_page(
+        self,
+        imdb_series_id: str,
+        *,
+        verbose: bool = False,
+    ) -> str:
+        """
+        Fetch IMDb full credits page HTML with retry logic for blocked requests.
+
+        Args:
+            imdb_series_id: IMDb title ID (e.g., "tt1720601")
+            verbose: If True, save debug HTML artifacts on blocked responses
+
+        Returns:
+            HTML content of full credits page
+
+        Raises:
+            ValueError: If imdb_series_id is invalid format
+            ImdbFullCreditsError: If request fails after retries (with is_blocked=True for 202/403/429)
+        """
         imdb_series_id = str(imdb_series_id or "").strip()
         if not _IMDB_TITLE_ID_RE.match(imdb_series_id):
             raise ValueError(f"Invalid IMDb id: {imdb_series_id!r}")
@@ -63,19 +92,87 @@ class HttpImdbFullCreditsClient:
             **self._extra_headers,
         }
 
-        try:
-            resp = self._session.get(url, headers=headers, timeout=self._timeout_seconds)
-        except requests.RequestException as exc:
-            raise ImdbFullCreditsError(f"IMDb request failed: {exc}") from exc
+        # Environment-configurable retry settings
+        # max_retries = additional attempts after first request
+        # So total attempts = 1 + max_retries
+        max_retries = int(os.getenv("IMDB_FULLCREDITS_MAX_RETRIES", "2"))  # Default 2 retries = 3 total attempts
+        base_delay = float(os.getenv("IMDB_FULLCREDITS_RETRY_BASE_DELAY_SEC", "5.0"))
 
-        if resp.status_code != 200:
+        last_response: requests.Response | None = None
+        last_exception: Exception | None = None
+
+        for attempt in range(1 + max_retries):  # 1 initial + N retries
+            try:
+                resp = self._session.get(url, headers=headers, timeout=self._timeout_seconds)
+                last_response = resp
+            except requests.RequestException as exc:
+                last_exception = exc
+                if attempt < max_retries:
+                    delay = base_delay * (2**attempt)
+                    jitter = random.uniform(0, delay * 0.25)
+                    time.sleep(delay + jitter)
+                    continue
+                # Exhausted retries on network error
+                raise ImdbFullCreditsError(f"IMDb request failed: {exc}") from exc
+
+            # Success case
+            if resp.status_code == 200:
+                return resp.text or ""
+
+            # Blocked/rate-limited responses (202=queued, 403=forbidden, 429=rate-limited)
+            is_blocked = resp.status_code in {202, 403, 429}
+
+            # Retry if blocked and have retries left
+            if is_blocked and attempt < max_retries:
+                # Exponential backoff with jitter
+                delay = base_delay * (2**attempt)
+                jitter = random.uniform(0, delay * 0.25)
+                time.sleep(delay + jitter)
+                continue
+
+            # Exhausted retries or non-retryable error
+            # Save debug artifact ONCE (on final blocked attempt)
+            if verbose and is_blocked:
+                self._save_debug_html(imdb_series_id, resp)
+
             raise ImdbFullCreditsError(
-                f"IMDb request failed with HTTP {resp.status_code}.",
+                f"IMDb fullcredits {'blocked/rate-limited' if is_blocked else 'request failed'} "
+                f"with HTTP {resp.status_code} (after {attempt + 1} attempt(s)).",
                 status_code=resp.status_code,
                 body_snippet=(resp.text or "")[:200],
+                is_blocked=is_blocked,
             )
 
-        return resp.text or ""
+        # Should never reach here, but satisfy type checker
+        if last_response:
+            raise ImdbFullCreditsError(
+                f"IMDb fullcredits request failed with HTTP {last_response.status_code}.",
+                status_code=last_response.status_code,
+                body_snippet=(last_response.text or "")[:200],
+                is_blocked=last_response.status_code in {202, 403, 429},
+            )
+        if last_exception:
+            raise ImdbFullCreditsError(f"IMDb request failed: {last_exception}") from last_exception
+        raise ImdbFullCreditsError("IMDb fullcredits request failed (no response).")
+
+    def _save_debug_html(self, imdb_series_id: str, resp: requests.Response) -> None:
+        """
+        Save blocked response HTML to debug_html/ directory (strips sensitive headers).
+
+        Uses Path.cwd() for testability (tests can monkeypatch.chdir).
+        """
+        debug_dir = Path.cwd() / "debug_html"
+        debug_dir.mkdir(exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"imdb_fullcredits_{imdb_series_id}_{timestamp}_http{resp.status_code}.html"
+        filepath = debug_dir / filename
+
+        try:
+            filepath.write_text(resp.text or "", encoding="utf-8")
+            print(f"Debug HTML saved: {filepath}")
+        except Exception as exc:
+            print(f"Warning: Failed to save debug HTML: {exc}")
 
 
 def _extract_imdb_name_id(value: str | None) -> str | None:
@@ -303,3 +400,169 @@ def is_self_role_text(value: str | None) -> bool:
 
 def filter_self_cast_rows(rows: Sequence[CastRow]) -> list[CastRow]:
     return [row for row in rows if is_self_role_text(row.raw_role_text)]
+
+
+def normalize_api_credits_to_cast_rows(
+    credits_response: ImdbTitleCredits,
+    *,
+    job_category_filter: str | None = None,
+) -> list[CastRow]:
+    """
+    Map JSON API credits response (from api.imdbapi.dev) to CastRow format.
+
+    This enables fallback from HTML scraping to JSON API when IMDb blocks
+    the /fullcredits/ page with 202/403/429 responses.
+
+    Args:
+        credits_response: Response from fetch_title_credits()
+        job_category_filter: Optional category filter (e.g., "self" for reality shows)
+
+    Returns:
+        List of CastRow instances compatible with sync_show_cast pipeline
+
+    Example:
+        >>> from trr_backend.integrations.imdb.credits_client import fetch_title_credits
+        >>> credits = fetch_title_credits("tt1720601")
+        >>> rows = normalize_api_credits_to_cast_rows(credits, job_category_filter="self")
+        >>> len(rows)
+        25
+    """
+    from trr_backend.integrations.imdb.credits_client import ImdbTitleCredits
+
+    if not isinstance(credits_response, ImdbTitleCredits):
+        raise TypeError(f"Expected ImdbTitleCredits, got {type(credits_response).__name__}")
+
+    # Crew categories to exclude (we only want cast: actor/actress/self)
+    crew_categories = {
+        "writer",
+        "producer",
+        "director",
+        "cinematographer",
+        "editor",
+        "composer",
+        "production_designer",
+        "executive_producer",
+        "co_producer",
+    }
+
+    rows: list[CastRow] = []
+    for idx, credit in enumerate(credits_response.credits, start=1):
+        # Extract fields from JSON API structure
+        # API returns: {"name": {"id": "nm0000148", "displayName": "..."}, "category": "actor", "characters": ["Self"]}
+        name_dict = credit.get("name") or {}
+        name_id = name_dict.get("id")  # e.g., "nm0000148"
+        name = name_dict.get("displayName")
+        category = (credit.get("category") or "").strip().lower()
+        characters = credit.get("characters") or []
+
+        # Filter out crew categories (only include cast: actor/actress/self)
+        if category in crew_categories:
+            continue
+
+        # Apply additional category filter if specified (e.g., job_category_filter="self")
+        if job_category_filter and category != job_category_filter.lower():
+            continue
+
+        # Skip invalid entries
+        if not name_id or not name:
+            continue
+
+        # Build role text from characters list
+        role_text = None
+        if isinstance(characters, list) and characters:
+            role_text = ", ".join(str(char) for char in characters if char)
+
+        # Map to job_category_id for filtering by filter_self_cast_rows()
+        # Check if category is "self" OR if "Self" appears in characters (for reality shows)
+        job_category_id = None
+        is_self = category == "self"
+        if not is_self and isinstance(characters, list):
+            # Check if any character contains "self" (case-insensitive)
+            is_self = any("self" in str(char).lower() for char in characters if char)
+
+        if is_self:
+            job_category_id = IMDB_JOB_CATEGORY_SELF
+
+        rows.append(
+            CastRow(
+                name_id=name_id.strip().lower() if name_id else "",
+                name=name.strip() if name else "",
+                billing_order=idx,
+                raw_role_text=role_text,
+                job_category_id=job_category_id,
+            )
+        )
+
+    return rows
+
+
+def fetch_fullcredits_cast_with_fallback(
+    series_id: str,
+    *,
+    extra_headers: Mapping[str, str] | None = None,
+    verbose: bool = False,
+) -> tuple[list[CastRow], str]:
+    """
+    Fetch full credits cast with automatic fallback to JSON API on blocked responses.
+
+    This is the recommended entry point for fetching IMDb cast data, as it handles
+    202/403/429 blocking gracefully by falling back to the JSON API.
+
+    Args:
+        series_id: IMDb series ID (e.g., "tt1720601")
+        extra_headers: Optional HTTP headers (for debugging only, not recommended)
+        verbose: If True, log fallback events and save debug HTML
+
+    Returns:
+        Tuple of (cast_rows, source_type) where:
+        - cast_rows: List of CastRow instances
+        - source_type: "fullcredits_html" or "credits_api_fallback"
+
+    Raises:
+        ImdbFullCreditsError: If both HTML and JSON API fail
+        ValueError: If series_id is invalid
+
+    Example:
+        >>> rows, source = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=True)
+        >>> source
+        'fullcredits_html'  # or 'credits_api_fallback' if HTML was blocked
+    """
+    # Check if fallback is enabled (allow disabling for testing/rollback)
+    enable_fallback = os.getenv("IMDB_FULLCREDITS_ENABLE_API_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
+
+    # Try HTML first
+    client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+    try:
+        html = client.fetch_fullcredits_page(series_id, verbose=verbose)
+        cast_rows = parse_fullcredits_cast_html(html, series_id=series_id)
+        return cast_rows, "fullcredits_html"
+    except ImdbFullCreditsError as exc:
+        # If blocked and fallback enabled, try JSON API
+        if exc.is_blocked and enable_fallback:
+            if verbose:
+                print(f"⚠️  IMDb HTML blocked for {series_id} (HTTP {exc.status_code}), falling back to JSON API...")
+
+            # Import here to avoid circular dependency
+            from trr_backend.integrations.imdb.credits_client import fetch_title_credits
+
+            try:
+                credits_response = fetch_title_credits(series_id)
+                cast_rows = normalize_api_credits_to_cast_rows(credits_response)
+
+                if verbose:
+                    print(
+                        f"✅ JSON API fallback succeeded: {len(cast_rows)} total credits "
+                        "(PARTIAL - top-billed cast only)"
+                    )
+
+                return cast_rows, "credits_api_fallback"
+            except Exception as api_exc:
+                # JSON API also failed - raise original HTML error with context
+                raise ImdbFullCreditsError(
+                    f"Both HTML and JSON API failed for {series_id}. HTML: {exc}. API: {api_exc}",
+                    status_code=exc.status_code,
+                    is_blocked=exc.is_blocked,
+                ) from exc
+        else:
+            # Not blocked, or fallback disabled - re-raise original error
+            raise

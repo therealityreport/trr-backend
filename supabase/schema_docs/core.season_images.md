@@ -26,6 +26,17 @@
 | hosted_bytes | bigint | YES |  | NO | NEVER |
 | hosted_etag | text | YES |  | NO | NEVER |
 | hosted_at | timestamp with time zone | YES |  | NO | NEVER |
+| source_image_id | text | NO |  | NO | NEVER |
+| caption | text | YES |  | NO | NEVER |
+| image_type | text | YES |  | NO | NEVER |
+| position | integer | YES |  | NO | NEVER |
+| url | text | NO |  | NO | NEVER |
+| url_path | text | YES |  | NO | NEVER |
+| metadata | jsonb | NO | '{}'::jsonb | NO | NEVER |
+| updated_at | timestamp with time zone | NO | now() | NO | NEVER |
+| created_at | timestamp with time zone | NO | now() | NO | NEVER |
+| fetch_method | text | YES |  | NO | NEVER |
+| fetched_from_url | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -45,7 +56,11 @@ id
 - core_season_images_season_id_idx (non-unique): season_id
 - core_season_images_tmdb_series_season_idx (non-unique): tmdb_series_id, season_number
 - core_season_images_unique (unique): tmdb_series_id, season_number, source, file_path
+- season_images_fetch_method_idx (non-unique): fetch_method
+- season_images_metadata_idx (non-unique): metadata
 - season_images_pkey (unique): id
+- season_images_season_source_image_unique (unique): season_id, source, source_image_id
+- season_images_source_image_id_idx (non-unique): source, source_image_id) WHERE (source_image_id IS NOT NULL
 
 ## RLS Enabled
 
@@ -76,6 +91,17 @@ true
   "hosted_content_type": "example",
   "hosted_bytes": 0,
   "hosted_etag": "example",
-  "hosted_at": "1970-01-01T00:00:00Z"
+  "hosted_at": "1970-01-01T00:00:00Z",
+  "source_image_id": "example",
+  "caption": "example",
+  "image_type": "example",
+  "position": 0,
+  "url": "example",
+  "url_path": "example",
+  "metadata": {},
+  "updated_at": "1970-01-01T00:00:00Z",
+  "created_at": "1970-01-01T00:00:00Z",
+  "fetch_method": "example",
+  "fetched_from_url": "example"
 }
 ```

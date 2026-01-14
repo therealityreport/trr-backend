@@ -26,5 +26,16 @@ erDiagram
         BIGINT hosted_bytes
         TEXT hosted_etag
         TIMESTAMP_WITH_TIME_ZONE hosted_at
+        TEXT source_image_id
+        TEXT caption
+        TEXT image_type
+        INTEGER position
+        TEXT url
+        TEXT url_path
+        JSONB metadata
+        TIMESTAMP_WITH_TIME_ZONE updated_at
+        TIMESTAMP_WITH_TIME_ZONE created_at
+        TEXT fetch_method
+        TEXT fetched_from_url
     }
 ```

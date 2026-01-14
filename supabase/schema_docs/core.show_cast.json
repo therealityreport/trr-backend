@@ -81,6 +81,14 @@
       "default": "now()",
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "source_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'fullcredits_html'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -123,6 +131,14 @@
       "definition": "CREATE INDEX core_show_cast_show_id_idx ON core.show_cast USING btree (show_id)"
     },
     {
+      "name": "idx_show_cast_source_type",
+      "columns": [
+        "source_type"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_show_cast_source_type ON core.show_cast USING btree (source_type)"
+    },
+    {
       "name": "show_cast_pkey1",
       "columns": [
         "id"
@@ -152,6 +168,7 @@
     "credit_category": "example",
     "id": "00000000-0000-0000-0000-000000000000",
     "created_at": "1970-01-01T00:00:00Z",
-    "updated_at": "1970-01-01T00:00:00Z"
+    "updated_at": "1970-01-01T00:00:00Z",
+    "source_type": "example"
   }
 }

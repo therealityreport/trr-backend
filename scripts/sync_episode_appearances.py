@@ -24,7 +24,7 @@ from trr_backend.integrations.imdb.episodic_client import (
 )
 from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     CastRow,
-    fetch_fullcredits_cast,
+    fetch_fullcredits_cast_with_fallback,
     filter_self_cast_rows,
 )
 from trr_backend.repositories.episode_appearances import (
@@ -322,7 +322,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"WARNING: Unable to load seasons for show_id={show_id}: {exc}", file=sys.stderr)
                 season_tmdb_ids = {}
 
-            cast_rows = fetch_fullcredits_cast(imdb_series_id, extra_headers=extra_headers)
+            cast_rows, _source_type = fetch_fullcredits_cast_with_fallback(
+                imdb_series_id, extra_headers=extra_headers, verbose=bool(args.verbose)
+            )
 
             cast_rows_total += len(cast_rows)
             self_rows = filter_self_cast_rows(cast_rows)
