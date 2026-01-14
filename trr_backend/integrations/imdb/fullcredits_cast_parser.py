@@ -9,7 +9,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from trr_backend.integrations.imdb.credits_client import ImdbTitleCredits
 
 import requests
 from bs4 import BeautifulSoup
@@ -397,3 +400,142 @@ def is_self_role_text(value: str | None) -> bool:
 
 def filter_self_cast_rows(rows: Sequence[CastRow]) -> list[CastRow]:
     return [row for row in rows if is_self_role_text(row.raw_role_text)]
+
+
+def normalize_api_credits_to_cast_rows(
+    credits_response: ImdbTitleCredits,
+    *,
+    job_category_filter: str | None = None,
+) -> list[CastRow]:
+    """
+    Map JSON API credits response (from api.imdbapi.dev) to CastRow format.
+
+    This enables fallback from HTML scraping to JSON API when IMDb blocks
+    the /fullcredits/ page with 202/403/429 responses.
+
+    Args:
+        credits_response: Response from fetch_title_credits()
+        job_category_filter: Optional category filter (e.g., "self" for reality shows)
+
+    Returns:
+        List of CastRow instances compatible with sync_show_cast pipeline
+
+    Example:
+        >>> from trr_backend.integrations.imdb.credits_client import fetch_title_credits
+        >>> credits = fetch_title_credits("tt1720601")
+        >>> rows = normalize_api_credits_to_cast_rows(credits, job_category_filter="self")
+        >>> len(rows)
+        25
+    """
+    from trr_backend.integrations.imdb.credits_client import ImdbTitleCredits
+
+    if not isinstance(credits_response, ImdbTitleCredits):
+        raise TypeError(f"Expected ImdbTitleCredits, got {type(credits_response).__name__}")
+
+    rows: list[CastRow] = []
+    for idx, credit in enumerate(credits_response.credits, start=1):
+        # Extract fields from JSON API structure
+        # API returns: {"id": "nm0000148", "name": "...", "category": "self", "characters": [...]}
+        name_id = credit.get("id")  # e.g., "nm0000148"
+        name = credit.get("name")
+        category = (credit.get("category") or "").strip().lower()
+        characters = credit.get("characters") or []
+
+        # Apply category filter if specified (use category, not role text)
+        if job_category_filter and category != job_category_filter.lower():
+            continue
+
+        # Skip invalid entries
+        if not name_id or not name:
+            continue
+
+        # Build role text from characters list
+        role_text = None
+        if isinstance(characters, list) and characters:
+            role_text = ", ".join(str(char) for char in characters if char)
+
+        # Map category to job_category_id (use category for self filtering)
+        job_category_id = None
+        if category == "self":
+            job_category_id = IMDB_JOB_CATEGORY_SELF
+
+        rows.append(
+            CastRow(
+                name_id=name_id.strip().lower() if name_id else "",
+                name=name.strip() if name else "",
+                billing_order=idx,
+                raw_role_text=role_text,
+                job_category_id=job_category_id,
+            )
+        )
+
+    return rows
+
+
+def fetch_fullcredits_cast_with_fallback(
+    series_id: str,
+    *,
+    extra_headers: Mapping[str, str] | None = None,
+    verbose: bool = False,
+) -> tuple[list[CastRow], str]:
+    """
+    Fetch full credits cast with automatic fallback to JSON API on blocked responses.
+
+    This is the recommended entry point for fetching IMDb cast data, as it handles
+    202/403/429 blocking gracefully by falling back to the JSON API.
+
+    Args:
+        series_id: IMDb series ID (e.g., "tt1720601")
+        extra_headers: Optional HTTP headers (for debugging only, not recommended)
+        verbose: If True, log fallback events and save debug HTML
+
+    Returns:
+        Tuple of (cast_rows, source_type) where:
+        - cast_rows: List of CastRow instances
+        - source_type: "fullcredits_html" or "credits_api_fallback"
+
+    Raises:
+        ImdbFullCreditsError: If both HTML and JSON API fail
+        ValueError: If series_id is invalid
+
+    Example:
+        >>> rows, source = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=True)
+        >>> source
+        'fullcredits_html'  # or 'credits_api_fallback' if HTML was blocked
+    """
+    # Check if fallback is enabled (allow disabling for testing/rollback)
+    enable_fallback = os.getenv("IMDB_FULLCREDITS_ENABLE_API_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
+
+    # Try HTML first
+    client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+    try:
+        html = client.fetch_fullcredits_page(series_id, verbose=verbose)
+        cast_rows = parse_fullcredits_cast_html(html, series_id=series_id)
+        return cast_rows, "fullcredits_html"
+    except ImdbFullCreditsError as exc:
+        # If blocked and fallback enabled, try JSON API
+        if exc.is_blocked and enable_fallback:
+            if verbose:
+                print(f"⚠️  IMDb HTML blocked for {series_id} (HTTP {exc.status_code}), falling back to JSON API...")
+
+            # Import here to avoid circular dependency
+            from trr_backend.integrations.imdb.credits_client import fetch_title_credits
+
+            try:
+                credits_response = fetch_title_credits(series_id)
+                cast_rows = normalize_api_credits_to_cast_rows(credits_response)
+
+                if verbose:
+                    print(f"✅ JSON API fallback succeeded: {len(cast_rows)} total credits")
+
+                return cast_rows, "credits_api_fallback"
+            except Exception as api_exc:
+                # JSON API also failed - raise original HTML error with context
+                raise ImdbFullCreditsError(
+                    f"Both HTML and JSON API failed for {series_id}. HTML: {exc}. API: {api_exc}",
+                    status_code=exc.status_code,
+                    is_blocked=exc.is_blocked,
+                ) from exc
+        else:
+            # Not blocked, or fallback disabled - re-raise original error
+            raise
