@@ -23,10 +23,12 @@ class ImdbFullCreditsError(RuntimeError):
         *,
         status_code: int | None = None,
         body_snippet: str | None = None,
+        is_blocked: bool = False,  # Indicates 202/403/429 blocked/rate-limited
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.body_snippet = body_snippet
+        self.is_blocked = is_blocked
 
 
 @dataclass(frozen=True)
