@@ -177,6 +177,94 @@
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "source_image_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "caption",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "image_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "position",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "metadata",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetch_method",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_from_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -225,12 +313,47 @@
       "definition": "CREATE UNIQUE INDEX core_season_images_unique ON core.season_images USING btree (tmdb_series_id, season_number, source, file_path)"
     },
     {
+      "name": "season_images_fetch_method_idx",
+      "columns": [
+        "fetch_method"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX season_images_fetch_method_idx ON core.season_images USING btree (fetch_method)"
+    },
+    {
+      "name": "season_images_metadata_idx",
+      "columns": [
+        "metadata"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX season_images_metadata_idx ON core.season_images USING gin (metadata)"
+    },
+    {
       "name": "season_images_pkey",
       "columns": [
         "id"
       ],
       "unique": true,
       "definition": "CREATE UNIQUE INDEX season_images_pkey ON core.season_images USING btree (id)"
+    },
+    {
+      "name": "season_images_season_source_image_unique",
+      "columns": [
+        "season_id",
+        "source",
+        "source_image_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX season_images_season_source_image_unique ON core.season_images USING btree (season_id, source, source_image_id)"
+    },
+    {
+      "name": "season_images_source_image_id_idx",
+      "columns": [
+        "source",
+        "source_image_id) WHERE (source_image_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX season_images_source_image_id_idx ON core.season_images USING btree (source, source_image_id) WHERE (source_image_id IS NOT NULL)"
     }
   ],
   "rls_enabled": true,
@@ -256,6 +379,17 @@
     "hosted_content_type": "example",
     "hosted_bytes": 0,
     "hosted_etag": "example",
-    "hosted_at": "1970-01-01T00:00:00Z"
+    "hosted_at": "1970-01-01T00:00:00Z",
+    "source_image_id": "example",
+    "caption": "example",
+    "image_type": "example",
+    "position": 0,
+    "url": "example",
+    "url_path": "example",
+    "metadata": {},
+    "updated_at": "1970-01-01T00:00:00Z",
+    "created_at": "1970-01-01T00:00:00Z",
+    "fetch_method": "example",
+    "fetched_from_url": "example"
   }
 }

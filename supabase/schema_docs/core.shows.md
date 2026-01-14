@@ -54,9 +54,9 @@
 | tmdb_fetched_at | timestamp with time zone | YES |  | NO | NEVER |
 | imdb_fetched_at | timestamp with time zone | YES |  | NO | NEVER |
 | tmdb_meta | jsonb | YES |  | NO | NEVER |
+| imdb_meta | jsonb | YES |  | NO | NEVER |
 | tmdb_network_ids | ARRAY | YES |  | NO | NEVER |
 | tmdb_production_company_ids | ARRAY | YES |  | NO | NEVER |
-| imdb_meta | jsonb | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -144,8 +144,8 @@ true
   "tmdb_fetched_at": "1970-01-01T00:00:00Z",
   "imdb_fetched_at": "1970-01-01T00:00:00Z",
   "tmdb_meta": {},
+  "imdb_meta": {},
   "tmdb_network_ids": [],
-  "tmdb_production_company_ids": [],
-  "imdb_meta": {}
+  "tmdb_production_company_ids": []
 }
 ```

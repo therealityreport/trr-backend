@@ -14,5 +14,6 @@ erDiagram
         UUID id
         TIMESTAMP_WITH_TIME_ZONE created_at
         TIMESTAMP_WITH_TIME_ZONE updated_at
+        TEXT source_type
     }
 ```

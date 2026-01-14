@@ -54,8 +54,8 @@ erDiagram
         TIMESTAMP_WITH_TIME_ZONE tmdb_fetched_at
         TIMESTAMP_WITH_TIME_ZONE imdb_fetched_at
         JSONB tmdb_meta
+        JSONB imdb_meta
         INT4_ARRAY tmdb_network_ids
         INT4_ARRAY tmdb_production_company_ids
-        JSONB imdb_meta
     }
 ```

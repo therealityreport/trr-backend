@@ -14,6 +14,7 @@
 | id | uuid | NO | gen_random_uuid() | NO | NEVER |
 | created_at | timestamp with time zone | NO | now() | NO | NEVER |
 | updated_at | timestamp with time zone | NO | now() | NO | NEVER |
+| source_type | text | NO | 'fullcredits_html'::text | NO | NEVER |
 
 ## Primary Key
 
@@ -32,6 +33,7 @@ id
 
 - core_show_cast_person_id_idx (non-unique): person_id
 - core_show_cast_show_id_idx (non-unique): show_id
+- idx_show_cast_source_type (non-unique): source_type
 - show_cast_pkey1 (unique): id
 - show_cast_show_id_person_id_credit_category_key (unique): show_id, person_id, credit_category
 
@@ -52,6 +54,7 @@ true
   "credit_category": "example",
   "id": "00000000-0000-0000-0000-000000000000",
   "created_at": "1970-01-01T00:00:00Z",
-  "updated_at": "1970-01-01T00:00:00Z"
+  "updated_at": "1970-01-01T00:00:00Z",
+  "source_type": "example"
 }
 ```
