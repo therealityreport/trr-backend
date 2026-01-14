@@ -13,7 +13,10 @@ from scripts._sync_common import (
     load_env_and_db,
 )
 from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env
-from trr_backend.integrations.imdb.fullcredits_cast_parser import fetch_fullcredits_cast, filter_self_cast_rows
+from trr_backend.integrations.imdb.fullcredits_cast_parser import (
+    fetch_fullcredits_cast_with_fallback,
+    filter_self_cast_rows,
+)
 from trr_backend.repositories.people import assert_core_people_table_exists, fetch_people_by_imdb_ids, insert_people
 from trr_backend.repositories.show_cast import assert_core_show_cast_table_exists, upsert_show_cast
 from trr_backend.repositories.sync_state import (
@@ -81,7 +84,12 @@ def main(argv: list[str] | None = None) -> int:
             mark_sync_state_in_progress(db, table_name="show_cast", show_id=show_id)
 
         try:
-            cast_rows = fetch_fullcredits_cast(imdb_id, extra_headers=extra_headers)
+            # Use centralized fallback function (returns cast_rows + source_type)
+            cast_rows, source_type = fetch_fullcredits_cast_with_fallback(
+                imdb_id,
+                extra_headers=extra_headers,
+                verbose=bool(args.verbose),
+            )
 
             cast_rows_total += len(cast_rows)
             self_rows = filter_self_cast_rows(cast_rows)
@@ -137,7 +145,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if show_cast_rows and not args.dry_run:
-                show_cast_upserted += len(upsert_show_cast(db, show_cast_rows))
+                # Inject source_type into each row dict (no repo signature change)
+                rows_with_source = [
+                    {**row, "source_type": source_type}
+                    for row in show_cast_rows
+                ]
+                show_cast_upserted += len(upsert_show_cast(db, rows_with_source))
             elif show_cast_rows:
                 show_cast_upserted += len(show_cast_rows)
 
