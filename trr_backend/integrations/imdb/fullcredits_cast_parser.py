@@ -434,8 +434,15 @@ def normalize_api_credits_to_cast_rows(
 
     # Crew categories to exclude (we only want cast: actor/actress/self)
     crew_categories = {
-        "writer", "producer", "director", "cinematographer", "editor",
-        "composer", "production_designer", "executive_producer", "co_producer"
+        "writer",
+        "producer",
+        "director",
+        "cinematographer",
+        "editor",
+        "composer",
+        "production_designer",
+        "executive_producer",
+        "co_producer",
     }
 
     rows: list[CastRow] = []
@@ -543,7 +550,10 @@ def fetch_fullcredits_cast_with_fallback(
                 cast_rows = normalize_api_credits_to_cast_rows(credits_response)
 
                 if verbose:
-                    print(f"✅ JSON API fallback succeeded: {len(cast_rows)} total credits (PARTIAL - top-billed cast only)")
+                    print(
+                        f"✅ JSON API fallback succeeded: {len(cast_rows)} total credits "
+                        "(PARTIAL - top-billed cast only)"
+                    )
 
                 return cast_rows, "credits_api_fallback"
             except Exception as api_exc:
