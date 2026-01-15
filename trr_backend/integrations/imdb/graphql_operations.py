@@ -117,7 +117,7 @@ def fetch_title_credits_paginated_v2(
 def select_show_cast_from_graphql(
     credits: list[dict[str, Any]],
     *,
-    min_episodes: int | None = None,
+    min_episodes_without_photo: int | None = None,
     max_members: int | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """
@@ -128,13 +128,19 @@ def select_show_cast_from_graphql(
     (IMDB_JOB_CATEGORY_SELF) which excludes non-cast like archival footage.
 
     Strategy:
-    1. Filter credits where episodeCount >= min_episodes (default: 1 to include all)
-    2. Sort by episodeCount descending
-    3. Apply safety cap at max_members (default: 500)
+    1. Always include: episodeCount > min_episodes_without_photo (regardless of photo)
+    2. Include if: episodeCount <= min_episodes_without_photo AND has primaryImage
+    3. Exclude if: episodeCount <= min_episodes_without_photo AND no primaryImage
+    4. Sort by episodeCount descending
+    5. Apply safety cap at max_members (default: 500)
+
+    This ensures we only store low-episode-count cast if we can visually represent them.
 
     Args:
         credits: Raw GraphQL credit edges from fetch_title_credits_paginated_v2()
-        min_episodes: Min episodes to include (default: 1 via IMDB_SHOW_CAST_MIN_EPISODES)
+        min_episodes_without_photo: Min episodes required if no photo (default: 6 via env var)
+            Cast with > this many episodes are always included.
+            Cast with <= this many episodes need primaryImage to be included.
         max_members: Safety cap to prevent extreme cases (default: 500 via IMDB_SHOW_CAST_MAX_MEMBERS)
 
     Returns:
@@ -148,15 +154,15 @@ def select_show_cast_from_graphql(
         945
         >>> main_cast, is_partial = select_show_cast_from_graphql(credits)
         >>> len(main_cast)
-        120  # All cast members with >= 1 episode
+        180  # High-episode cast + low-episode cast with photos
     """
-    if min_episodes is None:
-        min_episodes = int(os.getenv("IMDB_SHOW_CAST_MIN_EPISODES", "1"))
+    if min_episodes_without_photo is None:
+        min_episodes_without_photo = int(os.getenv("IMDB_SHOW_CAST_MIN_EPISODES_WITHOUT_PHOTO", "6"))
 
     if max_members is None:
         max_members = int(os.getenv("IMDB_SHOW_CAST_MAX_MEMBERS", "500"))
 
-    # Filter by episode count threshold
+    # Filter by episode count + photo presence
     qualified = []
     for edge in credits:
         node = edge.get("node", {})
@@ -167,9 +173,18 @@ def select_show_cast_from_graphql(
         if episode_count is None:
             continue
 
-        # Apply threshold
-        if episode_count >= min_episodes:
+        # Check if has primary image
+        name_dict = node.get("name", {})
+        has_image = name_dict.get("primaryImage") is not None
+
+        # Apply filtering logic
+        if episode_count > min_episodes_without_photo:
+            # Always include if above threshold (regardless of photo)
             qualified.append(edge)
+        elif has_image:
+            # Include if at/below threshold but has photo
+            qualified.append(edge)
+        # else: exclude (at/below threshold and no photo)
 
     # Sort by episode count descending
     qualified.sort(
