@@ -1,10 +1,20 @@
 # IMDb GraphQL Migration Specification
 
-**Status:** Draft
+**Status:** Draft (Revised)
 **Created:** 2026-01-14
+**Last Updated:** 2026-01-14 (Critical fixes applied)
 **Author:** Claude Sonnet 4.5
 **Related:** PR #17 (IMDb Full Credits Resilience)
 **Target:** Q1 2026
+
+**Revision Notes (2026-01-14):**
+- ✅ Fixed category ID inconsistency (use `IMDB_JOB_CATEGORY_SELF` constant)
+- ✅ Added cast selection policy to filter 945 credits → ~75-100 main cast
+- ✅ Added `IMDB_CAST_PRIMARY_SOURCE` config for tier order flexibility
+- ✅ Fixed `execute_query()` return type ambiguity
+- ✅ Added operational/ToS risk section (legal review required)
+- ✅ Added partial result signaling (`credits_graphql_paginated_partial`)
+- ✅ Added hard caps with circuit breaker behavior
 
 ---
 
@@ -51,6 +61,9 @@ Replace the JSON API fallback with IMDb's internal GraphQL persisted query API, 
 
 ### Architecture Overview
 
+**Configurable tier order** (via `IMDB_CAST_PRIMARY_SOURCE`):
+
+**Default (html-first) - Conservative rollout:**
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Cast Sync Entry Point (fetch_fullcredits_cast_with_fallback) │
@@ -59,7 +72,7 @@ Replace the JSON API fallback with IMDb's internal GraphQL persisted query API, 
                            ▼
 ┌──────────────────────────────────────────────────────────┐
 │  Tier 1: HTML Scraping (/fullcredits/)                  │
-│  - Fastest when available                                │
+│  - Most complete when available                          │
 │  - Most likely to be blocked (202/403/429)              │
 └──────────────────────────────────────────────────────────┘
                            │ (on block)
@@ -67,8 +80,8 @@ Replace the JSON API fallback with IMDb's internal GraphQL persisted query API, 
 ┌──────────────────────────────────────────────────────────┐
 │  Tier 2: GraphQL Persisted Queries (NEW)                │
 │  - caching.graphql.imdb.com                              │
-│  - Complete paginated data                               │
-│  - Less likely to be blocked                             │
+│  - Complete paginated data (filtered for main cast)      │
+│  - More reliable than HTML                               │
 └──────────────────────────────────────────────────────────┘
                            │ (on failure)
                            ▼
@@ -77,6 +90,21 @@ Replace the JSON API fallback with IMDb's internal GraphQL persisted query API, 
 │  - api.imdbapi.dev                                       │
 │  - Partial data (last resort only)                       │
 └──────────────────────────────────────────────────────────┘
+```
+
+**Alternative (graphql-first) - Maximum reliability:**
+```
+Tier 1: GraphQL (most reliable, filtered for main cast)
+   ↓ (on failure)
+Tier 2: HTML (most complete when available)
+   ↓ (on block)
+Tier 3: JSON API (deprecated, last resort)
+```
+
+**Configuration:**
+```bash
+# Primary source determines tier order
+IMDB_CAST_PRIMARY_SOURCE=html  # or 'graphql' for maximum reliability
 ```
 
 ### Unified GraphQL Client
@@ -102,11 +130,36 @@ class ImdbGraphQLPersistedClient:
         operation_name: str,
         sha256_hash: str,
         variables: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Execute a single persisted query request.
+
+        Returns:
+            Raw GraphQL response dict
+
+        Note: For pagination, use paginate_edges() helper or
+        specialized wrappers like fetch_title_credits_paginated_v2()
+        """
+
+    def paginate_edges(
+        self,
+        operation_name: str,
+        sha256_hash: str,
+        variables: dict[str, Any],
         *,
-        paginate: bool = False,
+        edges_path: str = "data.title.credits.edges",
+        page_info_path: str = "data.title.credits.pageInfo",
         max_pages: int | None = None,
-    ) -> dict[str, Any] | list[dict[str, Any]]:
-        """Execute a persisted query, optionally paginating."""
+    ) -> list[dict[str, Any]]:
+        """
+        Execute paginated query and collect all edges.
+
+        Handles cursor pagination automatically until hasNextPage=false
+        or max_pages reached.
+
+        Returns:
+            List of all edge nodes collected across pages
+        """
 ```
 
 ---
@@ -161,8 +214,21 @@ IMDB_GRAPHQL_TIMEOUT_SEC=30.0
 
 # Pagination defaults
 IMDB_GRAPHQL_PAGE_SIZE=250
-IMDB_GRAPHQL_MAX_PAGES=10
+IMDB_GRAPHQL_MAX_PAGES=10  # Hard cap to prevent runaway pagination
+
+# Cast sync configuration
+IMDB_CAST_PRIMARY_SOURCE=html  # 'html' (conservative) or 'graphql' (reliable)
+IMDB_SHOW_CAST_MIN_EPISODES=3  # Min episodes to qualify as series cast
+IMDB_SHOW_CAST_MAX_MEMBERS=100  # Max cast members per show (prevent pollution)
+
+# Feature flags
+IMDB_GRAPHQL_ENABLED=1  # Set to 0 to disable GraphQL fallback entirely
 ```
+
+**IMPORTANT**: `IMDB_GRAPHQL_MAX_PAGES` serves as a circuit breaker. If exceeded:
+- Log warning with actual total count
+- Mark result as partial (`source_type` suffix or status table)
+- Do NOT silently return truncated results
 
 ---
 
@@ -207,15 +273,19 @@ def fetch_title_credits_paginated_v2(
 
 **GraphQL Variables:**
 ```python
+from trr_backend.integrations.imdb.episodic_client import IMDB_JOB_CATEGORY_SELF
+
 {
     "const": "tt1720601",  # Title ID (required by API)
     "tconst": "tt1720601",  # Title ID (duplicate required)
     "first": 250,           # Page size
     "after": None,          # Cursor token (None for first page)
     "locale": "en-US",      # Language
-    "category": "amzn1.imdb.concept.name_credit_group.self"  # Job category
+    "category": IMDB_JOB_CATEGORY_SELF  # Use constant, NOT string literal
 }
 ```
+
+**CRITICAL**: Always use `IMDB_JOB_CATEGORY_SELF` constant from `episodic_client.py`. Never hardcode category IDs as string literals.
 
 **Response Structure:**
 ```json
@@ -249,6 +319,67 @@ def fetch_title_credits_paginated_v2(
   }
 }
 ```
+
+**Cast Selection Policy for `show_cast`**
+
+**CRITICAL ISSUE**: GraphQL returns **all credits** for a title (~945 for tt1720601), which includes:
+- Series regulars (main cast)
+- Recurring guests
+- One-off cameos
+- Episode-specific appearances
+- Potentially duplicates across seasons/specials
+
+**Problem**: Dumping all 945 credits into `core.show_cast` pollutes "main cast" and breaks downstream assumptions.
+
+**Solution**: Filter GraphQL results to select only "series cast" for `show_cast`:
+
+**Primary Strategy** (if fields available):
+- Use explicit "series regular" or "principal" flags from GraphQL response (field TBD)
+- Use `attributes` field if it contains role type information
+
+**Fallback Heuristic** (when explicit fields unavailable):
+```python
+# Filter by episode count threshold
+def select_show_cast_from_graphql(
+    credits: list[CreditNode],
+    *,
+    min_episodes: int = 3,  # Configurable: IMDB_SHOW_CAST_MIN_EPISODES
+    max_members: int = 100,  # Configurable: IMDB_SHOW_CAST_MAX_MEMBERS
+) -> list[CreditNode]:
+    """
+    Select series cast from GraphQL credits.
+
+    Strategy:
+    1. Filter credits where episodeCount >= min_episodes
+    2. Sort by episodeCount descending
+    3. Take top max_members
+
+    Returns:
+        Filtered list suitable for core.show_cast
+    """
+```
+
+**Environment Variables:**
+```bash
+# Cast selection thresholds
+IMDB_SHOW_CAST_MIN_EPISODES=3     # Min episodes to qualify as "series cast"
+IMDB_SHOW_CAST_MAX_MEMBERS=100    # Max cast members to prevent runaway lists
+```
+
+**Partial Result Signaling:**
+- If `total > max_members`, mark result as partial:
+  - Log warning: "GraphQL returned X credits, capped to Y for show_cast"
+  - Set `source_type = "credits_graphql_paginated_partial"`
+  - OR: Add show-level `sync_status` table (preferred long-term)
+
+**Guest/Episode-Level Credits:**
+- **Phase 1**: Ignore credits below threshold (acceptable data loss)
+- **Phase 2**: Route to `episode_appearances` table (requires episode mapping)
+
+**Example Counts for tt1720601:**
+| Total GraphQL Credits | After min_episodes=3 | After max_members=100 | Result |
+|-----------------------|----------------------|-----------------------|--------|
+| 945 | ~75-120 (estimated) | 100 | ✅ Manageable for show_cast |
 
 ---
 
@@ -356,14 +487,34 @@ ALTER TABLE core.show_cast
 ADD CONSTRAINT show_cast_source_type_check
 CHECK (source_type IN (
     'fullcredits_html',
-    'credits_graphql_paginated',  -- NEW
-    'credits_api_top_billed',     -- Renamed from credits_api_fallback
-    'credits_api_fallback',       -- Deprecated (keep for existing data)
+    'credits_graphql_paginated',           -- NEW: Complete GraphQL data
+    'credits_graphql_paginated_partial',   -- NEW: GraphQL capped by MAX_PAGES or MAX_MEMBERS
+    'credits_api_top_billed',              -- Renamed from credits_api_fallback
+    'credits_api_fallback',                -- Deprecated (keep for existing data)
     'manual'
 ));
 
 COMMENT ON COLUMN core.show_cast.source_type IS
-'Data source: fullcredits_html (HTML scraping), credits_graphql_paginated (GraphQL pagination - complete), credits_api_top_billed (JSON API - partial), manual (human entered)';
+'Data source:
+- fullcredits_html: HTML scraping (complete when available)
+- credits_graphql_paginated: GraphQL pagination (complete, filtered for main cast)
+- credits_graphql_paginated_partial: GraphQL pagination hit limits (MAX_PAGES/MAX_MEMBERS)
+- credits_api_top_billed: JSON API (partial - top-billed only)
+- credits_api_fallback: Deprecated JSON API fallback (legacy)
+- manual: Human entered';
+```
+
+**Partial Result Detection:**
+```python
+# Set source_type based on completion
+if hit_max_pages or hit_max_members:
+    source_type = "credits_graphql_paginated_partial"
+    logger.warning(
+        f"GraphQL pagination limited: total={total_count}, "
+        f"returned={len(cast_rows)}, reason={'max_pages' if hit_max_pages else 'max_members'}"
+    )
+else:
+    source_type = "credits_graphql_paginated"
 ```
 
 ---
@@ -551,6 +702,36 @@ LIMIT 20;
 ---
 
 ## Risks and Mitigations
+
+### Risk 0: Operational and Terms of Service Risk
+
+**CRITICAL**: This implementation uses IMDb's **internal GraphQL API**, not a public/documented API.
+
+**Legal/Operational Concerns:**
+- **No SLA or Support**: IMDb can change, deprecate, or block this API without notice
+- **Terms of Service**: Scraping/automated access may violate IMDb ToS (review required)
+- **Rate Limiting**: Aggressive usage can trigger IP blocks or legal action
+- **Data Ownership**: IMDb owns the data; redistribution may violate copyright
+
+**Mitigation:**
+- **Conservative usage**: Respect rate limits, implement backoff
+- **Monitoring**: Alert on sudden failure rate increases (indicates API change/blocking)
+- **Failover chain**: Always maintain fallback to JSON API and manual entry
+- **No auth/cookies**: Do not store or log authentication headers
+- **Legal review**: Consult legal team before production deployment
+- **Attribution**: Include IMDb attribution where data is displayed publicly
+
+**Circuit Breakers:**
+- If GraphQL fails >50% for 1 hour → auto-disable via `IMDB_GRAPHQL_ENABLED=0`
+- If IP blocked → manual intervention required (rotate IPs or pause sync)
+
+**Action Items Before Production:**
+1. ✅ Legal team approval for internal API usage
+2. ✅ Define acceptable use policy (rate limits, retry budgets)
+3. ✅ Implement IP rotation strategy (if needed)
+4. ✅ Set up monitoring for API health metrics
+
+---
 
 ### Risk 1: Persisted Query Hashes May Change
 
