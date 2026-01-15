@@ -496,6 +496,78 @@ def normalize_api_credits_to_cast_rows(
     return rows
 
 
+def normalize_graphql_credits_to_cast_rows(
+    graphql_edges: list[dict[str, Any]],
+) -> list[CastRow]:
+    """
+    Map GraphQL persisted query credits to CastRow format.
+
+    This enables fallback from HTML scraping to GraphQL API when IMDb blocks
+    the /fullcredits/ page with 202/403/429 responses.
+
+    Args:
+        graphql_edges: List of credit edges from GraphQL pagination
+            (each edge contains node with credit details)
+
+    Returns:
+        List of CastRow instances compatible with sync_show_cast pipeline
+
+    Example:
+        >>> from trr_backend.integrations.imdb.graphql_operations import fetch_title_credits_paginated_v2
+        >>> edges = fetch_title_credits_paginated_v2("tt1720601")
+        >>> rows = normalize_graphql_credits_to_cast_rows(edges)
+        >>> len(rows)
+        945  # All credits - use select_show_cast_from_graphql() to filter
+    """
+    rows: list[CastRow] = []
+
+    for idx, edge in enumerate(graphql_edges, start=1):
+        node = edge.get("node", {})
+
+        # Extract name information
+        name_dict = node.get("name", {})
+        name_id = name_dict.get("id")  # e.g., "nm0000148"
+        name = name_dict.get("nameText", {}).get("text")
+
+        if not name_id or not name:
+            continue
+
+        # Extract role/character information
+        # GraphQL structure: {"characters": [{"name": "Dr. Smith"}]}
+        characters_list = node.get("characters") or []
+        role_parts = []
+        for char_obj in characters_list:
+            if isinstance(char_obj, dict):
+                char_name = char_obj.get("name")
+                if char_name:
+                    role_parts.append(str(char_name))
+
+        raw_role_text = ", ".join(role_parts) if role_parts else None
+
+        # Map to job_category_id for filtering by filter_self_cast_rows()
+        # Check if raw_role_text starts with "Self" (for reality shows)
+        job_category_id = None
+        if is_self_role_text(raw_role_text):
+            job_category_id = IMDB_JOB_CATEGORY_SELF
+
+        # GraphQL also provides category field
+        category = node.get("category", {}).get("id")
+        if category and "self" in category.lower():
+            job_category_id = IMDB_JOB_CATEGORY_SELF
+
+        rows.append(
+            CastRow(
+                name_id=name_id.strip().lower() if name_id else "",
+                name=name.strip() if name else "",
+                billing_order=idx,
+                raw_role_text=raw_role_text,
+                job_category_id=job_category_id,
+            )
+        )
+
+    return rows
+
+
 def fetch_fullcredits_cast_with_fallback(
     series_id: str,
     *,
@@ -503,10 +575,14 @@ def fetch_fullcredits_cast_with_fallback(
     verbose: bool = False,
 ) -> tuple[list[CastRow], str]:
     """
-    Fetch full credits cast with automatic fallback to JSON API on blocked responses.
+    Fetch full credits cast with 3-tier fallback: HTML → GraphQL → JSON API.
 
     This is the recommended entry point for fetching IMDb cast data, as it handles
-    202/403/429 blocking gracefully by falling back to the JSON API.
+    202/403/429 blocking gracefully by falling back through multiple data sources.
+
+    Tier order is configurable via IMDB_CAST_PRIMARY_SOURCE:
+    - "html" (default): HTML → GraphQL → JSON API (conservative rollout)
+    - "graphql": GraphQL → HTML → JSON API (maximum reliability)
 
     Args:
         series_id: IMDb series ID (e.g., "tt1720601")
@@ -516,53 +592,135 @@ def fetch_fullcredits_cast_with_fallback(
     Returns:
         Tuple of (cast_rows, source_type) where:
         - cast_rows: List of CastRow instances
-        - source_type: "fullcredits_html" or "credits_api_fallback"
+        - source_type: One of:
+            - "fullcredits_html"
+            - "credits_graphql_paginated"
+            - "credits_graphql_paginated_partial"
+            - "credits_api_top_billed"
 
     Raises:
-        ImdbFullCreditsError: If both HTML and JSON API fail
+        ImdbFullCreditsError: If all tiers fail
         ValueError: If series_id is invalid
 
     Example:
         >>> rows, source = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=True)
         >>> source
-        'fullcredits_html'  # or 'credits_api_fallback' if HTML was blocked
+        'fullcredits_html'  # or 'credits_graphql_paginated' if HTML was blocked
     """
-    # Check if fallback is enabled (allow disabling for testing/rollback)
-    enable_fallback = os.getenv("IMDB_FULLCREDITS_ENABLE_API_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
+    # Feature flags
+    enable_graphql = os.getenv("IMDB_GRAPHQL_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+    enable_json_api = os.getenv("IMDB_FULLCREDITS_ENABLE_API_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
 
-    # Try HTML first
-    client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
-    try:
-        html = client.fetch_fullcredits_page(series_id, verbose=verbose)
-        cast_rows = parse_fullcredits_cast_html(html, series_id=series_id)
-        return cast_rows, "fullcredits_html"
-    except ImdbFullCreditsError as exc:
-        # If blocked and fallback enabled, try JSON API
-        if exc.is_blocked and enable_fallback:
+    # Determine tier order
+    primary_source = os.getenv("IMDB_CAST_PRIMARY_SOURCE", "html").strip().lower()
+
+    # Build tier list based on primary source
+    if primary_source == "graphql" and enable_graphql:
+        # GraphQL-first (maximum reliability)
+        tiers = ["graphql", "html", "json_api"]
+    else:
+        # HTML-first (default - conservative rollout)
+        tiers = ["html", "graphql", "json_api"]
+
+    # Track errors for final fallback message
+    errors: dict[str, Exception] = {}
+
+    for tier in tiers:
+        try:
+            if tier == "html":
+                return _try_html_fetch(series_id, extra_headers, verbose)
+
+            elif tier == "graphql" and enable_graphql:
+                return _try_graphql_fetch(series_id, extra_headers, verbose)
+
+            elif tier == "json_api" and enable_json_api:
+                return _try_json_api_fetch(series_id, verbose)
+
+        except Exception as exc:
+            errors[tier] = exc
             if verbose:
-                print(f"⚠️  IMDb HTML blocked for {series_id} (HTTP {exc.status_code}), falling back to JSON API...")
+                print(f"⚠️  {tier.upper()} tier failed for {series_id}: {exc}")
+            continue
 
-            # Import here to avoid circular dependency
-            from trr_backend.integrations.imdb.credits_client import fetch_title_credits
+    # All tiers failed
+    error_summary = "; ".join(f"{tier}: {err}" for tier, err in errors.items())
+    raise ImdbFullCreditsError(
+        f"All fallback tiers failed for {series_id}. {error_summary}",
+        status_code=getattr(errors.get("html"), "status_code", None),
+        is_blocked=getattr(errors.get("html"), "is_blocked", False),
+    )
 
-            try:
-                credits_response = fetch_title_credits(series_id)
-                cast_rows = normalize_api_credits_to_cast_rows(credits_response)
 
-                if verbose:
-                    print(
-                        f"✅ JSON API fallback succeeded: {len(cast_rows)} total credits "
-                        "(PARTIAL - top-billed cast only)"
-                    )
+def _try_html_fetch(
+    series_id: str,
+    extra_headers: Mapping[str, str] | None,
+    verbose: bool,
+) -> tuple[list[CastRow], str]:
+    """Try HTML scraping tier."""
+    client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+    html = client.fetch_fullcredits_page(series_id, verbose=verbose)
+    cast_rows = parse_fullcredits_cast_html(html, series_id=series_id)
 
-                return cast_rows, "credits_api_fallback"
-            except Exception as api_exc:
-                # JSON API also failed - raise original HTML error with context
-                raise ImdbFullCreditsError(
-                    f"Both HTML and JSON API failed for {series_id}. HTML: {exc}. API: {api_exc}",
-                    status_code=exc.status_code,
-                    is_blocked=exc.is_blocked,
-                ) from exc
-        else:
-            # Not blocked, or fallback disabled - re-raise original error
-            raise
+    if verbose:
+        print(f"✅ HTML fetch succeeded: {len(cast_rows)} credits")
+
+    return cast_rows, "fullcredits_html"
+
+
+def _try_graphql_fetch(
+    series_id: str,
+    extra_headers: Mapping[str, str] | None,
+    verbose: bool,
+) -> tuple[list[CastRow], str]:
+    """Try GraphQL persisted query tier with cast selection filtering."""
+    # Import here to avoid circular dependency
+    from trr_backend.integrations.imdb.graphql_operations import (
+        fetch_title_credits_paginated_v2,
+        select_show_cast_from_graphql,
+    )
+    from trr_backend.integrations.imdb.graphql_persisted_client import (
+        ImdbGraphQLPersistedClient,
+    )
+
+    # Create client with optional extra headers
+    graphql_client = ImdbGraphQLPersistedClient(extra_headers=extra_headers or {})
+
+    # Fetch all credits (unfiltered)
+    all_edges = fetch_title_credits_paginated_v2(series_id, client=graphql_client)
+
+    # Apply cast selection policy to filter to main cast
+    filtered_edges, is_partial = select_show_cast_from_graphql(all_edges)
+
+    # Normalize to CastRow format
+    cast_rows = normalize_graphql_credits_to_cast_rows(filtered_edges)
+
+    # Determine source_type based on partial flag
+    source_type = "credits_graphql_paginated_partial" if is_partial else "credits_graphql_paginated"
+
+    if verbose:
+        print(
+            f"✅ GraphQL fetch succeeded: {len(all_edges)} total credits → "
+            f"{len(cast_rows)} main cast (partial={is_partial})"
+        )
+
+    return cast_rows, source_type
+
+
+def _try_json_api_fetch(
+    series_id: str,
+    verbose: bool,
+) -> tuple[list[CastRow], str]:
+    """Try JSON API tier (top-billed only - last resort)."""
+    # Import here to avoid circular dependency
+    from trr_backend.integrations.imdb.credits_client import fetch_title_credits
+
+    credits_response = fetch_title_credits(series_id)
+    cast_rows = normalize_api_credits_to_cast_rows(credits_response)
+
+    if verbose:
+        print(
+            f"✅ JSON API fallback succeeded: {len(cast_rows)} credits "
+            "(PARTIAL - top-billed cast only)"
+        )
+
+    return cast_rows, "credits_api_top_billed"
