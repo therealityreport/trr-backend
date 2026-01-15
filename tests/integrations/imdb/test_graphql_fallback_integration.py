@@ -189,9 +189,9 @@ def test_normalize_graphql_credits_handles_missing_fields() -> None:
 
 def test_graphql_fetch_returns_partial_source_type_when_capped() -> None:
     """Test _try_graphql_fetch returns partial source type when cast selection caps results."""
-    # Mock GraphQL client to return many credits (all with episodeCredits.total >= 3)
+    # Mock GraphQL client to return many credits
     # Create 150 credits with episodeCredits.total from 150 down to 1
-    # With min_episodes=3, credits 3-150 qualify (148 items)
+    # With min_episodes_without_photo=6, credits with > 6 episodes qualify (144 items: episodes 150 down to 7)
     # With max_members=100, will be capped to 100
     # IMPORTANT: Need full GraphQL structure for normalization
     many_edges = [
@@ -211,7 +211,7 @@ def test_graphql_fetch_returns_partial_source_type_when_capped() -> None:
         with patch.dict(
             "os.environ",
             {
-                "IMDB_SHOW_CAST_MIN_EPISODES": "3",
+                "IMDB_SHOW_CAST_MIN_EPISODES_WITHOUT_PHOTO": "6",
                 "IMDB_SHOW_CAST_MAX_MEMBERS": "100",
             },
         ):
