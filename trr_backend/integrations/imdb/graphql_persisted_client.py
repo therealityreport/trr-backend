@@ -161,7 +161,7 @@ class ImdbGraphQLPersistedClient:
         # Build URL parameters (use compact JSON for IMDb compatibility)
         params = {
             "operationName": operation_name,
-            "variables": json_lib.dumps(variables, separators=(',', ':')),
+            "variables": json_lib.dumps(variables, separators=(",", ":")),
             "extensions": json_lib.dumps(
                 {
                     "persistedQuery": {
@@ -169,7 +169,7 @@ class ImdbGraphQLPersistedClient:
                         "sha256Hash": sha256_hash,
                     }
                 },
-                separators=(',', ':'),
+                separators=(",", ":"),
             ),
         }
 

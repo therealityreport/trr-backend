@@ -17,9 +17,9 @@ def test_fallback_uses_html_first_by_default() -> None:
     """Test that HTML is tried first when IMDB_CAST_PRIMARY_SOURCE=html (default)."""
     with patch.dict("os.environ", {"IMDB_CAST_PRIMARY_SOURCE": "html", "IMDB_GRAPHQL_ENABLED": "1"}):
         with patch("trr_backend.integrations.imdb.fullcredits_cast_parser._try_html_fetch") as mock_html:
-            mock_html.return_value = ([MagicMock()], "fullcredits_html")
+            mock_html.return_value = ([MagicMock()], "fullcredits_html", [])
 
-            rows, source_type = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
+            rows, source_type, person_images = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
 
     assert source_type == "fullcredits_html"
     mock_html.assert_called_once()
@@ -34,9 +34,9 @@ def test_fallback_uses_graphql_when_html_blocked() -> None:
 
             # GraphQL succeeds
             with patch("trr_backend.integrations.imdb.fullcredits_cast_parser._try_graphql_fetch") as mock_graphql:
-                mock_graphql.return_value = ([MagicMock()], "credits_graphql_paginated")
+                mock_graphql.return_value = ([MagicMock()], "credits_graphql_paginated", [])
 
-                rows, source_type = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
+                rows, source_type, person_images = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
 
     assert source_type == "credits_graphql_paginated"
     mock_html.assert_called_once()
@@ -56,9 +56,9 @@ def test_fallback_uses_json_api_when_html_and_graphql_fail() -> None:
 
                 # JSON API succeeds
                 with patch("trr_backend.integrations.imdb.fullcredits_cast_parser._try_json_api_fetch") as mock_json:
-                    mock_json.return_value = ([MagicMock()], "credits_api_top_billed")
+                    mock_json.return_value = ([MagicMock()], "credits_api_top_billed", [])
 
-                    rows, source_type = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
+                    rows, source_type, person_images = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
 
     assert source_type == "credits_api_top_billed"
     mock_html.assert_called_once()
@@ -71,11 +71,11 @@ def test_fallback_graphql_first_when_primary_source_graphql() -> None:
     with patch.dict("os.environ", {"IMDB_CAST_PRIMARY_SOURCE": "graphql", "IMDB_GRAPHQL_ENABLED": "1"}):
         # GraphQL succeeds immediately
         with patch("trr_backend.integrations.imdb.fullcredits_cast_parser._try_graphql_fetch") as mock_graphql:
-            mock_graphql.return_value = ([MagicMock()], "credits_graphql_paginated")
+            mock_graphql.return_value = ([MagicMock()], "credits_graphql_paginated", [])
 
             # HTML should not be called
             with patch("trr_backend.integrations.imdb.fullcredits_cast_parser._try_html_fetch") as mock_html:
-                rows, source_type = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
+                rows, source_type, person_images = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
 
     assert source_type == "credits_graphql_paginated"
     mock_graphql.assert_called_once()
@@ -93,9 +93,9 @@ def test_fallback_skips_graphql_when_disabled() -> None:
             with patch("trr_backend.integrations.imdb.fullcredits_cast_parser._try_graphql_fetch") as mock_graphql:
                 # JSON API succeeds
                 with patch("trr_backend.integrations.imdb.fullcredits_cast_parser._try_json_api_fetch") as mock_json:
-                    mock_json.return_value = ([MagicMock()], "credits_api_top_billed")
+                    mock_json.return_value = ([MagicMock()], "credits_api_top_billed", [])
 
-                    rows, source_type = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
+                    rows, source_type, person_images = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=False)
 
     assert source_type == "credits_api_top_billed"
     mock_html.assert_called_once()
@@ -217,7 +217,7 @@ def test_graphql_fetch_returns_partial_source_type_when_capped() -> None:
         ):
             from trr_backend.integrations.imdb.fullcredits_cast_parser import _try_graphql_fetch
 
-            rows, source_type = _try_graphql_fetch("tt1720601", None, verbose=False)
+            rows, source_type, person_images = _try_graphql_fetch("tt1720601", None, verbose=False)
 
     assert source_type == "credits_graphql_paginated_partial"
     assert len(rows) == 100  # Capped to max_members

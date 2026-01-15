@@ -18,6 +18,7 @@ from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     filter_self_cast_rows,
 )
 from trr_backend.repositories.people import assert_core_people_table_exists, fetch_people_by_imdb_ids, insert_people
+from trr_backend.repositories.person_images import upsert_person_images
 from trr_backend.repositories.show_cast import assert_core_show_cast_table_exists, upsert_show_cast
 from trr_backend.repositories.sync_state import (
     assert_core_sync_state_table_exists,
@@ -55,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     extra_headers = parse_imdb_headers_json_env()
     cast_rows_total = 0
     cast_rows_self = 0
+    person_images_upserted = 0
     failures: list[str] = []
     people_cache: dict[str, str] = {}
     people_inserted = 0
@@ -87,8 +89,8 @@ def main(argv: list[str] | None = None) -> int:
             mark_sync_state_in_progress(db, table_name="show_cast", show_id=show_id)
 
         try:
-            # Use centralized fallback function (returns cast_rows + source_type)
-            cast_rows, source_type = fetch_fullcredits_cast_with_fallback(
+            # Use centralized fallback function (returns cast_rows + source_type + person_images)
+            cast_rows, source_type, person_images = fetch_fullcredits_cast_with_fallback(
                 imdb_id,
                 extra_headers=extra_headers,
                 verbose=bool(args.verbose),
@@ -97,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
             cast_rows_total += len(cast_rows)
             self_rows = filter_self_cast_rows(cast_rows)
             cast_rows_self += len(self_rows)
+
+            # Persist person images from GraphQL tier
+            if person_images and not args.dry_run:
+                if args.verbose:
+                    print(f"  Upserting {len(person_images)} person images...")
+                upserted_images = upsert_person_images(db, person_images, verbose=bool(args.verbose))
+                person_images_upserted += len(upserted_images)
 
             name_ids = [row.name_id.strip().lower() for row in self_rows if row.name_id]
             missing_ids = [name_id for name_id in name_ids if name_id not in people_cache]
@@ -172,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"cast_rows_self={cast_rows_self}")
     print(f"people_inserted={people_inserted}")
     print(f"show_cast_upserted={show_cast_upserted}")
+    print(f"person_images_upserted={person_images_upserted}")
     print(f"failures={len(failures)}")
 
     if failures:
