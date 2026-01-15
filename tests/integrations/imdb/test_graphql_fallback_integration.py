@@ -189,8 +189,8 @@ def test_normalize_graphql_credits_handles_missing_fields() -> None:
 
 def test_graphql_fetch_returns_partial_source_type_when_capped() -> None:
     """Test _try_graphql_fetch returns partial source type when cast selection caps results."""
-    # Mock GraphQL client to return many credits (all with episodeCount >= 3)
-    # Create 150 credits with episodeCount from 150 down to 1
+    # Mock GraphQL client to return many credits (all with episodeCredits.total >= 3)
+    # Create 150 credits with episodeCredits.total from 150 down to 1
     # With min_episodes=3, credits 3-150 qualify (148 items)
     # With max_members=100, will be capped to 100
     # IMPORTANT: Need full GraphQL structure for normalization
@@ -198,7 +198,7 @@ def test_graphql_fetch_returns_partial_source_type_when_capped() -> None:
         {
             "node": {
                 "name": {"id": f"nm{i:04d}", "nameText": {"text": f"Actor {i}"}},
-                "episodeCount": 150 - i,
+                "episodeCredits": {"total": 150 - i},
                 "characters": [{"name": "Role"}],
             }
         }
@@ -208,10 +208,13 @@ def test_graphql_fetch_returns_partial_source_type_when_capped() -> None:
     with patch("trr_backend.integrations.imdb.graphql_operations.fetch_title_credits_paginated_v2") as mock_fetch:
         mock_fetch.return_value = many_edges
 
-        with patch.dict("os.environ", {
-            "IMDB_SHOW_CAST_MIN_EPISODES": "3",
-            "IMDB_SHOW_CAST_MAX_MEMBERS": "100",
-        }):
+        with patch.dict(
+            "os.environ",
+            {
+                "IMDB_SHOW_CAST_MIN_EPISODES": "3",
+                "IMDB_SHOW_CAST_MAX_MEMBERS": "100",
+            },
+        ):
             from trr_backend.integrations.imdb.fullcredits_cast_parser import _try_graphql_fetch
 
             rows, source_type = _try_graphql_fetch("tt1720601", None, verbose=False)

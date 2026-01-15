@@ -76,19 +76,11 @@ class ImdbGraphQLPersistedClient:
             max_retries: Max retry attempts (excluding initial request)
             retry_base_delay_sec: Base delay for exponential backoff
         """
-        self.base_url = base_url or os.getenv(
-            "IMDB_GRAPHQL_BASE_URL", "https://caching.graphql.imdb.com/"
-        )
-        self.fallback_url = fallback_url or os.getenv(
-            "IMDB_GRAPHQL_FALLBACK_URL", "https://api.graphql.imdb.com/"
-        )
+        self.base_url = base_url or os.getenv("IMDB_GRAPHQL_BASE_URL", "https://caching.graphql.imdb.com/")
+        self.fallback_url = fallback_url or os.getenv("IMDB_GRAPHQL_FALLBACK_URL", "https://api.graphql.imdb.com/")
         self.timeout_sec = timeout_sec or float(os.getenv("IMDB_GRAPHQL_TIMEOUT_SEC", "30.0"))
-        self.max_retries = max_retries if max_retries is not None else int(
-            os.getenv("IMDB_GRAPHQL_MAX_RETRIES", "2")
-        )
-        self.retry_base_delay_sec = retry_base_delay_sec or float(
-            os.getenv("IMDB_GRAPHQL_RETRY_BASE_DELAY_SEC", "2.0")
-        )
+        self.max_retries = max_retries if max_retries is not None else int(os.getenv("IMDB_GRAPHQL_MAX_RETRIES", "2"))
+        self.retry_base_delay_sec = retry_base_delay_sec or float(os.getenv("IMDB_GRAPHQL_RETRY_BASE_DELAY_SEC", "2.0"))
 
         # Merge extra headers from environment JSON if present
         env_headers = os.getenv("IMDB_EXTRA_HEADERS_JSON", "").strip()
@@ -205,6 +197,20 @@ class ImdbGraphQLPersistedClient:
                     data = resp.json()
                     # Check for GraphQL errors in response
                     if "errors" in data:
+                        errors = data.get("errors", [])
+                        # Detect stale persisted query hash
+                        for error in errors:
+                            extensions = error.get("extensions", {})
+                            code = extensions.get("code", "")
+                            if code in {"PersistedQueryNotFound", "PersistedQueryNotSupported"}:
+                                raise ImdbGraphQLError(
+                                    f"Persisted query hash is stale or invalid (code: {code}). "
+                                    f"Hash may need updating. Set IMDB_GRAPHQL_HASH_TITLE_CREDIT_PAGINATION_V2 "
+                                    f"with current hash from browser DevTools.",
+                                    status_code=resp.status_code,
+                                    response_data=data,
+                                )
+                        # Other GraphQL errors
                         raise ImdbGraphQLError(
                             f"GraphQL returned errors: {data['errors']}",
                             response_data=data,
@@ -227,8 +233,7 @@ class ImdbGraphQLPersistedClient:
 
             # Exhausted retries or non-retryable error
             raise ImdbGraphQLError(
-                f"GraphQL request failed with HTTP {resp.status_code} "
-                f"(after {attempt + 1} attempt(s))",
+                f"GraphQL request failed with HTTP {resp.status_code} (after {attempt + 1} attempt(s))",
                 status_code=resp.status_code,
                 is_blocked=is_blocked,
             )

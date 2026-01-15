@@ -13,11 +13,11 @@ from trr_backend.integrations.imdb.graphql_operations import (
 def test_select_show_cast_filters_by_episode_count() -> None:
     """Test cast selection filters by minimum episode count threshold."""
     credits = [
-        {"node": {"name": {"id": "nm0001"}, "episodeCount": 10}},  # Included
-        {"node": {"name": {"id": "nm0002"}, "episodeCount": 3}},   # Included (at threshold)
-        {"node": {"name": {"id": "nm0003"}, "episodeCount": 2}},   # Excluded (below threshold)
-        {"node": {"name": {"id": "nm0004"}, "episodeCount": 1}},   # Excluded
-        {"node": {"name": {"id": "nm0005"}, "episodeCount": None}},  # Excluded (no data)
+        {"node": {"name": {"id": "nm0001"}, "episodeCredits": {"total": 10}}},  # Included
+        {"node": {"name": {"id": "nm0002"}, "episodeCredits": {"total": 3}}},  # Included (at threshold)
+        {"node": {"name": {"id": "nm0003"}, "episodeCredits": {"total": 2}}},  # Excluded (below threshold)
+        {"node": {"name": {"id": "nm0004"}, "episodeCredits": {"total": 1}}},  # Excluded
+        {"node": {"name": {"id": "nm0005"}, "episodeCredits": {"total": None}}},  # Excluded (no data)
     ]
 
     filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=3, max_members=100)
@@ -31,9 +31,9 @@ def test_select_show_cast_filters_by_episode_count() -> None:
 def test_select_show_cast_sorts_by_episode_count_desc() -> None:
     """Test cast selection sorts by episode count descending."""
     credits = [
-        {"node": {"name": {"id": "nm0001"}, "episodeCount": 5}},
-        {"node": {"name": {"id": "nm0002"}, "episodeCount": 15}},  # Should be first
-        {"node": {"name": {"id": "nm0003"}, "episodeCount": 10}},  # Should be second
+        {"node": {"name": {"id": "nm0001"}, "episodeCredits": {"total": 5}}},
+        {"node": {"name": {"id": "nm0002"}, "episodeCredits": {"total": 15}}},  # Should be first
+        {"node": {"name": {"id": "nm0003"}, "episodeCredits": {"total": 10}}},  # Should be second
     ]
 
     filtered, _ = select_show_cast_from_graphql(credits, min_episodes=3, max_members=100)
@@ -45,19 +45,16 @@ def test_select_show_cast_sorts_by_episode_count_desc() -> None:
 
 def test_select_show_cast_caps_at_max_members() -> None:
     """Test cast selection caps results at max_members limit."""
-    # Create 150 credits all qualifying (episodeCount >= 3)
-    # episodeCount from 100 down to 1 (so 3-100 qualifies, that's 98 items)
-    credits = [
-        {"node": {"name": {"id": f"nm{i:04d}"}, "episodeCount": 100 - i}}
-        for i in range(150)
-    ]
+    # Create 150 credits all qualifying (episodeCredits.total >= 3)
+    # episodeCredits.total from 100 down to 1 (so 3-100 qualifies, that's 98 items)
+    credits = [{"node": {"name": {"id": f"nm{i:04d}"}, "episodeCredits": {"total": 100 - i}}} for i in range(150)]
 
-    # min_episodes=3 will filter to episodeCount >= 3, which is 98 items (episodeCount 3-100)
+    # min_episodes=3 will filter to episodeCredits.total >= 3, which is 98 items (episodeCredits.total 3-100)
     # Then capped to 100, but since we only have 98 qualifying, we get 98
     filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=3, max_members=100)
 
-    # 150 credits with episodeCount from 100 down to (100-149) = -49
-    # Only those >= 3 qualify: episodeCount 100, 99, 98, ..., 3 = 98 items
+    # 150 credits with episodeCredits.total from 100 down to (100-149) = -49
+    # Only those >= 3 qualify: episodeCredits.total 100, 99, 98, ..., 3 = 98 items
     assert len(filtered) == 98
     assert is_partial is False  # Not capped because 98 < 100
 
@@ -69,10 +66,7 @@ def test_select_show_cast_caps_at_max_members() -> None:
 
 def test_select_show_cast_not_partial_when_under_cap() -> None:
     """Test is_partial=False when result count is under max_members."""
-    credits = [
-        {"node": {"name": {"id": f"nm{i:04d}"}, "episodeCount": 10}}
-        for i in range(50)
-    ]
+    credits = [{"node": {"name": {"id": f"nm{i:04d}"}, "episodeCredits": {"total": 10}}} for i in range(50)]
 
     filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=3, max_members=100)
 
@@ -87,10 +81,13 @@ def test_fetch_title_credits_uses_env_defaults() -> None:
         {"node": {"name": {"id": "nm0001"}}},
     ]
 
-    with patch.dict("os.environ", {
-        "IMDB_GRAPHQL_PAGE_SIZE": "250",
-        "IMDB_GRAPHQL_LOCALE": "en-US",
-    }):
+    with patch.dict(
+        "os.environ",
+        {
+            "IMDB_GRAPHQL_PAGE_SIZE": "250",
+            "IMDB_GRAPHQL_LOCALE": "en-US",
+        },
+    ):
         with patch("trr_backend.integrations.imdb.graphql_operations.ImdbGraphQLPersistedClient") as mock_client_cls:
             mock_client_cls.return_value = mock_client
 
