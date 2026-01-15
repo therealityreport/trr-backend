@@ -97,11 +97,13 @@ def test_fetch_title_credits_uses_env_defaults() -> None:
     call_args = mock_client.paginate_edges.call_args
     variables = call_args[1]["variables"]
 
+    assert variables["after"] == ""  # Empty string for first page
+    assert variables["category"] is not None  # Should have default category
     assert variables["const"] == "tt1720601"
-    assert variables["tconst"] == "tt1720601"
     assert variables["first"] == 250
     assert variables["locale"] == "en-US"
-    assert variables["after"] is None
+    assert variables["originalTitleText"] is False
+    assert variables["tconst"] == "tt1720601"
 
 
 def test_fetch_title_credits_uses_category_constant() -> None:

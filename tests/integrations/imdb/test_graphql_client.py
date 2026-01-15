@@ -27,7 +27,7 @@ def test_execute_query_success() -> None:
         }
     }
 
-    with patch.object(client._session, "post", return_value=mock_response):
+    with patch.object(client._session, "get", return_value=mock_response):
         result = client.execute_query(
             operation_name="TitleCreditPaginationV2",
             sha256_hash="abc123",
@@ -51,7 +51,7 @@ def test_execute_query_retries_on_blocked_status(status_code: int) -> None:
     mock_success.status_code = 200
     mock_success.json.return_value = {"data": {"title": {"id": "tt1720601"}}}
 
-    with patch.object(client._session, "post", side_effect=[mock_blocked, mock_blocked, mock_success]) as mock_post:
+    with patch.object(client._session, "get", side_effect=[mock_blocked, mock_blocked, mock_success]) as mock_post:
         result = client.execute_query(
             operation_name="TitleCreditPaginationV2",
             sha256_hash="abc123",
@@ -76,7 +76,7 @@ def test_execute_query_retries_on_server_errors(status_code: int) -> None:
     mock_success.status_code = 200
     mock_success.json.return_value = {"data": {"title": {"id": "tt1720601"}}}
 
-    with patch.object(client._session, "post", side_effect=[mock_error, mock_success]):
+    with patch.object(client._session, "get", side_effect=[mock_error, mock_success]):
         result = client.execute_query(
             operation_name="TitleCreditPaginationV2",
             sha256_hash="abc123",
@@ -93,7 +93,7 @@ def test_execute_query_raises_on_exhausted_retries() -> None:
     mock_blocked = MagicMock()
     mock_blocked.status_code = 403
 
-    with patch.object(client._session, "post", return_value=mock_blocked):
+    with patch.object(client._session, "get", return_value=mock_blocked):
         with pytest.raises(ImdbGraphQLError) as exc_info:
             client.execute_query(
                 operation_name="TitleCreditPaginationV2",
@@ -123,7 +123,7 @@ def test_execute_query_uses_fallback_url_on_primary_failure() -> None:
     mock_fallback_success.status_code = 200
     mock_fallback_success.json.return_value = {"data": {"title": {"id": "tt1720601"}}}
 
-    with patch.object(client._session, "post", side_effect=[mock_primary_fail, mock_fallback_success]) as mock_post:
+    with patch.object(client._session, "get", side_effect=[mock_primary_fail, mock_fallback_success]) as mock_post:
         result = client.execute_query(
             operation_name="TitleCreditPaginationV2",
             sha256_hash="abc123",
@@ -181,7 +181,7 @@ def test_paginate_edges_aggregates_multiple_pages() -> None:
     mock_resp2.status_code = 200
     mock_resp2.json.return_value = page2_response
 
-    with patch.object(client._session, "post", side_effect=[mock_resp1, mock_resp2]):
+    with patch.object(client._session, "get", side_effect=[mock_resp1, mock_resp2]):
         edges = client.paginate_edges(
             operation_name="TitleCreditPaginationV2",
             sha256_hash="abc123",
@@ -218,7 +218,7 @@ def test_paginate_edges_respects_max_pages_cap() -> None:
     mock_resp.status_code = 200
     mock_resp.json.return_value = page_response
 
-    with patch.object(client._session, "post", return_value=mock_resp) as mock_post:
+    with patch.object(client._session, "get", return_value=mock_resp) as mock_post:
         edges = client.paginate_edges(
             operation_name="TitleCreditPaginationV2",
             sha256_hash="abc123",
