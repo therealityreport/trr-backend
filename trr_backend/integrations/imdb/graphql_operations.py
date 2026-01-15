@@ -123,18 +123,19 @@ def select_show_cast_from_graphql(
     """
     Select series cast from GraphQL credits for core.show_cast.
 
-    Filters raw GraphQL credits (e.g., 945 total) to main cast members
-    suitable for the show_cast table, using episode count heuristics.
+    Filters raw GraphQL credits (e.g., 945 total) to cast members suitable
+    for the show_cast table. Primary filtering happens via job category
+    (IMDB_JOB_CATEGORY_SELF) which excludes non-cast like archival footage.
 
     Strategy:
-    1. Filter credits where episodeCount >= min_episodes
+    1. Filter credits where episodeCount >= min_episodes (default: 1 to include all)
     2. Sort by episodeCount descending
-    3. Take top max_members
+    3. Apply safety cap at max_members (default: 500)
 
     Args:
         credits: Raw GraphQL credit edges from fetch_title_credits_paginated_v2()
-        min_episodes: Min episodes to qualify as series cast (default: IMDB_SHOW_CAST_MIN_EPISODES)
-        max_members: Max cast members to prevent pollution (default: IMDB_SHOW_CAST_MAX_MEMBERS)
+        min_episodes: Min episodes to include (default: 1 via IMDB_SHOW_CAST_MIN_EPISODES)
+        max_members: Safety cap to prevent extreme cases (default: 500 via IMDB_SHOW_CAST_MAX_MEMBERS)
 
     Returns:
         Tuple of (filtered_credits, is_partial) where:
@@ -147,13 +148,13 @@ def select_show_cast_from_graphql(
         945
         >>> main_cast, is_partial = select_show_cast_from_graphql(credits)
         >>> len(main_cast)
-        75  # Filtered to main cast only
+        120  # All cast members with >= 1 episode
     """
     if min_episodes is None:
-        min_episodes = int(os.getenv("IMDB_SHOW_CAST_MIN_EPISODES", "3"))
+        min_episodes = int(os.getenv("IMDB_SHOW_CAST_MIN_EPISODES", "1"))
 
     if max_members is None:
-        max_members = int(os.getenv("IMDB_SHOW_CAST_MAX_MEMBERS", "100"))
+        max_members = int(os.getenv("IMDB_SHOW_CAST_MAX_MEMBERS", "500"))
 
     # Filter by episode count threshold
     qualified = []

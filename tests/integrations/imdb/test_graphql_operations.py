@@ -14,17 +14,19 @@ def test_select_show_cast_filters_by_episode_count() -> None:
     """Test cast selection filters by minimum episode count threshold."""
     credits = [
         {"node": {"name": {"id": "nm0001"}, "episodeCredits": {"total": 10}}},  # Included
-        {"node": {"name": {"id": "nm0002"}, "episodeCredits": {"total": 3}}},  # Included (at threshold)
-        {"node": {"name": {"id": "nm0003"}, "episodeCredits": {"total": 2}}},  # Excluded (below threshold)
-        {"node": {"name": {"id": "nm0004"}, "episodeCredits": {"total": 1}}},  # Excluded
+        {"node": {"name": {"id": "nm0002"}, "episodeCredits": {"total": 3}}},  # Included
+        {"node": {"name": {"id": "nm0003"}, "episodeCredits": {"total": 2}}},  # Included
+        {"node": {"name": {"id": "nm0004"}, "episodeCredits": {"total": 1}}},  # Included (at threshold)
         {"node": {"name": {"id": "nm0005"}, "episodeCredits": {"total": None}}},  # Excluded (no data)
     ]
 
-    filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=3, max_members=100)
+    filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=1, max_members=500)
 
-    assert len(filtered) == 2
+    assert len(filtered) == 4
     assert filtered[0]["node"]["name"]["id"] == "nm0001"  # Highest episode count first
     assert filtered[1]["node"]["name"]["id"] == "nm0002"
+    assert filtered[2]["node"]["name"]["id"] == "nm0003"
+    assert filtered[3]["node"]["name"]["id"] == "nm0004"
     assert is_partial is False
 
 
@@ -36,7 +38,7 @@ def test_select_show_cast_sorts_by_episode_count_desc() -> None:
         {"node": {"name": {"id": "nm0003"}, "episodeCredits": {"total": 10}}},  # Should be second
     ]
 
-    filtered, _ = select_show_cast_from_graphql(credits, min_episodes=3, max_members=100)
+    filtered, _ = select_show_cast_from_graphql(credits, min_episodes=1, max_members=500)
 
     assert filtered[0]["node"]["name"]["id"] == "nm0002"
     assert filtered[1]["node"]["name"]["id"] == "nm0003"
@@ -45,21 +47,21 @@ def test_select_show_cast_sorts_by_episode_count_desc() -> None:
 
 def test_select_show_cast_caps_at_max_members() -> None:
     """Test cast selection caps results at max_members limit."""
-    # Create 150 credits all qualifying (episodeCredits.total >= 3)
-    # episodeCredits.total from 100 down to 1 (so 3-100 qualifies, that's 98 items)
+    # Create 150 credits with episodeCredits.total from 100 down to -49
+    # With min_episodes=1, all credits with episodeCredits.total >= 1 qualify (100 items: 100 down to 1)
     credits = [{"node": {"name": {"id": f"nm{i:04d}"}, "episodeCredits": {"total": 100 - i}}} for i in range(150)]
 
-    # min_episodes=3 will filter to episodeCredits.total >= 3, which is 98 items (episodeCredits.total 3-100)
-    # Then capped to 100, but since we only have 98 qualifying, we get 98
-    filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=3, max_members=100)
+    # min_episodes=1 will filter to episodeCredits.total >= 1, which is 100 items
+    # Then capped to 100, exactly at the limit
+    filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=1, max_members=100)
 
-    # 150 credits with episodeCredits.total from 100 down to (100-149) = -49
-    # Only those >= 3 qualify: episodeCredits.total 100, 99, 98, ..., 3 = 98 items
-    assert len(filtered) == 98
-    assert is_partial is False  # Not capped because 98 < 100
+    # 150 credits with episodeCredits.total from 100 down to -49
+    # Only those >= 1 qualify: episodeCredits.total 100, 99, 98, ..., 1 = 100 items
+    assert len(filtered) == 100
+    assert is_partial is False  # Not capped because 100 == 100
 
     # Test with lower max to actually trigger cap
-    filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=3, max_members=50)
+    filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=1, max_members=50)
     assert len(filtered) == 50
     assert is_partial is True
 
@@ -68,7 +70,7 @@ def test_select_show_cast_not_partial_when_under_cap() -> None:
     """Test is_partial=False when result count is under max_members."""
     credits = [{"node": {"name": {"id": f"nm{i:04d}"}, "episodeCredits": {"total": 10}}} for i in range(50)]
 
-    filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=3, max_members=100)
+    filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes=1, max_members=500)
 
     assert len(filtered) == 50
     assert is_partial is False
