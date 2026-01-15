@@ -146,38 +146,43 @@ def test_fetch_with_fallback_returns_html_source_on_success() -> None:
 
 @pytest.mark.parametrize("status_code", [202, 403, 429])
 def test_fetch_with_fallback_triggers_on_blocked_status(status_code: int) -> None:
-    """Test that 202/403/429 status codes trigger JSON API fallback."""
-    with patch("trr_backend.integrations.imdb.fullcredits_cast_parser.HttpImdbFullCreditsClient") as mock_client_class:
-        # Mock HTML fetch to raise blocked error
-        mock_client = MagicMock()
-        mock_client.fetch_fullcredits_page.side_effect = ImdbFullCreditsError(
-            f"Blocked with HTTP {status_code}",
-            status_code=status_code,
-            is_blocked=True,
-        )
-        mock_client_class.return_value = mock_client
+    """Test that 202/403/429 status codes trigger fallback chain."""
+    with patch.dict("os.environ", {"IMDB_GRAPHQL_ENABLED": "1"}):
+        with patch("trr_backend.integrations.imdb.fullcredits_cast_parser.HttpImdbFullCreditsClient") as mock_client_class:
+            # Mock HTML fetch to raise blocked error
+            mock_client = MagicMock()
+            mock_client.fetch_fullcredits_page.side_effect = ImdbFullCreditsError(
+                f"Blocked with HTTP {status_code}",
+                status_code=status_code,
+                is_blocked=True,
+            )
+            mock_client_class.return_value = mock_client
 
-        # Mock JSON API fallback (patched at import location inside the function)
-        with patch("trr_backend.integrations.imdb.credits_client.fetch_title_credits") as mock_api:
-            from trr_backend.integrations.imdb.credits_client import ImdbTitleCredits
+            # Mock GraphQL to also fail
+            with patch("trr_backend.integrations.imdb.graphql_operations.fetch_title_credits_paginated_v2") as mock_gql:
+                mock_gql.side_effect = Exception("GraphQL error")
 
-            mock_credits = MagicMock(spec=ImdbTitleCredits)
-            mock_credits.credits = [
-                {
-                    "name": {"id": "nm0000001", "displayName": "Jane Doe"},
-                    "category": "actor",
-                    "characters": ["Dr. Smith"],
-                }
-            ]
-            mock_api.return_value = mock_credits
+                # Mock JSON API fallback (last resort)
+                with patch("trr_backend.integrations.imdb.credits_client.fetch_title_credits") as mock_api:
+                    from trr_backend.integrations.imdb.credits_client import ImdbTitleCredits
 
-            rows, source_type = fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
+                    mock_credits = MagicMock(spec=ImdbTitleCredits)
+                    mock_credits.credits = [
+                        {
+                            "name": {"id": "nm0000001", "displayName": "Jane Doe"},
+                            "category": "actor",
+                            "characters": ["Dr. Smith"],
+                        }
+                    ]
+                    mock_api.return_value = mock_credits
 
-            # Should use JSON API fallback
-            assert source_type == "credits_api_top_billed"
-            assert len(rows) == 1
-            assert rows[0].name_id == "nm0000001"
-            assert rows[0].name == "Jane Doe"
+                    rows, source_type = fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
+
+                    # Should use JSON API fallback (last tier)
+                    assert source_type == "credits_api_top_billed"
+                    assert len(rows) == 1
+                    assert rows[0].name_id == "nm0000001"
+                    assert rows[0].name == "Jane Doe"
 
 
 def test_fetch_with_fallback_raises_when_both_fail() -> None:
