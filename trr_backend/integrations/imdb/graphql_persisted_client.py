@@ -153,23 +153,30 @@ class ImdbGraphQLPersistedClient:
         variables: dict[str, Any],
     ) -> dict[str, Any]:
         """Execute request with exponential backoff retry logic."""
-        url = f"{endpoint.rstrip('/')}"
+        # IMDb uses GET requests with URL parameters for persisted queries
+        import json as json_lib
 
-        headers = {
-            "content-type": "application/json",
-            "accept": "application/json",
-            **self._extra_headers,
+        base_url = f"{endpoint.rstrip('/')}"
+
+        # Build URL parameters (use compact JSON for IMDb compatibility)
+        params = {
+            "operationName": operation_name,
+            "variables": json_lib.dumps(variables, separators=(',', ':')),
+            "extensions": json_lib.dumps(
+                {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": sha256_hash,
+                    }
+                },
+                separators=(',', ':'),
+            ),
         }
 
-        payload = {
-            "operationName": operation_name,
-            "variables": variables,
-            "extensions": {
-                "persistedQuery": {
-                    "version": 1,
-                    "sha256Hash": sha256_hash,
-                }
-            },
+        headers = {
+            "accept": "application/graphql+json, application/json",
+            "content-type": "application/json",
+            **self._extra_headers,
         }
 
         last_exception: Exception | None = None
@@ -177,9 +184,9 @@ class ImdbGraphQLPersistedClient:
 
         for attempt in range(1 + self.max_retries):
             try:
-                resp = self._session.post(
-                    url,
-                    json=payload,
+                resp = self._session.get(
+                    base_url,
+                    params=params,
                     headers=headers,
                     timeout=self.timeout_sec,
                 )

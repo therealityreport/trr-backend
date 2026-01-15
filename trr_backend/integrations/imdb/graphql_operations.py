@@ -89,12 +89,13 @@ def fetch_title_credits_paginated_v2(
     # Build variables
     # CRITICAL: Use IMDB_JOB_CATEGORY_SELF constant, NOT string literal
     variables = {
-        "const": tconst,  # Required by API
-        "tconst": tconst,  # Duplicate required by API
-        "first": first,
-        "after": None,  # Cursor (None for first page)
-        "locale": locale,
+        "after": "",  # Cursor (empty string for first page, base64 token for subsequent)
         "category": category_id,  # Use constant from episodic_client
+        "const": tconst,  # Required by API
+        "first": first,
+        "locale": locale,
+        "originalTitleText": False,  # Required by API
+        "tconst": tconst,  # Duplicate required by API
     }
 
     # Execute paginated query
