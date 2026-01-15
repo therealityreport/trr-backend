@@ -174,31 +174,38 @@ def test_fetch_with_fallback_triggers_on_blocked_status(status_code: int) -> Non
             rows, source_type = fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
 
             # Should use JSON API fallback
-            assert source_type == "credits_api_fallback"
+            assert source_type == "credits_api_top_billed"
             assert len(rows) == 1
             assert rows[0].name_id == "nm0000001"
             assert rows[0].name == "Jane Doe"
 
 
 def test_fetch_with_fallback_raises_when_both_fail() -> None:
-    """Test that error is raised when both HTML and JSON API fail."""
-    with patch("trr_backend.integrations.imdb.fullcredits_cast_parser.HttpImdbFullCreditsClient") as mock_client_class:
-        # Mock HTML fetch to raise blocked error
-        mock_client = MagicMock()
-        mock_client.fetch_fullcredits_page.side_effect = ImdbFullCreditsError(
-            "Blocked with HTTP 403",
-            status_code=403,
-            is_blocked=True,
-        )
-        mock_client_class.return_value = mock_client
+    """Test that error is raised when all fallback tiers fail."""
+    with patch.dict("os.environ", {"IMDB_GRAPHQL_ENABLED": "1"}):
+        with patch(
+            "trr_backend.integrations.imdb.fullcredits_cast_parser.HttpImdbFullCreditsClient"
+        ) as mock_client_class:
+            # Mock HTML fetch to raise blocked error
+            mock_client = MagicMock()
+            mock_client.fetch_fullcredits_page.side_effect = ImdbFullCreditsError(
+                "Blocked with HTTP 403",
+                status_code=403,
+                is_blocked=True,
+            )
+            mock_client_class.return_value = mock_client
 
-        # Mock JSON API to also fail (patched at import location inside the function)
-        with patch("trr_backend.integrations.imdb.credits_client.fetch_title_credits") as mock_api:
-            mock_api.side_effect = Exception("JSON API error")
+            # Mock GraphQL to also fail
+            with patch("trr_backend.integrations.imdb.graphql_operations.fetch_title_credits_paginated_v2") as mock_gql:
+                mock_gql.side_effect = Exception("GraphQL error")
 
-            with pytest.raises(ImdbFullCreditsError) as exc_info:
-                fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
+                # Mock JSON API to also fail
+                with patch("trr_backend.integrations.imdb.credits_client.fetch_title_credits") as mock_api:
+                    mock_api.side_effect = Exception("JSON API error")
 
-            assert "Both HTML and JSON API failed" in str(exc_info.value)
-            assert exc_info.value.is_blocked is True
-            assert exc_info.value.status_code == 403
+                    with pytest.raises(ImdbFullCreditsError) as exc_info:
+                        fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
+
+                    assert "All fallback tiers failed" in str(exc_info.value)
+                    assert exc_info.value.is_blocked is True
+                    assert exc_info.value.status_code == 403

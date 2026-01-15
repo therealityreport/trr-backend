@@ -718,9 +718,6 @@ def _try_json_api_fetch(
     cast_rows = normalize_api_credits_to_cast_rows(credits_response)
 
     if verbose:
-        print(
-            f"✅ JSON API fallback succeeded: {len(cast_rows)} credits "
-            "(PARTIAL - top-billed cast only)"
-        )
+        print(f"✅ JSON API fallback succeeded: {len(cast_rows)} credits (PARTIAL - top-billed cast only)")
 
     return cast_rows, "credits_api_top_billed"

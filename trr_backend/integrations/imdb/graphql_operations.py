@@ -21,8 +21,12 @@ from trr_backend.integrations.imdb.graphql_persisted_client import (
 PERSISTED_QUERIES = {
     "TitleCreditPaginationV2": {
         "operation_name": "TitleCreditPaginationV2",
-        # Placeholder hash - needs discovery from IMDb production client
-        "sha256_hash": "c5f0e3b7f8e9d0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5",
+        # Real hash discovered from IMDb production client (2026-01-15)
+        # Can be overridden via IMDB_GRAPHQL_HASH_TITLE_CREDIT_PAGINATION_V2 env var
+        "sha256_hash": os.getenv(
+            "IMDB_GRAPHQL_HASH_TITLE_CREDIT_PAGINATION_V2",
+            "c2df29603060d12b6a76c48e2b47ac0ceee80e471f8cd8ee79abd672393e4bd8",
+        ),
         "description": "Paginated title credits with filters (category, locale, etc.)",
     },
     # Additional operations can be added here as needed
@@ -101,8 +105,8 @@ def fetch_title_credits_paginated_v2(
         operation_name=op_meta["operation_name"],
         sha256_hash=op_meta["sha256_hash"],
         variables=variables,
-        edges_path="data.title.credits.edges",
-        page_info_path="data.title.credits.pageInfo",
+        edges_path="data.title.creditsV2.edges",
+        page_info_path="data.title.creditsV2.pageInfo",
         max_pages=max_pages,
     )
 
@@ -154,7 +158,8 @@ def select_show_cast_from_graphql(
     qualified = []
     for edge in credits:
         node = edge.get("node", {})
-        episode_count = node.get("episodeCount")
+        episode_credits = node.get("episodeCredits", {})
+        episode_count = episode_credits.get("total")
 
         # Skip if no episode count data
         if episode_count is None:
@@ -165,7 +170,10 @@ def select_show_cast_from_graphql(
             qualified.append(edge)
 
     # Sort by episode count descending
-    qualified.sort(key=lambda e: e.get("node", {}).get("episodeCount", 0), reverse=True)
+    qualified.sort(
+        key=lambda e: e.get("node", {}).get("episodeCredits", {}).get("total", 0),
+        reverse=True,
+    )
 
     # Apply max members cap
     is_partial = len(qualified) > max_members
