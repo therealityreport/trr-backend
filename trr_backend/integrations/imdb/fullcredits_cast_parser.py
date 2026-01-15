@@ -496,6 +496,73 @@ def normalize_api_credits_to_cast_rows(
     return rows
 
 
+def extract_person_images_from_graphql(
+    graphql_edges: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Extract person primary images from GraphQL credits for core.person_images.
+
+    This extracts the primaryImage field from each credit node, which is used
+    for photo-based cast filtering (episodeCount <= 6 requires primaryImage).
+
+    Args:
+        graphql_edges: List of credit edges from GraphQL pagination
+
+    Returns:
+        List of image dicts with keys:
+        - imdb_person_id (str): IMDb name ID (e.g., "nm0724202")
+        - source (str): Always "imdb_graphql"
+        - url (str): Full image URL
+        - width (int | None): Image width in pixels
+        - height (int | None): Image height in pixels
+        - caption (str | None): Image caption text
+
+    Example:
+        >>> from trr_backend.integrations.imdb.graphql_operations import fetch_title_credits_paginated_v2
+        >>> edges = fetch_title_credits_paginated_v2("tt1720601")
+        >>> images = extract_person_images_from_graphql(edges)
+        >>> len(images)
+        330  # Only credits with primaryImage
+    """
+    images: list[dict[str, Any]] = []
+
+    for edge in graphql_edges:
+        node = edge.get("node", {})
+        name_dict = node.get("name", {})
+        name_id = name_dict.get("id")  # e.g., "nm0724202"
+
+        if not name_id:
+            continue
+
+        # Extract primaryImage (not all credits have this)
+        primary_image = name_dict.get("primaryImage")
+        if not primary_image:
+            continue
+
+        url = primary_image.get("url")
+        if not url:
+            continue
+
+        # Extract dimensions and caption
+        width = primary_image.get("width")
+        height = primary_image.get("height")
+        caption_dict = primary_image.get("caption", {})
+        caption = caption_dict.get("plainText") if caption_dict else None
+
+        images.append(
+            {
+                "imdb_person_id": name_id.strip().lower() if name_id else "",
+                "source": "imdb_graphql",
+                "url": url.strip(),
+                "width": width,
+                "height": height,
+                "caption": caption.strip() if caption else None,
+            }
+        )
+
+    return images
+
+
 def normalize_graphql_credits_to_cast_rows(
     graphql_edges: list[dict[str, Any]],
 ) -> list[CastRow]:
@@ -518,6 +585,9 @@ def normalize_graphql_credits_to_cast_rows(
         >>> rows = normalize_graphql_credits_to_cast_rows(edges)
         >>> len(rows)
         945  # All credits - use select_show_cast_from_graphql() to filter
+
+    Note:
+        Use extract_person_images_from_graphql() to get associated image data.
     """
     rows: list[CastRow] = []
 
@@ -573,7 +643,7 @@ def fetch_fullcredits_cast_with_fallback(
     *,
     extra_headers: Mapping[str, str] | None = None,
     verbose: bool = False,
-) -> tuple[list[CastRow], str]:
+) -> tuple[list[CastRow], str, list[dict[str, Any]]]:
     """
     Fetch full credits cast with 3-tier fallback: HTML → GraphQL → JSON API.
 
@@ -590,22 +660,25 @@ def fetch_fullcredits_cast_with_fallback(
         verbose: If True, log fallback events and save debug HTML
 
     Returns:
-        Tuple of (cast_rows, source_type) where:
+        Tuple of (cast_rows, source_type, person_images) where:
         - cast_rows: List of CastRow instances
         - source_type: One of:
-            - "fullcredits_html"
-            - "credits_graphql_paginated"
-            - "credits_graphql_paginated_partial"
-            - "credits_api_top_billed"
+            - "fullcredits_html" (no images extracted)
+            - "credits_graphql_paginated" (with images)
+            - "credits_graphql_paginated_partial" (with images)
+            - "credits_api_top_billed" (no images)
+        - person_images: List of image dicts (only populated for GraphQL tier)
 
     Raises:
         ImdbFullCreditsError: If all tiers fail
         ValueError: If series_id is invalid
 
     Example:
-        >>> rows, source = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=True)
+        >>> rows, source, images = fetch_fullcredits_cast_with_fallback("tt1720601", verbose=True)
         >>> source
         'fullcredits_html'  # or 'credits_graphql_paginated' if HTML was blocked
+        >>> len(images)
+        0  # Empty for HTML tier, populated for GraphQL tier
     """
     # Feature flags
     enable_graphql = os.getenv("IMDB_GRAPHQL_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
@@ -655,8 +728,8 @@ def _try_html_fetch(
     series_id: str,
     extra_headers: Mapping[str, str] | None,
     verbose: bool,
-) -> tuple[list[CastRow], str]:
-    """Try HTML scraping tier."""
+) -> tuple[list[CastRow], str, list[dict[str, Any]]]:
+    """Try HTML scraping tier (no images extracted from HTML)."""
     client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
     html = client.fetch_fullcredits_page(series_id, verbose=verbose)
     cast_rows = parse_fullcredits_cast_html(html, series_id=series_id)
@@ -664,15 +737,16 @@ def _try_html_fetch(
     if verbose:
         print(f"✅ HTML fetch succeeded: {len(cast_rows)} credits")
 
-    return cast_rows, "fullcredits_html"
+    # HTML tier does not extract images
+    return cast_rows, "fullcredits_html", []
 
 
 def _try_graphql_fetch(
     series_id: str,
     extra_headers: Mapping[str, str] | None,
     verbose: bool,
-) -> tuple[list[CastRow], str]:
-    """Try GraphQL persisted query tier with cast selection filtering."""
+) -> tuple[list[CastRow], str, list[dict[str, Any]]]:
+    """Try GraphQL persisted query tier with cast selection filtering and image extraction."""
     # Import here to avoid circular dependency
     from trr_backend.integrations.imdb.graphql_operations import (
         fetch_title_credits_paginated_v2,
@@ -694,23 +768,26 @@ def _try_graphql_fetch(
     # Normalize to CastRow format
     cast_rows = normalize_graphql_credits_to_cast_rows(filtered_edges)
 
+    # Extract person images from filtered edges
+    person_images = extract_person_images_from_graphql(filtered_edges)
+
     # Determine source_type based on partial flag
     source_type = "credits_graphql_paginated_partial" if is_partial else "credits_graphql_paginated"
 
     if verbose:
         print(
             f"✅ GraphQL fetch succeeded: {len(all_edges)} total credits → "
-            f"{len(cast_rows)} main cast (partial={is_partial})"
+            f"{len(cast_rows)} main cast (partial={is_partial}), {len(person_images)} images extracted"
         )
 
-    return cast_rows, source_type
+    return cast_rows, source_type, person_images
 
 
 def _try_json_api_fetch(
     series_id: str,
     verbose: bool,
-) -> tuple[list[CastRow], str]:
-    """Try JSON API tier (top-billed only - last resort)."""
+) -> tuple[list[CastRow], str, list[dict[str, Any]]]:
+    """Try JSON API tier (top-billed only - last resort, no images)."""
     # Import here to avoid circular dependency
     from trr_backend.integrations.imdb.credits_client import fetch_title_credits
 
@@ -720,4 +797,5 @@ def _try_json_api_fetch(
     if verbose:
         print(f"✅ JSON API fallback succeeded: {len(cast_rows)} credits (PARTIAL - top-billed cast only)")
 
-    return cast_rows, "credits_api_top_billed"
+    # JSON API tier does not extract images
+    return cast_rows, "credits_api_top_billed", []

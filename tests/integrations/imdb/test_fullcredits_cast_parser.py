@@ -137,7 +137,7 @@ def test_fetch_with_fallback_returns_html_source_on_success() -> None:
         mock_client.fetch_fullcredits_page.return_value = html
         mock_client_class.return_value = mock_client
 
-        rows, source_type = fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
+        rows, source_type, person_images = fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
 
         assert source_type == "fullcredits_html"
         assert len(rows) == 3
@@ -148,7 +148,9 @@ def test_fetch_with_fallback_returns_html_source_on_success() -> None:
 def test_fetch_with_fallback_triggers_on_blocked_status(status_code: int) -> None:
     """Test that 202/403/429 status codes trigger fallback chain."""
     with patch.dict("os.environ", {"IMDB_GRAPHQL_ENABLED": "1"}):
-        with patch("trr_backend.integrations.imdb.fullcredits_cast_parser.HttpImdbFullCreditsClient") as mock_client_class:
+        with patch(
+            "trr_backend.integrations.imdb.fullcredits_cast_parser.HttpImdbFullCreditsClient"
+        ) as mock_client_class:
             # Mock HTML fetch to raise blocked error
             mock_client = MagicMock()
             mock_client.fetch_fullcredits_page.side_effect = ImdbFullCreditsError(
@@ -176,7 +178,7 @@ def test_fetch_with_fallback_triggers_on_blocked_status(status_code: int) -> Non
                     ]
                     mock_api.return_value = mock_credits
 
-                    rows, source_type = fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
+                    rows, source_type, person_images = fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
 
                     # Should use JSON API fallback (last tier)
                     assert source_type == "credits_api_top_billed"

@@ -17,9 +17,13 @@ def test_select_show_cast_filters_by_photo_and_episode_count() -> None:
         {"node": {"name": {"id": "nm0001", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 10}}},
         {"node": {"name": {"id": "nm0002"}, "episodeCredits": {"total": 8}}},  # No photo but high episodes
         # Low episode count (<= 6) - only included if has photo
-        {"node": {"name": {"id": "nm0003", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 5}}},  # Has photo
+        {
+            "node": {"name": {"id": "nm0003", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 5}}
+        },  # Has photo
         {"node": {"name": {"id": "nm0004"}, "episodeCredits": {"total": 4}}},  # No photo - EXCLUDED
-        {"node": {"name": {"id": "nm0005", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 2}}},  # Has photo
+        {
+            "node": {"name": {"id": "nm0005", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 2}}
+        },  # Has photo
         {"node": {"name": {"id": "nm0006"}, "episodeCredits": {"total": 1}}},  # No photo - EXCLUDED
         {"node": {"name": {"id": "nm0007"}, "episodeCredits": {"total": None}}},  # No data - EXCLUDED
     ]
@@ -54,8 +58,12 @@ def test_select_show_cast_high_episode_count_no_photo_included() -> None:
 def test_select_show_cast_low_episode_count_with_photo_included() -> None:
     """Test cast with low episode count are included if they have primaryImage."""
     credits = [
-        {"node": {"name": {"id": "nm0001", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 3}}},  # Has photo
-        {"node": {"name": {"id": "nm0002", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 1}}},  # Has photo
+        {
+            "node": {"name": {"id": "nm0001", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 3}}
+        },  # Has photo
+        {
+            "node": {"name": {"id": "nm0002", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 1}}
+        },  # Has photo
         {"node": {"name": {"id": "nm0003"}, "episodeCredits": {"total": 3}}},  # No photo - EXCLUDED
         {"node": {"name": {"id": "nm0004"}, "episodeCredits": {"total": 1}}},  # No photo - EXCLUDED
     ]
@@ -72,7 +80,9 @@ def test_select_show_cast_sorts_by_episode_count_desc() -> None:
     credits = [
         {"node": {"name": {"id": "nm0001", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 5}}},
         {"node": {"name": {"id": "nm0002"}, "episodeCredits": {"total": 15}}},  # Should be first (high episodes)
-        {"node": {"name": {"id": "nm0003", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 10}}},  # Should be second
+        {
+            "node": {"name": {"id": "nm0003", "primaryImage": {"url": "..."}}, "episodeCredits": {"total": 10}}
+        },  # Should be second
     ]
 
     filtered, _ = select_show_cast_from_graphql(credits, min_episodes_without_photo=6, max_members=500)
@@ -85,10 +95,7 @@ def test_select_show_cast_sorts_by_episode_count_desc() -> None:
 def test_select_show_cast_caps_at_max_members() -> None:
     """Test cast selection caps results at max_members limit."""
     # Create 150 credits all with high episode counts (all qualify)
-    credits = [
-        {"node": {"name": {"id": f"nm{i:04d}"}, "episodeCredits": {"total": 100 - i}}}
-        for i in range(150)
-    ]
+    credits = [{"node": {"name": {"id": f"nm{i:04d}"}, "episodeCredits": {"total": 100 - i}}} for i in range(150)]
 
     # All 150 have episode counts from 100 down to -49
     # Those with > 6 episodes qualify: 100 down to 7 = 94 items
@@ -106,10 +113,7 @@ def test_select_show_cast_caps_at_max_members() -> None:
 
 def test_select_show_cast_not_partial_when_under_cap() -> None:
     """Test is_partial=False when result count is under max_members."""
-    credits = [
-        {"node": {"name": {"id": f"nm{i:04d}"}, "episodeCredits": {"total": 10}}}
-        for i in range(50)
-    ]
+    credits = [{"node": {"name": {"id": f"nm{i:04d}"}, "episodeCredits": {"total": 10}}} for i in range(50)]
 
     filtered, is_partial = select_show_cast_from_graphql(credits, min_episodes_without_photo=6, max_members=500)
 
