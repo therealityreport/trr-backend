@@ -123,7 +123,10 @@ def _pick_most_recent_episode(episodes: list[dict[str, Any]]) -> dict[str, Any] 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
-    db = load_env_and_db()
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
+    db = load_env_and_db(skip_db=args.skip_db)
 
     common_args = _build_common_args(args)
 

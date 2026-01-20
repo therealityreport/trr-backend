@@ -50,6 +50,9 @@ def _build_forward_args(args: argparse.Namespace) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
 
     from scripts import (
         sync_episode_appearances,
