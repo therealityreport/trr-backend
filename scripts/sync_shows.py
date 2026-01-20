@@ -88,6 +88,9 @@ def _build_show_records(show_rows: list[dict[str, object]]) -> list[ShowRecord]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
     db = load_env_and_db()
 
     show_rows = fetch_show_rows(db, args)

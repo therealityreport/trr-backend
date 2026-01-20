@@ -12,6 +12,7 @@ from typing import Annotated, Any
 from fastapi import Depends, HTTPException
 
 from supabase import Client, create_client
+from trr_backend.db.supabase import create_supabase_admin_client
 
 # Load environment variables if running standalone
 try:
@@ -60,7 +61,7 @@ def get_supabase_admin_client() -> Client:
     Returns a Supabase client using the service role key (bypasses RLS).
     Use only for admin operations like updating aggregates.
     """
-    return create_client(get_supabase_url(), get_supabase_service_key())
+    return create_supabase_admin_client()
 
 
 # Type aliases for dependency injection

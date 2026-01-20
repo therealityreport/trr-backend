@@ -5,10 +5,36 @@ from datetime import UTC, datetime
 from typing import Any
 
 from supabase import Client
+from trr_backend.db.supabase import is_timeout_error
 
 
 class SyncStateRepositoryError(RuntimeError):
     pass
+
+
+def _timeout_help_message(exc: Exception, url: str) -> str:
+    """Generate helpful error message for timeout failures."""
+    import os
+
+    timeout_sec = os.getenv("SUPABASE_POSTGREST_TIMEOUT_SEC", "15")
+
+    return (
+        f"Supabase connection timeout during core.sync_state preflight check.\n"
+        f"  URL: {url}\n"
+        f"  Timeout: {timeout_sec}s (SUPABASE_POSTGREST_TIMEOUT_SEC)\n"
+        f"  Error: {exc}\n\n"
+        f"Possible causes:\n"
+        f"  1. Network connectivity issues (check internet connection)\n"
+        f"  2. Supabase project is paused or unreachable\n"
+        f"  3. Firewall blocking connections\n"
+        f"  4. PostgREST service is overloaded or hung\n\n"
+        f"Troubleshooting:\n"
+        f"  - Verify Supabase project status in dashboard\n"
+        f"  - Check SUPABASE_URL in .env: {url}\n"
+        f"  - Increase timeout: SUPABASE_POSTGREST_TIMEOUT_SEC=30\n"
+        f"  - Test connection: curl -I {url}\n"
+        f"  - Use --skip-db flag for local debugging without database"
+    )
 
 
 def assert_core_sync_state_table_exists(db: Client) -> None:
@@ -52,10 +78,20 @@ def assert_core_sync_state_table_exists(db: Client) -> None:
     try:
         response = db.schema("core").table("sync_state").select("show_id").limit(1).execute()
     except Exception as exc:
+        # Check for timeout first (most actionable)
+        if is_timeout_error(exc):
+            import os
+
+            url = os.getenv("SUPABASE_URL", "unknown")
+            raise SyncStateRepositoryError(_timeout_help_message(exc, url)) from exc
+
+        # Check for schema/relation errors
         if is_schema_not_exposed(str(exc)):
             raise SyncStateRepositoryError(schema_help_message()) from exc
         if is_missing_relation(str(exc)):
             raise SyncStateRepositoryError(help_message()) from exc
+
+        # Generic error with hint
         raise SyncStateRepositoryError(f"Supabase error during core.sync_state preflight: {exc}") from exc
 
     error = getattr(response, "error", None)

@@ -72,6 +72,16 @@ supabase db reset                     # Reset + migrations
 PYTHONPATH=. python scripts/sync_shows_all.py --all --verbose
 ```
 
+### PostgREST Schema Cache (After Adding/Modifying Functions)
+```bash
+./scripts/reload_postgrest_schema.sh  # Reload PostgREST schema cache
+# Or manually: psql "$SUPABASE_DB_URL" -c "NOTIFY pgrst, 'reload schema';"
+```
+
+**When to reload**: After applying migrations that add/modify database functions, PostgREST needs to reload its schema cache or it will return PGRST202 errors ("function not found").
+
+**Hosted Supabase**: Verify `core` schema is exposed in Dashboard → Settings → API → Exposed schemas
+
 ## Slash Commands (Project-Specific)
 - `/trr-spec` - Write specification document
 - `/trr-plan` - Design implementation plan

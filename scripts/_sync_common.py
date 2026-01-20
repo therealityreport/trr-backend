@@ -64,10 +64,29 @@ def add_show_filter_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Reprocess shows whose last_success_at is before this ISO date/time.",
     )
+    parser.add_argument(
+        "--skip-db",
+        action="store_true",
+        help="Skip database connection and sync_state checks (debugging only; many scripts require DB).",
+    )
 
 
-def load_env_and_db() -> Client:
+def load_env_and_db(*, skip_db: bool = False) -> Client | None:
+    """
+    Load environment and create Supabase client.
+
+    Args:
+        skip_db: If True, return None (no database connection)
+
+    Returns:
+        Supabase Client instance, or None if skip_db=True
+    """
     load_env()
+
+    if skip_db:
+        print("WARN: --skip-db enabled, no database connection will be created")
+        return None
+
     db = create_supabase_admin_client()
     assert_core_shows_table_exists(db)
     return db
@@ -300,7 +319,7 @@ def should_sync_show(
 
 
 def filter_show_rows_for_sync(
-    db: Client,
+    db: Client | None,
     show_rows: Iterable[dict[str, Any]],
     *,
     table_name: str,
@@ -311,7 +330,32 @@ def filter_show_rows_for_sync(
     check_total_seasons: bool = False,
     verbose: bool = False,
 ) -> SyncFilterResult:
+    """
+    Filter show rows based on sync state and other criteria.
+
+    Args:
+        db: Supabase client (None if --skip-db is enabled)
+        show_rows: Show rows to filter
+        table_name: Sync state table name
+        incremental: Skip up-to-date shows
+        resume: Retry failed/in_progress shows
+        force: Process all shows
+        since: Reprocess shows updated before this date
+        check_total_seasons: Verify season counts
+        verbose: Enable verbose logging
+
+    Returns:
+        Filtered shows with reasons
+    """
     shows = list(show_rows)
+
+    # If db is None (--skip-db mode), return all shows without filtering
+    if db is None:
+        if verbose:
+            print(f"SYNC filter {table_name}: skip-db mode, selecting all {len(shows)} shows")
+        return SyncFilterResult(selected=shows, skipped=[], reasons={"skip-db": len(shows)})
+
+    # Normal database mode
     show_ids = [str(show.get("id") or "").strip() for show in shows if show.get("id")]
     reasons: dict[str, int] = {}
     skipped: list[dict[str, Any]] = []
@@ -359,7 +403,32 @@ def should_process_all(args: argparse.Namespace) -> bool:
     return bool(args.all) or not (args.show_id or args.tmdb_show_id or args.imdb_series_id)
 
 
-def fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any]]:
+def fetch_show_rows(db: Client | None, args: argparse.Namespace) -> list[dict[str, Any]]:
+    """
+    Fetch show rows from database or create synthetic rows for --skip-db mode.
+
+    Args:
+        db: Supabase client (None if --skip-db is enabled)
+        args: Parsed command-line arguments
+
+    Returns:
+        List of show rows
+
+    Raises:
+        RuntimeError: If --skip-db is used with --all or no specific IDs
+    """
+    # Handle --skip-db mode
+    if db is None:
+        imdb_ids = _coerce_str_list(args.imdb_series_id or [])
+        if not imdb_ids:
+            raise RuntimeError(
+                "--skip-db only supported with --imdb-id (or --imdb-series-id). "
+                "Cannot use --skip-db with --all or without specific IDs."
+            )
+        # Return synthetic show rows with just imdb_id
+        return [{"imdb_id": imdb_id, "name": f"[Debug: {imdb_id}]"} for imdb_id in imdb_ids]
+
+    # Normal database mode
     show_ids = _coerce_str_list(args.show_id or [])
     tmdb_ids = _coerce_int_list(args.tmdb_show_id or [])
     imdb_ids = _coerce_str_list(args.imdb_series_id or [])

@@ -149,6 +149,9 @@ def _mirror_show_images(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
     db = load_env_and_db()
     assert_core_show_images_table_exists(db)
 
