@@ -1,0 +1,153 @@
+{
+  "schema": "core",
+  "table": "person_images",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "width",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "height",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "caption",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "is_primary",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "true",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "person_images_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "person_id",
+      "source",
+      "url"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "person_images_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX person_images_person_id_idx ON core.person_images USING btree (person_id)"
+    },
+    {
+      "name": "person_images_person_id_is_primary_idx",
+      "columns": [
+        "person_id",
+        "is_primary) WHERE (is_primary = true"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX person_images_person_id_is_primary_idx ON core.person_images USING btree (person_id, is_primary) WHERE (is_primary = true)"
+    },
+    {
+      "name": "person_images_person_source_url_unique",
+      "columns": [
+        "person_id",
+        "source",
+        "url"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX person_images_person_source_url_unique ON core.person_images USING btree (person_id, source, url)"
+    },
+    {
+      "name": "person_images_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX person_images_pkey ON core.person_images USING btree (id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "source": "example",
+    "url": "example",
+    "width": 0,
+    "height": 0,
+    "caption": "example",
+    "is_primary": false,
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}
