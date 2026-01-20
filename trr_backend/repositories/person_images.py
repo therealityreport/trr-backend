@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json as json_lib
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import UUID
 
-if TYPE_CHECKING:
-    from psycopg2.extensions import connection
+from supabase import Client
+from trr_backend.db.supabase import call_rpc_with_cache_reload_hint
 
 
 def upsert_person_images(
-    conn: connection,  # type: ignore[valid-type]
+    db: Client,
     image_rows: list[dict[str, Any]],
     *,
     verbose: bool = False,
@@ -23,7 +22,7 @@ def upsert_person_images(
     upserts images into core.person_images using the RPC function.
 
     Args:
-        conn: PostgreSQL connection
+        db: Supabase client
         image_rows: List of image dicts with keys:
             - imdb_person_id (str): IMDb name ID (e.g., "nm0724202")
             - source (str): Image source (e.g., "imdb_graphql")
@@ -67,23 +66,24 @@ def upsert_person_images(
         print(f"  Resolving {len(unique_imdb_ids)} unique IMDb person IDs to person_ids...")
 
     # Query core.people to resolve IMDb IDs to UUIDs
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, external_ids->>'imdb' as imdb_id
-            FROM core.people
-            WHERE external_ids->>'imdb' = ANY(%s)
-            """,
-            (unique_imdb_ids,),
-        )
-        rows = cur.fetchall()
+    response = (
+        db.schema("core")
+        .table("people")
+        .select("id,external_ids")
+        .in_("external_ids->>imdb", unique_imdb_ids)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error resolving person images: {response.error}")
+    rows = response.data or []
 
     # Build mapping
     imdb_to_uuid: dict[str, UUID] = {}
-    for row in rows:
-        person_id, imdb_id = row
-        if imdb_id:
-            imdb_to_uuid[imdb_id.lower()] = person_id
+    for row in rows if isinstance(rows, list) else []:
+        person_id = row.get("id")
+        imdb_id = str((row.get("external_ids") or {}).get("imdb") or "").strip()
+        if person_id and imdb_id:
+            imdb_to_uuid[imdb_id.lower()] = UUID(str(person_id))
 
     if verbose:
         print(f"  Resolved {len(imdb_to_uuid)} / {len(unique_imdb_ids)} IMDb IDs to person_ids")
@@ -125,24 +125,15 @@ def upsert_person_images(
     if verbose:
         print(f"  Upserting {len(resolved_images)} person images...")
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT * FROM core.upsert_person_images(%s::jsonb)
-            """,
-            (json_lib.dumps(resolved_images),),
-        )
-        result = cur.fetchall()
+    result = call_rpc_with_cache_reload_hint(
+        db,
+        schema="core",
+        function_name="upsert_person_images",
+        params={"rows": resolved_images},
+    )
 
     if verbose:
-        print(f"  ✓ Upserted {len(result)} person images")
+        print(f"  ✓ Upserted {len(result or [])} person images")
 
     # Convert to list of dicts
-    if not result:
-        return []
-
-    # Get column names from cursor description
-    columns = [desc[0] for desc in cur.description]
-    upserted_rows = [dict(zip(columns, row, strict=False)) for row in result]
-
-    return upserted_rows
+    return result or []
