@@ -12,6 +12,10 @@ supabase start --exclude gotrue,realtime,storage-api,imgproxy,kong,mailpit,postg
 # Reset local DB to migrations + seed
 supabase db reset --yes
 
+# Note: local auth/storage uses ES256 signing keys in `supabase/signing_key.json` (local-only).
+# If `supabase db reset` returns a 502 right after restart, it is a health-check race; run
+# `supabase start` once and retry if needed.
+
 # Stop local Supabase
 supabase stop --no-backup
 ```

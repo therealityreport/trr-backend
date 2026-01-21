@@ -51,6 +51,7 @@ class ShowEnrichmentPatch:
     streaming_providers: list[str] | None = None
     tmdb_network_ids: list[int] | None = None
     tmdb_production_company_ids: list[int] | None = None
+    alternative_names: list[str] | None = None
     show_images_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -256,6 +257,26 @@ def _extract_tmdb_genres(details: Mapping[str, Any]) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _extract_tmdb_alternative_names(details: Mapping[str, Any]) -> list[str]:
+    """Extract alternative title names from TMDb TV details."""
+    alt_titles = details.get("alternative_titles")
+    if not isinstance(alt_titles, dict):
+        return []
+
+    results = alt_titles.get("results")
+    if not isinstance(results, list):
+        return []
+
+    names: list[str] = []
+    for item in results:
+        if isinstance(item, dict):
+            title = item.get("title")
+            if isinstance(title, str) and title.strip():
+                names.append(title.strip())
+
+    return sorted(set(names)) if names else []
+
+
 def _extract_tmdb_watch_providers(payload: Mapping[str, Any], *, region: str) -> list[dict[str, Any]]:
     results = payload.get("results")
     if not isinstance(results, dict):
@@ -405,6 +426,7 @@ def _enrich_one_show(
     streaming_providers: list[str] = []
     tmdb_network_ids: list[int] = []
     tmdb_production_company_ids: list[int] = []
+    alternative_names: list[str] = []
     show_images_rows: list[dict[str, Any]] = []
 
     imdb_id = _as_str(show.imdb_id)
@@ -437,7 +459,12 @@ def _enrich_one_show(
         with cache_lock:
             details = tmdb_details_cache.get(tmdb_id)
         if details is None:
-            details = fetch_tv_details(tmdb_id, api_key=tmdb_api_key, session=session)
+            details = fetch_tv_details(
+                tmdb_id,
+                api_key=tmdb_api_key,
+                session=session,
+                append_to_response=["alternative_titles"],
+            )
             with cache_lock:
                 tmdb_details_cache[tmdb_id] = details
         tmdb_sources.append("details")
@@ -468,6 +495,11 @@ def _enrich_one_show(
         production_company_ids = _extract_tmdb_production_company_ids(details)
         if production_company_ids:
             tmdb_production_company_ids.extend(production_company_ids)
+
+        # Extract alternative titles/names
+        tmdb_alt_names = _extract_tmdb_alternative_names(details)
+        if tmdb_alt_names:
+            alternative_names.extend(tmdb_alt_names)
 
         if force_refresh or show.show_total_seasons is None:
             value = _as_int(details.get("number_of_seasons"))
@@ -645,6 +677,7 @@ def _enrich_one_show(
     tags = sorted(set(tags)) if tags else None
     networks = sorted(set(networks)) if networks else None
     streaming_providers = sorted(set(streaming_providers)) if streaming_providers else None
+    alternative_names = sorted(set(alternative_names)) if alternative_names else None
 
     if not (
         show_update
@@ -655,6 +688,7 @@ def _enrich_one_show(
         or streaming_providers
         or tmdb_network_ids
         or tmdb_production_company_ids
+        or alternative_names
         or show_images_rows
     ):
         return None
@@ -669,6 +703,7 @@ def _enrich_one_show(
         streaming_providers=streaming_providers,
         tmdb_network_ids=sorted(set(tmdb_network_ids)) if tmdb_network_ids else None,
         tmdb_production_company_ids=sorted(set(tmdb_production_company_ids)) if tmdb_production_company_ids else None,
+        alternative_names=alternative_names,
         show_images_rows=show_images_rows,
     )
 

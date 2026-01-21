@@ -1,0 +1,21 @@
+{
+  "id": 12345,
+  "results": [
+    {
+      "iso_3166_1": "US",
+      "title": "RuPaul's Drag Race"
+    },
+    {
+      "iso_3166_1": "GB",
+      "title": "RuPaul Drag Race"
+    },
+    {
+      "iso_3166_1": "US",
+      "title": " RuPaul's Drag Race "
+    },
+    {
+      "iso_3166_1": "FR",
+      "title": ""
+    }
+  ]
+}

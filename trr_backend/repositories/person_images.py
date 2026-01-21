@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+import os
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from supabase import Client
 from trr_backend.db.supabase import call_rpc_with_cache_reload_hint
+from trr_backend.repositories.media_assets import upsert_media_with_links
+
+if TYPE_CHECKING:
+    from supabase import Client
+else:
+    Client = Any
 
 
 def upsert_person_images(
@@ -134,6 +141,13 @@ def upsert_person_images(
 
     if verbose:
         print(f"  ✓ Upserted {len(result or [])} person images")
+
+    dual_write_enabled = os.getenv("ENABLE_MEDIA_DUAL_WRITE", "0").lower() in ("1", "true", "yes")
+    if dual_write_enabled:
+        try:
+            upsert_media_with_links(db, resolved_images, entity_type="person")
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Media dual-write failed for person_images (non-blocking): %s", exc)
 
     # Convert to list of dicts
     return result or []
