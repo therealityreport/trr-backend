@@ -220,15 +220,34 @@ def insert_credits_ignore_conflicts(
     results: list[dict[str, Any]] = []
     for i in range(0, len(payload), max(1, int(chunk_size))):
         chunk = payload[i : i + max(1, int(chunk_size))]
-        # Use ignore_duplicates=True for ON CONFLICT DO NOTHING behavior.
-        # PostgREST doesn't support expression-based on_conflict columns like COALESCE(role, '').
-        # Postgres will automatically use the unique index (credits_unique_idx) for conflict detection.
-        response = db.schema("core").table("credits").upsert(chunk, ignore_duplicates=True).execute()
-        if hasattr(response, "error") and response.error:
-            raise CreditsRepositoryError(f"Supabase error inserting credits rows: {response.error}")
-        data = response.data or []
-        if isinstance(data, list):
-            results.extend(data)
+        try:
+            # Use ignore_duplicates=True for ON CONFLICT DO NOTHING behavior.
+            # Note: PostgREST's ignore_duplicates may not work perfectly with expression-based
+            # unique indexes (COALESCE(role, '')), so we also catch duplicate key errors.
+            response = db.schema("core").table("credits").upsert(chunk, ignore_duplicates=True).execute()
+            if hasattr(response, "error") and response.error:
+                raise CreditsRepositoryError(f"Supabase error inserting credits rows: {response.error}")
+            data = response.data or []
+            if isinstance(data, list):
+                results.extend(data)
+        except Exception as e:
+            # Handle duplicate key violation (23505) gracefully - this can happen with
+            # expression-based unique indexes where PostgREST's ignore_duplicates fails
+            error_str = str(e)
+            if "23505" in error_str or "duplicate key" in error_str.lower():
+                # Fall back to inserting one row at a time for this chunk
+                for row in chunk:
+                    try:
+                        response = db.schema("core").table("credits").upsert([row], ignore_duplicates=True).execute()
+                        if response.data:
+                            results.extend(response.data)
+                    except Exception as row_e:
+                        row_error_str = str(row_e)
+                        if "23505" not in row_error_str and "duplicate key" not in row_error_str.lower():
+                            raise
+                        # Silently skip duplicates
+            else:
+                raise
     return results
 
 

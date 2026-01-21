@@ -53,16 +53,26 @@ CREATE INDEX IF NOT EXISTS credits_source_type_idx
   ON core.credits (source_type);
 
 -- Source type constraint (matches show_cast.source_type values)
-ALTER TABLE core.credits
-ADD CONSTRAINT credits_source_type_check
-CHECK (source_type IN (
-    'fullcredits_html',
-    'credits_graphql_paginated',
-    'credits_graphql_paginated_partial',
-    'credits_api_top_billed',
-    'credits_api_fallback',
-    'manual'
-));
+-- Use DO block for idempotency - ADD CONSTRAINT IF NOT EXISTS is not available
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'credits_source_type_check'
+        AND conrelid = 'core.credits'::regclass
+    ) THEN
+        ALTER TABLE core.credits
+        ADD CONSTRAINT credits_source_type_check
+        CHECK (source_type IN (
+            'fullcredits_html',
+            'credits_graphql_paginated',
+            'credits_graphql_paginated_partial',
+            'credits_api_top_billed',
+            'credits_api_fallback',
+            'manual'
+        ));
+    END IF;
+END $$;
 
 -- updated_at trigger
 DROP TRIGGER IF EXISTS core_credits_set_updated_at ON core.credits;
