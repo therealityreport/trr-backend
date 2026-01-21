@@ -39,10 +39,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
-    db = load_env_and_db()
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
+    db = load_env_and_db(skip_db=args.skip_db)
     assert_core_people_table_exists(db)
     assert_core_show_cast_table_exists(db)
-    if not args.dry_run:
+    if not args.dry_run and not args.skip_db:
         assert_core_sync_state_table_exists(db)
 
     show_rows = fetch_show_rows(db, args)
@@ -137,6 +140,13 @@ def main(argv: list[str] | None = None) -> int:
                         imdb_value = str((row.get("external_ids") or {}).get("imdb") or "").strip().lower()
                         if imdb_value:
                             people_cache[imdb_value] = f"dry-run-{imdb_value}"
+
+            # Persist person images from GraphQL tier after ensuring people exist
+            if person_images and not args.dry_run:
+                if args.verbose:
+                    print(f"  Upserting {len(person_images)} person images...")
+                upserted_images = upsert_person_images(db, person_images, verbose=bool(args.verbose))
+                person_images_upserted += len(upserted_images)
 
             show_cast_rows: list[dict[str, object]] = []
             for row in self_rows:

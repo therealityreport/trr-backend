@@ -299,6 +299,9 @@ def _mirror_provider_logos(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
     load_env()
     _require_supabase_db_url()
 
@@ -306,8 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     if not api_key:
         raise RuntimeError("TMDB_API_KEY is required for TMDb watch provider sync.")
 
-    db = load_env_and_db()
-    if not args.dry_run:
+    db = load_env_and_db(skip_db=args.skip_db)
+    if not args.dry_run and not args.skip_db:
         assert_core_sync_state_table_exists(db)
 
     show_rows = _fetch_show_rows(db, args)

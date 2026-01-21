@@ -250,13 +250,15 @@ def _fetch_episodic_credits(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
-    db = load_env_and_db()
-
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
+    db = load_env_and_db(skip_db=args.skip_db)
     assert_core_shows_table_exists(db)
     assert_core_people_table_exists(db)
     assert_core_show_cast_table_exists(db)
     assert_core_episode_appearances_table_exists(db)
-    if not args.dry_run:
+    if not args.dry_run and not args.skip_db:
         assert_core_sync_state_table_exists(db)
 
     show_rows = fetch_show_rows(db, args)

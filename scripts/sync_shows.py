@@ -10,6 +10,7 @@ from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upse
 from trr_backend.models.shows import ShowRecord
 from trr_backend.repositories.show_images import upsert_show_images
 from trr_backend.repositories.shows import update_show
+from trr_backend.utils.array_merge import merge_int_arrays, merge_str_arrays
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -39,32 +40,6 @@ def _extract_tmdb_id(row: dict[str, object]) -> int | None:
     return None
 
 
-def _merge_str_arrays(existing: object, incoming: list[str] | None) -> list[str] | None:
-    if not incoming:
-        return None
-    existing_values = [
-        str(v).strip()
-        for v in (existing if isinstance(existing, list) else [])
-        if isinstance(v, str) and str(v).strip()
-    ]
-    incoming_values = [str(v).strip() for v in incoming if isinstance(v, str) and str(v).strip()]
-    merged = sorted(set(existing_values) | set(incoming_values))
-    if not merged or merged == sorted(existing_values):
-        return None
-    return merged
-
-
-def _merge_int_arrays(existing: object, incoming: list[int] | None) -> list[int] | None:
-    if not incoming:
-        return None
-    existing_values = [v for v in (existing if isinstance(existing, list) else []) if isinstance(v, int)]
-    incoming_values = [v for v in incoming if isinstance(v, int)]
-    merged = sorted(set(existing_values) | set(incoming_values))
-    if not merged or merged == sorted(existing_values):
-        return None
-    return merged
-
-
 def _build_show_records(show_rows: list[dict[str, object]]) -> list[ShowRecord]:
     records: list[ShowRecord] = []
     for row in show_rows:
@@ -88,6 +63,9 @@ def _build_show_records(show_rows: list[dict[str, object]]) -> list[ShowRecord]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
     db = load_env_and_db()
 
     show_rows = fetch_show_rows(db, args)
@@ -124,35 +102,39 @@ def main(argv: list[str] | None = None) -> int:
             if row.get(key) != value:
                 update_patch[key] = value
 
-        merged_genres = _merge_str_arrays(row.get("genres"), patch.genres)
+        merged_genres = merge_str_arrays(row.get("genres"), patch.genres)
         if merged_genres is not None:
             update_patch["genres"] = merged_genres
 
-        merged_keywords = _merge_str_arrays(row.get("keywords"), patch.keywords)
+        merged_keywords = merge_str_arrays(row.get("keywords"), patch.keywords)
         if merged_keywords is not None:
             update_patch["keywords"] = merged_keywords
 
-        merged_tags = _merge_str_arrays(row.get("tags"), patch.tags)
+        merged_tags = merge_str_arrays(row.get("tags"), patch.tags)
         if merged_tags is not None:
             update_patch["tags"] = merged_tags
 
-        merged_networks = _merge_str_arrays(row.get("networks"), patch.networks)
+        merged_networks = merge_str_arrays(row.get("networks"), patch.networks)
         if merged_networks is not None:
             update_patch["networks"] = merged_networks
 
-        merged_streaming = _merge_str_arrays(row.get("streaming_providers"), patch.streaming_providers)
+        merged_streaming = merge_str_arrays(row.get("streaming_providers"), patch.streaming_providers)
         if merged_streaming is not None:
             update_patch["streaming_providers"] = merged_streaming
 
-        merged_tmdb_network_ids = _merge_int_arrays(row.get("tmdb_network_ids"), patch.tmdb_network_ids)
+        merged_tmdb_network_ids = merge_int_arrays(row.get("tmdb_network_ids"), patch.tmdb_network_ids)
         if merged_tmdb_network_ids is not None:
             update_patch["tmdb_network_ids"] = merged_tmdb_network_ids
 
-        merged_tmdb_company_ids = _merge_int_arrays(
+        merged_tmdb_company_ids = merge_int_arrays(
             row.get("tmdb_production_company_ids"), patch.tmdb_production_company_ids
         )
         if merged_tmdb_company_ids is not None:
             update_patch["tmdb_production_company_ids"] = merged_tmdb_company_ids
+
+        merged_alternative_names = merge_str_arrays(row.get("alternative_names"), patch.alternative_names)
+        if merged_alternative_names is not None:
+            update_patch["alternative_names"] = merged_alternative_names
 
         if patch.show_images_rows:
             try:

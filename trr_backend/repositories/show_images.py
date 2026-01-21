@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
+import os
 import time
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from supabase import Client
+if TYPE_CHECKING:
+    from supabase import Client
+else:
+    Client = Any
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
+from trr_backend.repositories.media_assets import upsert_media_with_links
 
 
 class ShowImageRepositoryError(RuntimeError):
@@ -119,15 +125,14 @@ def assert_core_show_images_table_exists(db: Client) -> None:
     raise ShowImageRepositoryError(f"Supabase error during core.show_images preflight: {combined}")
 
 
-def upsert_show_images(
+def _upsert_show_images_table(
     db: Client,
-    rows: Iterable[Mapping[str, Any]],
+    rows: list[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    payload = [dict(r) for r in rows]
-    if not payload:
+    if not rows:
         return []
-    tmdb_rows = [row for row in payload if row.get("source") == "tmdb" and row.get("tmdb_id") is not None]
-    other_rows = [row for row in payload if row not in tmdb_rows]
+    tmdb_rows = [row for row in rows if row.get("source") == "tmdb" and row.get("tmdb_id") is not None]
+    other_rows = [row for row in rows if row not in tmdb_rows]
 
     results: list[dict[str, Any]] = []
 
@@ -166,6 +171,23 @@ def upsert_show_images(
         data = response.data or []
         if isinstance(data, list):
             results.extend(data)
+
+    return results
+
+
+def upsert_show_images(
+    db: Client,
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    payload = [dict(r) for r in rows]
+    results = _upsert_show_images_table(db, payload)
+
+    dual_write_enabled = os.getenv("ENABLE_MEDIA_DUAL_WRITE", "0").lower() in ("1", "true", "yes")
+    if dual_write_enabled and payload:
+        try:
+            upsert_media_with_links(db, payload, entity_type="show")
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Media dual-write failed for show_images (non-blocking): %s", exc)
 
     return results
 

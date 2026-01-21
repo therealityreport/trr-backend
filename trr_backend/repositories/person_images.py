@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
+
+from trr_backend.db.supabase import call_rpc_with_cache_reload_hint
+from trr_backend.repositories.media_assets import upsert_media_with_links
 
 if TYPE_CHECKING:
     from supabase import Client
+else:
+    Client = Any
 
 
 def upsert_person_images(
@@ -64,7 +72,7 @@ def upsert_person_images(
     if verbose:
         print(f"  Resolving {len(unique_imdb_ids)} unique IMDb person IDs to person_ids...")
 
-    # Query core.people to resolve IMDb IDs to UUIDs using Supabase client
+    # Query core.people to resolve IMDb IDs to UUIDs
     response = (
         db.schema("core")
         .table("people")
@@ -72,13 +80,17 @@ def upsert_person_images(
         .in_("external_ids->>imdb", unique_imdb_ids)
         .execute()
     )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error resolving person images: {response.error}")
+    rows = response.data or []
 
     # Build mapping
-    imdb_to_uuid: dict[str, str] = {}
-    for person in response.data:
-        imdb_id = person.get("external_ids", {}).get("imdb")
-        if imdb_id:
-            imdb_to_uuid[imdb_id.lower()] = str(person["id"])
+    imdb_to_uuid: dict[str, UUID] = {}
+    for row in rows if isinstance(rows, list) else []:
+        person_id = row.get("id")
+        imdb_id = str((row.get("external_ids") or {}).get("imdb") or "").strip()
+        if person_id and imdb_id:
+            imdb_to_uuid[imdb_id.lower()] = UUID(str(person_id))
 
     if verbose:
         print(f"  Resolved {len(imdb_to_uuid)} / {len(unique_imdb_ids)} IMDb IDs to person_ids")
@@ -94,7 +106,7 @@ def upsert_person_images(
         if person_id:
             resolved_images.append(
                 {
-                    "person_id": person_id,
+                    "person_id": str(person_id),
                     "source": img["source"],
                     "url": img["url"],
                     "width": img.get("width"),
@@ -116,14 +128,26 @@ def upsert_person_images(
             print("  No images to upsert after ID resolution")
         return []
 
-    # Call RPC function to upsert (in core schema)
+    # Call RPC function to upsert
     if verbose:
         print(f"  Upserting {len(resolved_images)} person images...")
 
-    response = db.schema("core").rpc("upsert_person_images", {"rows": resolved_images}).execute()
+    result = call_rpc_with_cache_reload_hint(
+        db,
+        schema="core",
+        function_name="upsert_person_images",
+        params={"rows": resolved_images},
+    )
 
-    result_count = len(response.data) if response.data else 0
     if verbose:
-        print(f"  ✓ Upserted {result_count} person images")
+        print(f"  ✓ Upserted {len(result or [])} person images")
 
-    return response.data if response.data else []
+    dual_write_enabled = os.getenv("ENABLE_MEDIA_DUAL_WRITE", "0").lower() in ("1", "true", "yes")
+    if dual_write_enabled:
+        try:
+            upsert_media_with_links(db, resolved_images, entity_type="person")
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Media dual-write failed for person_images (non-blocking): %s", exc)
+
+    # Convert to list of dicts
+    return result or []
