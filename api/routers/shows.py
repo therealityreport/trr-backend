@@ -16,6 +16,7 @@ from api.deps import (
     require_single_result,
 )
 from trr_backend.db.show_images import ShowImagesError, list_tmdb_show_images
+from trr_backend.repositories.credits import fetch_show_cast_from_credits, is_credits_v2_read_enabled
 
 router = APIRouter(prefix="/shows", tags=["shows"])
 
@@ -387,7 +388,15 @@ def list_show_cast(
 ) -> list[dict]:
     """
     List cast members for a show.
+
+    When ENABLE_CREDITS_V2_READ=1, reads from v_show_cast_from_credits view
+    (backed by core.credits table). Otherwise reads from legacy core.show_cast table.
     """
+    # Use v2 credits view when read switch is enabled
+    if is_credits_v2_read_enabled():
+        return fetch_show_cast_from_credits(db, str(show_id), limit=limit, offset=offset)
+
+    # Legacy: read from show_cast table
     response = (
         db.schema("core")
         .table("show_cast")

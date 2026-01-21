@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,6 +28,11 @@ from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     fetch_fullcredits_cast_with_fallback,
     filter_self_cast_rows,
 )
+from trr_backend.repositories.credits import (
+    fetch_credits_by_show,
+    insert_credit_occurrences_ignore_conflicts,
+    insert_credits_ignore_conflicts,
+)
 from trr_backend.repositories.episode_appearances import (
     assert_core_episode_appearances_table_exists,
     upsert_episode_appearances,
@@ -49,6 +55,11 @@ from trr_backend.repositories.sync_state import (
 )
 
 
+def _is_credits_v2_enabled() -> bool:
+    """Check if credits v2 dual-write is enabled via environment variable."""
+    return os.environ.get("ENABLE_CREDITS_V2_WRITE", "").lower() in ("1", "true", "yes")
+
+
 @dataclass(frozen=True)
 class EpisodicCreditsResult:
     cast_row: CastRow
@@ -58,6 +69,7 @@ class EpisodicCreditsResult:
 
 @dataclass(frozen=True)
 class EpisodeMeta:
+    id: str | None  # episode UUID for credit_occurrences dual-write
     season_number: int | None
     episode_number: int | None
     air_date: str | None
@@ -103,7 +115,7 @@ def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
     response = (
         db.schema("core")
         .table("episodes")
-        .select("imdb_episode_id,season_number,episode_number,air_date,tmdb_episode_id")
+        .select("id,imdb_episode_id,season_number,episode_number,air_date,tmdb_episode_id")
         .eq("show_id", show_id)
         .execute()
     )
@@ -119,6 +131,7 @@ def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
         if not imdb_id:
             continue
         index[imdb_id] = EpisodeMeta(
+            id=str(row.get("id") or "").strip() or None,
             season_number=_coerce_int(row.get("season_number")),
             episode_number=_coerce_int(row.get("episode_number")),
             air_date=_coerce_air_date(row.get("air_date")),
@@ -291,6 +304,9 @@ def main(argv: list[str] | None = None) -> int:
     rollups_inserted = 0
     rollups_skipped = 0
     failures: list[str] = []
+    credits_v2_inserted = 0
+    occurrences_v2_inserted = 0
+    credits_v2_enabled = _is_credits_v2_enabled()
 
     people_cache: dict[str, str] = {}
 
@@ -430,6 +446,70 @@ def main(argv: list[str] | None = None) -> int:
                     upsert_episode_appearances(db, rollup_rows)
                     rollups_inserted += len(rollup_rows)
 
+            # Dual-write to core.credits + core.credit_occurrences if enabled
+            if credits_v2_enabled and show_cast_rows and not args.dry_run:
+                # First insert credits (similar to sync_show_cast)
+                credit_rows = [
+                    {
+                        "show_id": row["show_id"],
+                        "person_id": row["person_id"],
+                        "credit_category": row.get("credit_category") or "Self",
+                        "role": row.get("role"),
+                        "billing_order": row.get("billing_order"),
+                        "source_type": "fullcredits_html",
+                        "metadata": {},
+                    }
+                    for row in show_cast_rows
+                ]
+                inserted_credits = insert_credits_ignore_conflicts(db, credit_rows)
+                credits_v2_inserted += len(inserted_credits)
+
+                # Now build credit_occurrences from the rollup data
+                # Build a lookup: person_id → credit_id
+                credits_for_show = fetch_credits_by_show(db, show_id)
+                person_to_credit: dict[str, str] = {}
+                for credit in credits_for_show:
+                    pid = str(credit.get("person_id") or "")
+                    cid = str(credit.get("id") or "")
+                    role = str(credit.get("role") or "")
+                    # Prefer credits with no role (typical for Self category)
+                    if pid and cid:
+                        if pid not in person_to_credit or not role:
+                            person_to_credit[pid] = cid
+
+                # Build occurrence rows
+                occurrence_rows: list[dict[str, object]] = []
+                for rollup_row in rollup_rows:
+                    person_id = str(rollup_row.get("person_id") or "")
+                    credit_id = person_to_credit.get(person_id)
+                    if not credit_id:
+                        continue
+
+                    imdb_episode_ids = rollup_row.get("imdb_episode_title_ids") or []
+                    for imdb_ep_id in imdb_episode_ids:
+                        meta = episode_index.get(imdb_ep_id)
+                        if meta and meta.id:
+                            occurrence_rows.append(
+                                {
+                                    "credit_id": credit_id,
+                                    "episode_id": meta.id,
+                                    "appearance_type": "appears",
+                                }
+                            )
+
+                if occurrence_rows:
+                    inserted_occs = insert_credit_occurrences_ignore_conflicts(db, occurrence_rows)
+                    occurrences_v2_inserted += len(inserted_occs)
+            elif credits_v2_enabled and show_cast_rows and args.dry_run:
+                # Dry-run: just count what would be inserted
+                credits_v2_inserted += len(show_cast_rows)
+                for rollup_row in rollup_rows:
+                    imdb_episode_ids = rollup_row.get("imdb_episode_title_ids") or []
+                    for imdb_ep_id in imdb_episode_ids:
+                        meta = episode_index.get(imdb_ep_id)
+                        if meta and meta.id:
+                            occurrences_v2_inserted += 1
+
             if not args.dry_run:
                 mark_sync_state_success(
                     db,
@@ -450,6 +530,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"people_inserted={people_inserted}")
     print(f"rollups_inserted={rollups_inserted}")
     print(f"rollups_skipped={rollups_skipped}")
+    if credits_v2_enabled:
+        print(f"credits_v2_inserted={credits_v2_inserted}")
+        print(f"occurrences_v2_inserted={occurrences_v2_inserted}")
     print(f"failures={len(failures)}")
 
     if failures:

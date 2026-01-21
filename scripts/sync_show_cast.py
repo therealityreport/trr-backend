@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from scripts._sync_common import (
@@ -17,6 +18,7 @@ from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     fetch_fullcredits_cast_with_fallback,
     filter_self_cast_rows,
 )
+from trr_backend.repositories.credits import insert_credits_ignore_conflicts
 from trr_backend.repositories.people import assert_core_people_table_exists, fetch_people_by_imdb_ids, insert_people
 from trr_backend.repositories.person_images import upsert_person_images
 from trr_backend.repositories.show_cast import assert_core_show_cast_table_exists, upsert_show_cast
@@ -26,6 +28,11 @@ from trr_backend.repositories.sync_state import (
     mark_sync_state_in_progress,
     mark_sync_state_success,
 )
+
+
+def _is_credits_v2_enabled() -> bool:
+    """Check if credits v2 dual-write is enabled via environment variable."""
+    return os.environ.get("ENABLE_CREDITS_V2_WRITE", "").lower() in ("1", "true", "yes")
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -61,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     people_cache: dict[str, str] = {}
     people_inserted = 0
     show_cast_upserted = 0
+    credits_v2_inserted = 0
+    credits_v2_enabled = _is_credits_v2_enabled()
 
     filter_result = filter_show_rows_for_sync(
         db,
@@ -160,8 +169,27 @@ def main(argv: list[str] | None = None) -> int:
                 # Inject source_type into each row dict (no repo signature change)
                 rows_with_source = [{**row, "source_type": source_type} for row in show_cast_rows]
                 show_cast_upserted += len(upsert_show_cast(db, rows_with_source))
+
+                # Dual-write to core.credits if enabled
+                if credits_v2_enabled:
+                    credit_rows = [
+                        {
+                            "show_id": row["show_id"],
+                            "person_id": row["person_id"],
+                            "credit_category": row.get("credit_category") or "Self",
+                            "role": row.get("role"),
+                            "billing_order": row.get("billing_order"),
+                            "source_type": source_type,
+                            "metadata": {},
+                        }
+                        for row in rows_with_source
+                    ]
+                    inserted = insert_credits_ignore_conflicts(db, credit_rows)
+                    credits_v2_inserted += len(inserted)
             elif show_cast_rows:
                 show_cast_upserted += len(show_cast_rows)
+                if credits_v2_enabled:
+                    credits_v2_inserted += len(show_cast_rows)
 
             if not args.dry_run:
                 mark_sync_state_success(
@@ -182,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"people_inserted={people_inserted}")
     print(f"show_cast_upserted={show_cast_upserted}")
     print(f"person_images_upserted={person_images_upserted}")
+    if credits_v2_enabled:
+        print(f"credits_v2_inserted={credits_v2_inserted}")
     print(f"failures={len(failures)}")
 
     if failures:
