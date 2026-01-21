@@ -57,6 +57,7 @@
 | imdb_meta | jsonb | YES |  | NO | NEVER |
 | tmdb_network_ids | ARRAY | YES |  | NO | NEVER |
 | tmdb_production_company_ids | ARRAY | YES |  | NO | NEVER |
+| alternative_names | ARRAY | NO | '{}'::text[] | NO | NEVER |
 
 ## Primary Key
 
@@ -74,6 +75,7 @@ id
 
 ## Indexes
 
+- core_shows_alternative_names_gin (non-unique): alternative_names
 - core_shows_genres_gin (non-unique): genres
 - core_shows_imdb_id_unique (unique): imdb_id) WHERE ((imdb_id IS NOT NULL) AND (btrim(imdb_id) <> ''::text)
 - core_shows_keywords_gin (non-unique): keywords
@@ -146,6 +148,7 @@ true
   "tmdb_meta": {},
   "imdb_meta": {},
   "tmdb_network_ids": [],
-  "tmdb_production_company_ids": []
+  "tmdb_production_company_ids": [],
+  "alternative_names": []
 }
 ```

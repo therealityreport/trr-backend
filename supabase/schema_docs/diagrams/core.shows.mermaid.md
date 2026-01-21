@@ -57,5 +57,6 @@ erDiagram
         JSONB imdb_meta
         INT4_ARRAY tmdb_network_ids
         INT4_ARRAY tmdb_production_company_ids
+        TEXT_ARRAY alternative_names
     }
 ```

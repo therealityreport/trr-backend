@@ -425,6 +425,14 @@
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "alternative_names",
+      "data_type": "ARRAY",
+      "is_nullable": "NO",
+      "default": "'{}'::text[]",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -449,6 +457,14 @@
   ],
   "unique_constraints": [],
   "indexes": [
+    {
+      "name": "core_shows_alternative_names_gin",
+      "columns": [
+        "alternative_names"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_alternative_names_gin ON core.shows USING gin (alternative_names)"
+    },
     {
       "name": "core_shows_genres_gin",
       "columns": [
@@ -592,6 +608,7 @@
     "tmdb_meta": {},
     "imdb_meta": {},
     "tmdb_network_ids": [],
-    "tmdb_production_company_ids": []
+    "tmdb_production_company_ids": [],
+    "alternative_names": []
   }
 }
