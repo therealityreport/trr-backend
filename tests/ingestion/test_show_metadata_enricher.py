@@ -7,13 +7,14 @@ from uuid import UUID
 
 import pytest
 
-from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
+from trr_backend.ingestion.show_metadata_enricher import _extract_tmdb_alternative_names, enrich_shows_after_upsert
 from trr_backend.integrations.imdb.title_metadata_client import (
     parse_imdb_episodes_page,
     parse_imdb_title_page,
     pick_most_recent_episode,
 )
 from trr_backend.models.shows import ShowRecord
+from trr_backend.utils.array_merge import merge_str_arrays
 
 
 def test_parse_imdb_title_page_from_jsonld() -> None:
@@ -51,10 +52,30 @@ def test_parse_imdb_episodes_page_seasons_and_most_recent_episode() -> None:
     assert picked.imdb_episode_id == "tt9000002"
 
 
+def test_extract_tmdb_alternative_names_from_details() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    alt_payload = json.loads(
+        (repo_root / "tests" / "fixtures" / "tmdb" / "tv_alternative_titles_sample.json").read_text()
+    )
+    details = {"alternative_titles": alt_payload}
+
+    names = _extract_tmdb_alternative_names(details)
+
+    assert names == ["RuPaul Drag Race", "RuPaul's Drag Race"]
+
+
+def test_extract_tmdb_alternative_names_missing() -> None:
+    assert _extract_tmdb_alternative_names({}) == []
+
+
 def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     find_payload = json.loads((repo_root / "tests" / "fixtures" / "tmdb" / "find_by_imdb_id_sample.json").read_text())
     details_payload = json.loads((repo_root / "tests" / "fixtures" / "tmdb" / "tv_details_sample.json").read_text())
+    alt_payload = json.loads(
+        (repo_root / "tests" / "fixtures" / "tmdb" / "tv_alternative_titles_sample.json").read_text()
+    )
+    details_payload["alternative_titles"] = alt_payload
     providers_payload = json.loads(
         (repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text()
     )
@@ -93,6 +114,7 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     assert summary.updated == 1
     assert len(summary.patches) == 1
     assert fetch_details_mock.call_count == 1
+    assert fetch_details_mock.call_args.kwargs.get("append_to_response") == ["alternative_titles"]
 
     patch = summary.patches[0]
     # Check show_update contains expected fields
@@ -101,6 +123,7 @@ def test_enrich_shows_after_upsert_tmdb_primary(monkeypatch: pytest.MonkeyPatch)
     assert patch.show_update.get("tmdb_meta", {}).get("number_of_seasons") == 16
     assert patch.show_update.get("tmdb_meta", {}).get("number_of_episodes") == 250
     assert patch.tmdb_network_ids == [1]
+    assert patch.alternative_names == ["RuPaul Drag Race", "RuPaul's Drag Race"]
 
 
 def test_enrich_shows_after_upsert_imdb_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,3 +211,19 @@ def test_enrich_shows_after_upsert_imdb_meta(monkeypatch: pytest.MonkeyPatch) ->
         "U.S. version of the British show 'Love Island' where a group of singles come to stay in a villa for a few "
         "weeks and have to couple up with one another."
     )
+
+
+def test_merge_alternative_names_preserves_manual_entries() -> None:
+    existing = ["Manual Name"]
+    incoming = ["TMDb Name", "Manual Name"]
+
+    merged = merge_str_arrays(existing, incoming)
+
+    assert merged == ["Manual Name", "TMDb Name"]
+
+
+def test_merge_alternative_names_empty_incoming_noop() -> None:
+    existing = ["Manual Name"]
+
+    assert merge_str_arrays(existing, []) is None
+    assert merge_str_arrays(existing, None) is None
