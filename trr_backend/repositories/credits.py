@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from supabase import Client
+
+logger = logging.getLogger(__name__)
 
 
 class CreditsRepositoryError(RuntimeError):
@@ -218,6 +221,10 @@ def insert_credits_ignore_conflicts(
         return []
 
     results: list[dict[str, Any]] = []
+    chunks_with_fallback = 0
+    rows_in_fallback = 0
+    duplicates_skipped = 0
+
     for i in range(0, len(payload), max(1, int(chunk_size))):
         chunk = payload[i : i + max(1, int(chunk_size))]
         try:
@@ -235,6 +242,8 @@ def insert_credits_ignore_conflicts(
             # expression-based unique indexes where PostgREST's ignore_duplicates fails
             error_str = str(e)
             if "23505" in error_str or "duplicate key" in error_str.lower():
+                chunks_with_fallback += 1
+                rows_in_fallback += len(chunk)
                 # Fall back to inserting one row at a time for this chunk
                 for row in chunk:
                     try:
@@ -246,8 +255,18 @@ def insert_credits_ignore_conflicts(
                         if "23505" not in row_error_str and "duplicate key" not in row_error_str.lower():
                             raise
                         # Silently skip duplicates
+                        duplicates_skipped += 1
             else:
                 raise
+
+    # Log fallback statistics if any chunks needed row-by-row processing
+    if chunks_with_fallback > 0:
+        logger.warning(
+            "insert_credits_ignore_conflicts fallback triggered: "
+            f"chunks={chunks_with_fallback}, rows_attempted={rows_in_fallback}, "
+            f"duplicates_skipped={duplicates_skipped}"
+        )
+
     return results
 
 
