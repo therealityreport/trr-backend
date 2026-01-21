@@ -9,6 +9,7 @@
 - [core.episodes](core.episodes.md) ([diagram](diagrams/core.episodes.mermaid.md))
 - [core.media_assets](core.media_assets.md) ([diagram](diagrams/core.media_assets.mermaid.md))
 - [core.media_links](core.media_links.md) ([diagram](diagrams/core.media_links.mermaid.md))
+- [core.media_uploads](core.media_uploads.md) ([diagram](diagrams/core.media_uploads.mermaid.md))
 - [core.networks](core.networks.md) ([diagram](diagrams/core.networks.mermaid.md))
 - [core.people](core.people.md) ([diagram](diagrams/core.people.mermaid.md))
 - [core.person_images](core.person_images.md) ([diagram](diagrams/core.person_images.mermaid.md))
