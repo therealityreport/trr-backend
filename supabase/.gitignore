@@ -2,9 +2,6 @@
 .branches
 .temp
 
-# Local JWT signing keys
-signing_key.json
-
 # dotenvx
 .env.keys
 .env.local
