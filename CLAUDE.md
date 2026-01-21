@@ -1,8 +1,6 @@
 # Claude Code - TRR Backend Vibe Coding Guide
 
 ## Vibe Coding Rules (Non-Negotiable)
-- Never work on main branch; always use feature branch + worktree
-- One feature = one worktree. No mixing.
 - Spec-first: write acceptance criteria before editing code
 - Commit early, push often. No invisible work.
 - Before asking for next instructions: must have commit SHA + pushed branch
