@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             mark_sync_state_in_progress(db, table_name="show_cast", show_id=show_id)
 
         try:
-            cast_rows, _source_type = fetch_fullcredits_cast_with_fallback(
+            cast_rows, _source_type, _person_images = fetch_fullcredits_cast_with_fallback(
                 imdb_id, extra_headers=extra_headers, verbose=bool(args.verbose)
             )
 
