@@ -168,11 +168,20 @@ def mirror_single_asset(
     5. Update database with hosted_* fields
     """
     asset_id = str(asset.get("id") or "")
-    source_url = str(asset.get("source_url") or "")
+    source_url = str(asset.get("source_url") or "").strip()
     current_retry_count = int(asset.get("ingest_retry_count") or 0)
 
     if verbose:
         print(f"  Processing asset {asset_id}: {source_url[:80]}...")
+
+    # Check for missing/empty source_url
+    if not source_url:
+        error = "source_url is empty or null"
+        if verbose:
+            print(f"    SKIP: {error}")
+        if not dry_run:
+            update_ingest_status(db, asset_id, "skipped", error=error)
+        return MirrorResult(asset_id=asset_id, status="skipped", error=error)
 
     # Validate domain
     if not is_allowed_domain(source_url):

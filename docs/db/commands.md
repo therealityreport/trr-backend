@@ -173,3 +173,65 @@ make ci-local
 
 Notes:
 - This target brings Supabase up, resets the DB, runs pytest, checks schema docs, then stops Supabase.
+
+## Media Asset Mirroring (Phase 3)
+
+Mirror media assets from external sources (TMDb, IMDb) to S3 for reliable serving.
+
+### Run mirroring
+
+```bash
+# Mirror pending assets (default behavior)
+python scripts/mirror_media_assets_to_s3.py --status pending --limit 100 --verbose
+
+# Mirror failed assets (retry with exponential backoff)
+python scripts/mirror_media_assets_to_s3.py --status failed --limit 50 --verbose
+
+# Mirror all pending/failed with concurrency
+python scripts/mirror_media_assets_to_s3.py --status all --limit 500 --concurrency 10
+
+# Dry run (validate domains, no actual uploads)
+python scripts/mirror_media_assets_to_s3.py --dry-run --limit 10 --verbose
+
+# Filter by source
+python scripts/mirror_media_assets_to_s3.py --source tmdb --status pending --limit 100
+```
+
+### Monitor ingest progress
+
+```sql
+-- Summary by source and status
+SELECT * FROM core.v_media_ingest_summary;
+
+-- Find stuck/failed assets
+SELECT id, source, source_url, ingest_status, ingest_last_error, ingest_retry_count
+FROM core.media_assets
+WHERE ingest_status IN ('failed', 'in_progress')
+ORDER BY ingest_failed_at DESC
+LIMIT 20;
+
+-- Pending queue size by source
+SELECT source, count(*) as pending_count
+FROM core.media_assets
+WHERE ingest_status = 'pending'
+GROUP BY source;
+```
+
+### Required environment variables
+
+```bash
+# S3 configuration (required for actual mirroring)
+AWS_S3_BUCKET=your-media-bucket
+AWS_CDN_BASE_URL=https://cdn.example.com
+AWS_REGION=us-east-1
+
+# Domain allowlist (optional, has sensible defaults)
+MEDIA_MIRROR_ALLOWED_DOMAINS=image.tmdb.org,m.media-amazon.com,static.wikia.nocookie.net
+```
+
+### Rollout notes
+
+- Safe to deploy before running the mirror worker; `hosted_url` simply stays null
+- Served views use `coalesce(hosted_url, source_url)` so external URLs continue working
+- The mirror worker is idempotent; re-running on already-hosted assets is a no-op
+- Failed assets are retried with exponential backoff (1h, 2h, 4h, 8h, ...)
