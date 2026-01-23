@@ -4,6 +4,8 @@
 - [core.cast_memberships](core.cast_memberships.md) ([diagram](diagrams/core.cast_memberships.mermaid.md))
 - [core.cast_photos](core.cast_photos.md) ([diagram](diagrams/core.cast_photos.mermaid.md))
 - [core.cast_tmdb](core.cast_tmdb.md) ([diagram](diagrams/core.cast_tmdb.mermaid.md))
+- [core.credit_occurrences](core.credit_occurrences.md) ([diagram](diagrams/core.credit_occurrences.mermaid.md))
+- [core.credits](core.credits.md) ([diagram](diagrams/core.credits.mermaid.md))
 - [core.episode_appearances](core.episode_appearances.md) ([diagram](diagrams/core.episode_appearances.mermaid.md))
 - [core.episode_cast](core.episode_cast.md) ([diagram](diagrams/core.episode_cast.mermaid.md))
 - [core.episodes](core.episodes.md) ([diagram](diagrams/core.episodes.mermaid.md))

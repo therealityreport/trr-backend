@@ -4,6 +4,8 @@ Dependency injection for Supabase client and other shared resources.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 from functools import lru_cache
@@ -25,6 +27,35 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        return json.loads(decoded.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def _jwt_role(token: str) -> str | None:
+    payload = _decode_jwt_payload(token)
+    if not payload:
+        return None
+    role = payload.get("role")
+    return role if isinstance(role, str) else None
+
+
+def _looks_like_service_role(key: str) -> bool:
+    return key.startswith("sb_secret_") or _jwt_role(key) == "service_role"
+
+
+def _looks_like_anon_key(key: str) -> bool:
+    return key.startswith("sb_publishable_") or _jwt_role(key) == "anon"
+
+
 @lru_cache
 def get_supabase_url() -> str:
     url = os.getenv("SUPABASE_URL")
@@ -38,6 +69,8 @@ def get_supabase_anon_key() -> str:
     key = os.getenv("SUPABASE_ANON_KEY")
     if not key:
         raise RuntimeError("SUPABASE_ANON_KEY environment variable is not set")
+    if _looks_like_service_role(key):
+        raise RuntimeError("SUPABASE_ANON_KEY appears to be a service role key; use the anon key instead")
     return key
 
 
@@ -46,6 +79,8 @@ def get_supabase_service_key() -> str:
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not key:
         raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY environment variable is not set")
+    if _looks_like_anon_key(key):
+        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY appears to be an anon key; use the service role key instead")
     return key
 
 
