@@ -232,7 +232,9 @@ def main(argv: list[str] | None = None) -> int:
         results["cast_photos"] = success
 
         # Get all person IDs for this show's cast
+        # Refresh DB connection to see data written by subprocesses
         print("\n  Fetching cast member person IDs...")
+        db = load_env_and_db()
         cast_members = get_show_cast_person_ids(db, show_id)
 
         if cast_members:
