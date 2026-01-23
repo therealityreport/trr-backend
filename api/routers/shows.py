@@ -11,12 +11,13 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from api.deps import (
+    SupabaseAdminClient,
     SupabaseClient,
     get_list_result,
     require_single_result,
 )
 from trr_backend.db.show_images import ShowImagesError, list_tmdb_show_images
-from trr_backend.repositories.credits import fetch_show_cast_from_credits, is_credits_v2_read_enabled
+from trr_backend.repositories.credits import is_credits_v2_read_enabled
 
 router = APIRouter(prefix="/shows", tags=["shows"])
 
@@ -131,12 +132,19 @@ class Person(BaseModel):
 class CastMember(BaseModel):
     id: UUID
     show_id: UUID
-    season_id: UUID | None
+    season_id: UUID | None = None
     person_id: UUID
     role: str
-    billing_order: int | None
-    notes: str | None
+    billing_order: int | None = None
+    notes: str | None = None
     person: Person | None = None
+
+
+class CastList(BaseModel):
+    count: int
+    total_count: int
+    has_more: bool
+    cast: list[CastMember]
 
 
 class ShowImage(BaseModel):
@@ -222,6 +230,23 @@ def _group_watch_providers(rows: list[dict]) -> list[dict]:
     return grouped
 
 
+def _build_show_external_ids(show: dict[str, Any]) -> dict[str, Any]:
+    external_ids: dict[str, Any] = {}
+    imdb_id = show.get("imdb_id")
+    if imdb_id:
+        external_ids["imdb_id"] = imdb_id
+        external_ids["imdb"] = imdb_id
+    tmdb_id = show.get("tmdb_id")
+    if tmdb_id is not None:
+        external_ids["tmdb_id"] = tmdb_id
+        external_ids["tmdb"] = tmdb_id
+    for key in ("tvdb_id", "tvrage_id", "wikidata_id", "facebook_id", "instagram_id", "twitter_id"):
+        value = show.get(key)
+        if value not in (None, ""):
+            external_ids[key] = value
+    return external_ids
+
+
 # --- Endpoints ---
 
 
@@ -233,7 +258,10 @@ def list_shows(
 ) -> list[dict]:
     """List all shows with pagination."""
     response = db.schema("core").table("shows").select("*").order("name").range(offset, offset + limit - 1).execute()
-    return get_list_result(response, "listing shows")
+    rows = get_list_result(response, "listing shows")
+    for row in rows:
+        row["external_ids"] = _build_show_external_ids(row)
+    return rows
 
 
 @router.get("/{show_id}", response_model=ShowDetail)
@@ -241,6 +269,7 @@ def get_show(db: SupabaseClient, show_id: UUID) -> dict:
     """Get a specific show by ID."""
     response = db.schema("core").table("shows").select("*").eq("id", str(show_id)).single().execute()
     show = require_single_result(response, "Show")
+    show["external_ids"] = _build_show_external_ids(show)
 
     network_ids = show.get("tmdb_network_ids") or []
     if isinstance(network_ids, list) and network_ids:
@@ -379,34 +408,41 @@ def list_episodes(
     return get_list_result(response, "listing episodes")
 
 
-@router.get("/{show_id}/cast", response_model=list[CastMember])
+@router.get("/{show_id}/cast", response_model=CastList)
 def list_show_cast(
-    db: SupabaseClient,
+    db: SupabaseAdminClient,
     show_id: UUID,
     limit: int = Query(default=50, le=100),
     offset: int = Query(default=0, ge=0),
-) -> list[dict]:
+) -> dict:
     """
     List cast members for a show.
 
     When ENABLE_CREDITS_V2_READ=1, reads from v_show_cast_from_credits view
     (backed by core.credits table). Otherwise reads from legacy core.show_cast table.
     """
-    # Use v2 credits view when read switch is enabled
-    if is_credits_v2_read_enabled():
-        return fetch_show_cast_from_credits(db, str(show_id), limit=limit, offset=offset)
-
-    # Legacy: read from show_cast table
+    table = "v_show_cast_from_credits" if is_credits_v2_read_enabled() else "show_cast"
     response = (
         db.schema("core")
-        .table("show_cast")
-        .select("*, person:people(*)")
+        .table(table)
+        .select("*, person:people(*)", count="exact")
         .eq("show_id", str(show_id))
         .order("billing_order", nullsfirst=False)
         .range(offset, offset + limit - 1)
         .execute()
     )
-    return get_list_result(response, "listing cast")
+    rows = get_list_result(response, "listing cast")
+    total_count = getattr(response, "count", None)
+    if isinstance(total_count, int):
+        total_count = total_count
+    elif isinstance(total_count, float):
+        total_count = int(total_count)
+    elif isinstance(total_count, str) and total_count.isdigit():
+        total_count = int(total_count)
+    else:
+        total_count = len(rows)
+    has_more = offset + limit < total_count
+    return {"count": len(rows), "total_count": total_count, "has_more": has_more, "cast": rows}
 
 
 @router.get("/people/{person_id}", response_model=Person)

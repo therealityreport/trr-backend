@@ -110,7 +110,14 @@ class TestShowsEndpoints:
         """List cast endpoint returns empty list when no data."""
         response = client.get("/api/v1/shows/00000000-0000-0000-0000-000000000000/cast")
         assert response.status_code == 200
-        assert response.json() == []
+        data = response.json()
+        assert data == {"count": 0, "total_count": 0, "has_more": False, "cast": []}
+        count = data["count"]
+        total_count = data["total_count"]
+        has_more = data["has_more"]
+        offset = 0
+        assert total_count >= count
+        assert has_more == ((offset + count) < total_count)
 
 
 class TestSurveysEndpoints:
