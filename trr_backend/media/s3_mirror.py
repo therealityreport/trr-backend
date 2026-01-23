@@ -989,3 +989,163 @@ def prune_orphaned_season_image_objects(
             print(f"  Deleted {deleted_count} orphaned objects")
 
     return list(orphaned)
+
+
+def mirror_episode_image_row(
+    row: Mapping[str, Any],
+    *,
+    force: bool = False,
+    s3_client=None,
+) -> dict[str, Any] | None:
+    """
+    Mirror an episode image to S3.
+
+    For TMDb images with file_path, always uses original resolution.
+    Returns patch dict with hosted_* fields, or None if already hosted.
+    """
+    hosted_url = row.get("hosted_url")
+    hosted_key = row.get("hosted_key")
+    if not force:
+        if hosted_key:
+            desired_url = build_hosted_url(hosted_key)
+            if hosted_url != desired_url:
+                return {"hosted_url": desired_url}
+            if hosted_url:
+                return None
+        elif hosted_url:
+            return None
+
+    source = str(row.get("source") or "").strip() or "tmdb"
+
+    # Get episode identifier for S3 path: prefer IMDb ID, fallback to episode_id UUID
+    episode_identifier = None
+    episodes_data = row.get("episodes")
+    if isinstance(episodes_data, dict):
+        episode_identifier = episodes_data.get("imdb_id")
+    if not episode_identifier:
+        episode_identifier = row.get("episode_id")
+    if not episode_identifier:
+        return None  # Can't build S3 path without an identifier
+
+    # Determine the source URL to download
+    file_path = row.get("file_path")
+    url = row.get("url")
+    url_original = row.get("url_original")
+
+    if source == "tmdb" and isinstance(file_path, str) and file_path.strip():
+        candidate_url = _get_tmdb_original_url(file_path)
+    elif isinstance(url, str) and url.strip():
+        candidate_url = url
+    elif isinstance(url_original, str) and url_original.strip():
+        candidate_url = url_original
+    else:
+        return None
+
+    # Download the image
+    data, content_type = download_image(candidate_url, source=source)
+    sha256 = _sha256_bytes(data)
+    current_sha = row.get("hosted_sha256")
+
+    if current_sha and current_sha == sha256 and hosted_url and not force:
+        return None
+
+    ext = guess_ext_from_content_type(content_type)
+    key = build_episode_image_s3_key(
+        episode_identifier=str(episode_identifier),
+        source=source,
+        sha256=sha256,
+        ext=ext,
+    )
+    bucket = get_s3_bucket()
+    s3_client = s3_client or get_s3_client()
+
+    head = _head_object(s3_client, bucket, key)
+    if head is None:
+        etag, bytes_len = upload_bytes_to_s3(
+            s3_client,
+            bucket=bucket,
+            key=key,
+            data=data,
+            content_type=content_type or "application/octet-stream",
+        )
+        hosted_content_type = content_type or "application/octet-stream"
+        hosted_bytes = bytes_len
+        hosted_etag = etag
+    else:
+        hosted_content_type = head.get("ContentType") or content_type
+        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_etag = _sanitize_etag(head.get("ETag"))
+
+    hosted_url = build_hosted_url(key)
+    hosted_at = datetime.now(UTC).isoformat()
+
+    return {
+        "hosted_bucket": bucket,
+        "hosted_key": key,
+        "hosted_url": hosted_url,
+        "hosted_sha256": sha256,
+        "hosted_content_type": hosted_content_type,
+        "hosted_bytes": hosted_bytes,
+        "hosted_etag": hosted_etag,
+        "hosted_at": hosted_at,
+    }
+
+
+def get_episode_s3_prefix(episode_identifier: str) -> str:
+    """
+    Build the S3 prefix for an episode's images.
+
+    Args:
+        episode_identifier: IMDb episode ID (tt...) or episode UUID
+
+    Returns:
+        S3 prefix like "images/episodes/tt123/"
+    """
+    return f"images/episodes/{episode_identifier}/"
+
+
+def prune_orphaned_episode_image_objects(
+    db,
+    episode_identifier: str,
+    *,
+    episode_id: str,
+    dry_run: bool = False,
+    verbose: bool = False,
+    s3_client=None,
+) -> list[str]:
+    """
+    Delete S3 objects under an episode's prefix that aren't referenced in episode_images.
+    """
+    from trr_backend.repositories.episode_images import fetch_hosted_keys_for_episode
+
+    bucket = get_s3_bucket()
+    s3_client = s3_client or get_s3_client()
+    prefix = get_episode_s3_prefix(episode_identifier)
+
+    s3_keys = set(list_s3_objects_under_prefix(s3_client, bucket, prefix))
+    if verbose:
+        print(f"  S3 objects under {prefix}: {len(s3_keys)}")
+    if not s3_keys:
+        return []
+
+    db_keys = fetch_hosted_keys_for_episode(db, episode_id=episode_id)
+    if verbose:
+        print(f"  DB hosted_key references: {len(db_keys)}")
+
+    orphaned = s3_keys - db_keys
+    if not orphaned:
+        if verbose:
+            print("  No orphaned S3 objects found.")
+        return []
+
+    if verbose or dry_run:
+        for key in sorted(orphaned):
+            action = "WOULD DELETE" if dry_run else "DELETING"
+            print(f"  {action}: {key}")
+
+    if not dry_run:
+        deleted_count = delete_s3_objects(s3_client, bucket, list(orphaned))
+        if verbose:
+            print(f"  Deleted {deleted_count} orphaned objects")
+
+    return list(orphaned)

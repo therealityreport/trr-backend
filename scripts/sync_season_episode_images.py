@@ -8,12 +8,24 @@ from datetime import UTC, datetime
 from typing import Any
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
-from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_season_details, resolve_api_key
+from trr_backend.integrations.tmdb.client import (
+    TmdbClientError,
+    fetch_tv_episode_images,
+    fetch_tv_season_images,
+    resolve_api_key,
+)
 from trr_backend.media.s3_mirror import (
     get_cdn_base_url,
     get_s3_client,
+    mirror_episode_image_row,
     mirror_season_image_row,
     prune_orphaned_season_image_objects,
+)
+from trr_backend.repositories.episode_images import (
+    assert_core_episode_images_table_exists,
+    fetch_episode_images_missing_hosted,
+    update_episode_image_hosted_fields,
+    upsert_episode_images,
 )
 from trr_backend.repositories.season_images import (
     assert_core_season_images_table_exists,
@@ -62,9 +74,9 @@ def _extract_posters(
     tmdb_id: int,
     fetched_at: str,
 ) -> list[dict[str, Any]]:
-    images_obj = payload.get("images")
-    images_map = images_obj if isinstance(images_obj, Mapping) else {}
-    posters = images_map.get("posters")
+    """Extract posters from the dedicated /tv/{id}/season/{n}/images endpoint response."""
+    # The dedicated images endpoint returns posters directly at top level
+    posters = payload.get("posters")
     poster_rows: list[dict[str, Any]] = []
     if not isinstance(posters, list):
         return poster_rows
@@ -97,6 +109,8 @@ def _extract_posters(
                 "kind": "poster",
                 "iso_639_1": poster.get("iso_639_1") if isinstance(poster.get("iso_639_1"), str) else None,
                 "file_path": file_path,
+                "url": f"https://image.tmdb.org/t/p/original{file_path}",
+                "source_image_id": file_path,
                 "width": int(width),
                 "height": int(height),
                 "aspect_ratio": aspect_ratio_val,
@@ -107,14 +121,87 @@ def _extract_posters(
     return poster_rows
 
 
+def _fetch_season_episodes(db, season_id: str) -> list[dict[str, Any]]:
+    """Fetch all episodes for a season from the database."""
+    response = (
+        db.schema("core")
+        .table("episodes")
+        .select("id,episode_number,external_ids")
+        .eq("season_id", season_id)
+        .order("episode_number")
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error listing episodes: {response.error}")
+    data = response.data or []
+    return data if isinstance(data, list) else []
+
+
+def _extract_episode_stills(
+    payload: Mapping[str, Any],
+    *,
+    show_id: str,
+    season_id: str,
+    episode_id: str,
+    season_number: int,
+    episode_number: int,
+    tmdb_id: int,
+    fetched_at: str,
+) -> list[dict[str, Any]]:
+    """Extract stills from the dedicated /tv/{id}/season/{n}/episode/{e}/images endpoint response."""
+    stills = payload.get("stills")
+    still_rows: list[dict[str, Any]] = []
+    if not isinstance(stills, list):
+        return still_rows
+
+    for still in stills:
+        if not isinstance(still, Mapping):
+            continue
+        file_path = still.get("file_path")
+        if not isinstance(file_path, str) or not file_path.strip():
+            continue
+        width = still.get("width")
+        height = still.get("height")
+        if not isinstance(width, int) or not isinstance(height, int):
+            continue
+        aspect_ratio = still.get("aspect_ratio")
+        if isinstance(aspect_ratio, (int, float)):
+            aspect_ratio_val: float = float(aspect_ratio)
+        elif height > 0:
+            aspect_ratio_val = float(width) / float(height)
+        else:
+            aspect_ratio_val = 0.0
+
+        still_rows.append(
+            {
+                "show_id": show_id,
+                "season_id": season_id,
+                "episode_id": episode_id,
+                "tmdb_series_id": int(tmdb_id),
+                "season_number": int(season_number),
+                "episode_number": int(episode_number),
+                "source": "tmdb",
+                "kind": "still",
+                "iso_639_1": still.get("iso_639_1") if isinstance(still.get("iso_639_1"), str) else None,
+                "file_path": file_path,
+                "url": f"https://image.tmdb.org/t/p/original{file_path}",
+                "source_image_id": file_path,
+                "width": int(width),
+                "height": int(height),
+                "aspect_ratio": aspect_ratio_val,
+                "fetched_at": fetched_at,
+            }
+        )
+
+    return still_rows
+
+
 def _episode_images_table_exists(db) -> bool:
     try:
-        response = db.schema("core").table("episode_images").select("id").limit(1).execute()
+        assert_core_episode_images_table_exists(db)
+        return True
     except Exception:
         return False
-    if hasattr(response, "error") and response.error:
-        return False
-    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,8 +216,10 @@ def main(argv: list[str] | None = None) -> int:
     if not api_key:
         raise RuntimeError("TMDB_API_KEY is required for season image sync.")
 
-    if _episode_images_table_exists(db) and args.verbose:
-        print("INFO: core.episode_images detected; episode still sync is not implemented yet.")
+    # Check if episode_images table exists
+    episode_images_enabled = _episode_images_table_exists(db)
+    if episode_images_enabled and args.verbose:
+        print("INFO: core.episode_images detected; syncing episode stills.")
 
     show_rows = fetch_show_rows(db, args)
     if not show_rows:
@@ -138,7 +227,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     total_posters = 0
+    total_stills = 0
     total_mirrored = 0
+    total_episode_mirrored = 0
     total_failed = 0
 
     s3_client = None
@@ -169,16 +260,17 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             fetched_at = _now_utc_iso()
+
+            # Fetch season images using dedicated endpoint
             try:
-                payload = fetch_tv_season_details(
+                season_images_payload = fetch_tv_season_images(
                     tmdb_id,
                     int(season_number),
                     api_key=api_key,
-                    append_to_response=["images"],
                     include_image_language="en,null",
                 )
                 poster_rows = _extract_posters(
-                    payload,
+                    season_images_payload,
                     show_id=show_id,
                     season_id=season_id,
                     season_number=int(season_number),
@@ -189,16 +281,61 @@ def main(argv: list[str] | None = None) -> int:
                 total_failed += 1
                 if args.verbose:
                     print(f"WARN {show_id} season={season_number}: {exc}")
-                continue
+                poster_rows = []
 
             if poster_rows:
                 total_posters += len(poster_rows)
                 if not args.dry_run:
                     upsert_season_images(db, poster_rows)
 
+            # Fetch episode images if table exists
+            if episode_images_enabled:
+                try:
+                    episodes = _fetch_season_episodes(db, season_id)
+                except Exception as exc:  # noqa: BLE001
+                    if args.verbose:
+                        print(f"WARN {show_id} season={season_number}: failed to list episodes: {exc}")
+                    episodes = []
+
+                for episode in episodes:
+                    episode_id = str(episode.get("id") or "").strip()
+                    episode_number = episode.get("episode_number")
+                    if not episode_id or not isinstance(episode_number, int):
+                        continue
+
+                    try:
+                        episode_images_payload = fetch_tv_episode_images(
+                            tmdb_id,
+                            int(season_number),
+                            int(episode_number),
+                            api_key=api_key,
+                            include_image_language="en,null",
+                        )
+                        still_rows = _extract_episode_stills(
+                            episode_images_payload,
+                            show_id=show_id,
+                            season_id=season_id,
+                            episode_id=episode_id,
+                            season_number=int(season_number),
+                            episode_number=int(episode_number),
+                            tmdb_id=int(tmdb_id),
+                            fetched_at=fetched_at,
+                        )
+                    except (TmdbClientError, RuntimeError, ValueError) as exc:
+                        total_failed += 1
+                        if args.verbose:
+                            print(f"WARN {show_id} S{season_number}E{episode_number}: {exc}")
+                        continue
+
+                    if still_rows:
+                        total_stills += len(still_rows)
+                        if not args.dry_run:
+                            upsert_episode_images(db, still_rows)
+
         if args.no_s3 or args.dry_run or s3_client is None:
             continue
 
+        # Mirror season images to S3
         rows = fetch_season_images_missing_hosted(
             db,
             show_id=show_id,
@@ -212,6 +349,22 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             update_season_image_hosted_fields(db, str(row.get("id")), patch)
             total_mirrored += 1
+
+        # Mirror episode images to S3
+        if episode_images_enabled:
+            episode_rows = fetch_episode_images_missing_hosted(
+                db,
+                show_id=show_id,
+                limit=int(args.mirror_limit),
+                include_hosted=True,
+                cdn_base_url=cdn_base_url,
+            )
+            for row in episode_rows:
+                patch = mirror_episode_image_row(row, force=bool(args.force), s3_client=s3_client)
+                if not patch:
+                    continue
+                update_episode_image_hosted_fields(db, str(row.get("id")), patch)
+                total_episode_mirrored += 1
 
         if not args.no_prune and not args.force:
             show_identifier = imdb_id or show_id
@@ -227,8 +380,10 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     if args.verbose:
-        print(f"posters_upserted={total_posters}")
-        print(f"posters_mirrored={total_mirrored}")
+        print(f"season_posters_upserted={total_posters}")
+        print(f"episode_stills_upserted={total_stills}")
+        print(f"season_images_mirrored={total_mirrored}")
+        print(f"episode_images_mirrored={total_episode_mirrored}")
         print(f"failed={total_failed}")
 
     return 0

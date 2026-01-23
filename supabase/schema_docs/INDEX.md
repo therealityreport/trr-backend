@@ -8,6 +8,7 @@
 - [core.credits](core.credits.md) ([diagram](diagrams/core.credits.mermaid.md))
 - [core.episode_appearances](core.episode_appearances.md) ([diagram](diagrams/core.episode_appearances.mermaid.md))
 - [core.episode_cast](core.episode_cast.md) ([diagram](diagrams/core.episode_cast.mermaid.md))
+- [core.episode_images](core.episode_images.md) ([diagram](diagrams/core.episode_images.mermaid.md))
 - [core.episodes](core.episodes.md) ([diagram](diagrams/core.episodes.mermaid.md))
 - [core.media_assets](core.media_assets.md) ([diagram](diagrams/core.media_assets.mermaid.md))
 - [core.media_links](core.media_links.md) ([diagram](diagrams/core.media_links.mermaid.md))

@@ -538,3 +538,97 @@ def fetch_person_external_ids(
     session = session or requests.Session()
     url = f"{TMDB_API_BASE_URL}/person/{int(person_id)}/external_ids"
     return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)
+
+
+def fetch_tv_season_images(
+    tv_id: int,
+    season_number: int,
+    *,
+    language: str = "en-US",
+    include_image_language: str = "en,null",
+    api_key: str | None = None,
+    bearer_token: str | None = None,
+    session: requests.Session | None = None,
+    cache: dict[tuple[int, int, str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch season images from TMDb.
+
+    GET /tv/{series_id}/season/{season_number}/images
+
+    Returns the full JSON object containing posters array.
+    """
+
+    tv_id_int = int(tv_id)
+    season_number_int = int(season_number)
+    cache_key = (tv_id_int, season_number_int, str(language or "en-US"), str(include_image_language or ""))
+
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}/season/{season_number_int}/images"
+    payload = _request_tmdb_json(
+        session,
+        url,
+        params={
+            "language": language,
+            "include_image_language": include_image_language,
+        },
+        api_key=api_key,
+        bearer_token=bearer_token,
+    )
+    if cache is not None:
+        cache[cache_key] = payload
+    return payload
+
+
+def fetch_tv_episode_images(
+    tv_id: int,
+    season_number: int,
+    episode_number: int,
+    *,
+    language: str = "en-US",
+    include_image_language: str = "en,null",
+    api_key: str | None = None,
+    bearer_token: str | None = None,
+    session: requests.Session | None = None,
+    cache: dict[tuple[int, int, int, str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch episode images (stills) from TMDb.
+
+    GET /tv/{series_id}/season/{season_number}/episode/{episode_number}/images
+
+    Returns the full JSON object containing stills array.
+    """
+
+    tv_id_int = int(tv_id)
+    season_number_int = int(season_number)
+    episode_number_int = int(episode_number)
+    cache_key = (
+        tv_id_int,
+        season_number_int,
+        episode_number_int,
+        str(language or "en-US"),
+        str(include_image_language or ""),
+    )
+
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/tv/{tv_id_int}/season/{season_number_int}/episode/{episode_number_int}/images"
+    payload = _request_tmdb_json(
+        session,
+        url,
+        params={
+            "language": language,
+            "include_image_language": include_image_language,
+        },
+        api_key=api_key,
+        bearer_token=bearer_token,
+    )
+    if cache is not None:
+        cache[cache_key] = payload
+    return payload
