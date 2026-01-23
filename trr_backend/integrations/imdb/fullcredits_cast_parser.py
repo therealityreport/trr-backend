@@ -399,7 +399,19 @@ def is_self_role_text(value: str | None) -> bool:
 
 
 def filter_self_cast_rows(rows: Sequence[CastRow]) -> list[CastRow]:
-    return [row for row in rows if is_self_role_text(row.raw_role_text)]
+    """Filter cast rows to only include 'Self' roles.
+
+    A cast member is considered a 'Self' role if either:
+    1. raw_role_text starts with "self" (from HTML parsing), OR
+    2. job_category_id == IMDB_JOB_CATEGORY_SELF (from GraphQL)
+
+    This dual check is necessary because GraphQL responses for reality TV shows
+    may have category.id = "self" but no character names in the characters array,
+    resulting in empty raw_role_text.
+    """
+    return [
+        row for row in rows if is_self_role_text(row.raw_role_text) or row.job_category_id == IMDB_JOB_CATEGORY_SELF
+    ]
 
 
 def normalize_api_credits_to_cast_rows(
@@ -614,16 +626,12 @@ def normalize_graphql_credits_to_cast_rows(
 
         raw_role_text = ", ".join(role_parts) if role_parts else None
 
-        # Map to job_category_id for filtering by filter_self_cast_rows()
-        # Check if raw_role_text starts with "Self" (for reality shows)
-        job_category_id = None
-        if is_self_role_text(raw_role_text):
-            job_category_id = IMDB_JOB_CATEGORY_SELF
-
-        # GraphQL also provides category field
-        category = node.get("category", {}).get("id")
-        if category and "self" in category.lower():
-            job_category_id = IMDB_JOB_CATEGORY_SELF
+        # IMPORTANT: The GraphQL query (fetch_title_credits_paginated_v2) already filters
+        # by category_id=IMDB_JOB_CATEGORY_SELF, so ALL credits returned are self roles.
+        # For reality TV shows, the response often has empty characters[] and category{},
+        # but they are still self roles since they passed the category filter.
+        # Always set job_category_id for GraphQL credits to ensure filter_self_cast_rows() works.
+        job_category_id = IMDB_JOB_CATEGORY_SELF
 
         rows.append(
             CastRow(
