@@ -105,6 +105,17 @@
       "definition": "CREATE INDEX media_links_entity_idx ON core.media_links USING btree (entity_type, entity_id)"
     },
     {
+      "name": "media_links_entity_kind_asset_uq",
+      "columns": [
+        "entity_type",
+        "entity_id",
+        "kind",
+        "media_asset_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_links_entity_kind_asset_uq ON core.media_links USING btree (entity_type, entity_id, kind, media_asset_id)"
+    },
+    {
       "name": "media_links_kind_idx",
       "columns": [
         "entity_type",
@@ -142,6 +153,16 @@
       ],
       "unique": true,
       "definition": "CREATE UNIQUE INDEX media_links_one_primary_per_entity_kind ON core.media_links USING btree (entity_type, entity_id, kind) WHERE (is_primary = true)"
+    },
+    {
+      "name": "media_links_one_primary_uq",
+      "columns": [
+        "entity_type",
+        "entity_id",
+        "kind) WHERE (is_primary = true"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_links_one_primary_uq ON core.media_links USING btree (entity_type, entity_id, kind) WHERE (is_primary = true)"
     },
     {
       "name": "media_links_pkey",

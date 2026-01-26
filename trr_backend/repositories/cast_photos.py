@@ -296,7 +296,7 @@ def fetch_cast_photos_for_person(
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Fetch all cast_photos for a person, optionally filtered by sources.
+    Fetch gallery images for a person from `core.v_person_images_served_media_v2`.
 
     Args:
         db: Supabase client
@@ -307,7 +307,13 @@ def fetch_cast_photos_for_person(
     Returns:
         List of cast photo records
     """
-    query = db.schema("core").table("cast_photos").select("*").eq("person_id", person_id)
+    query = (
+        db.schema("core")
+        .table("v_person_images_served_media_v2")
+        .select("*")
+        .eq("person_id", person_id)
+        .eq("kind", "gallery")
+    )
 
     if sources:
         query = query.in_("source", sources)

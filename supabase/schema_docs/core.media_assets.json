@@ -317,6 +317,15 @@
       "definition": "CREATE UNIQUE INDEX media_assets_source_asset_id_unique ON core.media_assets USING btree (source, source_asset_id) WHERE (source_asset_id IS NOT NULL)"
     },
     {
+      "name": "media_assets_source_hosted_sha_uq",
+      "columns": [
+        "source",
+        "hosted_sha256) WHERE (hosted_sha256 IS NOT NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_assets_source_hosted_sha_uq ON core.media_assets USING btree (source, hosted_sha256) WHERE (hosted_sha256 IS NOT NULL)"
+    },
+    {
       "name": "media_assets_source_idx",
       "columns": [
         "source"
