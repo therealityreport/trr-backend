@@ -1,4 +1,4 @@
-"""Repository for person_images table operations."""
+"""Repository for core.person_images table operations."""
 
 from __future__ import annotations
 
@@ -23,10 +23,10 @@ def upsert_person_images(
     verbose: bool = False,
 ) -> list[dict[str, Any]]:
     """
-    Upsert person images into person_images.
+    Upsert person images into core.person_images.
 
     This function maps IMDb person IDs (nm...) to core.people UUIDs and
-    upserts images into person_images using the RPC function.
+    upserts images into core.person_images using the RPC function.
 
     Args:
         db: Supabase client

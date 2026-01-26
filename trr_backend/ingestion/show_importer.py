@@ -1901,7 +1901,7 @@ def upsert_candidates_into_supabase(
                 if idx == 1 or idx % 10 == 0 or idx == total_shows:
                     print(f"Seasons/Episodes: processed {idx}/{total_shows}", file=sys.stderr)
 
-    # Optional TMDb images capture (posters/logos/backdrops): persist into show_images and set primary_* columns.
+    # Optional TMDb images capture (posters/logos/backdrops): persist into core.show_images and set primary_* columns.
     if tmdb_fetch_images:
         tmdb_images_language = "en-US"
         tmdb_images_include_lang = "en,null"

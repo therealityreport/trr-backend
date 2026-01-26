@@ -62,14 +62,14 @@ def assert_core_cast_photos_table_exists(db: Client) -> None:
 
     def help_message() -> str:
         return (
-            "Database table `cast_photos` is missing. "
+            "Database table `core.cast_photos` is missing. "
             "Run `supabase db push` to apply migrations (see `supabase/migrations/0040_create_cast_photos.sql`), "
             "then re-run the import job."
         )
 
     def schema_help_message() -> str:
         return (
-            "Supabase API does not expose schema `core`, so the importer cannot access `cast_photos`. "
+            "Supabase API does not expose schema `core`, so the importer cannot access `core.cast_photos`. "
             "Add `core` to `supabase/config.toml` under `[api].schemas` and run `supabase config push` "
             "(or enable `core` in Supabase Dashboard -> Settings -> API -> Exposed schemas), then re-run the import job."  # noqa: E501
         )
@@ -81,7 +81,7 @@ def assert_core_cast_photos_table_exists(db: Client) -> None:
             raise CastPhotoRepositoryError(schema_help_message()) from exc
         if is_missing_relation(str(exc)):
             raise CastPhotoRepositoryError(help_message()) from exc
-        raise CastPhotoRepositoryError(f"Supabase error during cast_photos preflight: {exc}") from exc
+        raise CastPhotoRepositoryError(f"Supabase error during core.cast_photos preflight: {exc}") from exc
 
     error = getattr(response, "error", None)
     if not error:
@@ -99,7 +99,7 @@ def assert_core_cast_photos_table_exists(db: Client) -> None:
         raise CastPhotoRepositoryError(schema_help_message())
     if is_missing_relation(combined):
         raise CastPhotoRepositoryError(help_message())
-    raise CastPhotoRepositoryError(f"Supabase error during cast_photos preflight: {combined}")
+    raise CastPhotoRepositoryError(f"Supabase error during core.cast_photos preflight: {combined}")
 
 
 def _serialize_row(row: Mapping[str, Any] | CastPhotoUpsert) -> dict[str, Any]:

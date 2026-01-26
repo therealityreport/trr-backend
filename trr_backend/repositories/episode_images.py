@@ -12,7 +12,7 @@ class EpisodeImageRepositoryError(RuntimeError):
 
 def assert_core_episode_images_table_exists(db: Client) -> None:
     """
-    Fail fast with a clear error if `episode_images` is missing in Supabase.
+    Fail fast with a clear error if `core.episode_images` is missing in Supabase.
     """
 
     def is_missing_relation(message: str) -> bool:
@@ -35,14 +35,14 @@ def assert_core_episode_images_table_exists(db: Client) -> None:
 
     def help_message() -> str:
         return (
-            "Database table `episode_images` is missing. "
+            "Database table `core.episode_images` is missing. "
             "Run `supabase db push` to apply migrations (see `supabase/migrations/0067_create_episode_images.sql`), "
             "then re-run the import job."
         )
 
     def schema_help_message() -> str:
         return (
-            "Supabase API does not expose schema `core`, so the importer cannot access `episode_images`. "
+            "Supabase API does not expose schema `core`, so the importer cannot access `core.episode_images`. "
             "Add `core` to `supabase/config.toml` under `[api].schemas` and run `supabase config push` "
             "(or enable `core` in Supabase Dashboard → Settings → API → Exposed schemas), then re-run the import job."
         )
@@ -54,7 +54,7 @@ def assert_core_episode_images_table_exists(db: Client) -> None:
             raise EpisodeImageRepositoryError(schema_help_message()) from exc
         if is_missing_relation(str(exc)):
             raise EpisodeImageRepositoryError(help_message()) from exc
-        raise EpisodeImageRepositoryError(f"Supabase error during episode_images preflight: {exc}") from exc
+        raise EpisodeImageRepositoryError(f"Supabase error during core.episode_images preflight: {exc}") from exc
 
     error = getattr(response, "error", None)
     if not error:
@@ -72,7 +72,7 @@ def assert_core_episode_images_table_exists(db: Client) -> None:
         raise EpisodeImageRepositoryError(schema_help_message())
     if is_missing_relation(combined):
         raise EpisodeImageRepositoryError(help_message())
-    raise EpisodeImageRepositoryError(f"Supabase error during episode_images preflight: {combined}")
+    raise EpisodeImageRepositoryError(f"Supabase error during core.episode_images preflight: {combined}")
 
 
 def upsert_episode_images(

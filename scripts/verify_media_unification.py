@@ -97,26 +97,87 @@ def _run_via_docker(sql_path: Path) -> bool:
         return False
 
 
+def _run_scoped_grep() -> bool:
+    table_names = (
+        "show_images|season_images|episode_images|person_images|cast_photos|"
+        "v_show_images_served_media|v_person_images_served_media"
+    )
+    pattern = rf"(?i)\\b(from|join)\\s+core\\.({table_names})\\b"
+
+    cmd = [
+        "rg",
+        "-n",
+        "--pcre2",
+        "--type",
+        "py",
+        "--type",
+        "js",
+        "--type",
+        "ts",
+        "--type",
+        "sql",
+        "-g",
+        "!scripts/db/**",
+        pattern,
+        "trr_backend",
+        "scripts",
+    ]
+    try:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise SystemExit("ripgrep (rg) is required for verification.")
+
+    if result.returncode == 0:
+        print("FAIL: legacy read path references found in runtime code:")
+        print(result.stdout.rstrip())
+        return False
+    if result.returncode not in (1, 2):
+        print("FAIL: rg returned an unexpected status.")
+        print(result.stdout.rstrip())
+        print(result.stderr.rstrip())
+        return False
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify media unification bridges and coverage using local Supabase.",
     )
-    _ = parser.parse_args()
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow verification against non-local DB URLs.",
+    )
+    args = parser.parse_args()
 
     load_env()
     sql_path = _resolve_sql_path()
 
     env_url = (os.getenv("SUPABASE_DB_URL") or "").strip()
     if env_url and _is_local_db_url(env_url):
+        print(f"Using local SUPABASE_DB_URL: {env_url}")
         if _run_psql(env_url, sql_path):
-            return 0
+            return 0 if _run_scoped_grep() else 1
 
     local_url = _detect_local_db_url()
     if local_url and _run_psql(local_url, sql_path):
-        return 0
+        print(f"Using local URL from supabase status: {local_url}")
+        return 0 if _run_scoped_grep() else 1
 
     if _run_via_docker(sql_path):
-        return 0
+        print("Falling back to docker exec for verification.")
+        return 0 if _run_scoped_grep() else 1
+
+    if env_url and not args.allow_remote:
+        raise SystemExit(
+            "Refusing to run against non-local SUPABASE_DB_URL. "
+            "Use --allow-remote to override."
+        )
+
+    if env_url:
+        print(f"Using remote SUPABASE_DB_URL: {env_url}")
+        if _run_psql(env_url, sql_path):
+            return 0 if _run_scoped_grep() else 1
 
     raise SystemExit("Failed to run media unification verification locally.")
 

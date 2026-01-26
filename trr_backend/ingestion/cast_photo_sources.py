@@ -1,7 +1,7 @@
 """
 Unified cast photo source fetchers.
 
-Each fetcher returns normalized rows ready for upsert into cast_photos.
+Each fetcher returns normalized rows ready for upsert into core.cast_photos.
 All rows include:
 - person_id (UUID)
 - source (imdb|tmdb|fandom|fandom-gallery)

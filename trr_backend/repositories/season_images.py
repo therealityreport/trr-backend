@@ -12,7 +12,7 @@ class SeasonImageRepositoryError(RuntimeError):
 
 def assert_core_season_images_table_exists(db: Client) -> None:
     """
-    Fail fast with a clear error if `season_images` is missing in Supabase.
+    Fail fast with a clear error if `core.season_images` is missing in Supabase.
     """
 
     def is_missing_relation(message: str) -> bool:
@@ -35,14 +35,14 @@ def assert_core_season_images_table_exists(db: Client) -> None:
 
     def help_message() -> str:
         return (
-            "Database table `season_images` is missing. "
+            "Database table `core.season_images` is missing. "
             "Run `supabase db push` to apply migrations (see `supabase/migrations/0013_season_images.sql`), "
             "then re-run the import job."
         )
 
     def schema_help_message() -> str:
         return (
-            "Supabase API does not expose schema `core`, so the importer cannot access `season_images`. "
+            "Supabase API does not expose schema `core`, so the importer cannot access `core.season_images`. "
             "Add `core` to `supabase/config.toml` under `[api].schemas` and run `supabase config push` "
             "(or enable `core` in Supabase Dashboard → Settings → API → Exposed schemas), then re-run the import job."
         )
@@ -54,7 +54,7 @@ def assert_core_season_images_table_exists(db: Client) -> None:
             raise SeasonImageRepositoryError(schema_help_message()) from exc
         if is_missing_relation(str(exc)):
             raise SeasonImageRepositoryError(help_message()) from exc
-        raise SeasonImageRepositoryError(f"Supabase error during season_images preflight: {exc}") from exc
+        raise SeasonImageRepositoryError(f"Supabase error during core.season_images preflight: {exc}") from exc
 
     error = getattr(response, "error", None)
     if not error:
@@ -72,7 +72,7 @@ def assert_core_season_images_table_exists(db: Client) -> None:
         raise SeasonImageRepositoryError(schema_help_message())
     if is_missing_relation(combined):
         raise SeasonImageRepositoryError(help_message())
-    raise SeasonImageRepositoryError(f"Supabase error during season_images preflight: {combined}")
+    raise SeasonImageRepositoryError(f"Supabase error during core.season_images preflight: {combined}")
 
 
 def upsert_season_images(

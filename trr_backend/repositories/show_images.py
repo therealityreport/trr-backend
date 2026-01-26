@@ -53,7 +53,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
 
 def assert_core_show_images_table_exists(db: Client) -> None:
     """
-    Fail fast with a clear error if `show_images` is missing in Supabase.
+    Fail fast with a clear error if `core.show_images` is missing in Supabase.
     """
 
     def is_missing_relation(message: str) -> bool:
@@ -76,7 +76,7 @@ def assert_core_show_images_table_exists(db: Client) -> None:
 
     def help_message() -> str:
         return (
-            "Database table `show_images` is missing. "
+            "Database table `core.show_images` is missing. "
             "Run `supabase db push` to apply migrations (see `supabase/migrations/0005_show_images.sql` "
             "`supabase/migrations/0008_show_images_tmdb_id.sql`, `supabase/migrations/0010_show_images_no_votes.sql`, "
             "and `supabase/migrations/0027_show_images_media_sources.sql`), "
@@ -85,7 +85,7 @@ def assert_core_show_images_table_exists(db: Client) -> None:
 
     def schema_help_message() -> str:
         return (
-            "Supabase API does not expose schema `core`, so the importer cannot access `show_images`. "
+            "Supabase API does not expose schema `core`, so the importer cannot access `core.show_images`. "
             "Add `core` to `supabase/config.toml` under `[api].schemas` and run `supabase config push` "
             "(or enable `core` in Supabase Dashboard → Settings → API → Exposed schemas), then re-run the import job."
         )
@@ -96,7 +96,7 @@ def assert_core_show_images_table_exists(db: Client) -> None:
         msg = str(exc).casefold()
         if "permission denied" in msg or "42501" in msg:
             raise ShowImageRepositoryError(
-                "Supabase service role lacks access to `show_images`. "
+                "Supabase service role lacks access to `core.show_images`. "
                 "Apply grants via `supabase db push` (see `supabase/migrations/0006_show_images_grants.sql` "
                 "and `supabase/migrations/0011_show_images_view_no_votes.sql`)."
             ) from exc
@@ -104,7 +104,7 @@ def assert_core_show_images_table_exists(db: Client) -> None:
             raise ShowImageRepositoryError(schema_help_message()) from exc
         if is_missing_relation(str(exc)):
             raise ShowImageRepositoryError(help_message()) from exc
-        raise ShowImageRepositoryError(f"Supabase error during show_images preflight: {exc}") from exc
+        raise ShowImageRepositoryError(f"Supabase error during core.show_images preflight: {exc}") from exc
 
     error = getattr(response, "error", None)
     if not error:
@@ -122,7 +122,7 @@ def assert_core_show_images_table_exists(db: Client) -> None:
         raise ShowImageRepositoryError(schema_help_message())
     if is_missing_relation(combined):
         raise ShowImageRepositoryError(help_message())
-    raise ShowImageRepositoryError(f"Supabase error during show_images preflight: {combined}")
+    raise ShowImageRepositoryError(f"Supabase error during core.show_images preflight: {combined}")
 
 
 def _upsert_show_images_table(
