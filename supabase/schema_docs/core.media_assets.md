@@ -57,6 +57,7 @@ id
 - media_assets_sha256_idx (non-unique): sha256) WHERE (sha256 IS NOT NULL
 - media_assets_sha256_unique (unique): sha256) WHERE (sha256 IS NOT NULL
 - media_assets_source_asset_id_unique (unique): source, source_asset_id) WHERE (source_asset_id IS NOT NULL
+- media_assets_source_hosted_sha_uq (unique): source, hosted_sha256) WHERE (hosted_sha256 IS NOT NULL
 - media_assets_source_idx (non-unique): source
 - media_assets_source_url_unique (unique): source, source_url) WHERE (source_url IS NOT NULL
 
