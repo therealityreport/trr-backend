@@ -160,12 +160,13 @@ def main() -> int:
             return 0 if _run_scoped_grep() else 1
 
     local_url = _detect_local_db_url()
-    if local_url and _run_psql(local_url, sql_path):
+    if local_url:
         print(f"Using local URL from supabase status: {local_url}")
-        return 0 if _run_scoped_grep() else 1
+        if _run_psql(local_url, sql_path):
+            return 0 if _run_scoped_grep() else 1
 
+    print("Falling back to docker exec for verification.")
     if _run_via_docker(sql_path):
-        print("Falling back to docker exec for verification.")
         return 0 if _run_scoped_grep() else 1
 
     if env_url and not args.allow_remote:

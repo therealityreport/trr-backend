@@ -12,6 +12,7 @@ as $$
 declare
   v_source_url text;
   v_media_asset_id uuid;
+  v_media_link_id uuid;
 begin
   if tg_op = 'DELETE' then
     delete from core.media_links
@@ -180,7 +181,13 @@ begin
   set
     context = excluded.context,
     position = coalesce(excluded.position, core.media_links.position),
-    updated_at = now();
+    updated_at = now()
+  returning id into v_media_link_id;
+
+  if v_media_link_id is not null
+    and new.kind in ('poster', 'backdrop', 'logo', 'still', 'profile') then
+    perform core.set_primary_media_link('show', new.show_id, new.kind, v_media_link_id);
+  end if;
 
   return new;
 end $$;
@@ -207,6 +214,7 @@ as $$
 declare
   v_source_url text;
   v_media_asset_id uuid;
+  v_media_link_id uuid;
 begin
   if tg_op = 'DELETE' then
     delete from core.media_links
@@ -376,7 +384,13 @@ begin
   set
     context = excluded.context,
     position = coalesce(excluded.position, core.media_links.position),
-    updated_at = now();
+    updated_at = now()
+  returning id into v_media_link_id;
+
+  if v_media_link_id is not null
+    and new.kind in ('poster', 'backdrop', 'logo', 'still', 'profile') then
+    perform core.set_primary_media_link('season', new.season_id, new.kind, v_media_link_id);
+  end if;
 
   return new;
 end $$;
@@ -403,6 +417,7 @@ as $$
 declare
   v_source_url text;
   v_media_asset_id uuid;
+  v_media_link_id uuid;
 begin
   if tg_op = 'DELETE' then
     delete from core.media_links
@@ -573,7 +588,13 @@ begin
   set
     context = excluded.context,
     position = coalesce(excluded.position, core.media_links.position),
-    updated_at = now();
+    updated_at = now()
+  returning id into v_media_link_id;
+
+  if v_media_link_id is not null
+    and new.kind in ('poster', 'backdrop', 'logo', 'still', 'profile') then
+    perform core.set_primary_media_link('episode', new.episode_id, new.kind, v_media_link_id);
+  end if;
 
   return new;
 end $$;
@@ -599,6 +620,7 @@ language plpgsql
 as $$
 declare
   v_media_asset_id uuid;
+  v_media_link_id uuid;
 begin
   if tg_op = 'DELETE' then
     delete from core.media_links
@@ -651,7 +673,12 @@ begin
   set
     context = excluded.context,
     is_primary = excluded.is_primary,
-    updated_at = now();
+    updated_at = now()
+  returning id into v_media_link_id;
+
+  if v_media_link_id is not null then
+    perform core.set_primary_media_link('person', new.person_id, 'profile', v_media_link_id);
+  end if;
 
   return new;
 end $$;
