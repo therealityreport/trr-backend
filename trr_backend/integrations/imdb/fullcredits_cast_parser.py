@@ -512,7 +512,7 @@ def extract_person_images_from_graphql(
     graphql_edges: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    Extract person primary images from GraphQL credits for core.person_images.
+    Extract person primary images from GraphQL credits for person_images.
 
     This extracts the primaryImage field from each credit node, which is used
     for photo-based cast filtering (episodeCount <= 6 requires primaryImage).
