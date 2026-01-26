@@ -5,40 +5,50 @@ Script entrypoints (`if __name__ == '__main__'`) and their trr_backend dependenc
 ```mermaid
 flowchart LR
     subgraph sg0["scripts (root)"]
-        s0["backfill_tmdb_show_details"]
-        s1["enrich_show_cast"]
-        s2["fix_repo_structure_mermaid"]
-        s3["generate_repo_mermaid"]
-        s4["imdb_show_enrichment"]
-        s5["import_fandom_gallery_photos"]
-        s6["import_imdb_cast_episode_appearances"]
-        s7["import_shows_from_lists"]
-        s8["mirror_cast_photos_to_s3"]
-        s9["mirror_show_images_to_s3"]
-        s10["rebuild_hosted_urls"]
-        s11["resolve_tmdb_ids_via_find"]
-        s12["rhoslc_fandom_enrichment"]
-        s13["run_pipeline"]
-        s14["run_show_import_job"]
-        s15["sync_all_tables"]
-        s16["sync_cast_photos"]
-        s17["sync_episode_appearances"]
-        s18["sync_episodes"]
-        s19["sync_people"]
-        s20["sync_season_episode_images"]
-        s21["sync_seasons"]
-        s22["sync_seasons_episodes"]
-        s23["sync_show_cast"]
-        s24["sync_show_images"]
-        s25["sync_shows"]
-        s26["sync_shows_all"]
-        s27["sync_tmdb_person_images"]
-        s28["sync_tmdb_show_entities"]
-        s29["sync_tmdb_watch_providers"]
-        s30["verify_schema"]
+        s0["apply_migration_0054"]
+        s1["backfill_credits"]
+        s2["backfill_media_assets"]
+        s3["backfill_tmdb_show_details"]
+        s4["cleanup_expired_media_uploads"]
+        s5["enrich_show_cast"]
+        s6["fix_repo_structure_mermaid"]
+        s7["generate_repo_mermaid"]
+        s8["imdb_show_enrichment"]
+        s9["import_fandom_gallery_photos"]
+        s10["import_imdb_cast_episode_appearances"]
+        s11["import_shows_from_lists"]
+        s12["mirror_cast_photos_to_s3"]
+        s13["mirror_media_assets_to_s3"]
+        s14["mirror_show_images_to_s3"]
+        s15["rebuild_hosted_urls"]
+        s16["resolve_tmdb_ids_via_find"]
+        s17["rhoslc_fandom_enrichment"]
+        s18["run_pipeline"]
+        s19["run_show_import_job"]
+        s20["sync_all_tables"]
+        s21["sync_cast_batch"]
+        s22["sync_cast_photos"]
+        s23["sync_episode_appearances"]
+        s24["sync_episodes"]
+        s25["sync_people"]
+        s26["sync_season_episode_images"]
+        s27["sync_seasons"]
+        s28["sync_seasons_episodes"]
+        s29["sync_show_batch"]
+        s30["sync_show_cast"]
+        s31["sync_show_complete"]
+        s32["sync_show_images"]
+        s33["sync_shows"]
+        s34["sync_shows_all"]
+        s35["sync_tmdb_person_images"]
+        s36["sync_tmdb_show_entities"]
+        s37["sync_tmdb_watch_providers"]
+        s38["validate_supabase_timeouts"]
+        s39["verify_credits_parity"]
+        s40["verify_schema"]
     end
     subgraph sg1["scripts/supabase"]
-        s31["generate_schema_docs"]
+        s41["generate_schema_docs"]
     end
     subgraph trr["trr_backend/"]
         ingestion["ingestion"]
@@ -46,61 +56,65 @@ flowchart LR
         media["media"]
         repos["repositories"]
     end
-    s0 --> ingestion
-    s0 --> integrations
-    s0 --> repos
-    s1 --> ingestion
-    s1 --> integrations
-    s1 --> media
     s1 --> repos
-    s4 --> integrations
+    s2 --> repos
+    s3 --> ingestion
+    s3 --> integrations
+    s3 --> repos
+    s4 --> media
+    s5 --> ingestion
     s5 --> integrations
+    s5 --> media
     s5 --> repos
-    s6 --> ingestion
-    s6 --> integrations
-    s6 --> repos
-    s7 --> ingestion
-    s7 --> integrations
-    s8 --> media
-    s8 --> repos
-    s9 --> media
+    s8 --> integrations
+    s9 --> integrations
     s9 --> repos
-    s10 --> media
+    s10 --> ingestion
+    s10 --> integrations
+    s10 --> repos
     s11 --> ingestion
     s11 --> integrations
-    s11 --> repos
-    s12 --> integrations
+    s12 --> media
+    s12 --> repos
+    s13 --> repos
+    s14 --> media
+    s14 --> repos
+    s15 --> media
     s16 --> ingestion
-    s16 --> media
+    s16 --> integrations
     s16 --> repos
-    s17 --> ingestion
     s17 --> integrations
-    s17 --> repos
-    s18 --> ingestion
-    s18 --> repos
-    s19 --> ingestion
-    s19 --> integrations
-    s19 --> repos
-    s20 --> integrations
-    s20 --> media
-    s20 --> repos
-    s21 --> ingestion
-    s21 --> repos
+    s22 --> ingestion
+    s22 --> media
     s22 --> repos
     s23 --> ingestion
     s23 --> integrations
     s23 --> repos
     s24 --> ingestion
-    s24 --> media
     s24 --> repos
     s25 --> ingestion
+    s25 --> integrations
     s25 --> repos
+    s26 --> integrations
+    s26 --> media
+    s26 --> repos
     s27 --> ingestion
     s27 --> repos
-    s28 --> integrations
-    s28 --> media
     s28 --> repos
-    s29 --> integrations
-    s29 --> media
-    s29 --> repos
+    s30 --> ingestion
+    s30 --> integrations
+    s30 --> repos
+    s32 --> ingestion
+    s32 --> media
+    s32 --> repos
+    s33 --> ingestion
+    s33 --> repos
+    s35 --> ingestion
+    s35 --> repos
+    s36 --> integrations
+    s36 --> media
+    s36 --> repos
+    s37 --> integrations
+    s37 --> media
+    s37 --> repos
 ```
