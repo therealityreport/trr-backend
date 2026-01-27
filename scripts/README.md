@@ -1,13 +1,9 @@
 # Realitease 2025 Data Pipeline
 
 > **⚠️ Note on Legacy Scripts:**
-> The following directories contain archived/legacy scripts and are excluded from linting, formatting, and repo-map generation:
-> - `scripts/archives/` - Old archived scripts
-> - `scripts/1-ShowInfo/`, `2-CastInfo/`, `3-RealiteaseInfo/`, `4-WWHLInfo/`, `5-FinalList/` - Legacy numbered pipeline
-> - `scripts/BravoTalent/`, `scripts/RealiteaseInfo/` - Deprecated modules
->
-> **Git history preserves these files**; do not rely on them for current development.
-> For the current, maintained scripts, see the root-level scripts in this directory.
+> The legacy numbered pipeline directories (`1-ShowInfo/`, `2-CastInfo/`, etc.) have been removed.
+> **Git history preserves these files** if needed for reference.
+> For current, maintained scripts, see the root-level scripts in this directory.
 
 ## 📋 Complete Pipeline Overview
 
@@ -209,7 +205,7 @@ python3 build_realitease_info.py                       # Final output
 
 ## 🔧 Environment Requirements
 
-- Python 3.9+
+- Python 3.11+
 - Google Sheets API credentials
 - TMDB API key (for tmdb_final_extractor.py)
 - Chrome/ChromeDriver (for IMDb scrapers)

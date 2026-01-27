@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 
 import httpx
-from supabase.lib.client_options import SyncClientOptions
 
-from supabase import Client, create_client
+# Defensive imports for supabase package.
+# Provides clear error message if dependencies aren't installed.
+try:
+    from supabase.lib.client_options import SyncClientOptions
+
+    from supabase import Client, create_client
+except ImportError as _import_err:
+    _msg = (
+        "Failed to import supabase package.\n\n"
+        "FIX:\n"
+        "  1. Ensure Python 3.11+ is installed\n"
+        "  2. Activate your virtual environment: source .venv/bin/activate\n"
+        "  3. Install dependencies: pip install -r requirements.txt\n"
+        "  4. Verify installation: make doctor\n\n"
+        f"Original error: {_import_err}"
+    )
+    print(_msg, file=sys.stderr)
+    raise ImportError(_msg) from _import_err
 
 
 @lru_cache

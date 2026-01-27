@@ -1,6 +1,6 @@
 # The Reality Report Backend Data Pipeline
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Production](https://img.shields.io/badge/status-production-green.svg)](https://github.com/therealityreport/trr-backend-2025)
 
@@ -20,7 +20,7 @@ The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.8 or higher
+- Python 3.11 or higher
 - Google Cloud service account with Sheets API access
 - API keys for TMDb, IMDb, and Gemini AI
 
@@ -53,13 +53,10 @@ The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system 
    - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `IMDB_API_KEY`, `GEMINI_API_KEY`
    - Configure spreadsheet name: `SPREADSHEET_NAME=Realitease2025Data`
 
-5. **Run the pipeline**
+5. **Verify environment**
    ```bash
-   # Run complete pipeline
-   python3 scripts/run_pipeline.py --step all
-   
-   # Or run individual stages
-   python3 scripts/run_pipeline.py --step showinfo
+   # Check that all dependencies are correctly installed
+   make doctor
    ```
 
 ## 🧰 DB Sync Scripts
@@ -124,109 +121,26 @@ Never commit API keys, AWS credentials, or private keys. Rotate any exposed cred
 - `api/`: FastAPI app (Supabase-backed API + WebSockets)
 - `trr_backend/`: Shared library code (reused by API + pipeline)
   - `trr_backend/integrations/`: External metadata clients (IMDb/TMDb/etc.)
-- `scripts/`: Data pipeline stages and orchestration (`scripts/run_pipeline.py`)
+- `scripts/`: Data sync scripts and utilities
 - `supabase/`: Database schema, migrations, and seeds
 - `docs/`: Architecture and operating docs
 
 For detailed repository structure, module dependency graphs, and architecture diagrams, see [docs/Repository/README.md](docs/Repository/README.md).
 
-## 📁 Pipeline Architecture
+## 📁 Architecture
 
-The data pipeline is organized into 5 sequential stages, each building upon the previous stage's output:
+The backend uses a Supabase database with data sync scripts that fetch from external APIs and populate the database.
 
-### 1️⃣ Show Information Collection
-**Location**: `scripts/1-ShowInfo/`
-**Purpose**: Populate show metadata from TMDb and IMDb APIs
+**Current Architecture:**
+- Data stored in Supabase PostgreSQL (`core.*` schema)
+- Sync scripts in `scripts/` fetch from TMDb, IMDb, Fandom wikis
+- FastAPI app in `api/` serves data to the frontend
 
-```bash
-cd scripts/1-ShowInfo
-python3 showinfo_step1.py
-```
+See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
 
-**Input**: TMDb lists, IMDb lists (automatically fetched)
-**Output**: Populated ShowInfo sheet with show metadata
-**Key Features**:
-- Automatic show discovery from TMDb lists
-- IMDb ID resolution and validation
-- External ID mapping (TheTVDB, Wikidata)
-- Network and genre information
-
-### 2️⃣ Cast Information Extraction
-**Location**: `scripts/2-CastInfo/`
-**Purpose**: Extract and enrich cast member data for each show
-
-```bash
-cd scripts/2-CastInfo
-python3 CastInfo_Step1.py    # Update cast columns A-F
-python3 CastInfo_Step2.py    # Extract seasons/episodes to G/H
-```
-
-**Input**: ShowInfo sheet
-**Output**: Populated CastInfo sheet with cast details
-**Key Features**:
-- Smart filtering based on episode thresholds
-- Multi-threaded processing with rate limiting
-- Comprehensive error handling and recovery
-- Show-based batching for efficiency
-
-### 3️⃣ Person Data Enrichment
-**Location**: `scripts/3-RealiteaseInfo/`
-**Purpose**: Build person-focused database with biographical enrichment
-
-```bash
-cd scripts/3-RealiteaseInfo
-python3 RealiteaseInfo_Step1.py   # Build base from CastInfo
-python3 RealiteaseInfo_Step2.py   # Aggregate show counts/links
-python3 RealiteaseInfo_Step3.py   # Enrich: gender, birthday, zodiac
-python3 RealiteaseInfo_Step4.py   # Backfill TMDb cast IDs
-```
-
-**Input**: CastInfo sheet
-**Output**: Person-focused RealiteaseInfo sheet
-**Key Features**:
-- Biographical data enrichment (birthdays, zodiac signs)
-- Show participation aggregation
-- Duplicate person resolution
-- External source integration
-
-### 4️⃣ WWHL Data Processing
-**Location**: `scripts/4-WWHLInfo/`
-**Purpose**: Process Watch What Happens Live episodes and guest data
-
-```bash
-cd scripts/4-WWHLInfo
-python3 WWHLInfo_TMDb_Step1.py    # Show data from TMDb
-python3 WWHLInfo_IMDb_Step2.py    # Episode data from IMDb
-python3 WWHLInfo_Gemini_Step3.py  # Fill gaps with Gemini AI
-python3 WWHLInfo_Checker_Step4.py # Validate and clean data
-```
-
-**Input**: TMDb and IMDb episode data
-**Output**: Comprehensive WWHL episode database
-**Key Features**:
-- AI-powered guest name extraction
-- Episode metadata enrichment
-- Data validation and cleaning
-- Comprehensive error handling
-
-### 5️⃣ Final Data Curation
-**Location**: `scripts/5-FinalList/`
-**Purpose**: Generate the final curated dataset for production
-
-```bash
-cd scripts/5-FinalList
-python3 FinalInfo_Step1.py  # Build final consolidated list
-python3 FinalInfo_Step2.py   # Enrich with IMDb data + retries
-python3 FinalInfo_Step3.py   # Normalize and clean final data
-```
-
-**Input**: All previous pipeline stages
-**Output**: Production-ready FinalList dataset
-**Key Features**:
-- Data consolidation and normalization
-- Final quality assurance
-- Firebase deployment preparation
-- Comprehensive data validation
+> **Note:** The legacy numbered pipeline (`1-ShowInfo/`, `2-CastInfo/`, etc.) has been removed.
+> Git history preserves these files if needed for reference.
+> Current data ingestion uses the DB Sync Scripts documented above.
 
 ## 📊 Data Sources
 
@@ -342,25 +256,23 @@ External APIs → Data Collection → Processing Pipeline → Quality Validation
 
 ```
 TRR-Backend/
-├── scripts/                    # Main pipeline scripts
-│   ├── 1-ShowInfo/            # Stage 1: Show collection
-│   ├── 2-CastInfo/            # Stage 2: Cast extraction
-│   ├── 3-RealiteaseInfo/      # Stage 3: Person enrichment
-│   ├── 4-WWHLInfo/            # Stage 4: WWHL processing
-│   ├── 5-FinalList/           # Stage 5: Final curation
-│   ├── EPISODE details/       # Episode processing utilities
-│   ├── BravoTalent/           # Bravo-specific processing
-│   └── archives/              # Legacy and experimental scripts
+├── api/                       # FastAPI application
+├── trr_backend/               # Shared library code
+│   ├── db/                    # Database utilities
+│   ├── integrations/          # External API clients (IMDb, TMDb, etc.)
+│   ├── ingestion/             # Data ingestion modules
+│   └── repositories/          # Database access layer
+├── scripts/                   # Data sync and utility scripts
+│   ├── dev/                   # Development tools (doctor.py)
+│   ├── db/                    # Database SQL scripts
+│   └── supabase/              # Supabase-specific utilities
+├── supabase/                  # Database schema and migrations
+│   ├── migrations/            # SQL migrations
+│   └── schema_docs/           # Auto-generated schema documentation
+├── tests/                     # Test suite
 ├── docs/                      # Documentation
-│   ├── cloud/                 # Cloud deployment guides
-│   └── images/                # Documentation images
-├── logs/                      # Execution logs and results (gitignored)
-├── keys/                      # Credentials (gitignored)
-├── .cache/                    # API response caches (gitignored)
-├── debug_html/                # Debug HTML artifacts (gitignored)
-├── requirements.txt            # Python dependencies
-├── PRD.md                     # Product Requirements Document
-└── README.md                  # This file
+├── requirements.txt           # Python dependencies
+└── Makefile                   # Common development tasks
 ```
 
 ## 🚀 Deployment
@@ -376,24 +288,15 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your credentials
 
-# Run pipeline
-python3 scripts/run_pipeline.py --step all
+# Verify setup
+make doctor
+
+# Run tests
+pytest
 ```
 
 ### Cloud Deployment
-See `docs/cloud/` for detailed cloud deployment guides:
-- **Google Cloud Platform**: Complete setup guide
-- **GitHub Codespaces**: Development environment setup
-- **AWS**: Alternative deployment options
-
-### Production Deployment
-```bash
-# Deploy to Firebase
-python3 scripts/5-FinalList/Firebase_Uploader.py
-
-# Verify deployment
-python3 scripts/5-FinalList/FinalInfo_Step3.py --verify
-```
+See `docs/cloud/` for detailed cloud deployment guides.
 
 ## 🔐 Security
 

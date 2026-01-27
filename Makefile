@@ -1,6 +1,10 @@
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-.PHONY: schema-docs schema-docs-check schema-docs-reset-check ci-local repo-map repo-map-check
+.PHONY: doctor schema-docs schema-docs-check schema-docs-reset-check ci-local repo-map repo-map-check
+
+# Environment diagnostic - run before pytest to verify setup
+doctor:
+	@$(PYTHON) scripts/dev/doctor.py
 
 # Generate schema docs (JSON, MD) and diagrams (Mermaid) from database
 schema-docs:
