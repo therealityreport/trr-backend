@@ -80,8 +80,9 @@ def test_stage1_tmdb_fetch_images_upserts_show_images_and_sets_primary_paths(mon
     assert all(isinstance(r.get("aspect_ratio"), float) for r in rows)
     assert all("metadata" in r for r in rows)
 
-    assert update_show_mock.call_count == 1
-    patch = update_show_mock.call_args[0][2]
+    # update_show is called twice: once for external_ids after insert, once for primary_tmdb_*_path
+    assert update_show_mock.call_count == 2
+    patch = update_show_mock.call_args_list[1][0][2]
     assert patch["primary_tmdb_poster_path"] == "/poster_en_votes_high.jpg"
     assert patch["primary_tmdb_backdrop_path"] == "/backdrop_en.jpg"
     assert patch["primary_tmdb_logo_path"] == "/logo_en.jpg"

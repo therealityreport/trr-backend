@@ -52,7 +52,17 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
         }
 
     monkeypatch.setattr(mod, "insert_show", _fake_insert_show)
-    monkeypatch.setattr(mod, "update_show", MagicMock())
+
+    def _fake_update_show(_db, show_id, patch):
+        return {
+            "id": inserted_show_id,
+            "name": "Test Show",
+            "imdb_id": "tt1234567",
+            "tmdb_id": None,
+            **patch,
+        }
+
+    monkeypatch.setattr(mod, "update_show", _fake_update_show)
 
     upsert_seasons_mock = MagicMock(return_value=[])
     monkeypatch.setattr(mod, "upsert_seasons", upsert_seasons_mock)
@@ -65,6 +75,11 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
     upsert_episodes_mock = MagicMock(return_value=[])
     monkeypatch.setattr(mod, "upsert_episodes", upsert_episodes_mock)
 
+    # Mock fetch_episodes_for_show_season to return empty list (no existing episodes)
+    monkeypatch.setattr(mod, "fetch_episodes_for_show_season", lambda db, *, show_id, season_number: [])
+
+    # Use MagicMock for supabase_client so .schema() calls don't fail
+    fake_db = MagicMock()
     result = mod.upsert_candidates_into_supabase(
         [CandidateShow(imdb_id="tt1234567", tmdb_id=None, title="Test Show")],
         dry_run=False,
@@ -72,7 +87,7 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
         tmdb_fetch_details=False,
         imdb_fetch_episodes=True,
         tmdb_fetch_seasons=False,
-        supabase_client=object(),
+        supabase_client=fake_db,
     )
     assert result.created == 1
 
@@ -85,6 +100,7 @@ def test_imdb_episodes_ingestion_upserts_seasons_and_episode_rows(monkeypatch: p
             "imdb_series_id": "tt1234567",
             "language": "en-US",
             "fetched_at": "2025-12-18T00:00:00Z",
+            "external_ids": {"imdb": "tt1234567"},
         }
     ]
 

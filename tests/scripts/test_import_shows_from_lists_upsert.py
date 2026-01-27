@@ -15,7 +15,7 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *args, **kwargs: None)
 
     insert_mock = MagicMock(return_value={"id": "00000000-0000-0000-0000-000000000001", "name": "New Show"})
-    update_mock = MagicMock()
+    update_mock = MagicMock(return_value={"id": "00000000-0000-0000-0000-000000000001", "name": "New Show"})
     monkeypatch.setattr(mod, "insert_show", insert_mock)
     monkeypatch.setattr(mod, "update_show", update_mock)
 
@@ -33,7 +33,12 @@ def test_upsert_candidates_inserts_when_missing(monkeypatch):
     assert result.updated == 0
     assert result.skipped == 0
     insert_mock.assert_called_once()
-    update_mock.assert_not_called()
+    # After insert, update_show is called to set external_ids
+    assert update_mock.call_count == 1
+    _, call_kwargs = update_mock.call_args_list[0]
+    if not call_kwargs:
+        call_args = update_mock.call_args_list[0][0]
+        assert "external_ids" in call_args[2]  # patch dict contains external_ids
 
 
 def test_upsert_candidates_updates_show_columns_without_clobber(monkeypatch):

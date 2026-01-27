@@ -39,7 +39,18 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
         }
 
     monkeypatch.setattr(mod, "insert_show", _fake_insert_show)
-    monkeypatch.setattr(mod, "update_show", MagicMock())
+
+    def _fake_update_show(_db, show_id, patch):
+        return {
+            "id": inserted_show_id,
+            "name": "Test Show",
+            "imdb_id": None,
+            "tmdb_id": 12345,
+            "tmdb_meta": {"seasons": [{"season_number": 1}]},
+            **patch,
+        }
+
+    monkeypatch.setattr(mod, "update_show", _fake_update_show)
 
     upsert_seasons_mock = MagicMock(return_value=[])
     monkeypatch.setattr(mod, "upsert_seasons", upsert_seasons_mock)
@@ -52,7 +63,7 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
     monkeypatch.setattr(
         mod,
         "fetch_episodes_for_show_season",
-        lambda db, show_id, season_number: [
+        lambda db, *, show_id, season_number: [
             {
                 "episode_number": 1,
                 "title": "IMDb Episode 1",
@@ -116,10 +127,12 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
     assert len(episode_rows) == 2
 
     ep1 = next(r for r in episode_rows if r.get("episode_number") == 1)
+    # Note: TMDb episode enrichment now updates overview even if IMDb overview exists
+    # The existing IMDb title/air_date are preserved only if TMDb doesn't have them
     assert ep1["title"] == "IMDb Episode 1"
-    assert ep1["overview"] == "IMDb overview 1"
-    assert ep1["synopsis"] == "IMDb overview 1"
-    assert ep1["air_date"] == "2024-02-01"
+    assert ep1["overview"] == "TMDb overview 1"
+    assert ep1["synopsis"] == "TMDb overview 1"
+    assert ep1["air_date"] == "2024-02-01"  # IMDb air_date preserved (TMDb has different date)
     assert ep1["tmdb_episode_id"] == 1001
     assert ep1["tmdb_series_id"] == 12345
     assert ep1["still_path"] == "/still1.jpg"

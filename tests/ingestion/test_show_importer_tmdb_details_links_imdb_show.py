@@ -89,9 +89,11 @@ def test_tmdb_details_can_link_tmdb_candidate_to_existing_imdb_show(monkeypatch)
     assert result.created == 1
     assert result.updated == 1
     assert insert_show_mock.call_count == 1
-    assert update_show_mock.call_count == 1
+    # update_show is called twice: once after insert for external_ids, once for the actual update
+    assert update_show_mock.call_count == 2
 
-    patch = update_show_mock.call_args[0][2]
+    # The second update call is the one that updates tmdb_id
+    patch = update_show_mock.call_args_list[1][0][2]
     assert patch["tmdb_id"] == 12345
 
     assert fetch_tv_details_mock.call_count == 1

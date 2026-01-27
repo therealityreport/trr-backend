@@ -137,7 +137,10 @@ def test_fetch_with_fallback_returns_html_source_on_success() -> None:
         mock_client.fetch_fullcredits_page.return_value = html
         mock_client_class.return_value = mock_client
 
-        rows, source_type, person_images = fetch_fullcredits_cast_with_fallback("tt1234567", verbose=False)
+        # Use primary_source="html" to explicitly test the HTML tier
+        rows, source_type, person_images = fetch_fullcredits_cast_with_fallback(
+            "tt1234567", verbose=False, primary_source="html"
+        )
 
         assert source_type == "fullcredits_html"
         assert len(rows) == 3
