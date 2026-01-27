@@ -239,6 +239,19 @@ def _merge_int_arrays(existing: Sequence[Any] | None, incoming: Sequence[Any] | 
     return merged
 
 
+def _filter_ascii_strings(values: Sequence[Any] | None) -> list[str]:
+    out: list[str] = []
+    for v in values or []:
+        if not isinstance(v, str):
+            continue
+        s = v.strip()
+        if not s:
+            continue
+        if s.isascii():
+            out.append(s)
+    return out
+
+
 def _apply_patch_if_changed(
     patch: dict[str, Any],
     *,
@@ -2283,7 +2296,10 @@ def upsert_candidates_into_supabase(
             if merged_tmdb_company_ids is not None:
                 update_patch["tmdb_production_company_ids"] = merged_tmdb_company_ids
 
-            merged_alt_names = _merge_str_arrays(row.get("alternative_names"), patch.alternative_names)
+            merged_alt_names = _merge_str_arrays(
+                _filter_ascii_strings(row.get("alternative_names")),
+                _filter_ascii_strings(patch.alternative_names),
+            )
             if merged_alt_names is not None:
                 update_patch["alternative_names"] = merged_alt_names
 

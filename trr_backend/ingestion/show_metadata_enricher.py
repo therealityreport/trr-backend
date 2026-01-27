@@ -416,6 +416,13 @@ _ENGLISH_COUNTRY_CODES = {
     "IE",
 }
 
+def _is_ascii_text(value: str) -> bool:
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
 
 def _extract_tmdb_alternative_name_rows(details: Mapping[str, Any]) -> list[dict[str, Any]]:
     """
@@ -440,6 +447,8 @@ def _extract_tmdb_alternative_name_rows(details: Mapping[str, Any]) -> list[dict
             continue
         title = item.get("title")
         if not isinstance(title, str) or not title.strip():
+            continue
+        if not _is_ascii_text(title):
             continue
         country = item.get("iso_3166_1")
         if isinstance(country, str):
