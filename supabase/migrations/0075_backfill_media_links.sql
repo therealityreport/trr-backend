@@ -21,7 +21,8 @@ from core.show_images
 on conflict do nothing;
 
 insert into core.media_links (entity_type, entity_id, media_asset_id, kind, position, context, created_at, updated_at)
-select 'show', s.show_id, a.id, s.kind, s.position,
+select distinct on (s.show_id, s.kind, a.id)
+       'show', s.show_id, a.id, s.kind, s.position,
        jsonb_build_object(
          'legacy_table','show_images',
          'legacy_id', s.id,
@@ -53,6 +54,13 @@ join lateral (
     a.id
   limit 1
 ) a on true
+order by
+  s.show_id,
+  s.kind,
+  a.id,
+  coalesce(s.position, 9999),
+  s.updated_at desc,
+  s.id
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
@@ -80,7 +88,8 @@ from core.season_images
 on conflict do nothing;
 
 insert into core.media_links (entity_type, entity_id, media_asset_id, kind, position, context, created_at, updated_at)
-select 'season', s.season_id, a.id, s.kind, s.position,
+select distinct on (s.season_id, s.kind, a.id)
+       'season', s.season_id, a.id, s.kind, s.position,
        jsonb_build_object(
          'legacy_table','season_images',
          'legacy_id', s.id,
@@ -113,6 +122,13 @@ join lateral (
     a.id
   limit 1
 ) a on true
+order by
+  s.season_id,
+  s.kind,
+  a.id,
+  coalesce(s.position, 9999),
+  s.updated_at desc,
+  s.id
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
@@ -140,7 +156,8 @@ from core.episode_images
 on conflict do nothing;
 
 insert into core.media_links (entity_type, entity_id, media_asset_id, kind, position, context, created_at, updated_at)
-select 'episode', e.episode_id, a.id, e.kind, e.position,
+select distinct on (e.episode_id, e.kind, a.id)
+       'episode', e.episode_id, a.id, e.kind, e.position,
        jsonb_build_object(
          'legacy_table','episode_images',
          'legacy_id', e.id,
@@ -174,6 +191,13 @@ join lateral (
     a.id
   limit 1
 ) a on true
+order by
+  e.episode_id,
+  e.kind,
+  a.id,
+  coalesce(e.position, 9999),
+  e.updated_at desc,
+  e.id
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
@@ -199,7 +223,8 @@ on conflict do nothing;
 insert into core.media_links (
   entity_type, entity_id, media_asset_id, kind, position, is_primary, context, created_at, updated_at
 )
-select 'person', p.person_id, a.id, 'profile', null, false,
+select distinct on (p.person_id, a.id)
+       'person', p.person_id, a.id, 'profile', null, false,
        jsonb_build_object(
          'legacy_table','person_images',
          'legacy_id', p.id
@@ -210,6 +235,11 @@ from core.person_images p
 join core.media_assets a
   on a.source = p.source
  and a.source_url = p.url
+order by
+  p.person_id,
+  a.id,
+  p.updated_at desc,
+  p.id
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
@@ -239,7 +269,8 @@ from core.cast_photos
 on conflict do nothing;
 
 insert into core.media_links (entity_type, entity_id, media_asset_id, kind, position, context, created_at, updated_at)
-select 'person', c.person_id, a.id, 'gallery', c.gallery_index,
+select distinct on (c.person_id, a.id)
+       'person', c.person_id, a.id, 'gallery', c.gallery_index,
        jsonb_build_object(
          'legacy_table','cast_photos',
          'legacy_id', c.id,
@@ -270,6 +301,12 @@ join lateral (
     a.id
   limit 1
 ) a on true
+order by
+  c.person_id,
+  a.id,
+  coalesce(c.gallery_index, 9999),
+  c.updated_at desc,
+  c.id
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
