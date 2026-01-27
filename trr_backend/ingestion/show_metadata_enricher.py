@@ -60,6 +60,7 @@ class ShowEnrichmentPatch:
     tmdb_network_ids: list[int] | None = None
     tmdb_production_company_ids: list[int] | None = None
     alternative_names: list[str] | None = None
+    alternative_name_rows: list[dict[str, Any]] = field(default_factory=list)
     show_images_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -386,7 +387,7 @@ def _extract_tmdb_genres(details: Mapping[str, Any]) -> list[str]:
 
 
 def _extract_tmdb_alternative_names(details: Mapping[str, Any]) -> list[str]:
-    """Extract alternative title names from TMDb TV details."""
+    """Extract alternative title names from TMDb TV details (names only)."""
     alt_titles = details.get("alternative_titles")
     if not isinstance(alt_titles, dict):
         return []
@@ -403,6 +404,62 @@ def _extract_tmdb_alternative_names(details: Mapping[str, Any]) -> list[str]:
                 names.append(title.strip())
 
     return sorted(set(names)) if names else []
+
+
+_ENGLISH_COUNTRY_CODES = {
+    "US",
+    "GB",
+    "UK",
+    "CA",
+    "AU",
+    "NZ",
+    "IE",
+}
+
+
+def _extract_tmdb_alternative_name_rows(details: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """
+    Extract alternative title rows from TMDb TV details.
+
+    Keep only:
+    - English-country entries (US/GB/CA/AU/NZ/IE), or
+    - Uncategorized entries (no country provided).
+    """
+    alt_titles = details.get("alternative_titles")
+    if not isinstance(alt_titles, dict):
+        return []
+
+    results = alt_titles.get("results")
+    if not isinstance(results, list):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        country = item.get("iso_3166_1")
+        if isinstance(country, str):
+            country = country.strip().upper() or None
+        if country is not None and country not in _ENGLISH_COUNTRY_CODES:
+            continue
+        key = (title.strip(), country)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "name": title.strip(),
+                "country": country,
+                "language": None,
+                "source": "tmdb",
+            }
+        )
+
+    return rows
 
 
 def _extract_tmdb_watch_providers(payload: Mapping[str, Any], *, region: str) -> list[dict[str, Any]]:
@@ -556,6 +613,7 @@ def _enrich_one_show(
     tmdb_network_ids: list[int] = []
     tmdb_production_company_ids: list[int] = []
     alternative_names: list[str] = []
+    alternative_name_rows: list[dict[str, Any]] = []
     show_images_rows: list[dict[str, Any]] = []
 
     imdb_id = _as_str(show.imdb_id)
@@ -647,9 +705,10 @@ def _enrich_one_show(
             tmdb_production_company_ids.extend(production_company_ids)
 
         # Extract alternative titles/names
-        tmdb_alt_names = _extract_tmdb_alternative_names(details)
-        if tmdb_alt_names:
-            alternative_names.extend(tmdb_alt_names)
+        tmdb_alt_name_rows = _extract_tmdb_alternative_name_rows(details)
+        if tmdb_alt_name_rows:
+            alternative_name_rows.extend(tmdb_alt_name_rows)
+            alternative_names.extend([r["name"] for r in tmdb_alt_name_rows if r.get("name")])
 
         if force_refresh or show.show_total_seasons is None:
             value = _as_int(details.get("number_of_seasons"))
@@ -917,6 +976,7 @@ def _enrich_one_show(
         tmdb_network_ids=sorted(set(tmdb_network_ids)) if tmdb_network_ids else None,
         tmdb_production_company_ids=sorted(set(tmdb_production_company_ids)) if tmdb_production_company_ids else None,
         alternative_names=alternative_names,
+        alternative_name_rows=alternative_name_rows,
         show_images_rows=show_images_rows,
     )
 

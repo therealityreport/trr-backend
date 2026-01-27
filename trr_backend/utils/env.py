@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-def load_env(*, override: bool = False) -> Path | None:
+def load_env(*, override: bool = True) -> Path | None:
     repo_root = Path(__file__).resolve().parents[2]
     candidates = [
         repo_root / ".env",

@@ -2283,6 +2283,10 @@ def upsert_candidates_into_supabase(
             if merged_tmdb_company_ids is not None:
                 update_patch["tmdb_production_company_ids"] = merged_tmdb_company_ids
 
+            merged_alt_names = _merge_str_arrays(row.get("alternative_names"), patch.alternative_names)
+            if merged_alt_names is not None:
+                update_patch["alternative_names"] = merged_alt_names
+
             if patch.show_images_rows:
                 if dry_run:
                     print(f"ENRICH images show_id={patch.show_id} rows={len(patch.show_images_rows)} source=imdb")
@@ -2291,6 +2295,27 @@ def upsert_candidates_into_supabase(
                         upsert_show_images(supabase_client, patch.show_images_rows)
                     except Exception as exc:  # noqa: BLE001
                         print(f"ENRICH images failed show_id={patch.show_id} error={exc}", file=sys.stderr)
+
+            if patch.alternative_name_rows:
+                if dry_run:
+                    print(
+                        f"ENRICH alt_names show_id={patch.show_id} rows={len(patch.alternative_name_rows)} source=tmdb"
+                    )
+                elif supabase_client is not None:
+                    try:
+                        rows = [
+                            {
+                                **r,
+                                "show_id": str(patch.show_id),
+                            }
+                            for r in patch.alternative_name_rows
+                        ]
+                        supabase_client.schema("core").table("show_alternative_names").upsert(
+                            rows,
+                            on_conflict="show_id,name,language,country,source",
+                        ).execute()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"ENRICH alt_names failed show_id={patch.show_id} error={exc}", file=sys.stderr)
 
             if not update_patch:
                 continue
