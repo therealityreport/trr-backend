@@ -37,13 +37,22 @@ select 'show', s.show_id, a.id, s.kind, s.position,
        s.created_at,
        s.updated_at
 from core.show_images s
-join core.media_assets a
-  on a.source = s.source
- and (
+join lateral (
+  select a.*
+  from core.media_assets a
+  where a.source = s.source
+    and (
       (a.hosted_sha256 is not null and a.hosted_sha256 = s.hosted_sha256)
-   or (a.source_asset_id is not null and a.source_asset_id = s.source_image_id)
-   or (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url))
- )
+      or (a.source_asset_id is not null and a.source_asset_id = s.source_image_id)
+      or (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url))
+    )
+  order by
+    (a.hosted_sha256 is not null and a.hosted_sha256 = s.hosted_sha256) desc,
+    (a.source_asset_id is not null and a.source_asset_id = s.source_image_id) desc,
+    (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url)) desc,
+    a.id
+  limit 1
+) a on true
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
@@ -88,13 +97,22 @@ select 'season', s.season_id, a.id, s.kind, s.position,
        s.created_at,
        s.updated_at
 from core.season_images s
-join core.media_assets a
-  on a.source = s.source
- and (
+join lateral (
+  select a.*
+  from core.media_assets a
+  where a.source = s.source
+    and (
       (a.hosted_sha256 is not null and a.hosted_sha256 = s.hosted_sha256)
-   or (a.source_asset_id is not null and a.source_asset_id = s.source_image_id)
-   or (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url))
- )
+      or (a.source_asset_id is not null and a.source_asset_id = s.source_image_id)
+      or (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url))
+    )
+  order by
+    (a.hosted_sha256 is not null and a.hosted_sha256 = s.hosted_sha256) desc,
+    (a.source_asset_id is not null and a.source_asset_id = s.source_image_id) desc,
+    (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url)) desc,
+    a.id
+  limit 1
+) a on true
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
@@ -140,13 +158,22 @@ select 'episode', e.episode_id, a.id, e.kind, e.position,
        e.created_at,
        e.updated_at
 from core.episode_images e
-join core.media_assets a
-  on a.source = e.source
- and (
+join lateral (
+  select a.*
+  from core.media_assets a
+  where a.source = e.source
+    and (
       (a.hosted_sha256 is not null and a.hosted_sha256 = e.hosted_sha256)
-   or (a.source_asset_id is not null and a.source_asset_id = e.source_image_id)
-   or (a.source_url is not null and a.source_url = coalesce(e.url_original, e.url))
- )
+      or (a.source_asset_id is not null and a.source_asset_id = e.source_image_id)
+      or (a.source_url is not null and a.source_url = coalesce(e.url_original, e.url))
+    )
+  order by
+    (a.hosted_sha256 is not null and a.hosted_sha256 = e.hosted_sha256) desc,
+    (a.source_asset_id is not null and a.source_asset_id = e.source_image_id) desc,
+    (a.source_url is not null and a.source_url = coalesce(e.url_original, e.url)) desc,
+    a.id
+  limit 1
+) a on true
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
@@ -227,13 +254,22 @@ select 'person', c.person_id, a.id, 'gallery', c.gallery_index,
        coalesce(c.fetched_at, c.updated_at, now()),
        coalesce(c.updated_at, c.fetched_at, now())
 from core.cast_photos c
-join core.media_assets a
-  on a.source = c.source
- and (
+join lateral (
+  select a.*
+  from core.media_assets a
+  where a.source = c.source
+    and (
       (a.hosted_sha256 is not null and a.hosted_sha256 = c.hosted_sha256)
-   or (a.source_asset_id is not null and a.source_asset_id = c.source_image_id)
-   or (a.source_url is not null and a.source_url = coalesce(c.image_url_canonical, c.image_url, c.url, c.thumb_url))
- )
+      or (a.source_asset_id is not null and a.source_asset_id = c.source_image_id)
+      or (a.source_url is not null and a.source_url = coalesce(c.image_url_canonical, c.image_url, c.url, c.thumb_url))
+    )
+  order by
+    (a.hosted_sha256 is not null and a.hosted_sha256 = c.hosted_sha256) desc,
+    (a.source_asset_id is not null and a.source_asset_id = c.source_image_id) desc,
+    (a.source_url is not null and a.source_url = coalesce(c.image_url_canonical, c.image_url, c.url, c.thumb_url)) desc,
+    a.id
+  limit 1
+) a on true
 on conflict (entity_type, entity_id, kind, media_asset_id) do update
 set
   context = excluded.context,
