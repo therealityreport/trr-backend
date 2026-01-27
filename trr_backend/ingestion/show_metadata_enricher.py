@@ -798,12 +798,14 @@ def enrich_shows_after_upsert(
         except (TmdbClientError, requests.RequestException, RuntimeError, ValueError) as exc:
             return show.id, None, str(exc)
 
+    total = len(rows)
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {pool.submit(run_one, show): show for show in rows}
         for fut in as_completed(futures):
             show = futures[fut]
             attempted += 1
             show_id, patch, error = fut.result()
+            print(f"ENRICH progress {attempted}/{total} show_id={show_id} name={show.name!r}", file=sys.stderr)
             if error:
                 failed += 1
                 failures.append(EnrichFailure(show_id=show_id, name=show.name, message=error))

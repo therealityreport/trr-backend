@@ -130,10 +130,12 @@ def main(argv: list[str] | None = None) -> int:
 
     common_args = _build_common_args(args)
 
+    print("SEASONS+EPISODES: starting seasons sync", file=sys.stderr)
     code = sync_seasons.main(list(common_args))
     if code != 0:
         return code
 
+    print("SEASONS+EPISODES: starting episodes sync", file=sys.stderr)
     code = sync_episodes.main(list(common_args))
     if code != 0:
         return code

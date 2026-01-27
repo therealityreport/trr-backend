@@ -68,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[str] = []
 
     extra_headers = parse_imdb_headers_json_env()
-    for show in show_rows:
+    total = len(show_rows)
+    for idx, show in enumerate(show_rows, start=1):
         show_id = str(show.get("id") or "").strip()
         if not show_id:
             continue
@@ -110,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(f"{show_id}: {exc}")
             if not args.dry_run:
                 mark_sync_state_failed(db, table_name="seasons", show_id=show_id, error=exc)
+        print(f"SEASONS progress {idx}/{total} show_id={show_id}", file=sys.stderr)
 
     print(
         "SEASONS summary "
