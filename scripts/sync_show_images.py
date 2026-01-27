@@ -7,8 +7,8 @@ from typing import Any
 from uuid import UUID
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
-from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.ingestion.imdb_show_mediaindex import fetch_imdb_show_mediaindex_rows
+from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.media.s3_mirror import (
     get_cdn_base_url,
     get_s3_client,
@@ -224,9 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         upserted += len(patch.show_images_rows)
         upsert_show_images(db, patch.show_images_rows)
 
-    imdb_mediaindex_enabled = (
-        not args.no_imdb_mediaindex and (args.imdb_mediaindex or args.source in ("imdb", "all"))
-    )
+    imdb_mediaindex_enabled = not args.no_imdb_mediaindex and (args.imdb_mediaindex or args.source in ("imdb", "all"))
     imdb_mediaindex_tags_enabled = not args.no_imdb_mediaindex_tags or args.imdb_mediaindex_tags
     if imdb_mediaindex_enabled and (args.kind is None or args.kind == "media"):
         for show in show_rows:

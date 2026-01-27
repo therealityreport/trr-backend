@@ -107,6 +107,7 @@ def test_stage1_tmdb_no_images_skips_fetch(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_show_images_read_path_filters_by_show_id() -> None:
     from trr_backend.db.show_images import list_tmdb_show_images
+
     expected_show_id = "00000000-0000-0000-0000-0000000000b2"
 
     class _Resp:

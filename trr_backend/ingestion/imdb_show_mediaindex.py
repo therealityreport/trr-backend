@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from trr_backend.ingestion.imdb_images import fetch_imdb_mediaindex_html as fetch_imdb_mediaindex_html_fallback
 from trr_backend.integrations.imdb.mediaindex_images import (
     fetch_imdb_mediaindex_html as fetch_imdb_mediaindex_html_next,
+)
+from trr_backend.integrations.imdb.mediaindex_images import (
     fetch_imdb_mediaindex_images,
     fetch_imdb_mediaviewer_tags,
     parse_imdb_mediaindex_html,
@@ -27,7 +29,7 @@ def fetch_imdb_show_mediaindex_rows(
     if not imdb_id or not show_id:
         return []
 
-    fetched_at = datetime.now(timezone.utc).isoformat()
+    fetched_at = datetime.now(UTC).isoformat()
     try:
         images = fetch_imdb_mediaindex_images(imdb_id, sleep_ms=sleep_ms, max_pages=max_pages)
     except Exception:

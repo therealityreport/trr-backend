@@ -416,6 +416,7 @@ _ENGLISH_COUNTRY_CODES = {
     "IE",
 }
 
+
 def _is_ascii_text(value: str) -> bool:
     try:
         value.encode("ascii")

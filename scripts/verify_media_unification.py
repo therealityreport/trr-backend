@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from trr_backend.utils.env import load_env
+from trr_backend.utils.env import load_env  # noqa: E402
 
 
 def _is_local_db_url(url: str) -> bool:
@@ -124,8 +124,8 @@ def _run_scoped_grep() -> bool:
     ]
     try:
         result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    except FileNotFoundError:
-        raise SystemExit("ripgrep (rg) is required for verification.")
+    except FileNotFoundError as err:
+        raise SystemExit("ripgrep (rg) is required for verification.") from err
 
     if result.returncode == 0:
         print("FAIL: legacy read path references found in runtime code:")
@@ -170,10 +170,7 @@ def main() -> int:
         return 0 if _run_scoped_grep() else 1
 
     if env_url and not args.allow_remote:
-        raise SystemExit(
-            "Refusing to run against non-local SUPABASE_DB_URL. "
-            "Use --allow-remote to override."
-        )
+        raise SystemExit("Refusing to run against non-local SUPABASE_DB_URL. Use --allow-remote to override.")
 
     if env_url:
         print(f"Using remote SUPABASE_DB_URL: {env_url}")

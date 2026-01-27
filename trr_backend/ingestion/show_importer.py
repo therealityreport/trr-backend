@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,7 +21,6 @@ from trr_backend.ingestion.showinfo_overrides import (
     ShowOverrideIndex,
     fetch_showinfo_overrides,
 )
-from trr_backend.ingestion.tmdb_show_backfill import resolve_tmdb_id_from_find_payload
 from trr_backend.ingestion.shows_from_lists import (
     CandidateShow,
     ImdbListItem,
@@ -30,6 +30,7 @@ from trr_backend.ingestion.shows_from_lists import (
     merge_candidates,
     parse_imdb_list_id,
 )
+from trr_backend.ingestion.tmdb_show_backfill import resolve_tmdb_id_from_find_payload
 from trr_backend.integrations.imdb.episodic_client import IMDB_JOB_CATEGORY_SELF, HttpImdbEpisodicClient
 from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     extract_person_images_from_graphql,
@@ -44,10 +45,10 @@ from trr_backend.integrations.imdb.graphql_operations import (
 from trr_backend.integrations.imdb.graphql_persisted_client import ImdbGraphQLPersistedClient
 from trr_backend.integrations.imdb.title_metadata_client import (
     HttpImdbTitleMetadataClient,
-    parse_imdb_episodes_payload,
     parse_imdb_episodes_page,
-    parse_imdb_season_episodes_payload,
+    parse_imdb_episodes_payload,
     parse_imdb_season_episodes_page,
+    parse_imdb_season_episodes_payload,
 )
 from trr_backend.integrations.tmdb.client import (
     TmdbClientError,
@@ -1651,9 +1652,13 @@ def upsert_candidates_into_supabase(
                                             if ep.title:
                                                 episode_row["title"] = ep.title
                                             if ep.overview:
-                                                if not (isinstance(existing_overview, str) and existing_overview.strip()):
+                                                if not (
+                                                    isinstance(existing_overview, str) and existing_overview.strip()
+                                                ):
                                                     episode_row["overview"] = ep.overview
-                                                if not (isinstance(existing_synopsis, str) and existing_synopsis.strip()):
+                                                if not (
+                                                    isinstance(existing_synopsis, str) and existing_synopsis.strip()
+                                                ):
                                                     episode_row["synopsis"] = ep.overview
                                             if ep.air_date:
                                                 episode_row["air_date"] = ep.air_date
@@ -1673,11 +1678,7 @@ def upsert_candidates_into_supabase(
                                                 episode_row["imdb_primary_image_height"] = ep.imdb_primary_image_height
 
                                             tmdb_episode_id = existing.get("tmdb_episode_id")
-                                            if (
-                                                tmdb_episode_id is None
-                                                and tmdb_id_int is None
-                                                and ep.imdb_episode_id
-                                            ):
+                                            if tmdb_episode_id is None and tmdb_id_int is None and ep.imdb_episode_id:
                                                 payload = _fetch_tmdb_find_payload(
                                                     ep.imdb_episode_id,
                                                     api_key=tmdb_find_api_key,
@@ -1930,7 +1931,9 @@ def upsert_candidates_into_supabase(
                                                 episode_row["title"] = title_val
                                             if isinstance(tmdb_overview, str) and tmdb_overview.strip():
                                                 episode_row["overview"] = tmdb_overview.strip()
-                                                if not (isinstance(existing_synopsis, str) and existing_synopsis.strip()):
+                                                if not (
+                                                    isinstance(existing_synopsis, str) and existing_synopsis.strip()
+                                                ):
                                                     episode_row["synopsis"] = tmdb_overview.strip()
                                             if air_val:
                                                 episode_row["air_date"] = air_val
@@ -1959,7 +1962,10 @@ def upsert_candidates_into_supabase(
                                             existing_external_ids = existing.get("external_ids")
                                             existing_imdb_episode_id = existing.get("imdb_episode_id")
                                             external_updates: dict[str, Any] = {}
-                                            if isinstance(existing_imdb_episode_id, str) and existing_imdb_episode_id.strip():
+                                            if (
+                                                isinstance(existing_imdb_episode_id, str)
+                                                and existing_imdb_episode_id.strip()
+                                            ):
                                                 external_updates["imdb"] = existing_imdb_episode_id.strip()
                                             tmdb_episode_id = episode_row.get("tmdb_episode_id")
                                             if isinstance(tmdb_episode_id, int):

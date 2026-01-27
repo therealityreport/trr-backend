@@ -4,11 +4,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import requests
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
+
+import requests
 
 from scripts._sync_common import (
     add_show_filter_args,
