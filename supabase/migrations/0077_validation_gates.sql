@@ -7,12 +7,30 @@ declare missing int;
 begin
   select count(*) into missing
   from core.show_images s
-  where not exists (
+  left join lateral (
+    select a.id
+    from core.media_assets a
+    where a.source = s.source
+      and (
+        (a.hosted_sha256 is not null and a.hosted_sha256 = s.hosted_sha256)
+        or (a.source_asset_id is not null and a.source_asset_id = s.source_image_id)
+        or (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url))
+      )
+    order by
+      (a.hosted_sha256 is not null and a.hosted_sha256 = s.hosted_sha256) desc,
+      (a.source_asset_id is not null and a.source_asset_id = s.source_image_id) desc,
+      (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url)) desc,
+      a.id
+    limit 1
+  ) a on true
+  where a.id is null
+     or not exists (
     select 1
     from core.media_links ml
     where ml.entity_type = 'show'
       and ml.entity_id = s.show_id
-      and (ml.context->>'legacy_id')::uuid = s.id
+      and ml.kind = s.kind
+      and ml.media_asset_id = a.id
   );
 
   if missing > 0 then
@@ -27,12 +45,30 @@ declare missing int;
 begin
   select count(*) into missing
   from core.season_images s
-  where not exists (
+  left join lateral (
+    select a.id
+    from core.media_assets a
+    where a.source = s.source
+      and (
+        (a.hosted_sha256 is not null and a.hosted_sha256 = s.hosted_sha256)
+        or (a.source_asset_id is not null and a.source_asset_id = s.source_image_id)
+        or (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url))
+      )
+    order by
+      (a.hosted_sha256 is not null and a.hosted_sha256 = s.hosted_sha256) desc,
+      (a.source_asset_id is not null and a.source_asset_id = s.source_image_id) desc,
+      (a.source_url is not null and a.source_url = coalesce(s.url_original, s.url)) desc,
+      a.id
+    limit 1
+  ) a on true
+  where a.id is null
+     or not exists (
     select 1
     from core.media_links ml
     where ml.entity_type = 'season'
       and ml.entity_id = s.season_id
-      and (ml.context->>'legacy_id')::uuid = s.id
+      and ml.kind = s.kind
+      and ml.media_asset_id = a.id
   );
 
   if missing > 0 then
@@ -47,12 +83,30 @@ declare missing int;
 begin
   select count(*) into missing
   from core.episode_images e
-  where not exists (
+  left join lateral (
+    select a.id
+    from core.media_assets a
+    where a.source = e.source
+      and (
+        (a.hosted_sha256 is not null and a.hosted_sha256 = e.hosted_sha256)
+        or (a.source_asset_id is not null and a.source_asset_id = e.source_image_id)
+        or (a.source_url is not null and a.source_url = coalesce(e.url_original, e.url))
+      )
+    order by
+      (a.hosted_sha256 is not null and a.hosted_sha256 = e.hosted_sha256) desc,
+      (a.source_asset_id is not null and a.source_asset_id = e.source_image_id) desc,
+      (a.source_url is not null and a.source_url = coalesce(e.url_original, e.url)) desc,
+      a.id
+    limit 1
+  ) a on true
+  where a.id is null
+     or not exists (
     select 1
     from core.media_links ml
     where ml.entity_type = 'episode'
       and ml.entity_id = e.episode_id
-      and (ml.context->>'legacy_id')::uuid = e.id
+      and ml.kind = e.kind
+      and ml.media_asset_id = a.id
   );
 
   if missing > 0 then
@@ -67,12 +121,21 @@ declare missing int;
 begin
   select count(*) into missing
   from core.person_images p
-  where not exists (
+  left join lateral (
+    select a.id
+    from core.media_assets a
+    where a.source = p.source
+      and a.source_url = p.url
+    order by a.id
+    limit 1
+  ) a on true
+  where a.id is null
+     or not exists (
     select 1
     from core.media_links ml
     where ml.entity_type = 'person'
-      and (ml.context->>'legacy_table') = 'person_images'
-      and (ml.context->>'legacy_id')::uuid = p.id
+      and ml.kind = 'profile'
+      and ml.media_asset_id = a.id
   );
 
   if missing > 0 then
@@ -87,12 +150,29 @@ declare missing int;
 begin
   select count(*) into missing
   from core.cast_photos c
-  where not exists (
+  left join lateral (
+    select a.id
+    from core.media_assets a
+    where a.source = c.source
+      and (
+        (a.hosted_sha256 is not null and a.hosted_sha256 = c.hosted_sha256)
+        or (a.source_asset_id is not null and a.source_asset_id = c.source_image_id)
+        or (a.source_url is not null and a.source_url = coalesce(c.image_url_canonical, c.image_url, c.url, c.thumb_url))
+      )
+    order by
+      (a.hosted_sha256 is not null and a.hosted_sha256 = c.hosted_sha256) desc,
+      (a.source_asset_id is not null and a.source_asset_id = c.source_image_id) desc,
+      (a.source_url is not null and a.source_url = coalesce(c.image_url_canonical, c.image_url, c.url, c.thumb_url)) desc,
+      a.id
+    limit 1
+  ) a on true
+  where a.id is null
+     or not exists (
     select 1
     from core.media_links ml
     where ml.entity_type = 'person'
-      and (ml.context->>'legacy_table') = 'cast_photos'
-      and (ml.context->>'legacy_id')::uuid = c.id
+      and ml.kind = 'gallery'
+      and ml.media_asset_id = a.id
   );
 
   if missing > 0 then
