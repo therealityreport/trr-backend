@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import requests
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     fetch_fullcredits_cast_with_fallback,
     filter_self_cast_rows,
 )
+from trr_backend.integrations.tmdb.client import TmdbClientError, find_by_imdb_id, resolve_api_key
 from trr_backend.repositories.credits import (
     fetch_credits_by_show,
     insert_credit_occurrences_ignore_conflicts,
@@ -85,6 +87,64 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--limit-cast", type=int, default=None, help="Optional cap on cast per show.")
     parser.add_argument("--concurrency", type=int, default=4, help="Parallelism for IMDb episodic credits.")
     return parser.parse_args(argv)
+
+
+def _merge_external_ids(existing: object, updates: dict[str, object]) -> dict[str, object] | None:
+    existing_map = existing if isinstance(existing, dict) else {}
+    merged: dict[str, object] = dict(existing_map)
+    changed = False
+    for key, value in updates.items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        if merged.get(key) != value:
+            merged[key] = value
+            changed = True
+    return merged if changed else None
+
+
+def _fetch_tmdb_find_payload(
+    imdb_id: str,
+    *,
+    api_key: str | None,
+    session: requests.Session,
+    cache: dict[str, dict[str, object] | None],
+) -> dict[str, object] | None:
+    if not imdb_id:
+        return None
+    if imdb_id in cache:
+        return cache[imdb_id]
+    if not api_key:
+        cache[imdb_id] = None
+        return None
+    try:
+        payload = find_by_imdb_id(imdb_id, api_key=api_key, session=session)
+    except TmdbClientError as exc:
+        print(f"TMDb find failed imdb_id={imdb_id} (HTTP {exc.status_code})", file=sys.stderr)
+        payload = None
+    except Exception as exc:  # noqa: BLE001
+        print(f"TMDb find failed imdb_id={imdb_id} (unexpected error={exc})", file=sys.stderr)
+        payload = None
+    cache[imdb_id] = payload
+    return payload
+
+
+def _extract_tmdb_person_id(payload: dict[str, object] | None) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    results = payload.get("person_results")
+    if not isinstance(results, list):
+        return None
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        tmdb_id = item.get("id")
+        if isinstance(tmdb_id, int):
+            return tmdb_id
+    return None
 
 
 def _coerce_int(value: object) -> int | None:
@@ -296,6 +356,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     extra_headers = parse_imdb_headers_json_env()
+    tmdb_find_api_key = resolve_api_key()
+    tmdb_find_session = requests.Session()
+    tmdb_find_cache: dict[str, dict[str, object] | None] = {}
     concurrency = max(1, int(args.concurrency or 1))
 
     cast_rows_total = 0
@@ -341,7 +404,10 @@ def main(argv: list[str] | None = None) -> int:
                 season_tmdb_ids = {}
 
             cast_rows, _source_type = fetch_fullcredits_cast_with_fallback(
-                imdb_series_id, extra_headers=extra_headers, verbose=bool(args.verbose)
+                imdb_series_id,
+                extra_headers=extra_headers,
+                verbose=bool(args.verbose),
+                primary_source="graphql",
             )
 
             cast_rows_total += len(cast_rows)
@@ -354,10 +420,33 @@ def main(argv: list[str] | None = None) -> int:
             missing_ids = [name_id for name_id in name_ids if name_id not in people_cache]
             if missing_ids:
                 existing_people = fetch_people_by_imdb_ids(db, missing_ids)
+                existing_updates: list[tuple[str, dict[str, object]]] = []
                 for person in existing_people:
                     imdb_id = str((person.get("external_ids") or {}).get("imdb") or "").strip().lower()
                     if imdb_id:
                         people_cache[imdb_id] = str(person.get("id"))
+                        if not (person.get("external_ids") or {}).get("tmdb"):
+                            payload = _fetch_tmdb_find_payload(
+                                imdb_id,
+                                api_key=tmdb_find_api_key,
+                                session=tmdb_find_session,
+                                cache=tmdb_find_cache,
+                            )
+                            tmdb_person_id = _extract_tmdb_person_id(payload)
+                            merged_external_ids = _merge_external_ids(
+                                person.get("external_ids"),
+                                {"tmdb": tmdb_person_id},
+                            )
+                            person_id = person.get("id")
+                            if merged_external_ids is not None and isinstance(person_id, str):
+                                existing_updates.append((person_id, merged_external_ids))
+                for person_id, merged_external_ids in existing_updates:
+                    try:
+                        db.schema("core").table("people").update({"external_ids": merged_external_ids}).eq(
+                            "id", person_id
+                        ).execute()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"WARNING: failed to update person external_ids id={person_id} error={exc}")
 
                 new_people_map: dict[str, str] = {}
                 for row in self_rows:
@@ -367,7 +456,25 @@ def main(argv: list[str] | None = None) -> int:
                     new_people_map.setdefault(key, row.name)
 
                 new_people_rows = [
-                    {"full_name": name, "external_ids": {"imdb": imdb_id}} for imdb_id, name in new_people_map.items()
+                    {
+                        "full_name": name,
+                        "external_ids": _merge_external_ids(
+                            {},
+                            {
+                                "imdb": imdb_id,
+                                "tmdb": _extract_tmdb_person_id(
+                                    _fetch_tmdb_find_payload(
+                                        imdb_id,
+                                        api_key=tmdb_find_api_key,
+                                        session=tmdb_find_session,
+                                        cache=tmdb_find_cache,
+                                    )
+                                ),
+                            },
+                        )
+                        or {"imdb": imdb_id},
+                    }
+                    for imdb_id, name in new_people_map.items()
                 ]
                 if new_people_rows and not args.dry_run:
                     inserted = insert_people(db, new_people_rows)

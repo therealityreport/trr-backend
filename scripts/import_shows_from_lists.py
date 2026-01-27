@@ -247,11 +247,13 @@ def run_from_cli(args: argparse.Namespace) -> None:
     if not imdb_lists and not tmdb_lists:
         raise SystemExit("No list sources provided. Use --imdb-list/--tmdb-list and/or --config.")
 
+    imdb_extra_headers = parse_imdb_headers_json_env()
     candidates = collect_candidates_from_lists(
         imdb_list_urls=imdb_lists,
         tmdb_lists=tmdb_lists,
         resolve_tmdb_external_ids=not bool(args.skip_tmdb_external_ids),
         imdb_use_graphql=bool(args.imdb_use_graphql),
+        imdb_extra_headers=imdb_extra_headers,
     )
     print(f"Collected {len(candidates)} merged candidate shows.")
     if args.skip_tmdb_external_ids and imdb_lists and tmdb_lists:
@@ -271,7 +273,6 @@ def run_from_cli(args: argparse.Namespace) -> None:
     imdb_probe_job_category_id = (
         os.getenv("IMDB_EPISODIC_PROBE_JOB_CATEGORY_ID") or ""
     ).strip() or IMDB_JOB_CATEGORY_SELF
-    imdb_extra_headers = parse_imdb_headers_json_env()
 
     result = upsert_candidates_into_supabase(
         candidates,

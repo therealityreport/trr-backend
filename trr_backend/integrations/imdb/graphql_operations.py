@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date, timedelta
 from typing import Any
 
 from trr_backend.integrations.imdb.episodic_client import IMDB_JOB_CATEGORY_SELF
@@ -28,6 +29,54 @@ PERSISTED_QUERIES = {
             "c2df29603060d12b6a76c48e2b47ac0ceee80e471f8cd8ee79abd672393e4bd8",
         ),
         "description": "Paginated title credits with filters (category, locale, etc.)",
+    },
+    "HERO_SUB_NAV_EPISODE": {
+        "operation_name": "HERO_SUB_NAV_EPISODE",
+        "sha256_hash": os.getenv(
+            "IMDB_GRAPHQL_HASH_HERO_SUB_NAV_EPISODE",
+            "3f56a4c9c2cca81733ebabbf5e317e3da7f2a4a02069d406bec001ed611c80e4",
+        ),
+        "description": "Episode summary used by title hero (episode count + most recent).",
+    },
+    "EpisodesWidget_EpisodesCardContainer": {
+        "operation_name": "EpisodesWidget_EpisodesCardContainer",
+        "sha256_hash": os.getenv(
+            "IMDB_GRAPHQL_HASH_EPISODES_WIDGET_CONTAINER",
+            "b25f2b7759a5e94de7a20b90bbb7471eaa6a035eb4696bdc89a15957bd2df171",
+        ),
+        "description": "Episodes widget container (top rated + most recent).",
+    },
+    "EpisodesWidget_NextEpisode": {
+        "operation_name": "EpisodesWidget_NextEpisode",
+        "sha256_hash": os.getenv(
+            "IMDB_GRAPHQL_HASH_EPISODES_WIDGET_NEXT_EPISODE",
+            "f6f22a817cbb51b8eb0be17df7bfe0b6e32b898db525149547cfe184dbe4faf0",
+        ),
+        "description": "Episodes widget next episode + most recent.",
+    },
+    "HERO_WATCH_BOX": {
+        "operation_name": "HERO_WATCH_BOX",
+        "sha256_hash": os.getenv(
+            "IMDB_GRAPHQL_HASH_HERO_WATCH_BOX",
+            "45a4e574562d71de9f5c7efe76d5e47a08f06457c6a69749802218db5162f3d6",
+        ),
+        "description": "Hero watch providers + episode summary payload.",
+    },
+    "NameMainProjectsInDev": {
+        "operation_name": "NameMainProjectsInDev",
+        "sha256_hash": os.getenv(
+            "IMDB_GRAPHQL_HASH_NAME_MAIN_PROJECTS_IN_DEV",
+            "19507cdb3883a63d0e4e2a231ceb4c2835e1e76f68445a4a749a6787ba9f5aeb",
+        ),
+        "description": "Person projects in development for name pages.",
+    },
+    "Base_Title_Prompt": {
+        "operation_name": "Base_Title_Prompt",
+        "sha256_hash": os.getenv(
+            "IMDB_GRAPHQL_HASH_BASE_TITLE_PROMPT",
+            "a1db725f62c858a762c25e89d9aa6980834fba1054f271ea613f0e98e6762b5b",
+        ),
+        "description": "Base title prompt payload (plot, production status, watch options).",
     },
     # Additional operations can be added here as needed
 }
@@ -112,6 +161,210 @@ def fetch_title_credits_paginated_v2(
     )
 
     return edges
+
+
+def _today() -> date:
+    return date.today()
+
+
+def _date_components(value: date) -> tuple[int, int, int]:
+    return value.day, value.month, value.year
+
+
+def fetch_hero_sub_nav_episode(
+    tconst: str,
+    *,
+    locale: str | None = None,
+    now_date: date | None = None,
+    client: ImdbGraphQLPersistedClient | None = None,
+) -> dict[str, Any]:
+    if locale is None:
+        locale = os.getenv("IMDB_GRAPHQL_LOCALE", "en-US")
+    now_date = now_date or _today()
+    yesterday = now_date - timedelta(days=1)
+
+    op_meta = PERSISTED_QUERIES["HERO_SUB_NAV_EPISODE"]
+
+    now_day, now_month, now_year = _date_components(now_date)
+    y_day, y_month, y_year = _date_components(yesterday)
+    variables = {
+        "heroNowDateDay": now_day,
+        "heroNowDateMonth": now_month,
+        "heroNowDateYear": now_year,
+        "heroYesterdayDateDay": y_day,
+        "heroYesterdayDateMonth": y_month,
+        "heroYesterdayDateYear": y_year,
+        "locale": locale,
+        "titleId": tconst,
+    }
+
+    if client is None:
+        client = ImdbGraphQLPersistedClient()
+
+    return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
+
+
+def fetch_episodes_widget_container(
+    tconst: str,
+    *,
+    locale: str | None = None,
+    now_date: date | None = None,
+    most_recent_after_days: int = 14,
+    client: ImdbGraphQLPersistedClient | None = None,
+) -> dict[str, Any]:
+    if locale is None:
+        locale = os.getenv("IMDB_GRAPHQL_LOCALE", "en-US")
+    now_date = now_date or _today()
+    most_recent_after = now_date - timedelta(days=max(0, most_recent_after_days))
+
+    op_meta = PERSISTED_QUERIES["EpisodesWidget_EpisodesCardContainer"]
+
+    now_day, now_month, now_year = _date_components(now_date)
+    after_day, after_month, after_year = _date_components(most_recent_after)
+    variables = {
+        "const": tconst,
+        "episodesNowDateDay": now_day,
+        "episodesNowDateMonth": now_month,
+        "episodesNowDateYear": now_year,
+        "locale": locale,
+        "mostRecentEpisodeAfterDateDay": after_day,
+        "mostRecentEpisodeAfterDateMonth": after_month,
+        "mostRecentEpisodeAfterDateYear": after_year,
+    }
+
+    if client is None:
+        client = ImdbGraphQLPersistedClient()
+
+    return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
+
+
+def fetch_episodes_widget_next_episode(
+    tconst: str,
+    *,
+    locale: str | None = None,
+    now_date: date | None = None,
+    most_recent_after_days: int = 14,
+    client: ImdbGraphQLPersistedClient | None = None,
+) -> dict[str, Any]:
+    if locale is None:
+        locale = os.getenv("IMDB_GRAPHQL_LOCALE", "en-US")
+    now_date = now_date or _today()
+    tomorrow = now_date + timedelta(days=1)
+    most_recent_after = now_date - timedelta(days=max(0, most_recent_after_days))
+
+    op_meta = PERSISTED_QUERIES["EpisodesWidget_NextEpisode"]
+
+    now_day, now_month, now_year = _date_components(now_date)
+    t_day, t_month, t_year = _date_components(tomorrow)
+    after_day, after_month, after_year = _date_components(most_recent_after)
+    variables = {
+        "const": tconst,
+        "episodesNowDateDay": now_day,
+        "episodesNowDateMonth": now_month,
+        "episodesNowDateYear": now_year,
+        "episodesTomorrowDateDay": t_day,
+        "episodesTomorrowDateMonth": t_month,
+        "episodesTomorrowDateYear": t_year,
+        "locale": locale,
+        "mostRecentEpisodeAfterDateDay": after_day,
+        "mostRecentEpisodeAfterDateMonth": after_month,
+        "mostRecentEpisodeAfterDateYear": after_year,
+    }
+
+    if client is None:
+        client = ImdbGraphQLPersistedClient()
+
+    return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
+
+
+def fetch_base_title_prompt(
+    tconst: str,
+    *,
+    locale: str | None = None,
+    include_user_preferred_services: bool = False,
+    include_box_office_data: bool = False,
+    is_pro_page: bool = False,
+    postal_code: str | None = None,
+    country: str = "US",
+    client: ImdbGraphQLPersistedClient | None = None,
+) -> dict[str, Any]:
+    if locale is None:
+        locale = os.getenv("IMDB_GRAPHQL_LOCALE", "en-US")
+    op_meta = PERSISTED_QUERIES["Base_Title_Prompt"]
+    location: dict[str, Any] | None = None
+    if postal_code:
+        location = {"postalCodeLocation": {"country": country, "postalCode": postal_code}}
+    variables = {
+        "id": tconst,
+        "includeBoxOfficeData": bool(include_box_office_data),
+        "includeUserPreferredServices": bool(include_user_preferred_services),
+        "isProPage": bool(is_pro_page),
+        "locale": locale,
+    }
+    if location is not None:
+        variables["location"] = location
+
+    if client is None:
+        client = ImdbGraphQLPersistedClient()
+
+    return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
+
+
+def fetch_hero_watch_box(
+    tconst: str,
+    *,
+    locale: str | None = None,
+    now_date: date | None = None,
+    country: str | None = None,
+    postal_code: str | None = None,
+    client: ImdbGraphQLPersistedClient | None = None,
+) -> dict[str, Any]:
+    if locale is None:
+        locale = os.getenv("IMDB_GRAPHQL_LOCALE", "en-US")
+    now_date = now_date or _today()
+    yesterday = now_date - timedelta(days=1)
+    country = (country or os.getenv("IMDB_GRAPHQL_COUNTRY", "US")).strip() or "US"
+    postal_code = (postal_code or os.getenv("IMDB_GRAPHQL_POSTAL_CODE", "32099")).strip() or "32099"
+
+    op_meta = PERSISTED_QUERIES["HERO_WATCH_BOX"]
+
+    now_day, now_month, now_year = _date_components(now_date)
+    y_day, y_month, y_year = _date_components(yesterday)
+    variables = {
+        "heroNowDateDay": now_day,
+        "heroNowDateMonth": now_month,
+        "heroNowDateYear": now_year,
+        "heroYesterdayDateDay": y_day,
+        "heroYesterdayDateMonth": y_month,
+        "heroYesterdayDateYear": y_year,
+        "id": tconst,
+        "includeUserPreferredServices": False,
+        "locale": locale,
+        "location": {"postalCodeLocation": {"country": country, "postalCode": postal_code}},
+    }
+
+    if client is None:
+        client = ImdbGraphQLPersistedClient()
+
+    return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
+
+
+def fetch_name_main_projects_in_dev(
+    nconst: str,
+    *,
+    first: int = 5,
+    locale: str | None = None,
+    client: ImdbGraphQLPersistedClient | None = None,
+) -> dict[str, Any]:
+    if locale is None:
+        locale = os.getenv("IMDB_GRAPHQL_LOCALE", "en-US")
+    op_meta = PERSISTED_QUERIES["NameMainProjectsInDev"]
+    variables = {"first": int(first), "locale": locale, "nconst": nconst}
+
+    if client is None:
+        client = ImdbGraphQLPersistedClient()
+
+    return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
 
 
 def select_show_cast_from_graphql(

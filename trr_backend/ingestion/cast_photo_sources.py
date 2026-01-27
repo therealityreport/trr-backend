@@ -129,6 +129,33 @@ def fetch_imdb_cast_photos(
         if not source_image_id:
             continue
 
+        tags: dict[str, Any] = {}
+        people_ids = details.get("people_imdb_ids") or []
+        people_names = details.get("people_names") or []
+        people: list[dict[str, Any]] = []
+        for idx, imdb_id in enumerate(people_ids):
+            name = people_names[idx] if idx < len(people_names) else None
+            people.append({"imdb_id": imdb_id, "name": name})
+        if people:
+            tags["people"] = people
+
+        title_ids = details.get("title_imdb_ids") or []
+        title_names = details.get("title_names") or []
+        titles: list[dict[str, Any]] = []
+        for idx, imdb_id in enumerate(title_ids):
+            title = title_names[idx] if idx < len(title_names) else None
+            titles.append({"imdb_id": imdb_id, "title": title})
+        if titles:
+            tags["titles"] = titles
+
+        caption = details.get("caption")
+        if caption:
+            tags["caption_plain"] = caption
+
+        metadata: dict[str, Any] | None = None
+        if tags:
+            metadata = {"tags": tags}
+
         rows.append(
             {
                 "person_id": str(person_id),
@@ -151,6 +178,7 @@ def fetch_imdb_cast_photos(
                 "people_names": details.get("people_names"),
                 "title_imdb_ids": details.get("title_imdb_ids"),
                 "title_names": details.get("title_names"),
+                "metadata": metadata,
                 "fetched_at": datetime.now(UTC).isoformat(),
             }
         )

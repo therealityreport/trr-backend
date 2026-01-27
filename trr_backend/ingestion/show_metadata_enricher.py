@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
@@ -18,6 +19,12 @@ from trr_backend.ingestion.imdb_images import (
     extract_imdb_image_width,
     fetch_imdb_mediaindex_html,
 )
+from trr_backend.integrations.imdb.graphql_operations import (
+    fetch_base_title_prompt,
+    fetch_episodes_widget_container,
+    fetch_hero_sub_nav_episode,
+)
+from trr_backend.integrations.imdb.graphql_persisted_client import ImdbGraphQLPersistedClient
 from trr_backend.integrations.imdb.title_metadata_client import (
     HttpImdbTitleMetadataClient,
     parse_imdb_episodes_page,
@@ -82,6 +89,91 @@ _IMDB_IMAGE_BASE_RE = re.compile(r"^(?P<base>.+?)\._V\d+_", re.IGNORECASE)
 _IMDB_IMAGE_BASE_FALLBACK_RE = re.compile(r"^(?P<base>.+?)\._V\d+", re.IGNORECASE)
 
 
+def _parse_graphql_release_date(value: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    day = value.get("day")
+    month = value.get("month")
+    year = value.get("year")
+    if isinstance(day, int) and isinstance(month, int) and isinstance(year, int):
+        try:
+            return datetime(year, month, day, tzinfo=UTC).date().isoformat()
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_graphql_episode_node(node: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(node, Mapping):
+        return None
+    series = node.get("series")
+    series_num = series.get("episodeNumber") if isinstance(series, Mapping) else None
+    if not isinstance(series_num, Mapping):
+        return None
+    season = _as_int(series_num.get("seasonNumber"))
+    episode = _as_int(series_num.get("episodeNumber"))
+    if season is None or episode is None:
+        return None
+
+    title_text = node.get("titleText")
+    title = _as_str(title_text.get("text")) if isinstance(title_text, Mapping) else None
+    air_date = _parse_graphql_release_date(node.get("releaseDate"))
+    imdb_episode_id = _as_str(node.get("id"))
+
+    return {
+        "season": season,
+        "episode": episode,
+        "title": title,
+        "air_date": air_date,
+        "imdb_episode_id": imdb_episode_id,
+    }
+
+
+def _extract_episode_from_graphql_edges(edges: Any) -> dict[str, Any] | None:
+    if not isinstance(edges, list) or not edges:
+        return None
+    first = edges[0]
+    node = first.get("node") if isinstance(first, Mapping) else None
+    return _extract_graphql_episode_node(node)
+
+
+def _extract_imdb_episode_summary_from_graphql(payload: Mapping[str, Any]) -> tuple[int | None, dict[str, Any] | None]:
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    if not isinstance(data, Mapping):
+        return None, None
+    title = data.get("title")
+    if not isinstance(title, Mapping):
+        return None, None
+    episodes = title.get("episodes")
+    if not isinstance(episodes, Mapping):
+        return None, None
+
+    total = None
+    hero_count = episodes.get("TMD_Hero_EpisodeCount")
+    if isinstance(hero_count, Mapping):
+        total = _as_int(hero_count.get("total"))
+
+    hero_recent = episodes.get("TMD_Hero_MostRecentEpisode")
+    hero_edges = hero_recent.get("edges") if isinstance(hero_recent, Mapping) else None
+    recent = _extract_episode_from_graphql_edges(hero_edges)
+    return total, recent
+
+
+def _extract_imdb_episode_summary_from_widget(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    if not isinstance(data, Mapping):
+        return None
+    title = data.get("title")
+    if not isinstance(title, Mapping):
+        return None
+    episodes = title.get("episodes")
+    if not isinstance(episodes, Mapping):
+        return None
+    most_recent = episodes.get("mostRecent")
+    edges = most_recent.get("edges") if isinstance(most_recent, Mapping) else None
+    return _extract_episode_from_graphql_edges(edges)
+
+
 def _imdb_source_image_id_from_url(url: str) -> str | None:
     parsed = urlparse(url)
     filename = (parsed.path or "").rsplit("/", 1)[-1]
@@ -138,6 +230,41 @@ def _as_int(value: Any) -> int | None:
         if raw.isdigit():
             return int(raw)
     return None
+
+
+def _extract_imdb_title_prompt_meta(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    if not isinstance(data, Mapping):
+        return None
+    title = data.get("title")
+    if not isinstance(title, Mapping):
+        return None
+
+    meta: dict[str, Any] = {}
+    plot = title.get("plot")
+    if isinstance(plot, Mapping):
+        plot_text = plot.get("plotText")
+        if isinstance(plot_text, Mapping):
+            plain = _as_str(plot_text.get("plainText"))
+            if plain:
+                meta["plot"] = plain
+
+    production_status = title.get("productionStatus")
+    if isinstance(production_status, Mapping):
+        current_stage = production_status.get("currentProductionStage")
+        if isinstance(current_stage, Mapping):
+            stage_id = _as_str(current_stage.get("id"))
+            stage_text = _as_str(current_stage.get("text"))
+            if stage_id or stage_text:
+                meta["production_status"] = {"id": stage_id, "text": stage_text}
+
+    watch_options = title.get("watchOptionsByCategory")
+    if isinstance(watch_options, Mapping):
+        categorized = watch_options.get("categorizedWatchOptionsList")
+        if isinstance(categorized, list) and categorized:
+            meta["watch_options_by_category"] = categorized
+
+    return meta or None
 
 
 def _as_float(value: Any) -> float | None:
@@ -572,6 +699,64 @@ def _enrich_one_show(
 
     # IMDb title + episodes for missing values.
     if imdb_id:
+        # GraphQL-first: episode summary + totals (fastest, lowest block rate).
+        need_imdb_episodes = force_refresh or show_update.get("most_recent_episode") is None
+        graphql_title_prompt_meta: dict[str, Any] | None = None
+        if need_imdb_episodes or show.show_total_episodes is None:
+            graphql_client: ImdbGraphQLPersistedClient | None = None
+            try:
+                if imdb_sleep_ms:
+                    time.sleep(imdb_sleep_ms / 1000.0)
+                graphql_client = ImdbGraphQLPersistedClient()
+                hero_payload = fetch_hero_sub_nav_episode(imdb_id, client=graphql_client)
+                total, recent = _extract_imdb_episode_summary_from_graphql(hero_payload)
+                if (force_refresh or show.show_total_episodes is None) and total is not None:
+                    show_update["show_total_episodes"] = int(total)
+                if recent and (force_refresh or show_update.get("most_recent_episode") is None):
+                    show_update["most_recent_episode"] = _build_most_recent_episode_string(recent)
+                    show_update["most_recent_episode_season"] = recent.get("season")
+                    show_update["most_recent_episode_number"] = recent.get("episode")
+                    show_update["most_recent_episode_title"] = recent.get("title")
+                    show_update["most_recent_episode_air_date"] = recent.get("air_date")
+                    show_update["most_recent_episode_imdb_id"] = recent.get("imdb_episode_id")
+                imdb_sources.append("episodes_graphql")
+            except Exception as exc:  # noqa: BLE001
+                print(f"IMDb episodes (GraphQL): failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
+
+            if force_refresh or show_update.get("most_recent_episode") is None:
+                try:
+                    if graphql_client is None:
+                        graphql_client = ImdbGraphQLPersistedClient()
+                    if imdb_sleep_ms:
+                        time.sleep(imdb_sleep_ms / 1000.0)
+                    widget_payload = fetch_episodes_widget_container(imdb_id, client=graphql_client)
+                    widget_recent = _extract_imdb_episode_summary_from_widget(widget_payload)
+                    if widget_recent:
+                        show_update["most_recent_episode"] = _build_most_recent_episode_string(widget_recent)
+                        show_update["most_recent_episode_season"] = widget_recent.get("season")
+                        show_update["most_recent_episode_number"] = widget_recent.get("episode")
+                        show_update["most_recent_episode_title"] = widget_recent.get("title")
+                        show_update["most_recent_episode_air_date"] = widget_recent.get("air_date")
+                        show_update["most_recent_episode_imdb_id"] = widget_recent.get("imdb_episode_id")
+                        imdb_sources.append("episodes_graphql_widget")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"IMDb episodes (GraphQL widget): failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
+
+        try:
+            graphql_client = ImdbGraphQLPersistedClient()
+            if imdb_sleep_ms:
+                time.sleep(imdb_sleep_ms / 1000.0)
+            prompt_payload = fetch_base_title_prompt(
+                imdb_id,
+                client=graphql_client,
+                postal_code=os.getenv("IMDB_GRAPHQL_POSTAL_CODE"),
+            )
+            graphql_title_prompt_meta = _extract_imdb_title_prompt_meta(prompt_payload)
+            if graphql_title_prompt_meta:
+                imdb_sources.append("title_graphql_prompt")
+        except Exception as exc:  # noqa: BLE001
+            print(f"IMDb title prompt (GraphQL): failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
+
         title_html = None
         with cache_lock:
             title_html = imdb_title_cache.get(imdb_id)
@@ -587,6 +772,8 @@ def _enrich_one_show(
                 title_html = None
         if title_html:
             parsed = parse_imdb_title_html(title_html, imdb_id=imdb_id)
+            if graphql_title_prompt_meta:
+                parsed.setdefault("graphql_title_prompt", graphql_title_prompt_meta)
             show_update.update(_build_imdb_show_patch(parsed, fetched_at=fetched_at))
             imdb_sources.append("title")
 
@@ -614,6 +801,9 @@ def _enrich_one_show(
                     show_update["show_total_episodes"] = int(title_meta.total_episodes)
                 if (force_refresh or show.show_total_seasons is None) and title_meta.total_seasons is not None:
                     show_update["show_total_seasons"] = int(title_meta.total_seasons)
+        elif graphql_title_prompt_meta:
+            show_update["imdb_meta"] = {"graphql_title_prompt": graphql_title_prompt_meta}
+            show_update["imdb_fetched_at"] = fetched_at
 
         need_imdb_episodes = force_refresh or show_update.get("most_recent_episode") is None
         if need_imdb_episodes:

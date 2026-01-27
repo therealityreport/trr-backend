@@ -209,18 +209,18 @@ def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
             response = db.schema("core").table("shows").insert(payload).execute()
             break
         except Exception as exc:
-            # Check for PGRST204 first (schema cache error)
-            if _handle_pgrst204_with_retry(exc, attempt, "inserting show"):
-                continue
-
             # Handle missing column errors
             missing = _missing_column_from_error(str(exc))
             if missing and missing in payload:
                 payload.pop(missing, None)
                 response = db.schema("core").table("shows").insert(payload).execute()
                 break
-            else:
-                raise ShowRepositoryError(f"Supabase error during inserting show: {exc}") from exc
+
+            # Check for PGRST204 (schema cache error)
+            if _handle_pgrst204_with_retry(exc, attempt, "inserting show"):
+                continue
+
+            raise ShowRepositoryError(f"Supabase error during inserting show: {exc}") from exc
 
     _raise_for_supabase_error(response, "inserting show")
     data = response.data or []
@@ -236,10 +236,6 @@ def update_show(db: Client, show_id: UUID | str, patch: Mapping[str, Any]) -> di
             response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
             break
         except Exception as exc:
-            # Check for PGRST204 first (schema cache error)
-            if _handle_pgrst204_with_retry(exc, attempt, "updating show"):
-                continue
-
             # Handle missing column errors
             missing = _missing_column_from_error(str(exc))
             if missing and missing in payload:
@@ -255,8 +251,12 @@ def update_show(db: Client, show_id: UUID | str, patch: Mapping[str, Any]) -> di
                     ) from None  # noqa: E501
                 response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
                 break
-            else:
-                raise ShowRepositoryError(f"Supabase error during updating show: {exc}") from exc
+
+            # Check for PGRST204 first (schema cache error)
+            if _handle_pgrst204_with_retry(exc, attempt, "updating show"):
+                continue
+
+            raise ShowRepositoryError(f"Supabase error during updating show: {exc}") from exc
 
     _raise_for_supabase_error(response, "updating show")
     data = response.data or []

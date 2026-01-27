@@ -102,7 +102,7 @@ def fetch_episodes_for_show_season(
     response = (
         db.schema("core")
         .table("episodes")
-        .select("episode_number,title,overview,synopsis,air_date,imdb_episode_id")
+        .select("episode_number,title,overview,synopsis,air_date,imdb_episode_id,tmdb_episode_id,external_ids")
         .eq("show_id", str(show_id))
         .eq("season_number", int(season_number))
         .execute()

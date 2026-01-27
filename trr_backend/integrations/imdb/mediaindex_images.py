@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 
 _IMDB_TITLE_ID_RE = re.compile(r"^tt\d+$", re.IGNORECASE)
 _IMDB_IMAGE_ID_RE = re.compile(r"^rm\d+$", re.IGNORECASE)
+_IMDB_NAME_ID_RE = re.compile(r"^nm\d+$", re.IGNORECASE)
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml",
@@ -140,6 +141,30 @@ def fetch_imdb_mediaindex_html(
     return html or ""
 
 
+def fetch_imdb_mediaviewer_html(
+    imdb_id: str,
+    image_id: str,
+    *,
+    timeout_seconds: float = 30.0,
+    headers: Mapping[str, str] | None = None,
+) -> str:
+    imdb_id = str(imdb_id or "").strip()
+    image_id = str(image_id or "").strip()
+    if not _IMDB_TITLE_ID_RE.match(imdb_id):
+        raise ValueError(f"Invalid IMDb id: {imdb_id!r}")
+    if not _IMDB_IMAGE_ID_RE.match(image_id):
+        raise ValueError(f"Invalid IMDb image id: {image_id!r}")
+
+    url = f"https://www.imdb.com/title/{quote(imdb_id)}/mediaviewer/{quote(image_id)}/"
+    status, html, error = fetch_html(url, timeout=timeout_seconds, headers=headers)
+    if error and status is None:
+        raise RuntimeError(f"IMDb request failed: {error}")
+    if status != 200:
+        snippet = (html or "")[:200]
+        raise RuntimeError(f"IMDb request failed with HTTP {status}: {snippet}")
+    return html or ""
+
+
 def _extract_payloads(html: str) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     text = (html or "").strip()
@@ -175,6 +200,107 @@ def _extract_payloads(html: str) -> list[dict[str, Any]]:
                 payloads.append(data)
 
     return payloads
+
+
+def _find_image_node_with_tags(node: Any, image_id: str) -> Mapping[str, Any] | None:
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            if current.get("id") == image_id and (
+                isinstance(current.get("names"), list)
+                or isinstance(current.get("titles"), list)
+                or isinstance(current.get("caption"), Mapping)
+            ):
+                return current
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return None
+
+
+def parse_imdb_mediaviewer_tags(
+    html: str,
+    *,
+    image_id: str,
+) -> dict[str, Any]:
+    image_id = str(image_id or "").strip()
+    if not _IMDB_IMAGE_ID_RE.match(image_id):
+        raise ValueError(f"Invalid IMDb image id: {image_id!r}")
+
+    payloads = _extract_payloads(html)
+    node: Mapping[str, Any] | None = None
+    for payload in payloads:
+        node = _find_image_node_with_tags(payload, image_id)
+        if node is not None:
+            break
+
+    if not isinstance(node, Mapping):
+        return {}
+
+    tags: dict[str, Any] = {}
+    names = node.get("names")
+    if isinstance(names, list):
+        parsed_names: list[dict[str, Any]] = []
+        for item in names:
+            if not isinstance(item, Mapping):
+                continue
+            name_id = item.get("id")
+            if not isinstance(name_id, str) or not _IMDB_NAME_ID_RE.match(name_id.strip()):
+                continue
+            name_text = None
+            name_text_obj = item.get("nameText")
+            if isinstance(name_text_obj, Mapping):
+                text = name_text_obj.get("text")
+                if isinstance(text, str) and text.strip():
+                    name_text = text.strip()
+            parsed_names.append({"imdb_id": name_id.strip(), "name": name_text})
+        if parsed_names:
+            tags["people"] = parsed_names
+
+    titles = node.get("titles")
+    if isinstance(titles, list):
+        parsed_titles: list[dict[str, Any]] = []
+        for item in titles:
+            if not isinstance(item, Mapping):
+                continue
+            title_id = item.get("id")
+            if not isinstance(title_id, str) or not _IMDB_TITLE_ID_RE.match(title_id.strip()):
+                continue
+            title_text = None
+            title_text_obj = item.get("titleText")
+            if isinstance(title_text_obj, Mapping):
+                text = title_text_obj.get("text")
+                if isinstance(text, str) and text.strip():
+                    title_text = text.strip()
+            parsed_titles.append({"imdb_id": title_id.strip(), "title": title_text})
+        if parsed_titles:
+            tags["titles"] = parsed_titles
+
+    caption_obj = node.get("caption")
+    if isinstance(caption_obj, Mapping):
+        text = caption_obj.get("plainText")
+        if isinstance(text, str) and text.strip():
+            tags["caption_plain"] = text.strip()
+
+    image_type = node.get("type")
+    if isinstance(image_type, str) and image_type.strip():
+        tags["image_type"] = image_type.strip()
+
+    return tags
+
+
+def fetch_imdb_mediaviewer_tags(
+    imdb_id: str,
+    image_id: str,
+    *,
+    sleep_ms: int = 0,
+) -> dict[str, Any]:
+    html = fetch_imdb_mediaviewer_html(imdb_id, image_id)
+    tags = parse_imdb_mediaviewer_tags(html, image_id=image_id)
+    if sleep_ms > 0:
+        time.sleep(sleep_ms / 1000.0)
+    return tags
 
 
 def _find_all_images(node: Any) -> Mapping[str, Any] | None:

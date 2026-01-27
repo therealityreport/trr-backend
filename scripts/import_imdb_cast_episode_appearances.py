@@ -288,7 +288,10 @@ def main(argv: list[str] | None = None) -> int:
         season_tmdb_ids = {}
 
     cast_rows, _source_type = fetch_fullcredits_cast_with_fallback(
-        series_id, extra_headers=extra_headers, verbose=False
+        series_id,
+        extra_headers=extra_headers,
+        verbose=False,
+        primary_source="graphql",
     )
     cast_rows_total = len(cast_rows)
 

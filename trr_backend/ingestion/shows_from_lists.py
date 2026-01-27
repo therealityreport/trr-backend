@@ -617,6 +617,7 @@ def fetch_imdb_list_items(
     max_pages: int = 25,
     use_graphql: bool = True,
     graphql_locale: str = "en-US",
+    extra_headers: Mapping[str, str] | None = None,
 ) -> list[ImdbListItem]:
     session = session or requests.Session()
     list_id = parse_imdb_list_id(list_url_or_id)
@@ -694,6 +695,11 @@ def fetch_imdb_list_items(
         "User-Agent": "Mozilla/5.0",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    if extra_headers:
+        for key, value in extra_headers.items():
+            if value is None:
+                continue
+            headers[str(key)] = str(value)
 
     base_url = f"https://www.imdb.com/list/{list_id}/"
     url = base_url

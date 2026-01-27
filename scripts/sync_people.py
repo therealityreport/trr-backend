@@ -105,7 +105,10 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             cast_rows, _source_type = fetch_fullcredits_cast_with_fallback(
-                imdb_id, extra_headers=extra_headers, verbose=bool(args.verbose)
+                imdb_id,
+                extra_headers=extra_headers,
+                verbose=bool(args.verbose),
+                primary_source="graphql",
             )
 
             cast_rows_total += len(cast_rows)

@@ -27,45 +27,49 @@ begin
 
   v_media_asset_id := null;
 
-  if new.hosted_sha256 is not null then
-    insert into core.media_assets (
-      media_type, source, source_asset_id, source_url,
-      content_type, bytes, width, height, caption,
-      hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
-      hosted_content_type, hosted_bytes,
-      metadata, fetched_at,
-      created_at, updated_at
-    ) values (
-      'image', new.source, new.source_image_id, v_source_url,
-      new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
-      new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
-      new.hosted_content_type, new.hosted_bytes,
-      coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
-      new.created_at, new.updated_at
-    )
-    on conflict (source, hosted_sha256) where hosted_sha256 is not null do update
-    set
-      source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
-      source_url = coalesce(excluded.source_url, core.media_assets.source_url),
-      content_type = coalesce(excluded.content_type, core.media_assets.content_type),
-      bytes = coalesce(excluded.bytes, core.media_assets.bytes),
-      width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
-      height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
-      caption = coalesce(excluded.caption, core.media_assets.caption),
-      hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
-      hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
-      hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
-      hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
-      hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
-      hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
-      hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
-      hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
-      metadata = coalesce(excluded.metadata, core.media_assets.metadata),
-      fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
-      updated_at = now()
-    returning id into v_media_asset_id;
-  else
-    if new.source_image_id is not null then
+  if tg_op = 'UPDATE' then
+    select id into v_media_asset_id
+    from core.media_assets
+    where source = new.source
+      and (
+        (new.hosted_sha256 is not null and hosted_sha256 = new.hosted_sha256)
+        or (source_asset_id is not null and source_asset_id = new.source_image_id)
+        or (source_url is not null and source_url = v_source_url)
+      )
+    order by created_at asc
+    limit 1;
+
+    if v_media_asset_id is not null then
+      update core.media_assets
+      set
+        source_asset_id = coalesce(core.media_assets.source_asset_id, new.source_image_id),
+        source_url = coalesce(v_source_url, core.media_assets.source_url),
+        content_type = coalesce(new.hosted_content_type, core.media_assets.content_type),
+        bytes = coalesce(new.hosted_bytes, core.media_assets.bytes),
+        width = greatest(coalesce(new.width, 0), coalesce(core.media_assets.width, 0)),
+        height = greatest(coalesce(new.height, 0), coalesce(core.media_assets.height, 0)),
+        caption = coalesce(new.caption, core.media_assets.caption),
+        hosted_bucket = coalesce(new.hosted_bucket, core.media_assets.hosted_bucket),
+        hosted_key = coalesce(new.hosted_key, core.media_assets.hosted_key),
+        hosted_url = coalesce(new.hosted_url, core.media_assets.hosted_url),
+        hosted_etag = coalesce(new.hosted_etag, core.media_assets.hosted_etag),
+        hosted_at = coalesce(new.hosted_at, core.media_assets.hosted_at),
+        hosted_sha256 = coalesce(new.hosted_sha256, core.media_assets.hosted_sha256),
+        hosted_content_type = coalesce(new.hosted_content_type, core.media_assets.hosted_content_type),
+        hosted_bytes = coalesce(new.hosted_bytes, core.media_assets.hosted_bytes),
+        metadata = coalesce(new.metadata, core.media_assets.metadata),
+        fetched_at = coalesce(new.fetched_at, core.media_assets.fetched_at),
+        updated_at = now()
+      where id = v_media_asset_id;
+    end if;
+  end if;
+
+  if v_media_asset_id is null then
+    if tg_op = 'UPDATE' then
+      return new;
+    end if;
+
+    if new.hosted_sha256 is not null then
       insert into core.media_assets (
         media_type, source, source_asset_id, source_url,
         content_type, bytes, width, height, caption,
@@ -81,8 +85,9 @@ begin
         coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
         new.created_at, new.updated_at
       )
-      on conflict (source, source_asset_id) where source_asset_id is not null do update
+      on conflict (source, hosted_sha256) where hosted_sha256 is not null do update
       set
+        source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
         source_url = coalesce(excluded.source_url, core.media_assets.source_url),
         content_type = coalesce(excluded.content_type, core.media_assets.content_type),
         bytes = coalesce(excluded.bytes, core.media_assets.bytes),
@@ -101,44 +106,82 @@ begin
         fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
         updated_at = now()
       returning id into v_media_asset_id;
-    end if;
+    else
+      if new.source_image_id is not null then
+        insert into core.media_assets (
+          media_type, source, source_asset_id, source_url,
+          content_type, bytes, width, height, caption,
+          hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
+          hosted_content_type, hosted_bytes,
+          metadata, fetched_at,
+          created_at, updated_at
+        ) values (
+          'image', new.source, new.source_image_id, v_source_url,
+          new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
+          new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
+          new.hosted_content_type, new.hosted_bytes,
+          coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
+          new.created_at, new.updated_at
+        )
+        on conflict (source, source_asset_id) where source_asset_id is not null do update
+        set
+          source_url = coalesce(excluded.source_url, core.media_assets.source_url),
+          content_type = coalesce(excluded.content_type, core.media_assets.content_type),
+          bytes = coalesce(excluded.bytes, core.media_assets.bytes),
+          width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
+          height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
+          caption = coalesce(excluded.caption, core.media_assets.caption),
+          hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
+          hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
+          hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
+          hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
+          hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
+          hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
+          hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
+          hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
+          metadata = coalesce(excluded.metadata, core.media_assets.metadata),
+          fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
+          updated_at = now()
+        returning id into v_media_asset_id;
+      end if;
 
-    if v_media_asset_id is null and v_source_url is not null then
-      insert into core.media_assets (
-        media_type, source, source_asset_id, source_url,
-        content_type, bytes, width, height, caption,
-        hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
-        hosted_content_type, hosted_bytes,
-        metadata, fetched_at,
-        created_at, updated_at
-      ) values (
-        'image', new.source, new.source_image_id, v_source_url,
-        new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
-        new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
-        new.hosted_content_type, new.hosted_bytes,
-        coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
-        new.created_at, new.updated_at
-      )
-      on conflict (source, source_url) where source_url is not null do update
-      set
-        source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
-        content_type = coalesce(excluded.content_type, core.media_assets.content_type),
-        bytes = coalesce(excluded.bytes, core.media_assets.bytes),
-        width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
-        height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
-        caption = coalesce(excluded.caption, core.media_assets.caption),
-        hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
-        hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
-        hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
-        hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
-        hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
-        hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
-        hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
-        hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
-        metadata = coalesce(excluded.metadata, core.media_assets.metadata),
-        fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
-        updated_at = now()
-      returning id into v_media_asset_id;
+      if v_media_asset_id is null and v_source_url is not null then
+        insert into core.media_assets (
+          media_type, source, source_asset_id, source_url,
+          content_type, bytes, width, height, caption,
+          hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
+          hosted_content_type, hosted_bytes,
+          metadata, fetched_at,
+          created_at, updated_at
+        ) values (
+          'image', new.source, new.source_image_id, v_source_url,
+          new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
+          new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
+          new.hosted_content_type, new.hosted_bytes,
+          coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
+          new.created_at, new.updated_at
+        )
+        on conflict (source, source_url) where source_url is not null do update
+        set
+          source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
+          content_type = coalesce(excluded.content_type, core.media_assets.content_type),
+          bytes = coalesce(excluded.bytes, core.media_assets.bytes),
+          width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
+          height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
+          caption = coalesce(excluded.caption, core.media_assets.caption),
+          hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
+          hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
+          hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
+          hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
+          hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
+          hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
+          hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
+          hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
+          metadata = coalesce(excluded.metadata, core.media_assets.metadata),
+          fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
+          updated_at = now()
+        returning id into v_media_asset_id;
+      end if;
     end if;
   end if;
 
@@ -229,45 +272,49 @@ begin
 
   v_media_asset_id := null;
 
-  if new.hosted_sha256 is not null then
-    insert into core.media_assets (
-      media_type, source, source_asset_id, source_url,
-      content_type, bytes, width, height, caption,
-      hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
-      hosted_content_type, hosted_bytes,
-      metadata, fetched_at,
-      created_at, updated_at
-    ) values (
-      'image', new.source, new.source_image_id, v_source_url,
-      new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
-      new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
-      new.hosted_content_type, new.hosted_bytes,
-      coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
-      new.created_at, new.updated_at
-    )
-    on conflict (source, hosted_sha256) where hosted_sha256 is not null do update
-    set
-      source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
-      source_url = coalesce(excluded.source_url, core.media_assets.source_url),
-      content_type = coalesce(excluded.content_type, core.media_assets.content_type),
-      bytes = coalesce(excluded.bytes, core.media_assets.bytes),
-      width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
-      height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
-      caption = coalesce(excluded.caption, core.media_assets.caption),
-      hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
-      hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
-      hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
-      hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
-      hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
-      hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
-      hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
-      hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
-      metadata = coalesce(excluded.metadata, core.media_assets.metadata),
-      fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
-      updated_at = now()
-    returning id into v_media_asset_id;
-  else
-    if new.source_image_id is not null then
+  if tg_op = 'UPDATE' then
+    select id into v_media_asset_id
+    from core.media_assets
+    where source = new.source
+      and (
+        (new.hosted_sha256 is not null and hosted_sha256 = new.hosted_sha256)
+        or (source_asset_id is not null and source_asset_id = new.source_image_id)
+        or (source_url is not null and source_url = v_source_url)
+      )
+    order by created_at asc
+    limit 1;
+
+    if v_media_asset_id is not null then
+      update core.media_assets
+      set
+        source_asset_id = coalesce(core.media_assets.source_asset_id, new.source_image_id),
+        source_url = coalesce(v_source_url, core.media_assets.source_url),
+        content_type = coalesce(new.hosted_content_type, core.media_assets.content_type),
+        bytes = coalesce(new.hosted_bytes, core.media_assets.bytes),
+        width = greatest(coalesce(new.width, 0), coalesce(core.media_assets.width, 0)),
+        height = greatest(coalesce(new.height, 0), coalesce(core.media_assets.height, 0)),
+        caption = coalesce(new.caption, core.media_assets.caption),
+        hosted_bucket = coalesce(new.hosted_bucket, core.media_assets.hosted_bucket),
+        hosted_key = coalesce(new.hosted_key, core.media_assets.hosted_key),
+        hosted_url = coalesce(new.hosted_url, core.media_assets.hosted_url),
+        hosted_etag = coalesce(new.hosted_etag, core.media_assets.hosted_etag),
+        hosted_at = coalesce(new.hosted_at, core.media_assets.hosted_at),
+        hosted_sha256 = coalesce(new.hosted_sha256, core.media_assets.hosted_sha256),
+        hosted_content_type = coalesce(new.hosted_content_type, core.media_assets.hosted_content_type),
+        hosted_bytes = coalesce(new.hosted_bytes, core.media_assets.hosted_bytes),
+        metadata = coalesce(new.metadata, core.media_assets.metadata),
+        fetched_at = coalesce(new.fetched_at, core.media_assets.fetched_at),
+        updated_at = now()
+      where id = v_media_asset_id;
+    end if;
+  end if;
+
+  if v_media_asset_id is null then
+    if tg_op = 'UPDATE' then
+      return new;
+    end if;
+
+    if new.hosted_sha256 is not null then
       insert into core.media_assets (
         media_type, source, source_asset_id, source_url,
         content_type, bytes, width, height, caption,
@@ -283,8 +330,9 @@ begin
         coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
         new.created_at, new.updated_at
       )
-      on conflict (source, source_asset_id) where source_asset_id is not null do update
+      on conflict (source, hosted_sha256) where hosted_sha256 is not null do update
       set
+        source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
         source_url = coalesce(excluded.source_url, core.media_assets.source_url),
         content_type = coalesce(excluded.content_type, core.media_assets.content_type),
         bytes = coalesce(excluded.bytes, core.media_assets.bytes),
@@ -303,44 +351,82 @@ begin
         fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
         updated_at = now()
       returning id into v_media_asset_id;
-    end if;
+    else
+      if new.source_image_id is not null then
+        insert into core.media_assets (
+          media_type, source, source_asset_id, source_url,
+          content_type, bytes, width, height, caption,
+          hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
+          hosted_content_type, hosted_bytes,
+          metadata, fetched_at,
+          created_at, updated_at
+        ) values (
+          'image', new.source, new.source_image_id, v_source_url,
+          new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
+          new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
+          new.hosted_content_type, new.hosted_bytes,
+          coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
+          new.created_at, new.updated_at
+        )
+        on conflict (source, source_asset_id) where source_asset_id is not null do update
+        set
+          source_url = coalesce(excluded.source_url, core.media_assets.source_url),
+          content_type = coalesce(excluded.content_type, core.media_assets.content_type),
+          bytes = coalesce(excluded.bytes, core.media_assets.bytes),
+          width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
+          height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
+          caption = coalesce(excluded.caption, core.media_assets.caption),
+          hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
+          hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
+          hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
+          hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
+          hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
+          hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
+          hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
+          hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
+          metadata = coalesce(excluded.metadata, core.media_assets.metadata),
+          fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
+          updated_at = now()
+        returning id into v_media_asset_id;
+      end if;
 
-    if v_media_asset_id is null and v_source_url is not null then
-      insert into core.media_assets (
-        media_type, source, source_asset_id, source_url,
-        content_type, bytes, width, height, caption,
-        hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
-        hosted_content_type, hosted_bytes,
-        metadata, fetched_at,
-        created_at, updated_at
-      ) values (
-        'image', new.source, new.source_image_id, v_source_url,
-        new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
-        new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
-        new.hosted_content_type, new.hosted_bytes,
-        coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
-        new.created_at, new.updated_at
-      )
-      on conflict (source, source_url) where source_url is not null do update
-      set
-        source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
-        content_type = coalesce(excluded.content_type, core.media_assets.content_type),
-        bytes = coalesce(excluded.bytes, core.media_assets.bytes),
-        width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
-        height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
-        caption = coalesce(excluded.caption, core.media_assets.caption),
-        hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
-        hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
-        hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
-        hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
-        hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
-        hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
-        hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
-        hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
-        metadata = coalesce(excluded.metadata, core.media_assets.metadata),
-        fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
-        updated_at = now()
-      returning id into v_media_asset_id;
+      if v_media_asset_id is null and v_source_url is not null then
+        insert into core.media_assets (
+          media_type, source, source_asset_id, source_url,
+          content_type, bytes, width, height, caption,
+          hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
+          hosted_content_type, hosted_bytes,
+          metadata, fetched_at,
+          created_at, updated_at
+        ) values (
+          'image', new.source, new.source_image_id, v_source_url,
+          new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
+          new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
+          new.hosted_content_type, new.hosted_bytes,
+          coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
+          new.created_at, new.updated_at
+        )
+        on conflict (source, source_url) where source_url is not null do update
+        set
+          source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
+          content_type = coalesce(excluded.content_type, core.media_assets.content_type),
+          bytes = coalesce(excluded.bytes, core.media_assets.bytes),
+          width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
+          height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
+          caption = coalesce(excluded.caption, core.media_assets.caption),
+          hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
+          hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
+          hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
+          hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
+          hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
+          hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
+          hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
+          hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
+          metadata = coalesce(excluded.metadata, core.media_assets.metadata),
+          fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
+          updated_at = now()
+        returning id into v_media_asset_id;
+      end if;
     end if;
   end if;
 
@@ -432,45 +518,49 @@ begin
 
   v_media_asset_id := null;
 
-  if new.hosted_sha256 is not null then
-    insert into core.media_assets (
-      media_type, source, source_asset_id, source_url,
-      content_type, bytes, width, height, caption,
-      hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
-      hosted_content_type, hosted_bytes,
-      metadata, fetched_at,
-      created_at, updated_at
-    ) values (
-      'image', new.source, new.source_image_id, v_source_url,
-      new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
-      new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
-      new.hosted_content_type, new.hosted_bytes,
-      coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
-      new.created_at, new.updated_at
-    )
-    on conflict (source, hosted_sha256) where hosted_sha256 is not null do update
-    set
-      source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
-      source_url = coalesce(excluded.source_url, core.media_assets.source_url),
-      content_type = coalesce(excluded.content_type, core.media_assets.content_type),
-      bytes = coalesce(excluded.bytes, core.media_assets.bytes),
-      width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
-      height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
-      caption = coalesce(excluded.caption, core.media_assets.caption),
-      hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
-      hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
-      hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
-      hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
-      hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
-      hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
-      hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
-      hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
-      metadata = coalesce(excluded.metadata, core.media_assets.metadata),
-      fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
-      updated_at = now()
-    returning id into v_media_asset_id;
-  else
-    if new.source_image_id is not null then
+  if tg_op = 'UPDATE' then
+    select id into v_media_asset_id
+    from core.media_assets
+    where source = new.source
+      and (
+        (new.hosted_sha256 is not null and hosted_sha256 = new.hosted_sha256)
+        or (source_asset_id is not null and source_asset_id = new.source_image_id)
+        or (source_url is not null and source_url = v_source_url)
+      )
+    order by created_at asc
+    limit 1;
+
+    if v_media_asset_id is not null then
+      update core.media_assets
+      set
+        source_asset_id = coalesce(core.media_assets.source_asset_id, new.source_image_id),
+        source_url = coalesce(v_source_url, core.media_assets.source_url),
+        content_type = coalesce(new.hosted_content_type, core.media_assets.content_type),
+        bytes = coalesce(new.hosted_bytes, core.media_assets.bytes),
+        width = greatest(coalesce(new.width, 0), coalesce(core.media_assets.width, 0)),
+        height = greatest(coalesce(new.height, 0), coalesce(core.media_assets.height, 0)),
+        caption = coalesce(new.caption, core.media_assets.caption),
+        hosted_bucket = coalesce(new.hosted_bucket, core.media_assets.hosted_bucket),
+        hosted_key = coalesce(new.hosted_key, core.media_assets.hosted_key),
+        hosted_url = coalesce(new.hosted_url, core.media_assets.hosted_url),
+        hosted_etag = coalesce(new.hosted_etag, core.media_assets.hosted_etag),
+        hosted_at = coalesce(new.hosted_at, core.media_assets.hosted_at),
+        hosted_sha256 = coalesce(new.hosted_sha256, core.media_assets.hosted_sha256),
+        hosted_content_type = coalesce(new.hosted_content_type, core.media_assets.hosted_content_type),
+        hosted_bytes = coalesce(new.hosted_bytes, core.media_assets.hosted_bytes),
+        metadata = coalesce(new.metadata, core.media_assets.metadata),
+        fetched_at = coalesce(new.fetched_at, core.media_assets.fetched_at),
+        updated_at = now()
+      where id = v_media_asset_id;
+    end if;
+  end if;
+
+  if v_media_asset_id is null then
+    if tg_op = 'UPDATE' then
+      return new;
+    end if;
+
+    if new.hosted_sha256 is not null then
       insert into core.media_assets (
         media_type, source, source_asset_id, source_url,
         content_type, bytes, width, height, caption,
@@ -486,8 +576,9 @@ begin
         coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
         new.created_at, new.updated_at
       )
-      on conflict (source, source_asset_id) where source_asset_id is not null do update
+      on conflict (source, hosted_sha256) where hosted_sha256 is not null do update
       set
+        source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
         source_url = coalesce(excluded.source_url, core.media_assets.source_url),
         content_type = coalesce(excluded.content_type, core.media_assets.content_type),
         bytes = coalesce(excluded.bytes, core.media_assets.bytes),
@@ -506,44 +597,82 @@ begin
         fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
         updated_at = now()
       returning id into v_media_asset_id;
-    end if;
+    else
+      if new.source_image_id is not null then
+        insert into core.media_assets (
+          media_type, source, source_asset_id, source_url,
+          content_type, bytes, width, height, caption,
+          hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
+          hosted_content_type, hosted_bytes,
+          metadata, fetched_at,
+          created_at, updated_at
+        ) values (
+          'image', new.source, new.source_image_id, v_source_url,
+          new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
+          new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
+          new.hosted_content_type, new.hosted_bytes,
+          coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
+          new.created_at, new.updated_at
+        )
+        on conflict (source, source_asset_id) where source_asset_id is not null do update
+        set
+          source_url = coalesce(excluded.source_url, core.media_assets.source_url),
+          content_type = coalesce(excluded.content_type, core.media_assets.content_type),
+          bytes = coalesce(excluded.bytes, core.media_assets.bytes),
+          width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
+          height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
+          caption = coalesce(excluded.caption, core.media_assets.caption),
+          hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
+          hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
+          hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
+          hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
+          hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
+          hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
+          hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
+          hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
+          metadata = coalesce(excluded.metadata, core.media_assets.metadata),
+          fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
+          updated_at = now()
+        returning id into v_media_asset_id;
+      end if;
 
-    if v_media_asset_id is null and v_source_url is not null then
-      insert into core.media_assets (
-        media_type, source, source_asset_id, source_url,
-        content_type, bytes, width, height, caption,
-        hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
-        hosted_content_type, hosted_bytes,
-        metadata, fetched_at,
-        created_at, updated_at
-      ) values (
-        'image', new.source, new.source_image_id, v_source_url,
-        new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
-        new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
-        new.hosted_content_type, new.hosted_bytes,
-        coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
-        new.created_at, new.updated_at
-      )
-      on conflict (source, source_url) where source_url is not null do update
-      set
-        source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
-        content_type = coalesce(excluded.content_type, core.media_assets.content_type),
-        bytes = coalesce(excluded.bytes, core.media_assets.bytes),
-        width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
-        height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
-        caption = coalesce(excluded.caption, core.media_assets.caption),
-        hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
-        hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
-        hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
-        hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
-        hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
-        hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
-        hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
-        hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
-        metadata = coalesce(excluded.metadata, core.media_assets.metadata),
-        fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
-        updated_at = now()
-      returning id into v_media_asset_id;
+      if v_media_asset_id is null and v_source_url is not null then
+        insert into core.media_assets (
+          media_type, source, source_asset_id, source_url,
+          content_type, bytes, width, height, caption,
+          hosted_bucket, hosted_key, hosted_url, hosted_etag, hosted_at, hosted_sha256,
+          hosted_content_type, hosted_bytes,
+          metadata, fetched_at,
+          created_at, updated_at
+        ) values (
+          'image', new.source, new.source_image_id, v_source_url,
+          new.hosted_content_type, new.hosted_bytes, new.width, new.height, new.caption,
+          new.hosted_bucket, new.hosted_key, new.hosted_url, new.hosted_etag, new.hosted_at, new.hosted_sha256,
+          new.hosted_content_type, new.hosted_bytes,
+          coalesce(new.metadata, '{}'::jsonb), new.fetched_at,
+          new.created_at, new.updated_at
+        )
+        on conflict (source, source_url) where source_url is not null do update
+        set
+          source_asset_id = coalesce(core.media_assets.source_asset_id, excluded.source_asset_id),
+          content_type = coalesce(excluded.content_type, core.media_assets.content_type),
+          bytes = coalesce(excluded.bytes, core.media_assets.bytes),
+          width = greatest(coalesce(excluded.width, 0), coalesce(core.media_assets.width, 0)),
+          height = greatest(coalesce(excluded.height, 0), coalesce(core.media_assets.height, 0)),
+          caption = coalesce(excluded.caption, core.media_assets.caption),
+          hosted_bucket = coalesce(excluded.hosted_bucket, core.media_assets.hosted_bucket),
+          hosted_key = coalesce(excluded.hosted_key, core.media_assets.hosted_key),
+          hosted_url = coalesce(excluded.hosted_url, core.media_assets.hosted_url),
+          hosted_etag = coalesce(excluded.hosted_etag, core.media_assets.hosted_etag),
+          hosted_at = coalesce(excluded.hosted_at, core.media_assets.hosted_at),
+          hosted_sha256 = coalesce(excluded.hosted_sha256, core.media_assets.hosted_sha256),
+          hosted_content_type = coalesce(excluded.hosted_content_type, core.media_assets.hosted_content_type),
+          hosted_bytes = coalesce(excluded.hosted_bytes, core.media_assets.hosted_bytes),
+          metadata = coalesce(excluded.metadata, core.media_assets.metadata),
+          fetched_at = coalesce(excluded.fetched_at, core.media_assets.fetched_at),
+          updated_at = now()
+        returning id into v_media_asset_id;
+      end if;
     end if;
   end if;
 
@@ -718,7 +847,48 @@ begin
 
   v_media_asset_id := null;
 
-  if new.hosted_sha256 is not null then
+  select id into v_media_asset_id
+  from core.media_assets
+  where source = new.source
+    and (
+      (new.hosted_sha256 is not null and hosted_sha256 = new.hosted_sha256)
+      or (source_asset_id is not null and source_asset_id = new.source_image_id)
+      or (source_url is not null and source_url = v_source_url)
+    )
+  order by created_at asc
+  limit 1;
+
+  if v_media_asset_id is not null then
+    update core.media_assets
+    set
+      source_asset_id = coalesce(core.media_assets.source_asset_id, new.source_image_id),
+      source_url = coalesce(v_source_url, core.media_assets.source_url),
+      content_type = coalesce(new.hosted_content_type, core.media_assets.content_type),
+      bytes = coalesce(new.hosted_bytes, core.media_assets.bytes),
+      width = greatest(coalesce(new.width, 0), coalesce(core.media_assets.width, 0)),
+      height = greatest(coalesce(new.height, 0), coalesce(core.media_assets.height, 0)),
+      caption = coalesce(new.caption, core.media_assets.caption),
+      hosted_bucket = coalesce(new.hosted_bucket, core.media_assets.hosted_bucket),
+      hosted_key = coalesce(new.hosted_key, core.media_assets.hosted_key),
+      hosted_url = coalesce(new.hosted_url, core.media_assets.hosted_url),
+      hosted_etag = coalesce(new.hosted_etag, core.media_assets.hosted_etag),
+      hosted_at = coalesce(new.hosted_at, core.media_assets.hosted_at),
+      hosted_sha256 = coalesce(new.hosted_sha256, core.media_assets.hosted_sha256),
+      hosted_content_type = coalesce(new.hosted_content_type, core.media_assets.hosted_content_type),
+      hosted_bytes = coalesce(new.hosted_bytes, core.media_assets.hosted_bytes),
+      metadata = coalesce(new.metadata, core.media_assets.metadata),
+      fetched_at = coalesce(new.fetched_at, core.media_assets.fetched_at),
+      updated_at = now()
+    where id = v_media_asset_id;
+  end if;
+
+  if v_media_asset_id is null then
+    if tg_op = 'UPDATE' then
+      return new;
+    end if;
+  end if;
+
+  if v_media_asset_id is null and new.hosted_sha256 is not null then
     insert into core.media_assets (
       media_type, source, source_asset_id, source_url,
       content_type, bytes, width, height, caption,
@@ -757,7 +927,7 @@ begin
       updated_at = now()
     returning id into v_media_asset_id;
   else
-    if new.source_image_id is not null then
+    if v_media_asset_id is null and new.source_image_id is not null then
       insert into core.media_assets (
         media_type, source, source_asset_id, source_url,
         content_type, bytes, width, height, caption,

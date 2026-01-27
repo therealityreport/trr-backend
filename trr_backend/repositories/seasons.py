@@ -106,7 +106,7 @@ def fetch_seasons_by_show(
     query = (
         db.schema("core")
         .table("seasons")
-        .select("id,season_number")
+        .select("id,season_number,external_ids,imdb_series_id,tmdb_series_id,tmdb_season_id")
         .eq("show_id", str(show_id))
         .in_("season_number", numbers)
     )

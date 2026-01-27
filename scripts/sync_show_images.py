@@ -8,6 +8,7 @@ from uuid import UUID
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
 from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
+from trr_backend.ingestion.imdb_show_mediaindex import fetch_imdb_show_mediaindex_rows
 from trr_backend.media.s3_mirror import (
     get_cdn_base_url,
     get_s3_client,
@@ -40,6 +41,44 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         choices=["poster", "backdrop", "logo", "media"],
         help="Filter by image kind when mirroring.",
+    )
+    parser.add_argument(
+        "--imdb-mediaindex",
+        action="store_true",
+        help="Fetch full IMDb mediaindex gallery and store in core.show_images.",
+    )
+    parser.add_argument(
+        "--no-imdb-mediaindex",
+        action="store_true",
+        help="Skip IMDb mediaindex gallery fetch (default: enabled when source includes imdb).",
+    )
+    parser.add_argument(
+        "--imdb-mediaindex-pages",
+        type=int,
+        default=25,
+        help="Max IMDb mediaindex pages to fetch per show (default: 25).",
+    )
+    parser.add_argument(
+        "--imdb-mediaindex-limit",
+        type=int,
+        default=None,
+        help="Max IMDb mediaindex images per show (default: no limit).",
+    )
+    parser.add_argument(
+        "--imdb-mediaindex-sleep-ms",
+        type=int,
+        default=0,
+        help="Delay between IMDb mediaindex pages in ms (default: 0).",
+    )
+    parser.add_argument(
+        "--imdb-mediaindex-tags",
+        action="store_true",
+        help="Fetch IMDb mediaviewer tags (people/titles) per image.",
+    )
+    parser.add_argument(
+        "--no-imdb-mediaindex-tags",
+        action="store_true",
+        help="Skip IMDb mediaviewer tags fetch (default: enabled).",
     )
     parser.add_argument("--no-s3", action="store_true", help="Skip S3 mirroring.")
     parser.add_argument("--no-prune", action="store_true", help="Skip S3 prune step.")
@@ -184,6 +223,31 @@ def main(argv: list[str] | None = None) -> int:
             continue
         upserted += len(patch.show_images_rows)
         upsert_show_images(db, patch.show_images_rows)
+
+    imdb_mediaindex_enabled = (
+        not args.no_imdb_mediaindex and (args.imdb_mediaindex or args.source in ("imdb", "all"))
+    )
+    imdb_mediaindex_tags_enabled = not args.no_imdb_mediaindex_tags or args.imdb_mediaindex_tags
+    if imdb_mediaindex_enabled and (args.kind is None or args.kind == "media"):
+        for show in show_rows:
+            show_id = str(show.get("id") or "").strip()
+            imdb_id = str(show.get("imdb_id") or "").strip()
+            if not show_id or not imdb_id:
+                continue
+            rows = fetch_imdb_show_mediaindex_rows(
+                imdb_id,
+                show_id=show_id,
+                max_pages=int(args.imdb_mediaindex_pages),
+                max_images=args.imdb_mediaindex_limit,
+                sleep_ms=int(args.imdb_mediaindex_sleep_ms),
+                include_tags=bool(imdb_mediaindex_tags_enabled),
+            )
+            if not rows:
+                continue
+            upsert_show_images(db, rows)
+            upserted += len(rows)
+            if args.verbose:
+                print(f"IMDb mediaindex images show_id={show_id} rows={len(rows)}")
 
     if args.verbose:
         print(f"show_images_upserted={upserted}")

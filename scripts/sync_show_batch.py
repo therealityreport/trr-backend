@@ -173,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     all_results: list[dict[str, Any]] = []
     batch_num = 0
 
+    show_counter = 0
     for i in range(0, total, args.batch_size):
         batch = show_rows[i : i + args.batch_size]
         batch_num += 1
@@ -182,10 +183,11 @@ def main(argv: list[str] | None = None) -> int:
         print("-" * 80)
 
         for idx, show in enumerate(batch):
+            show_counter += 1
             show_name = str(show.get("name") or "")
             imdb_id = str(show.get("imdb_id") or "")
 
-            print(f"\n[{imdb_id}] {show_name}")
+            print(f"\n[{show_counter}/{total}] {imdb_id} {show_name}")
 
             result = sync_single_show(
                 show,
@@ -195,6 +197,10 @@ def main(argv: list[str] | None = None) -> int:
                 verbose=args.verbose,
             )
             all_results.append(result)
+
+            if args.verbose:
+                percent = int((show_counter / total) * 100)
+                print(f"  → Progress: {show_counter}/{total} ({percent}%)")
 
             # Add delay between shows within the batch (but not after the last show in batch)
             if args.per_show_delay > 0 and idx < len(batch) - 1:

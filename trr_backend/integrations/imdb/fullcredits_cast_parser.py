@@ -651,16 +651,17 @@ def fetch_fullcredits_cast_with_fallback(
     *,
     extra_headers: Mapping[str, str] | None = None,
     verbose: bool = False,
+    primary_source: str | None = None,
 ) -> tuple[list[CastRow], str, list[dict[str, Any]]]:
     """
-    Fetch full credits cast with 3-tier fallback: HTML → GraphQL → JSON API.
+    Fetch full credits cast with 3-tier fallback: GraphQL → HTML → JSON API.
 
     This is the recommended entry point for fetching IMDb cast data, as it handles
     202/403/429 blocking gracefully by falling back through multiple data sources.
 
     Tier order is configurable via IMDB_CAST_PRIMARY_SOURCE:
-    - "html" (default): HTML → GraphQL → JSON API (conservative rollout)
-    - "graphql": GraphQL → HTML → JSON API (maximum reliability)
+    - "graphql" (default): GraphQL → HTML → JSON API (maximum reliability)
+    - "html": HTML → GraphQL → JSON API (conservative rollout)
 
     Args:
         series_id: IMDb series ID (e.g., "tt1720601")
@@ -693,10 +694,10 @@ def fetch_fullcredits_cast_with_fallback(
     enable_json_api = os.getenv("IMDB_FULLCREDITS_ENABLE_API_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
 
     # Determine tier order
-    primary_source = os.getenv("IMDB_CAST_PRIMARY_SOURCE", "html").strip().lower()
+    preferred = (primary_source or os.getenv("IMDB_CAST_PRIMARY_SOURCE", "graphql")).strip().lower()
 
     # Build tier list based on primary source
-    if primary_source == "graphql" and enable_graphql:
+    if preferred == "graphql" and enable_graphql:
         # GraphQL-first (maximum reliability)
         tiers = ["graphql", "html", "json_api"]
     else:

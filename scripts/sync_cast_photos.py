@@ -99,6 +99,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-s3", action="store_true", help="Skip S3 mirroring.")
     parser.add_argument("--no-prune", action="store_true", help="Skip S3 orphan pruning.")
     parser.add_argument("--force-mirror", action="store_true", help="Re-download and re-upload even if hosted.")
+    parser.add_argument(
+        "--force-fetch",
+        action="store_true",
+        help="Force refetch from sources even if photos already exist.",
+    )
 
     # Limits and behavior
     parser.add_argument(
@@ -156,9 +161,14 @@ def _fetch_show_ids_by_imdb(db, imdb_id: str) -> list[str]:
         except Exception as exc:  # noqa: BLE001
             if is_pgrst204_error(exc):
                 continue
+            # Some schemas don't have imdb_series_id; skip if missing
+            if "imdb_series_id" in column and "does not exist" in str(exc):
+                continue
             raise RuntimeError(f"Supabase error fetching show for {imdb_id}: {exc}") from exc
         if hasattr(response, "error") and response.error:
             if is_pgrst204_error(response.error):
+                continue
+            if "imdb_series_id" in column and "does not exist" in str(response.error):
                 continue
             raise RuntimeError(f"Supabase error fetching show for {imdb_id}: {response.error}")
         data = response.data or []
@@ -229,6 +239,24 @@ def _get_tmdb_person_id(db, person_id: str) -> int | None:
         pass
 
     return None
+
+
+def _count_existing_cast_photos(db, person_id: str, source: str) -> int:
+    try:
+        response = (
+            db.schema("core")
+            .table("cast_photos")
+            .select("id", count="exact")
+            .eq("person_id", person_id)
+            .eq("source", source)
+            .execute()
+        )
+        if hasattr(response, "count") and response.count is not None:
+            return int(response.count)
+        data = response.data or []
+        return len(data) if isinstance(data, list) else 0
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _mirror_person_photos(
@@ -400,17 +428,30 @@ def main(argv: list[str] | None = None) -> int:
             if args.verbose and tmdb_person_id:
                 print(f"  TMDb ID: {tmdb_person_id}")
 
+        sources_for_person = list(sources)
+        if "imdb" in sources_for_person and not args.force_fetch:
+            existing = _count_existing_cast_photos(db, person_id, "imdb")
+            if existing > 0:
+                sources_for_person.remove("imdb")
+                if args.verbose:
+                    print(f"  Skipping IMDb fetch (already have {existing} photos)")
+
         # Fetch photos from all sources
-        rows = fetch_all_cast_photos(
-            person_id,
-            imdb_person_id=imdb_person_id,
-            tmdb_person_id=tmdb_person_id,
-            person_name=name,
-            sources=sources,
-            limit_per_source=args.limit,
-            session=session,
-            verbose=args.verbose,
-        )
+        if sources_for_person:
+            rows = fetch_all_cast_photos(
+                person_id,
+                imdb_person_id=imdb_person_id,
+                tmdb_person_id=tmdb_person_id,
+                person_name=name,
+                sources=sources_for_person,
+                limit_per_source=args.limit,
+                session=session,
+                verbose=args.verbose,
+            )
+        else:
+            rows = []
+            if args.verbose:
+                print("  No sources to fetch; will only mirror/prune existing photos.")
 
         total_fetched += len(rows)
 
