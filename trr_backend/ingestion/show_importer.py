@@ -1578,7 +1578,7 @@ def upsert_candidates_into_supabase(
                                         if episode_rows:
                                             upsert_episodes(db, episode_rows)
                                             episodes_upserted += len(episode_rows)
-                                    except Exception:
+                                    except Exception:  # noqa: BLE001
                                         seasons_failed += 1
                                         print(
                                             f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} season={season_no}",  # noqa: E501
@@ -1592,7 +1592,7 @@ def upsert_candidates_into_supabase(
                                     f"episodes_upserted={episodes_upserted}",
                                     file=sys.stderr,
                                 )
-                        except Exception:
+                        except Exception:  # noqa: BLE001
                             print(
                                 f"IMDb episodes: failed show_id={show_id} imdb_id={imdb_series_id_str} (unexpected error)",  # noqa: E501
                                 file=sys.stderr,
@@ -1842,6 +1842,7 @@ def upsert_candidates_into_supabase(
                                             else:
                                                 aspect_ratio_val = 0.0
 
+                                            url_original = f"https://image.tmdb.org/t/p/original{file_path}"
                                             poster_rows.append(
                                                 {
                                                     "show_id": show_id,
@@ -1854,6 +1855,9 @@ def upsert_candidates_into_supabase(
                                                     if isinstance(poster.get("iso_639_1"), str)
                                                     else None,
                                                     "file_path": file_path,
+                                                    "source_image_id": file_path,
+                                                    "url": url_original,
+                                                    "url_path": file_path,
                                                     "width": int(width),
                                                     "height": int(height),
                                                     "aspect_ratio": aspect_ratio_val,
@@ -1872,7 +1876,7 @@ def upsert_candidates_into_supabase(
                                         f"(HTTP {exc.status_code if exc.status_code is not None else 'unknown'})",
                                         file=sys.stderr,
                                     )
-                                except Exception:
+                                except Exception:  # noqa: BLE001
                                     seasons_failed += 1
                                     print(
                                         f"TMDb seasons: failed tmdb_id={tmdb_id_int} season={season_no} (unexpected error)",  # noqa: E501

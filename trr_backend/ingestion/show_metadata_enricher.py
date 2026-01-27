@@ -31,6 +31,7 @@ from trr_backend.integrations.imdb.title_page_metadata import (
 from trr_backend.integrations.tmdb.client import (
     TmdbClientError,
     fetch_tv_details,
+    fetch_tv_external_ids,
     fetch_tv_watch_providers,
     find_by_imdb_id,
     resolve_api_key,
@@ -412,6 +413,7 @@ def _enrich_one_show(
     tmdb_find_cache: dict[str, int | None],
     tmdb_details_cache: dict[int, dict[str, Any]],
     tmdb_watch_cache: dict[int, dict[str, Any]],
+    tmdb_external_ids_cache: dict[int, dict[str, Any] | None],
     imdb_title_cache: dict[str, str],
     imdb_episodes_cache: dict[tuple[str, int | None], str],
     imdb_images_cache: dict[str, list[str]],
@@ -451,6 +453,27 @@ def _enrich_one_show(
             tmdb_sources.append("find")
 
     fetched_at = _now_utc_iso()
+
+    # Resolve IMDb id from TMDb external ids if missing.
+    if imdb_id is None and tmdb_id is not None and tmdb_api_key:
+        with cache_lock:
+            ext_cached = tmdb_external_ids_cache.get(tmdb_id)
+        if ext_cached is None and tmdb_id not in tmdb_external_ids_cache:
+            session = requests.Session()
+            ext_cached = fetch_tv_external_ids(tmdb_id, api_key=tmdb_api_key, session=session)
+            with cache_lock:
+                tmdb_external_ids_cache[tmdb_id] = ext_cached
+        ext_ids = ext_cached or {}
+        imdb_val = _as_str(ext_ids.get("imdb_id"))
+        if imdb_val:
+            imdb_id = imdb_val
+            show_update["imdb_id"] = imdb_val
+            tmdb_sources.append("external_ids")
+        # Also capture other external ids if present (TVDb/TVRage/Wikidata/social).
+        for ext_key in ("tvdb_id", "tvrage_id", "wikidata_id", "facebook_id", "instagram_id", "twitter_id"):
+            ext_val = ext_ids.get(ext_key)
+            if ext_val is not None:
+                show_update[ext_key] = ext_val
 
     # TMDb details + providers.
     if tmdb_id is not None and tmdb_api_key:
@@ -739,6 +762,7 @@ def enrich_shows_after_upsert(
     tmdb_find_cache: dict[str, int | None] = {}
     tmdb_details_cache: dict[int, dict[str, Any]] = {}
     tmdb_watch_cache: dict[int, dict[str, Any]] = {}
+    tmdb_external_ids_cache: dict[int, dict[str, Any] | None] = {}
     imdb_title_cache: dict[str, str] = {}
     imdb_episodes_cache: dict[tuple[str, int | None], str] = {}
     imdb_images_cache: dict[str, list[str]] = {}
@@ -764,6 +788,7 @@ def enrich_shows_after_upsert(
                 tmdb_find_cache=tmdb_find_cache,
                 tmdb_details_cache=tmdb_details_cache,
                 tmdb_watch_cache=tmdb_watch_cache,
+                tmdb_external_ids_cache=tmdb_external_ids_cache,
                 imdb_title_cache=imdb_title_cache,
                 imdb_episodes_cache=imdb_episodes_cache,
                 imdb_images_cache=imdb_images_cache,
