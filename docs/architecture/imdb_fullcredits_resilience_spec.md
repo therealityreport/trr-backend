@@ -19,7 +19,7 @@ The `sync_show_cast.py` script fails completely when IMDb's `/fullcredits/` endp
 
 **Example Failure:**
 ```bash
-$ PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose
+$ PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601 --verbose
 # Output: IMDb request failed with HTTP 202.
 # cast_rows_total=0
 # core.show_cast: empty
@@ -468,6 +468,6 @@ If issues arise:
 
 - [IMDb Full Credits Parser](../../trr_backend/integrations/imdb/fullcredits_cast_parser.py)
 - [IMDb Credits Client (JSON API)](../../trr_backend/integrations/imdb/credits_client.py)
-- [Sync Show Cast Script](../../scripts/sync_show_cast.py)
+- [Sync Show Cast Script](../../scripts/sync/sync_show_cast.py)
 - [Architecture: Integrations](./integrations.md)
 - [Database Schema Docs](../db/schema.md)

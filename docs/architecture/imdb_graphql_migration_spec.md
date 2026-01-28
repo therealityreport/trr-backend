@@ -587,7 +587,7 @@ result = client.execute_query(
 7. ✅ Update documentation in `docs/architecture/integrations.md`
 
 **Validation:**
-- ✅ `PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose --dry-run`
+- ✅ `PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601 --verbose --dry-run`
   - Returns 900+ credits (not 18)
   - `source_type = "credits_graphql_paginated"`
   - Logs show "GraphQL fallback succeeded: 945 complete credits"
@@ -600,7 +600,7 @@ result = client.execute_query(
 3. ✅ Update tests to mock unified client
 
 **Validation:**
-- ✅ `PYTHONPATH=. python scripts/import_shows_from_lists.py --list-id ls123456789`
+- ✅ `PYTHONPATH=. python scripts/import/import_shows_from_lists.py --list-id ls123456789`
 - ✅ All existing list functionality works
 - ✅ No regressions in list imports
 

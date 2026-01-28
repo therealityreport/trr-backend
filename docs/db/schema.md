@@ -16,6 +16,10 @@ Interactive "game" content (quiz/poll/prediction/ranking), user sessions, and us
 
 Survey definitions, user responses, user answers, and live aggregates for near-real-time results.
 
+### `pipeline`
+
+Pipeline run tracking and stage-level execution metadata for the orchestrator.
+
 ## `core` tables
 
 - `core.shows`: Top-level show record.
@@ -26,6 +30,12 @@ Survey definitions, user responses, user answers, and live aggregates for near-r
 - `core.episode_cast`: Links cast memberships to specific episodes.
 
 Relationship chain: `shows -> seasons -> episodes`, with cast connected via `cast_memberships` and `episode_cast`.
+
+## `core` views (Screenalytics)
+
+- `core.v_episode_cast`: episode-level cast (credit_occurrences joined to credits).
+- `core.v_season_cast`: season-level distinct cast, with episode counts per season.
+- `core.v_person_images`: person images joined from media_links + media_assets for facebank seeding.
 
 ## TMDb entity tables
 
@@ -45,6 +55,11 @@ Key columns for dimension tables:
 The `show_watch_providers` junction table has a composite primary key: `(show_id, region, offer_type, provider_id)`.
 
 See `docs/architecture.md` for the full TMDb enrichment pipeline.
+
+## `pipeline` tables
+
+- `pipeline.runs`: One row per orchestrator invocation (status + config + timestamps).
+- `pipeline.run_stages`: Per-stage execution status, hashes for resume, manifest keys, and metrics.
 
 ## `games` tables
 

@@ -52,9 +52,11 @@ Thumbs.db
 # Logs
 *.log
 logs/
+logs
 
 # Caches
 .cache/
+.cache
 *.jsonl
 .gemini_cache.jsonl
 .gemini_realitease_cache.jsonl
@@ -82,6 +84,7 @@ keys/
 
 # Generated debug artifacts
 debug_html/
+debug_html
 scripts/**/debug_html/
 
 # Jupyter
@@ -94,7 +97,11 @@ scripts/**/debug_html/
 # Local / generated
 .mcp.json
 out/
+out
 .artifacts/
+.playwright-mcp/
+.playwright-mcp
+artifacts/
 
 # Secrets
 *.pem

@@ -366,11 +366,15 @@ def ensure_system_maps_template(diagrams_dir: Path) -> None:
 ```mermaid
 flowchart TB
     subgraph scripts["scripts/"]
-        s1["ShowInfo"]
-        s2["CastInfo"]
-        s3["RealiteaseInfo"]
-        s4["WWHLInfo"]
-        s5["FinalList"]
+        import_scripts["import/"]
+        sync_scripts["sync/"]
+        backfill_scripts["backfill/"]
+        media_scripts["media/"]
+        verify_scripts["verify/"]
+    end
+
+    subgraph cli["trr_backend/cli/"]
+        pipeline_cli["pipeline (typer)"]
     end
 
     subgraph api["api/"]
@@ -383,6 +387,7 @@ flowchart TB
         repos["repositories/"]
         integrations["integrations/"]
         ingestion["ingestion/"]
+        pipeline["pipeline/"]
         media["media/"]
     end
 
@@ -390,10 +395,13 @@ flowchart TB
         tmdb["TMDb"]
         imdb["IMDb"]
         fandom["Fandom"]
+        gemini["Gemini"]
     end
 
-    scripts --> repos
-    scripts --> ingestion
+    pipeline_cli --> pipeline
+    scripts --> pipeline
+    pipeline --> repos
+    pipeline --> ingestion
     api --> repos
     ingestion --> integrations
     integrations --> external
@@ -405,18 +413,20 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    lists["IMDb/TMDb Lists"] --> resolve["resolve_tmdb_ids"]
-    resolve --> backfill["backfill_tmdb_details"]
-    backfill --> sync["sync_entities"]
-    sync --> providers["sync_watch_providers"]
-    providers --> api["API serves ShowDetail"]
+    lists["IMDb/TMDb Lists"] --> import["import_shows_from_lists"]
+    import --> resolve["resolve_tmdb_ids"]
+    resolve --> enrich["backfill_tmdb_details"]
+    enrich --> providers["sync_tmdb_entities/providers"]
+    providers --> db["Supabase core.*"]
+    db --> api["API serves data"]
 ```
 
 ## Key Components
 
 - **scripts/**: Data ingestion and enrichment pipelines
+- **trr_backend/pipeline/**: Orchestrated, resumable pipeline stages
+- **trr_backend/cli/**: CLI entrypoints (Typer)
 - **api/**: FastAPI REST endpoints and WebSocket realtime
-- **trr_backend/**: Core business logic and data access
 - **integrations/**: External API clients (TMDb, IMDb, etc.)
 """
 

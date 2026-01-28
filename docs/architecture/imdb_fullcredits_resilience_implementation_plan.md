@@ -586,7 +586,7 @@ except Exception as e:
 
 ### Step 5.1: Update sync_show_cast.py to Use Fallback
 
-**File:** `scripts/sync_show_cast.py`
+**File:** `scripts/sync/sync_show_cast.py`
 
 **Lines to modify:** 16 (imports), 83-89 (fetch call), ~139 (upsert call)
 
@@ -653,7 +653,7 @@ if show_cast_rows and not args.dry_run:
 **Validation Checkpoint:**
 ```bash
 # Test with known blocked show (tt1720601)
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose --dry-run
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601 --verbose --dry-run
 
 # Expected output:
 # ⚠️  IMDb HTML blocked for tt1720601 (HTTP 202), falling back to JSON API...
@@ -661,12 +661,12 @@ PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose --dr
 # cast_rows_self=XX
 
 # Test with normal show (should use HTML)
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt0386676 --verbose --dry-run
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt0386676 --verbose --dry-run
 
 # Expected: No fallback message, uses HTML
 
 # Test with fallback disabled
-IMDB_FULLCREDITS_ENABLE_API_FALLBACK=0 PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose --dry-run
+IMDB_FULLCREDITS_ENABLE_API_FALLBACK=0 PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601 --verbose --dry-run
 
 # Expected: Fails with ImdbFullCreditsError (fallback disabled)
 ```
@@ -1137,7 +1137,7 @@ cd /Users/thomashulihan/Projects/trr-backend-fix-imdb-202
 supabase db reset
 
 # 2. Run sync with known blocked show (tt1720601)
-PYTHONPATH=. python scripts/sync_show_cast.py \
+PYTHONPATH=. python scripts/sync/sync_show_cast.py \
   --imdb-id tt1720601 \
   --verbose
 
@@ -1158,7 +1158,7 @@ LIMIT 5;
 # Expected: Rows with source_type='credits_api_fallback'
 
 # 4. Test with normal show (should use HTML)
-PYTHONPATH=. python scripts/sync_show_cast.py \
+PYTHONPATH=. python scripts/sync/sync_show_cast.py \
   --imdb-id tt0386676 \
   --verbose
 
@@ -1171,7 +1171,7 @@ ls -lh debug_html/
 
 # 6. Test with fallback disabled
 IMDB_FULLCREDITS_ENABLE_API_FALLBACK=0 \
-PYTHONPATH=. python scripts/sync_show_cast.py \
+PYTHONPATH=. python scripts/sync/sync_show_cast.py \
   --imdb-id tt1720601 \
   --verbose
 
@@ -1180,7 +1180,7 @@ PYTHONPATH=. python scripts/sync_show_cast.py \
 # 7. Test retry configuration
 IMDB_FULLCREDITS_MAX_RETRIES=0 \
 IMDB_FULLCREDITS_RETRY_BASE_DELAY_SEC=2.0 \
-PYTHONPATH=. python scripts/sync_show_cast.py \
+PYTHONPATH=. python scripts/sync/sync_show_cast.py \
   --imdb-id tt1720601 \
   --verbose
 
@@ -1236,16 +1236,16 @@ print(f"Got {len(rows)} rows from {source_type}")
 
 ```bash
 # Sync with automatic fallback
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601 --verbose
 
 # Configure retry behavior
 IMDB_FULLCREDITS_MAX_RETRIES=1 \
 IMDB_FULLCREDITS_RETRY_BASE_DELAY_SEC=3.0 \
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601
 
 # Disable fallback (for testing/rollback)
 IMDB_FULLCREDITS_ENABLE_API_FALLBACK=0 \
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601
 ```
 
 See [IMDb Full Credits Resilience Spec](./imdb_fullcredits_resilience_spec.md) for full design rationale.
@@ -1306,10 +1306,10 @@ supabase db reset
 psql $TRR_DB_URL -c "\d core.show_cast" | grep source_type
 
 # 4. Sync script works end-to-end with fallback
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601 --verbose
 
 # 5. Sync script works with fallback disabled
-IMDB_FULLCREDITS_ENABLE_API_FALLBACK=0 PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose || echo "Expected failure"
+IMDB_FULLCREDITS_ENABLE_API_FALLBACK=0 PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601 --verbose || echo "Expected failure"
 
 # 6. Verify data in database
 psql $TRR_DB_URL -c "
@@ -1390,7 +1390,7 @@ Ref: docs/architecture/imdb_fullcredits_resilience_spec.md"
 
 ### Commit 5: Sync Script Integration
 ```bash
-git add scripts/sync_show_cast.py
+git add scripts/sync/sync_show_cast.py
 git commit -m "feat(sync): use centralized HTML + JSON API fallback
 
 - Use fetch_fullcredits_cast_with_fallback() for resilience

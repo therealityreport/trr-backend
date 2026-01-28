@@ -8,21 +8,22 @@
 
 ## 🎯 Overview
 
-The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system that transforms raw data from APIs and web sources into a structured, production-ready dataset for The Reality Report platform. It handles everything from initial data collection to final production deployment.
+The TRR Backend Data Pipeline is a Supabase-first data processing system that transforms raw data from APIs and web sources into a structured, production-ready dataset for The Reality Report platform. It supports both direct sync scripts and a resumable pipeline orchestrator.
 
 ### Key Features
+- **Supabase-first storage**: Normalized core schema in Postgres
 - **Multi-Source Data Collection**: TMDb, IMDb, Fandom Wikis, Famous Birthdays
 - **AI-Powered Enrichment**: Gemini AI for text analysis and gap filling
-- **Comprehensive Validation**: Data quality assurance and error handling
+- **Resumable orchestration**: Pipeline run tracking + stage-level resume
 - **Scalable Processing**: Handles 10,000+ cast members and 1,000+ shows
-- **Production Ready**: Firebase integration and deployment support
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 - Python 3.11 or higher
-- Google Cloud service account with Sheets API access
+- Supabase project URL + Service Role key
 - API keys for TMDb, IMDb, and Gemini AI
+- Optional: AWS credentials for S3 media mirroring
 
 ### Installation
 
@@ -49,9 +50,9 @@ The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system 
    ```
 
 4. **Add credentials**
-   - Place your Google service account JSON in `keys/`
+   - Set Supabase credentials in `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
    - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `IMDB_API_KEY`, `GEMINI_API_KEY`
-   - Configure spreadsheet name: `SPREADSHEET_NAME=Realitease2025Data`
+   - Optional: `AWS_S3_BUCKET`, `AWS_REGION`, `AWS_CDN_BASE_URL` for media mirroring
 
 5. **Verify environment**
    ```bash
@@ -65,32 +66,32 @@ These scripts read the list of shows from `core.shows` (Supabase) and update tab
 
 ```bash
 # Shows (metadata + entities + watch providers)
-PYTHONPATH=. python scripts/sync_shows_all.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_shows_all.py --all --verbose
 
 # Seasons + episodes
-PYTHONPATH=. python scripts/sync_seasons_episodes.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_seasons_episodes.py --all --verbose
 
 # People + cast/credits
-PYTHONPATH=. python scripts/sync_people.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_people.py --all --verbose
 
 # Show images
-PYTHONPATH=. python scripts/sync_show_images.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_show_images.py --all --verbose
 
 # Season/episode images
-PYTHONPATH=. python scripts/sync_season_episode_images.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_season_episode_images.py --all --verbose
 
 # People photos (multi-source)
-PYTHONPATH=. python scripts/sync_cast_photos.py --imdb-person-id nm11883948 --verbose
+PYTHONPATH=. python scripts/sync/sync_cast_photos.py --imdb-person-id nm11883948 --verbose
 
 # TMDb resolution + backfill (shows)
-PYTHONPATH=. python scripts/resolve_tmdb_ids_via_find.py --all --verbose
-PYTHONPATH=. python scripts/backfill_tmdb_show_details.py --all --verbose
+PYTHONPATH=. python scripts/sync/resolve_tmdb_ids_via_find.py --all --verbose
+PYTHONPATH=. python scripts/backfill/backfill_tmdb_show_details.py --all --verbose
 
 # TMDb entities (networks, production companies) + S3 logo mirroring
-PYTHONPATH=. python scripts/sync_tmdb_show_entities.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_tmdb_show_entities.py --all --verbose
 
 # TMDb watch providers + S3 logo mirroring
-PYTHONPATH=. python scripts/sync_tmdb_watch_providers.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_tmdb_watch_providers.py --all --verbose
 ```
 
 Legacy composite runner:
@@ -112,6 +113,18 @@ Incremental mode uses `core.sync_state` + `shows.most_recent_episode` to skip un
 After seasons/episodes sync, `shows.show_total_seasons` is normalized to the count of seasons with `season_number > 0`.
 Per-show progress is stored in `core.sync_state` (one row per show + table).
 
+## 🧭 Pipeline Orchestrator (Resumable)
+
+The pipeline orchestrator records runs and stages in the `pipeline` schema and supports resume-by-hash.
+
+```bash
+python -m trr_backend.cli pipeline run --all --verbose
+python -m trr_backend.cli pipeline list
+python -m trr_backend.cli pipeline status <run-id>
+```
+
+See `docs/architecture/pipeline.md` for details.
+
 ## 🔐 Security
 
 Never commit API keys, AWS credentials, or private keys. Rotate any exposed credentials immediately.
@@ -121,6 +134,8 @@ Never commit API keys, AWS credentials, or private keys. Rotate any exposed cred
 - `api/`: FastAPI app (Supabase-backed API + WebSockets)
 - `trr_backend/`: Shared library code (reused by API + pipeline)
   - `trr_backend/integrations/`: External metadata clients (IMDb/TMDb/etc.)
+  - `trr_backend/pipeline/`: Pipeline orchestration logic
+  - `trr_backend/cli/`: CLI entrypoints (Typer)
 - `scripts/`: Data sync scripts and utilities
 - `supabase/`: Database schema, migrations, and seeds
 - `docs/`: Architecture and operating docs
@@ -134,6 +149,7 @@ The backend uses a Supabase database with data sync scripts that fetch from exte
 **Current Architecture:**
 - Data stored in Supabase PostgreSQL (`core.*` schema)
 - Sync scripts in `scripts/` fetch from TMDb, IMDb, Fandom wikis
+- Resumable pipeline orchestrator in `trr_backend/pipeline/`
 - FastAPI app in `api/` serves data to the frontend
 
 See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
@@ -165,50 +181,47 @@ TMDB_API_KEY=your_tmdb_api_key
 IMDB_API_KEY=your_imdb_api_key  
 GEMINI_API_KEY=your_gemini_api_key
 
-# Google Sheets Configuration
-SPREADSHEET_NAME=Realitease2025Data
-GOOGLE_APPLICATION_CREDENTIALS=keys/service-account.json
+# Supabase Configuration
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+SUPABASE_DB_URL=postgresql://user:password@db.your-project.supabase.co:5432/postgres
 
 # Optional Configuration
 REALITEASE_TMDB_SHOW_LIMIT=5
 GOOGLE_GEMINI_MODEL=gemini-2.5-flash
+
+# Legacy Google Sheets (archived)
+SPREADSHEET_NAME=Realitease2025Data
+GOOGLE_APPLICATION_CREDENTIALS=keys/service-account.json
 ```
 
-### Google Sheets Structure
+### Supabase Structure
 
-The pipeline works with a Google Sheets workbook containing these tabs:
-
-| Sheet | Purpose | Key Columns |
-|-------|---------|-------------|
-| **ShowInfo** | Show metadata and IDs | ShowName, IMDbID, TMDbID, Network |
-| **CastInfo** | Cast member details by show | CastName, IMDbID, ShowName, Episodes |
-| **RealiteaseInfo** | Person-focused aggregated data | PersonName, Shows, Birthday, Zodiac |
-| **WWHLinfo** | Watch What Happens Live episodes | EpisodeID, Season, Episode, Guests |
-| **FinalList** | Curated final dataset | All consolidated data |
+For the authoritative schema, see `docs/db/schema.md` and `docs/architecture.md`.
 
 ## 🛠️ Development
 
 ### Running Individual Steps
 
-Each pipeline stage can be run independently with various options:
+Each sync stage can be run independently with various options:
 
 ```bash
-# Dry run with limited rows
-python3 RealiteaseInfo_Step3.py --dry-run --limit 100
+# Import shows from lists
+PYTHONPATH=. python scripts/import/import_shows_from_lists.py --imdb-list ... --tmdb-list ...
 
-# Process specific row range
-python3 FinalInfo_Step2.py --start-row 1000 --end-row 2000
+# Enrich shows (TMDb metadata + entities + providers)
+PYTHONPATH=. python scripts/sync/sync_shows_all.py --all --verbose
 
-# Custom batch size and delays
-python3 FinalInfo_Step2.py --batch-size 500 --delay 0.8
+# Seasons + episodes
+PYTHONPATH=. python scripts/sync/sync_seasons_episodes.py --all --verbose
 
-# Verbose logging
-python3 CastInfo_Step1.py --verbose
+# People + cast
+PYTHONPATH=. python scripts/sync/sync_people.py --all --verbose
 ```
 
 ### Monitoring Progress
 
-- **Logs**: Check `logs/` directory for execution logs and results
+- **Logs**: Check `../artifacts/trr-backend/logs/` (or the `logs` symlink) for execution logs and results
 - **Dry Run**: Use `--dry-run` flag to preview changes before writing
 - **Limited Processing**: Use `--limit` to test with smaller datasets
 - **Progress Tracking**: Most scripts provide detailed progress output
@@ -217,7 +230,7 @@ python3 CastInfo_Step1.py --verbose
 
 The system includes comprehensive caching for efficiency:
 
-- **Gemini Responses**: Cached in `.cache/` directory
+- **Gemini Responses**: Cached in `../artifacts/trr-backend/.cache/` (or the `.cache` symlink)
 - **TMDb API**: Per-session caching to respect rate limits
 - **IMDb Data**: Local caching for repeated requests
 - **Custom Cache**: Use `--cache-file` to specify custom locations
@@ -225,11 +238,9 @@ The system includes comprehensive caching for efficiency:
 ## 📈 Data Flow
 
 ```
-External APIs → Data Collection → Processing Pipeline → Quality Validation → Production Storage
-     ↓              ↓                    ↓                    ↓                    ↓
-   TMDb/IMDb    ShowInfo         CastInfo/RealiteaseInfo    Validation         Firebase
-     ↓              ↓                    ↓                    ↓                    ↓
-   Rate Limits   Batch Updates      Person Enrichment    Error Handling    Final Dataset
+External APIs → Ingestion Scripts → Supabase → API/Exports
+     ↓                 ↓             ↓          ↓
+TMDb/IMDb/Fandom   import/sync     core.*     FastAPI + S3
 ```
 
 ## 🔍 Quality Assurance
@@ -303,16 +314,18 @@ See `docs/cloud/` for detailed cloud deployment guides.
 - **Rotate Secrets**: This repo previously tracked a `.env` file. Assume any keys in it are compromised and rotate them.
 - **Never Commit `.env`**: Local `.env` files are gitignored; use `.env.example` as the template.
 - **Credentials**: Keep service account JSONs under `keys/` (gitignored) or inject via CI secrets.
-- **Generated Output**: `logs/`, `.cache/`, and `debug_html/` are runtime artifacts and are excluded from version control.
+- **Generated Output**: Runtime artifacts live outside the repo root in `../artifacts/trr-backend/` (e.g. `logs/`, `.cache/`, `debug_html/`, `out/`). Use symlinks in the repo root for convenience.
 - **Optional History Purge**: If you need to remove leaked secrets from git history, rotate keys first, then use a history-rewrite tool and force-push.
 
 ## 📝 Documentation
 
 - **PRD**: See `PRD.md` for comprehensive product requirements
 - **Architecture**: See `docs/architecture.md` for a high-level system overview
+- **Pipeline Orchestration**: See `docs/architecture/pipeline.md` for staged runs and resume logic
+- **DB Schema**: See `docs/db/schema.md` for core tables and views
 - **Setup Guides**: See `docs/cloud/` for deployment documentation
-- **API Mapping**: See `docs/SHEET_EDIT_MAPPING.md` for column specifications
 - **Local Development**: See `docs/README_local.md` for additional setup notes
+- **Legacy Google Sheets Pipeline**: See `docs/legacy/google_sheets_pipeline.md`
 
 ## 🤝 Contributing
 
@@ -341,22 +354,23 @@ See `docs/cloud/` for detailed cloud deployment guides.
 
 ### Common Issues
 
-**API Rate Limits**
+**Supabase Connectivity**
 ```bash
-# Check rate limit compliance
-python3 scripts/5-FinalList/FinalInfo_Step2.py --dry-run --limit 10
+# Verify environment and connectivity
+make doctor
 ```
 
-**Google Sheets Access**
+**Schema Cache Issues**
 ```bash
-# Test Google Sheets connectivity
-python3 test_connection.py
+# Reload PostgREST schema cache
+bash scripts/reload_postgrest_schema.sh
 ```
 
-**Data Quality Issues**
+**Data Parity Checks**
 ```bash
-# Validate data quality
-python3 scripts/5-FinalList/FinalInfo_Step3.py --verify
+# Validate credits/media parity
+PYTHONPATH=. python scripts/verify/verify_credits_parity.py
+PYTHONPATH=. python scripts/verify/verify_media_unification.py
 ```
 
 ### Getting Help
@@ -374,7 +388,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **TMDb**: For comprehensive movie and TV database
 - **IMDb**: For detailed episode and cast information
-- **Google**: For Gemini AI and Google Sheets integration
+- **Google**: For Gemini AI
 - **Fandom**: For reality TV show wikis and community data
 
 ---

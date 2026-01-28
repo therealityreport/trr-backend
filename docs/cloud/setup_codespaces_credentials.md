@@ -1,18 +1,25 @@
-# Setting up Google Cloud Credentials in GitHub Codespaces
+# Setting up Supabase Credentials in GitHub Codespaces
 
-Your Google Cloud service account credentials need to be set up securely in Codespaces.
+If you run sync scripts in Codespaces, store required secrets in your repo's Codespaces secrets.
 
-## Steps:
+## Required Secrets
 
-1. In your GitHub repository, go to Settings → Secrets and variables → Codespaces
-2. Add a new repository secret named `GOOGLE_SERVICE_ACCOUNT_JSON` 
-3. Copy the entire contents of your `keys/trr-backend-df2c438612e1.json` file as the value
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `TMDB_API_KEY`
+- `IMDB_API_KEY`
 
-## The script will automatically create the credentials file in Codespaces from this secret.
+Optional (media sync):
+- `AWS_REGION`, `AWS_S3_BUCKET`, `AWS_CDN_BASE_URL`
 
-Your credentials file contains:
-- Service account email
-- Private key 
-- Project details
+## Steps
 
-Keep this file local and never commit it to git!
+1. GitHub repo → Settings → Secrets and variables → Codespaces
+2. Add the secrets listed above
+3. In the Codespace, export them to `.env` or load them into your shell before running scripts
+
+Example:
+```bash
+printf "SUPABASE_URL=%s\nSUPABASE_SERVICE_ROLE_KEY=%s\n" \
+  "$SUPABASE_URL" "$SUPABASE_SERVICE_ROLE_KEY" >> .env
+```

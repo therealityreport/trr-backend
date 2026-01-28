@@ -77,16 +77,16 @@ print(f"Got {len(rows)} rows from {source_type}")
 
 ```bash
 # Sync with automatic fallback
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601 --verbose
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601 --verbose
 
 # Configure retry behavior
 IMDB_FULLCREDITS_MAX_RETRIES=1 \
 IMDB_FULLCREDITS_RETRY_BASE_DELAY_SEC=3.0 \
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601
 
 # Disable fallback (for testing/rollback)
 IMDB_FULLCREDITS_ENABLE_API_FALLBACK=0 \
-PYTHONPATH=. python scripts/sync_show_cast.py --imdb-id tt1720601
+PYTHONPATH=. python scripts/sync/sync_show_cast.py --imdb-id tt1720601
 ```
 
 See [IMDb Full Credits Resilience Spec](./imdb_fullcredits_resilience_spec.md) for full design rationale.

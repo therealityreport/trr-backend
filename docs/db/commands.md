@@ -27,7 +27,7 @@ supabase stop --no-backup
 Import shows from lists (IMDb + TMDb):
 
 ```bash
-python3 scripts/import_shows_from_lists.py \
+python3 scripts/import/import_shows_from_lists.py \
   --imdb-list "<IMDB_LIST_URL>" \
   --tmdb-list "<TMDB_LIST_ID_OR_URL>" \
   --enrich-show-metadata \
@@ -37,7 +37,7 @@ python3 scripts/import_shows_from_lists.py \
 One-stop wrapper (list import + enrichment):
 
 ```bash
-python3 scripts/run_show_import_job.py \
+python3 scripts/import/run_show_import_job.py \
   --imdb-list "<IMDB_LIST_URL>" \
   --tmdb-list "<TMDB_LIST_ID_OR_URL>" \
   --region US
@@ -49,15 +49,15 @@ Default list sources (no flags required):
 # Set once in .env:
 # TMDB_LIST_ID=8301263
 # IMDB_LIST_URL=https://www.imdb.com/list/ls4106677119/
-python3 scripts/run_show_import_job.py
+python3 scripts/import/run_show_import_job.py
 ```
 
 Sync/enrich existing show rows (filters available):
 
 ```bash
-python3 scripts/sync_shows.py --all
+python3 scripts/sync/sync_shows.py --all
 # or
-python3 scripts/sync_shows.py --show-id <SHOW_UUID>
+python3 scripts/sync/sync_shows.py --show-id <SHOW_UUID>
 ```
 
 Notes:
@@ -67,33 +67,33 @@ Notes:
 ### core.seasons
 
 ```bash
-python3 scripts/sync_seasons.py --all
+python3 scripts/sync/sync_seasons.py --all
 # or filter by show
-python3 scripts/sync_seasons.py --imdb-series-id <tt1234567>
+python3 scripts/sync/sync_seasons.py --imdb-series-id <tt1234567>
 ```
 
 ### core.episodes
 
 ```bash
-python3 scripts/sync_episodes.py --all
+python3 scripts/sync/sync_episodes.py --all
 # or filter by show
-python3 scripts/sync_episodes.py --tmdb-show-id <TMDB_ID>
+python3 scripts/sync/sync_episodes.py --tmdb-show-id <TMDB_ID>
 ```
 
 ### core.people
 
 ```bash
-python3 scripts/sync_people.py --all
+python3 scripts/sync/sync_people.py --all
 # or filter by show
-python3 scripts/sync_people.py --imdb-series-id <tt1234567>
+python3 scripts/sync/sync_people.py --imdb-series-id <tt1234567>
 ```
 
 ### core.show_cast
 
 ```bash
-python3 scripts/sync_show_cast.py --all
+python3 scripts/sync/sync_show_cast.py --all
 # or filter by show
-python3 scripts/sync_show_cast.py --show-id <SHOW_UUID>
+python3 scripts/sync/sync_show_cast.py --show-id <SHOW_UUID>
 ```
 
 ### core.episode_appearances
@@ -101,15 +101,15 @@ python3 scripts/sync_show_cast.py --show-id <SHOW_UUID>
 Sync aggregated appearances:
 
 ```bash
-python3 scripts/sync_episode_appearances.py --all
+python3 scripts/sync/sync_episode_appearances.py --all
 # or filter by show
-python3 scripts/sync_episode_appearances.py --imdb-series-id <tt1234567>
+python3 scripts/sync/sync_episode_appearances.py --imdb-series-id <tt1234567>
 ```
 
 Build episode appearances from IMDb cast data (single show):
 
 ```bash
-python3 scripts/import_imdb_cast_episode_appearances.py --imdb-series-id <tt1234567>
+python3 scripts/import/import_imdb_cast_episode_appearances.py --imdb-series-id <tt1234567>
 ```
 
 ### core.show_images
@@ -118,13 +118,13 @@ Images are written as one row per image by:
 
 ```bash
 # During list import (TMDb images)
-python3 scripts/import_shows_from_lists.py --tmdb-list "<TMDB_LIST_ID_OR_URL>" --tmdb-fetch-images
+python3 scripts/import/import_shows_from_lists.py --tmdb-list "<TMDB_LIST_ID_OR_URL>" --tmdb-fetch-images
 
 # Or via the wrapper
-python3 scripts/run_show_import_job.py --tmdb-list "<TMDB_LIST_ID_OR_URL>" --tmdb-fetch-images
+python3 scripts/import/run_show_import_job.py --tmdb-list "<TMDB_LIST_ID_OR_URL>" --tmdb-fetch-images
 
 # Or via enrichment on existing shows (IMDb media images)
-python3 scripts/sync_shows.py --all
+python3 scripts/sync/sync_shows.py --all
 ```
 
 ### core.season_images
@@ -132,7 +132,7 @@ python3 scripts/sync_shows.py --all
 Season images are written by the list import/enrichment flow when TMDb seasons are fetched:
 
 ```bash
-python3 scripts/import_shows_from_lists.py --tmdb-list "<TMDB_LIST_ID_OR_URL>" --tmdb-fetch-seasons
+python3 scripts/import/import_shows_from_lists.py --tmdb-list "<TMDB_LIST_ID_OR_URL>" --tmdb-fetch-seasons
 ```
 
 ## Multi-table convenience
@@ -140,9 +140,19 @@ python3 scripts/import_shows_from_lists.py --tmdb-list "<TMDB_LIST_ID_OR_URL>" -
 Run the standard sync pipeline in order:
 
 ```bash
-python3 scripts/sync_all_tables.py --all
+python3 scripts/sync/sync_all_tables.py --all
 # or only certain tables
-python3 scripts/sync_all_tables.py --tables shows,episodes,people --all
+python3 scripts/sync/sync_all_tables.py --tables shows,episodes,people --all
+```
+
+## Pipeline Orchestrator (Resumable)
+
+Run the staged orchestrator (tracks runs in `pipeline.*` tables):
+
+```bash
+python -m trr_backend.cli pipeline run --all --verbose
+python -m trr_backend.cli pipeline list
+python -m trr_backend.cli pipeline status <run-id>
 ```
 
 ## Fandom enrichment (RHOSLC example)
@@ -182,19 +192,19 @@ Mirror media assets from external sources (TMDb, IMDb) to S3 for reliable servin
 
 ```bash
 # Mirror pending assets (default behavior)
-python scripts/mirror_media_assets_to_s3.py --status pending --limit 100 --verbose
+python scripts/media/mirror_media_assets_to_s3.py --status pending --limit 100 --verbose
 
 # Mirror failed assets (retry with exponential backoff)
-python scripts/mirror_media_assets_to_s3.py --status failed --limit 50 --verbose
+python scripts/media/mirror_media_assets_to_s3.py --status failed --limit 50 --verbose
 
 # Mirror all pending/failed with concurrency
-python scripts/mirror_media_assets_to_s3.py --status all --limit 500 --concurrency 10
+python scripts/media/mirror_media_assets_to_s3.py --status all --limit 500 --concurrency 10
 
 # Dry run (validate domains, no actual uploads)
-python scripts/mirror_media_assets_to_s3.py --dry-run --limit 10 --verbose
+python scripts/media/mirror_media_assets_to_s3.py --dry-run --limit 10 --verbose
 
 # Filter by source
-python scripts/mirror_media_assets_to_s3.py --source tmdb --status pending --limit 100
+python scripts/media/mirror_media_assets_to_s3.py --source tmdb --status pending --limit 100
 ```
 
 ### Monitor ingest progress

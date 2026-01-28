@@ -2,9 +2,9 @@
 
 ## What This Repo Is Today
 
-This repository is a data pipeline that pulls reality TV show/cast metadata from external sources (TMDb, IMDb, Fandom, Famous Birthdays, Gemini) and writes curated outputs into a Google Sheets workbook (e.g. `ShowInfo`, `CastInfo`, `RealiteaseInfo`, `WWHLinfo`, `FinalList`).
+This repository is a Supabase-first data pipeline and API. It pulls reality TV show/cast metadata from external sources (TMDb, IMDb, Fandom, Famous Birthdays, Gemini) and persists normalized data into Supabase (`core.*` schema). The FastAPI app serves data from Supabase, and the sync scripts in `scripts/` handle ingestion/enrichment.
 
-Most pipeline execution lives under `scripts/` and is designed to be run locally or from scheduled jobs.
+The legacy Google Sheets pipeline is preserved for reference in `docs/legacy/architecture_google_sheets.md`.
 
 ## FastAPI App (Supabase)
 
@@ -16,15 +16,26 @@ Code that should be reused by both the API and the pipeline should live under `t
 
 External metadata clients live under `trr_backend/integrations/` (see `docs/architecture/integrations.md`).
 
-## Pipeline Stages
+## Pipeline Stages (Supabase)
 
-- `scripts/1-ShowInfo/`: discover/populate show metadata
-- `scripts/2-CastInfo/`: extract cast per show and enrich episode/season counts
-- `scripts/3-RealiteaseInfo/`: person-focused enrichment (bio fields, dedupe, backfills)
-- `scripts/4-WWHLInfo/`: Watch What Happens Live episode + guest processing
-- `scripts/5-FinalList/`: final curation + optional Firebase publishing helpers
+- **List ingestion:** `scripts/import/import_shows_from_lists.py` (or `scripts/import/run_show_import_job.py`)
+- **Show enrichment:** `scripts/sync/resolve_tmdb_ids_via_find.py`, `scripts/backfill/backfill_tmdb_show_details.py`, `scripts/sync/sync_tmdb_show_entities.py`, `scripts/sync/sync_tmdb_watch_providers.py`
+- **Shows/Seasons/Episodes:** `scripts/sync/sync_shows.py`, `scripts/sync/sync_seasons_episodes.py`
+- **People/Cast:** `scripts/sync/sync_people.py`, `scripts/sync/sync_show_cast.py`, `scripts/sync/sync_episode_appearances.py`
+- **Media:** `scripts/sync/sync_show_images.py`, `scripts/sync/sync_season_episode_images.py`, `scripts/sync/sync_cast_photos.py`
+- **Single-show:** `scripts/sync/sync_show_complete.py` (metadata, seasons, episodes, cast, and photos)
 
-For a single entrypoint, use `scripts/run_pipeline.py`.
+## Pipeline Orchestrator
+
+The `trr_backend/pipeline/` module provides a resumable, staged orchestrator that records runs in the `pipeline` schema.
+Use the CLI entrypoint in `trr_backend/cli/`:
+
+```bash
+python -m trr_backend.cli pipeline run --all --verbose
+python -m trr_backend.cli pipeline list
+```
+
+See `docs/architecture/pipeline.md` for stages, resume logic, manifests, and schema details.
 
 ## Source vs. Generated Artifacts
 
@@ -32,13 +43,20 @@ These paths are expected to exist locally during runs, but are excluded from ver
 
 - `.env` (local secrets/config)
 - `keys/` (service account JSONs, Firebase credentials)
-- `logs/` (runtime logs/results)
-- `.cache/` (API caches)
-- `debug_html/` and `scripts/**/debug_html/` (HTML snapshots/mirrors for debugging scrapers)
+- `../artifacts/trr-backend/` (runtime logs/results, caches, debug HTML, and other outputs)
 
-## Future Direction (Supabase)
+Recommended layout:
 
-The long-term direction is to use Supabase as the system of record (database + API) and treat Google Sheets as a lightweight admin/export surface. Environment placeholders for Supabase are included in `.env.example` to support this transition.
+- `../artifacts/trr-backend/logs/`
+- `../artifacts/trr-backend/debug_html/`
+- `../artifacts/trr-backend/out/`
+- `../artifacts/trr-backend/.cache/`
+
+For convenience, create symlinks in the repo root (`logs`, `debug_html`, `out`, `.cache`) that point to these external directories.
+
+## Legacy Note
+
+The Google Sheets pipeline and related docs are archived under `docs/legacy/`. Supabase is now the system of record for production workflows.
 
 ---
 
@@ -56,11 +74,11 @@ This section documents the Supabase-first workflow for show metadata enrichment.
 - `core.show_watch_providers` — Junction table (show × region × offer_type × provider)
 
 **Scripts:**
-- `scripts/resolve_tmdb_ids_via_find.py` — Resolve TMDb IDs via `/find/{imdb_id}`
-- `scripts/backfill_tmdb_show_details.py` — Enrich shows with TMDb `/tv/{id}` data
-- `scripts/sync_tmdb_show_entities.py` — Sync networks/production_companies + S3 logos
-- `scripts/sync_tmdb_watch_providers.py` — Sync watch_providers + show_watch_providers + S3 logos
-- `scripts/sync_shows_all.py` — Wrapper that runs all of the above in sequence
+- `scripts/sync/resolve_tmdb_ids_via_find.py` — Resolve TMDb IDs via `/find/{imdb_id}`
+- `scripts/backfill/backfill_tmdb_show_details.py` — Enrich shows with TMDb `/tv/{id}` data
+- `scripts/sync/sync_tmdb_show_entities.py` — Sync networks/production_companies + S3 logos
+- `scripts/sync/sync_tmdb_watch_providers.py` — Sync watch_providers + show_watch_providers + S3 logos
+- `scripts/sync/sync_shows_all.py` — Wrapper that runs all of the above in sequence
 
 **Migrations:** `0047`, `0048`, `0049`, `0050`, `0051` (see `supabase/migrations/`)
 

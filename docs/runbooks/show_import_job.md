@@ -77,6 +77,6 @@ Example run:
 
 If you prefer a thin wrapper that validates env vars and always enables Stage 2:
 
-- `python scripts/run_show_import_job.py --tmdb-list "8301263" --imdb-list "<IMDB_LIST_URL>" --region US`
+- `python scripts/import/run_show_import_job.py --tmdb-list "8301263" --imdb-list "<IMDB_LIST_URL>" --region US`
 
 By default this runs a single combined import; use `--two-pass` only when you need extra resilience against IMDb stalls.

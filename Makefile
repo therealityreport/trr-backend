@@ -1,6 +1,7 @@
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-.PHONY: doctor schema-docs schema-docs-check schema-docs-reset-check ci-local repo-map repo-map-check
+.PHONY: doctor schema-docs schema-docs-check schema-docs-reset-check ci-local repo-map repo-map-check \
+       pipeline-run pipeline-run-all pipeline-status pipeline-list
 
 # Environment diagnostic - run before pytest to verify setup
 doctor:
@@ -47,3 +48,16 @@ repo-map-check:
 		git diff docs/Repository/generated/; \
 		exit 1; \
 	fi
+
+# Pipeline orchestration commands
+pipeline-run:
+	@$(PYTHON) -m trr_backend.cli pipeline run $(ARGS)
+
+pipeline-run-all:
+	@$(PYTHON) -m trr_backend.cli pipeline run --all
+
+pipeline-status:
+	@$(PYTHON) -m trr_backend.cli pipeline status $(RUN_ID)
+
+pipeline-list:
+	@$(PYTHON) -m trr_backend.cli pipeline list

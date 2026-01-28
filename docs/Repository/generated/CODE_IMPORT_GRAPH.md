@@ -2,20 +2,28 @@
 
 ```mermaid
 flowchart TB
-    n0["trr_backend.db"]
-    n1["trr_backend.ingestion"]
-    n2["trr_backend.integrations"]
-    n3["trr_backend.media"]
-    n4["trr_backend.models"]
-    n5["trr_backend.repositories"]
-    n6["trr_backend.utils"]
+    n0["scripts._sync_common"]
+    n1["trr_backend.cli"]
+    n2["trr_backend.db"]
+    n3["trr_backend.ingestion"]
+    n4["trr_backend.integrations"]
+    n5["trr_backend.media"]
+    n6["trr_backend.models"]
+    n7["trr_backend.pipeline"]
+    n8["trr_backend.repositories"]
+    n9["trr_backend.utils"]
 
-    n1 --> n0
     n1 --> n2
-    n1 --> n4
-    n1 --> n5
-    n2 --> n6
-    n3 --> n5
-    n5 --> n0
-    n5 --> n4
+    n1 --> n7
+    n1 --> n9
+    n3 --> n2
+    n3 --> n4
+    n3 --> n6
+    n3 --> n8
+    n4 --> n9
+    n5 --> n8
+    n7 --> n0
+    n7 --> n2
+    n8 --> n2
+    n8 --> n6
 ```

@@ -39,13 +39,13 @@ as needed.
 Parity sample check:
 
 ```bash
-PYTHONPATH=. python scripts/verify_credits_parity.py --limit 25 --spot-check 20
+PYTHONPATH=. python scripts/verify/verify_credits_parity.py --limit 25 --spot-check 20
 ```
 
 Parity check for a single high-signal show:
 
 ```bash
-PYTHONPATH=. python scripts/verify_credits_parity.py --show-id "<uuid>"
+PYTHONPATH=. python scripts/verify/verify_credits_parity.py --show-id "<uuid>"
 ```
 
 Cast endpoint verification (expects count/total_count/has_more):
@@ -88,4 +88,4 @@ ENABLE_CREDITS_V2_WRITE=0
 ## Notes
 
 - Pagination invariants are covered by `tests/test_api_smoke.py`.
-- `scripts/verify_credits_parity.py` supports `--show-id` for targeted checks.
+- `scripts/verify/verify_credits_parity.py` supports `--show-id` for targeted checks.

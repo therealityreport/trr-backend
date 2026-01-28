@@ -4,6 +4,11 @@ Media Mirroring (S3)
 This directory contains scripts to mirror media assets (cast photos) to S3 and
 store hosted URLs back into Supabase.
 
+Scripts live in this directory:
+- `scripts/media/mirror_cast_photos_to_s3.py`
+- `scripts/media/mirror_media_assets_to_s3.py`
+- `scripts/media/rebuild_hosted_urls.py`
+
 Required environment variables
 ------------------------------
 
@@ -25,7 +30,7 @@ Example usage
 Mirror Fandom cast photos for a single IMDb person:
 
 ```
-PYTHONPATH=. python scripts/mirror_cast_photos_to_s3.py \
+PYTHONPATH=. python scripts/media/mirror_cast_photos_to_s3.py \
   --source fandom \
   --imdb-person-id nm11883948 \
   --limit 50
@@ -34,13 +39,13 @@ PYTHONPATH=. python scripts/mirror_cast_photos_to_s3.py \
 Mirror all pending fandom images (default):
 
 ```
-PYTHONPATH=. python scripts/mirror_cast_photos_to_s3.py --source fandom --limit 200
+PYTHONPATH=. python scripts/media/mirror_cast_photos_to_s3.py --source fandom --limit 200
 ```
 
 Dry run (no writes):
 
 ```
-PYTHONPATH=. python scripts/mirror_cast_photos_to_s3.py --source fandom --limit 50 --dry-run
+PYTHONPATH=. python scripts/media/mirror_cast_photos_to_s3.py --source fandom --limit 50 --dry-run
 ```
 
 Troubleshooting
