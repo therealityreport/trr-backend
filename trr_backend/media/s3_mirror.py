@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
 import boto3
 import requests
@@ -18,6 +19,29 @@ _DEFAULT_HEADERS = {
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
+
+
+def _normalize_fandom_file_url(url: str, *, referer: str | None) -> str:
+    cleaned = (url or "").strip()
+    if not cleaned:
+        return cleaned
+    if cleaned.startswith("//"):
+        cleaned = f"https:{cleaned}"
+    if cleaned.startswith("/wiki/"):
+        parsed = urlparse(referer or "")
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://real-housewives.fandom.com"
+        cleaned = f"{base}{cleaned}"
+    lowered = cleaned.lower()
+    if "/wiki/file:" in lowered or "/wiki/file%3a" in lowered:
+        parsed = urlparse(cleaned)
+        path = unquote(parsed.path or "")
+        if "file:" in path.lower():
+            file_part = path.split("File:", 1)[1].lstrip("/") if "File:" in path else path.split("file:", 1)[1].lstrip("/")
+            if file_part:
+                file_part = quote(unquote(file_part), safe="")
+                base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://real-housewives.fandom.com"
+                cleaned = f"{base}/wiki/Special:FilePath/{file_part}"
+    return cleaned
 
 
 @dataclass(frozen=True)
@@ -386,6 +410,10 @@ def mirror_cast_photo_row(
         return None  # Can't build S3 path without any identifier
 
     referer = row.get("source_page_url")
+    normalized_url = candidate_url
+    if source == "fandom" and isinstance(candidate_url, str):
+        normalized_url = _normalize_fandom_file_url(candidate_url, referer=referer)
+        candidate_url = normalized_url
     data, content_type = download_image(candidate_url, source=source, referer=referer)
     sha256 = _sha256_bytes(data)
     current_sha = row.get("hosted_sha256")
@@ -423,7 +451,7 @@ def mirror_cast_photo_row(
     hosted_url = build_hosted_url(key)
     hosted_at = datetime.now(UTC).isoformat()
 
-    return {
+    patch = {
         "hosted_bucket": bucket,
         "hosted_key": key,
         "hosted_url": hosted_url,
@@ -433,6 +461,12 @@ def mirror_cast_photo_row(
         "hosted_etag": hosted_etag,
         "hosted_at": hosted_at,
     }
+    if source == "fandom" and isinstance(normalized_url, str) and normalized_url:
+        if normalized_url != row.get("image_url") or normalized_url != row.get("url"):
+            patch["image_url"] = normalized_url
+            patch["url"] = normalized_url
+            patch["image_url_canonical"] = normalized_url
+    return patch
 
 
 def _get_tmdb_original_url(file_path: str) -> str:

@@ -272,6 +272,31 @@ def _parse_data_attrs(raw: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _normalize_fandom_image_url(url: str | None, *, source_page_url: str) -> str | None:
+    if not url:
+        return url
+    cleaned = url.strip()
+    if not cleaned:
+        return cleaned
+    if cleaned.startswith("//"):
+        cleaned = f"https:{cleaned}"
+    if cleaned.startswith("/wiki/"):
+        parsed = urlparse(source_page_url)
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://real-housewives.fandom.com"
+        cleaned = f"{base}{cleaned}"
+    lowered = cleaned.lower()
+    if "/wiki/file:" in lowered or "/wiki/file%3a" in lowered:
+        parsed = urlparse(cleaned)
+        path = unquote(parsed.path or "")
+        if "file:" in path.lower():
+            file_part = path.split("File:", 1)[1].lstrip("/") if "File:" in path else path.split("file:", 1)[1].lstrip("/")
+            if file_part:
+                file_part = quote(unquote(file_part), safe="")
+                base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://real-housewives.fandom.com"
+                cleaned = f"{base}/wiki/Special:FilePath/{file_part}"
+    return cleaned
+
+
 def _extract_image_entry(
     container: BeautifulSoup,
     *,
@@ -337,6 +362,7 @@ def _extract_image_entry(
     image_url = _normalize_text(image_url)
     if not image_url:
         return None
+    image_url = _normalize_fandom_image_url(image_url, source_page_url=source_page_url)
     if "scale-to-width-down" in image_url:
         expanded = _strip_scale_to_width(image_url)
         if expanded:

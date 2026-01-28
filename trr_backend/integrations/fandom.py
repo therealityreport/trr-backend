@@ -404,13 +404,36 @@ def _extract_full_image_url(thumb_url: str) -> str:
     """
     if not thumb_url:
         return thumb_url
+    url = thumb_url.strip()
+    if not url:
+        return url
+    if url.startswith("//"):
+        url = f"https:{url}"
+    if url.lower().startswith("/wiki/file:") or url.lower().startswith("/wiki/file%3a"):
+        return _fandom_file_to_special_url(url)
+    if url.startswith("/"):
+        url = f"https://real-housewives.fandom.com{url}"
+    if "/wiki/file:" in url.lower() or "/wiki/file%3a" in url.lower():
+        return _fandom_file_to_special_url(url)
     # Remove scale-to-width-down or other resize parameters
-    url = re.sub(r"/scale-to-width-down/\d+", "", thumb_url)
+    url = re.sub(r"/scale-to-width-down/\d+", "", url)
     url = re.sub(r"/scale-to-height-down/\d+", "", url)
     url = re.sub(r"/scale-to-width/\d+", "", url)
     url = re.sub(r"/smart/width/\d+/height/\d+", "", url)
     url = re.sub(r"/window-crop/width/\d+/x-offset/\d+/y-offset/\d+/window-width/\d+/window-height/\d+", "", url)
     return url
+
+
+def _fandom_file_to_special_url(raw_url: str) -> str:
+    parsed = urlparse(raw_url)
+    path = parsed.path or ""
+    if "file:" not in path.lower():
+        return raw_url
+    file_part = path.split("File:", 1)[1].lstrip("/") if "File:" in path else path.split("file:", 1)[1].lstrip("/")
+    if not file_part:
+        return raw_url
+    file_part = quote(unquote(file_part), safe="")
+    return f"https://real-housewives.fandom.com/wiki/Special:FilePath/{file_part}"
 
 
 def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> FandomGalleryResult:

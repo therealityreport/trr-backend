@@ -29,6 +29,7 @@
 - [core.season_source_history](core.season_source_history.md) ([diagram](diagrams/core.season_source_history.mermaid.md))
 - [core.season_source_latest](core.season_source_latest.md) ([diagram](diagrams/core.season_source_latest.mermaid.md))
 - [core.seasons](core.seasons.md) ([diagram](diagrams/core.seasons.mermaid.md))
+- [core.show_alternative_names](core.show_alternative_names.md) ([diagram](diagrams/core.show_alternative_names.mermaid.md))
 - [core.show_cast](core.show_cast.md) ([diagram](diagrams/core.show_cast.mermaid.md))
 - [core.show_external_ids](core.show_external_ids.md) ([diagram](diagrams/core.show_external_ids.mermaid.md))
 - [core.show_images](core.show_images.md) ([diagram](diagrams/core.show_images.mermaid.md))

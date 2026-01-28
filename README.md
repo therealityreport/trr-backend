@@ -2,7 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: Production](https://img.shields.io/badge/status-production-green.svg)](https://github.com/therealityreport/trr-backend-2025)
+[![Status: Production](https://img.shields.io/badge/status-production-green.svg)](https://github.com/therealityreport/trr-backend)
 
 **The Reality Report** backend data pipeline for reality TV show and cast information. This system automatically collects, enriches, and curates comprehensive data about reality TV shows and their cast members from multiple sources.
 
@@ -28,8 +28,8 @@ The TRR Backend Data Pipeline is a sophisticated 5-stage data processing system 
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/therealityreport/trr-backend-2025.git
-   cd trr-backend-2025
+   git clone https://github.com/therealityreport/trr-backend.git
+   cd trr-backend
    ```
 
 2. **Install dependencies**
