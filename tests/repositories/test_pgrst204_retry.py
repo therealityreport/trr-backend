@@ -120,7 +120,7 @@ def test_insert_show_retries_on_pgrst204(
     mock_reload: MagicMock,
 ) -> None:
     # First call fails with PGRST204, second succeeds
-    client = _FakeClient (fail_count=1)
+    client = _FakeClient(fail_count=1)
     show = ShowUpsert(name="Test Show", description="A test", premiere_date="2025-01-01")
 
     result = insert_show(client, show)
@@ -134,7 +134,7 @@ def test_insert_show_retries_on_pgrst204(
 @patch("trr_backend.repositories.shows.reload_postgrest_schema")
 def test_insert_show_raises_after_max_retries(mock_reload: MagicMock) -> None:
     # Always fails with PGRST204
-    client = _FakeClient (fail_count=100)
+    client = _FakeClient(fail_count=100)
     show = ShowUpsert(name="Test Show", description="A test", premiere_date="2025-01-01")
 
     with pytest.raises(ShowRepositoryError) as excinfo:
@@ -153,7 +153,7 @@ def test_update_show_retries_on_pgrst204(
     mock_reload: MagicMock,
 ) -> None:
     # First call fails with PGRST204, second succeeds
-    client = _FakeClient (fail_count=1)
+    client = _FakeClient(fail_count=1)
 
     result = update_show(client, "test-uuid", {"description": "Updated"})
 
@@ -166,7 +166,7 @@ def test_update_show_retries_on_pgrst204(
 @patch("trr_backend.repositories.shows.reload_postgrest_schema")
 def test_update_show_raises_after_max_retries(mock_reload: MagicMock) -> None:
     # Always fails with PGRST204
-    client = _FakeClient (fail_count=100)
+    client = _FakeClient(fail_count=100)
 
     with pytest.raises(ShowRepositoryError) as excinfo:
         update_show(client, "test-uuid", {"description": "Updated"})

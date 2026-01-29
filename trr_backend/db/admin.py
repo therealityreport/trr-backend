@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
-from typing import Tuple
 
 import httpx
 
 from trr_backend.db.session import DbSession, get_db_session
-
 
 # NOTE: Supabase Python SDK has been removed from this repo. These helpers
 # provide backwards-compatible entry points for call sites that previously

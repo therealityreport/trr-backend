@@ -148,9 +148,7 @@ def create_or_get_conversation(
     conversation_id = existing["conversation_id"] if existing else None
 
     if not conversation_id:
-        conversation = pg.fetch_one(
-            "INSERT INTO social.dm_conversations (is_group) VALUES (false) RETURNING *"
-        )
+        conversation = pg.fetch_one("INSERT INTO social.dm_conversations (is_group) VALUES (false) RETURNING *")
         if not conversation:
             raise HTTPException(status_code=500, detail="Failed to create conversation")
         conversation_id = conversation["id"]

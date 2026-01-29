@@ -8,15 +8,16 @@ All user-scoped writes must enforce ownership using the JWT subject.
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
 
 from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
+
 logger = logging.getLogger(__name__)
 
 
-def get_bearer_token(request: Request) -> Optional[str]:
+def get_bearer_token(request: Request) -> str | None:
     """
     Extract Bearer token from Authorization header.
 
@@ -33,7 +34,7 @@ def get_bearer_token(request: Request) -> Optional[str]:
     return parts[1]
 
 
-async def get_current_user(request: Request) -> Optional[dict]:
+async def get_current_user(request: Request) -> dict | None:
     """
     Get the current user from the JWT token payload.
 
@@ -88,4 +89,4 @@ def get_user_db_session(user: dict) -> Any:
 
 # Type alias for dependency injection
 CurrentUser = Annotated[dict, Depends(require_user)]
-OptionalUser = Annotated[Optional[dict], Depends(get_current_user)]
+OptionalUser = Annotated[dict | None, Depends(get_current_user)]

@@ -19,7 +19,8 @@ Usage:
     PYTHONPATH=. python scripts/enrich/enrich_show_cast.py --imdb-id tt1628033 --limit 5
 
     # Only run TMDb enrichment (skip Fandom and gallery)
-    PYTHONPATH=. python scripts/enrich/enrich_show_cast.py --imdb-id tt1628033 --skip-fandom-profile --skip-gallery --skip-s3
+    PYTHONPATH=. python scripts/enrich/enrich_show_cast.py --imdb-id tt1628033 \\
+        --skip-fandom-profile --skip-gallery --skip-s3
 
     # Skip TMDb enrichment
     PYTHONPATH=. python scripts/enrich/enrich_show_cast.py --imdb-id tt1628033 --skip-tmdb

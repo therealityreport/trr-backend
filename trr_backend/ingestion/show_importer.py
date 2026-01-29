@@ -13,8 +13,8 @@ from uuid import UUID, uuid4
 
 import requests
 
-from trr_backend.db.session import DbSession
 from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.db.session import DbSession
 from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.ingestion.showinfo_overrides import (
     ShowInfoOverridesError,
@@ -385,7 +385,7 @@ def _ingest_imdb_cast(
         try:
             if imdb_sleep_ms:
                 time.sleep(imdb_sleep_ms / 1000.0)
-            graphql_client = ImdbGraphQLPersistedClient (extra_headers=extra_headers)
+            graphql_client = ImdbGraphQLPersistedClient(extra_headers=extra_headers)
             edges = fetch_title_credits_paginated_v2(imdb_id, client=graphql_client)
             filtered_edges, is_partial = select_show_cast_from_graphql(
                 edges,
@@ -1066,7 +1066,7 @@ def annotate_candidates_imdb_episodic(
     do not use this probe (set only `supported=True` flags instead).
     """
 
-    client = HttpImdbEpisodicClient (extra_headers=extra_headers)
+    client = HttpImdbEpisodicClient(extra_headers=extra_headers)
     seasons_by_imdb_id: dict[str, list[int]] = {}
     for c in candidates:
         if not c.imdb_id:
@@ -1495,7 +1495,7 @@ def upsert_candidates_into_supabase(
             if tmdb_fetch_seasons:
                 assert_core_season_images_table_exists(db)
 
-            imdb_client = HttpImdbTitleMetadataClient (
+            imdb_client = HttpImdbTitleMetadataClient(
                 extra_headers=imdb_episodic_extra_headers,
                 sleep_ms=enrich_imdb_sleep_ms,
             )

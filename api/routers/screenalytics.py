@@ -43,12 +43,7 @@ def get_season_cast(
     offset: int = Query(default=0, ge=0),
     _: None = Depends(require_screenalytics_service_token),
 ) -> list[dict]:
-    sql = (
-        "SELECT * FROM core.v_season_cast "
-        "WHERE season_id = %s "
-        "ORDER BY episodes_in_season DESC "
-        "LIMIT %s OFFSET %s"
-    )
+    sql = "SELECT * FROM core.v_season_cast WHERE season_id = %s ORDER BY episodes_in_season DESC LIMIT %s OFFSET %s"
     return pg.fetch_all(sql, [str(season_id), limit, offset])
 
 

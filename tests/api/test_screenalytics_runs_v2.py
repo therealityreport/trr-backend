@@ -127,7 +127,7 @@ def _auth_headers():
 
 
 def test_requires_token():
-    client = TestClient (app)
+    client = TestClient(app)
     response = client.post("/api/v1/screenalytics/v2/video-assets", json={})
     assert response.status_code == 401
 
@@ -138,7 +138,7 @@ def test_screenalytics_flow():
     episode_id = uuid4()
     person_id = uuid4()
 
-    client = TestClient (app)
+    client = TestClient(app)
     response = client.post(
         "/api/v1/screenalytics/v2/video-assets",
         headers=_auth_headers(),
@@ -214,7 +214,7 @@ def test_screenalytics_flow():
 
 
 def test_unknown_clusters_flow():
-    client = TestClient (app)
+    client = TestClient(app)
     # create minimal run + video asset
     show_id = uuid4()
     season_id = uuid4()
@@ -278,7 +278,7 @@ def test_unknown_clusters_flow():
 
 
 def test_idempotent_upserts():
-    client = TestClient (app)
+    client = TestClient(app)
     show_id = uuid4()
     season_id = uuid4()
     episode_id = uuid4()

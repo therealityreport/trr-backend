@@ -97,7 +97,11 @@ def sync_single_show(
             [
                 ("episodes", ["scripts/sync/sync_episodes.py", "--imdb-id", imdb_id], True),  # IMDb
                 ("show_cast", ["scripts/sync/sync_show_cast.py", "--imdb-id", imdb_id], True),  # IMDb
-                ("episode_appearances", ["scripts/sync/sync_episode_appearances.py", "--imdb-id", imdb_id], True),  # IMDb
+                (
+                    "episode_appearances",
+                    ["scripts/sync/sync_episode_appearances.py", "--imdb-id", imdb_id],
+                    True,
+                ),  # IMDb
             ]
         )
 

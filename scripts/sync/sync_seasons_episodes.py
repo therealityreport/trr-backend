@@ -5,9 +5,8 @@ import argparse
 import sys
 from typing import Any
 
-from scripts.sync import sync_episodes
-from scripts.sync import sync_seasons
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
+from scripts.sync import sync_episodes, sync_seasons
 from trr_backend.repositories.shows import update_show
 
 

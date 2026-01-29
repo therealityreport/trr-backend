@@ -4,8 +4,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from trr_backend.db.session import DbSession
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
+from trr_backend.db.session import DbSession
 
 
 class CastFandomRepositoryError(RuntimeError):

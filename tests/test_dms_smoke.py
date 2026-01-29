@@ -116,7 +116,7 @@ def client(mock_supabase):
     """Test client with mocked Supabase (no auth)."""
     app.dependency_overrides[deps.get_supabase_client] = lambda: mock_supabase
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_supabase
-    yield TestClient (app)
+    yield TestClient(app)
     app.dependency_overrides.clear()
 
 
@@ -179,7 +179,7 @@ class TestValidation:
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
         with patch("api.routers.dms.get_user_db_session", return_value=mock_db):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.post("/api/v1/dms", json={})
             assert response.status_code == 422
 
@@ -192,7 +192,7 @@ class TestValidation:
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
         with patch("api.routers.dms.get_user_db_session", return_value=mock_db):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages",
                 json={},
@@ -208,7 +208,7 @@ class TestValidation:
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
         with patch("api.routers.dms.get_user_db_session", return_value=mock_db):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/read",
                 json={},
@@ -239,7 +239,7 @@ class TestCreateConversation:
             patch("api.routers.dms.pg.execute_returning", return_value=[mock_member]),
             patch("api.routers.dms.pg.fetch_all", return_value=[mock_member]),
         ):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.post(
                 "/api/v1/dms",
                 json={"other_user_id": MOCK_OTHER_USER_ID},
@@ -260,7 +260,7 @@ class TestListConversations:
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
         with patch("api.routers.dms.pg.fetch_all", return_value=[MOCK_CONVERSATION]):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.get("/api/v1/dms")
             assert response.status_code == 200
             data = response.json()
@@ -280,7 +280,7 @@ class TestMessages:
             patch("api.routers.dms._require_membership", return_value=None),
             patch("api.routers.dms.pg.fetch_all", return_value=[MOCK_MESSAGE]),
         ):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.get(f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages")
             assert response.status_code == 200
             data = response.json()
@@ -300,7 +300,7 @@ class TestMessages:
             patch("api.routers.dms.pg.fetch_one", return_value=mock_sent),
             patch("api.routers.dms.pg.execute_returning", return_value=None),
         ):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages",
                 json={"body": "Hello!"},
@@ -320,7 +320,7 @@ class TestMessages:
             patch("api.routers.dms._require_membership", return_value=None),
             patch("api.routers.dms.pg.fetch_all", return_value=[]),
         ):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.get(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages",
                 params={"cursor": "2025-01-01T00:00:00Z"},
@@ -343,7 +343,7 @@ class TestReadReceipts:
             patch("api.routers.dms._require_membership", return_value=None),
             patch("api.routers.dms.pg.fetch_one", side_effect=[MOCK_MESSAGE, MOCK_READ_RECEIPT]),
         ):
-            client = TestClient (app)
+            client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/read",
                 json={"last_read_message_id": MOCK_MESSAGE["id"]},

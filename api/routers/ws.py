@@ -104,8 +104,6 @@ async def check_dm_membership(user_id: str, conversation_id: str, token: str) ->
         return False
 
 
-
-
 async def send_event(websocket: WebSocket, event: Event) -> None:
     """Send an event to a WebSocket client."""
     try:

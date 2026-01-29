@@ -4,8 +4,8 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.db.session import DbSession
 from trr_backend.db.admin import is_timeout_error
+from trr_backend.db.session import DbSession
 
 
 class SyncStateRepositoryError(RuntimeError):

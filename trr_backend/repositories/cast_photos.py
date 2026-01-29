@@ -6,8 +6,8 @@ from dataclasses import asdict
 from typing import Any
 from uuid import UUID
 
-from trr_backend.db.session import DbSession
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
+from trr_backend.db.session import DbSession
 from trr_backend.models.cast_photos import CastPhotoUpsert
 
 

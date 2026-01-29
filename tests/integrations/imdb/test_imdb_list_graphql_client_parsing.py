@@ -88,7 +88,7 @@ def test_fetch_imdb_list_items_graphql_paginates_via_jump_to_position(monkeypatc
                 edges = []
             return {"data": {"list": {"titleListItemSearch": {"total": 251, "edges": edges}}}}
 
-    fake = _FakeGraphqlClient ()
+    fake = _FakeGraphqlClient()
 
     def _factory(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         return fake

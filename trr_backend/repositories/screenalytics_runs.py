@@ -162,11 +162,7 @@ def upsert_run_person_metrics(run_id: str, metrics: list[dict[str, Any]]) -> lis
 
 
 def list_leaderboard(run_id: str) -> list[dict[str, Any]]:
-    sql = (
-        "SELECT * FROM screenalytics.run_person_metrics "
-        "WHERE run_id = %s "
-        "ORDER BY screen_time_seconds DESC"
-    )
+    sql = "SELECT * FROM screenalytics.run_person_metrics WHERE run_id = %s ORDER BY screen_time_seconds DESC"
     return pg.fetch_all(sql, [_normalize(run_id)])
 
 

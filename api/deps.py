@@ -83,8 +83,6 @@ def get_supabase_service_key() -> str:
     return key
 
 
-
-
 def get_supabase_client() -> Client:
     """
     Returns a DB session for public read operations.

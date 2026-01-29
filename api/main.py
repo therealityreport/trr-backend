@@ -69,7 +69,15 @@ app.add_middleware(
 )
 
 # Include routers
-from api.routers import discussions, dms, screenalytics, screenalytics_runs_v2, shows, surveys, ws
+from api.routers import (  # noqa: E402
+    discussions,
+    dms,
+    screenalytics,
+    screenalytics_runs_v2,
+    shows,
+    surveys,
+    ws,
+)
 
 app.include_router(shows.router, prefix="/api/v1")
 app.include_router(surveys.router, prefix="/api/v1")

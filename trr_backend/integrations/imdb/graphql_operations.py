@@ -149,7 +149,7 @@ def fetch_title_credits_paginated_v2(
 
     # Execute paginated query
     if client is None:
-        client = ImdbGraphQLPersistedClient ()
+        client = ImdbGraphQLPersistedClient()
 
     edges = client.paginate_edges(
         operation_name=op_meta["operation_name"],
@@ -199,7 +199,7 @@ def fetch_hero_sub_nav_episode(
     }
 
     if client is None:
-        client = ImdbGraphQLPersistedClient ()
+        client = ImdbGraphQLPersistedClient()
 
     return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
 
@@ -233,7 +233,7 @@ def fetch_episodes_widget_container(
     }
 
     if client is None:
-        client = ImdbGraphQLPersistedClient ()
+        client = ImdbGraphQLPersistedClient()
 
     return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
 
@@ -272,7 +272,7 @@ def fetch_episodes_widget_next_episode(
     }
 
     if client is None:
-        client = ImdbGraphQLPersistedClient ()
+        client = ImdbGraphQLPersistedClient()
 
     return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
 
@@ -305,7 +305,7 @@ def fetch_base_title_prompt(
         variables["location"] = location
 
     if client is None:
-        client = ImdbGraphQLPersistedClient ()
+        client = ImdbGraphQLPersistedClient()
 
     return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
 
@@ -344,7 +344,7 @@ def fetch_hero_watch_box(
     }
 
     if client is None:
-        client = ImdbGraphQLPersistedClient ()
+        client = ImdbGraphQLPersistedClient()
 
     return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
 
@@ -362,7 +362,7 @@ def fetch_name_main_projects_in_dev(
     variables = {"first": int(first), "locale": locale, "nconst": nconst}
 
     if client is None:
-        client = ImdbGraphQLPersistedClient ()
+        client = ImdbGraphQLPersistedClient()
 
     return client.execute_query(op_meta["operation_name"], op_meta["sha256_hash"], variables)
 

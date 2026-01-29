@@ -70,7 +70,7 @@ class ImdbEpisodicCredits:
     credits: Sequence[ImdbEpisodeCredit]
 
 
-class ImdbEpisodicClient (Protocol):
+class ImdbEpisodicClient(Protocol):
     """
     Port used by the rest of the system to retrieve episodic credits from IMDb.
 
@@ -342,7 +342,7 @@ def _parse_episode_credits_page_from_payload(payload: Mapping[str, Any]) -> Imdb
     return ImdbEpisodeCreditsPage(credits=credits, end_cursor=end_cursor, has_next_page=has_next_page)
 
 
-class HttpImdbEpisodicClient (ImdbEpisodicClient):
+class HttpImdbEpisodicClient(ImdbEpisodicClient):
     """
     HTTP client for IMDb episodic credits via persisted GraphQL query.
 
@@ -575,7 +575,7 @@ def debug_print_example(extra_headers: Mapping[str, str] | None = None) -> None:
     name_id = "nm1278492"
     job_category_id = IMDB_JOB_CATEGORY_SELF
 
-    client = HttpImdbEpisodicClient (extra_headers=extra_headers)
+    client = HttpImdbEpisodicClient(extra_headers=extra_headers)
     seasons = client.fetch_available_seasons(title_id, name_id, job_category_id)
     print("Available seasons:", seasons)
 

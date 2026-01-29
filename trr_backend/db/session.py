@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
-from psycopg2.extras import RealDictCursor, execute_values, Json
+from psycopg2.extras import Json, RealDictCursor, execute_values
 
 from trr_backend.db.connection import resolve_database_url
 from trr_backend.db.pg import db_connection
@@ -301,7 +302,7 @@ class DbQuery:
             if self._ignore_duplicates:
                 sql += f" ON CONFLICT ({self._on_conflict}) DO NOTHING"
             else:
-                update_cols = [col for col in columns]
+                update_cols = list(columns)
                 update_sql = ",".join([f"{col} = EXCLUDED.{col}" for col in update_cols])
                 sql += f" ON CONFLICT ({self._on_conflict}) DO UPDATE SET {update_sql}"
         sql += " RETURNING *"
@@ -324,7 +325,10 @@ class DbRpc:
             if self._params:
                 arg_sql = ", ".join([f"{key} := %s" for key in self._params.keys()])
                 sql = f"SELECT * FROM {self._schema}.{self._function_name}({arg_sql})"
-                params = [self._params[key] if not isinstance(self._params[key], (dict, list)) else Json(self._params[key]) for key in self._params]
+                params = [
+                    self._params[key] if not isinstance(self._params[key], (dict, list)) else Json(self._params[key])
+                    for key in self._params
+                ]
             else:
                 sql = f"SELECT * FROM {self._schema}.{self._function_name}()"
                 params = []

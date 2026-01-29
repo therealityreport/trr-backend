@@ -227,7 +227,7 @@ def _fetch_episodic_credits(
     extra_headers: dict[str, str] | None,
 ) -> EpisodicCreditsResult:
     job_category_id = cast_row.job_category_id or IMDB_JOB_CATEGORY_SELF
-    client = HttpImdbEpisodicClient (extra_headers=extra_headers)
+    client = HttpImdbEpisodicClient(extra_headers=extra_headers)
     try:
         seasons = client.fetch_available_seasons(series_id, cast_row.name_id, job_category_id)
         credits = client.fetch_episode_credits_for_seasons(
@@ -262,7 +262,8 @@ def main(argv: list[str] | None = None) -> int:
     show = find_show_by_imdb_id(db, series_id)
     if not show:
         print(
-            f\"ERROR: core.shows missing imdb id {series_id}. Run list import first (scripts/import/import_shows_from_lists.py).\",
+            f"ERROR: core.shows missing imdb id {series_id}. "
+            "Run list import first (scripts/import/import_shows_from_lists.py).",
             file=sys.stderr,
         )
         return 1

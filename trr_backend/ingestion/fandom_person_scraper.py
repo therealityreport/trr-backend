@@ -282,17 +282,27 @@ def _normalize_fandom_image_url(url: str | None, *, source_page_url: str) -> str
         cleaned = f"https:{cleaned}"
     if cleaned.startswith("/wiki/"):
         parsed = urlparse(source_page_url)
-        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://real-housewives.fandom.com"
+        base = (
+            f"{parsed.scheme}://{parsed.netloc}"
+            if parsed.scheme and parsed.netloc
+            else "https://real-housewives.fandom.com"
+        )
         cleaned = f"{base}{cleaned}"
     lowered = cleaned.lower()
     if "/wiki/file:" in lowered or "/wiki/file%3a" in lowered:
         parsed = urlparse(cleaned)
         path = unquote(parsed.path or "")
         if "file:" in path.lower():
-            file_part = path.split("File:", 1)[1].lstrip("/") if "File:" in path else path.split("file:", 1)[1].lstrip("/")
+            file_part = (
+                path.split("File:", 1)[1].lstrip("/") if "File:" in path else path.split("file:", 1)[1].lstrip("/")
+            )
             if file_part:
                 file_part = quote(unquote(file_part), safe="")
-                base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://real-housewives.fandom.com"
+                base = (
+                    f"{parsed.scheme}://{parsed.netloc}"
+                    if parsed.scheme and parsed.netloc
+                    else "https://real-housewives.fandom.com"
+                )
                 cleaned = f"{base}/wiki/Special:FilePath/{file_part}"
     return cleaned
 

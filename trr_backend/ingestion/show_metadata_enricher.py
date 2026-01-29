@@ -776,7 +776,7 @@ def _enrich_one_show(
             try:
                 if imdb_sleep_ms:
                     time.sleep(imdb_sleep_ms / 1000.0)
-                graphql_client = ImdbGraphQLPersistedClient ()
+                graphql_client = ImdbGraphQLPersistedClient()
                 hero_payload = fetch_hero_sub_nav_episode(imdb_id, client=graphql_client)
                 total, recent = _extract_imdb_episode_summary_from_graphql(hero_payload)
                 if (force_refresh or show.show_total_episodes is None) and total is not None:
@@ -795,7 +795,7 @@ def _enrich_one_show(
             if force_refresh or show_update.get("most_recent_episode") is None:
                 try:
                     if graphql_client is None:
-                        graphql_client = ImdbGraphQLPersistedClient ()
+                        graphql_client = ImdbGraphQLPersistedClient()
                     if imdb_sleep_ms:
                         time.sleep(imdb_sleep_ms / 1000.0)
                     widget_payload = fetch_episodes_widget_container(imdb_id, client=graphql_client)
@@ -812,7 +812,7 @@ def _enrich_one_show(
                     print(f"IMDb episodes (GraphQL widget): failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
 
         try:
-            graphql_client = ImdbGraphQLPersistedClient ()
+            graphql_client = ImdbGraphQLPersistedClient()
             if imdb_sleep_ms:
                 time.sleep(imdb_sleep_ms / 1000.0)
             prompt_payload = fetch_base_title_prompt(
@@ -876,7 +876,7 @@ def _enrich_one_show(
 
         need_imdb_episodes = force_refresh or show_update.get("most_recent_episode") is None
         if need_imdb_episodes:
-            client = HttpImdbTitleMetadataClient (sleep_ms=imdb_sleep_ms)
+            client = HttpImdbTitleMetadataClient(sleep_ms=imdb_sleep_ms)
             key = (imdb_id, None)
             with cache_lock:
                 episodes_html = imdb_episodes_cache.get(key)

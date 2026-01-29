@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.db.session import DbSession
 from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.db.session import DbSession
 from trr_backend.repositories.shows import assert_core_shows_table_exists, update_show
 from trr_backend.repositories.sync_state import assert_core_sync_state_table_exists, fetch_sync_state_map
 from trr_backend.utils.env import load_env
