@@ -52,6 +52,7 @@ class Survey(BaseModel):
     show_id: UUID
     season_id: UUID | None
     episode_id: UUID | None
+    slug: str | None
     title: str
     description: str | None
     status: str
@@ -146,6 +147,33 @@ def get_survey(db: SupabaseClient, survey_id: UUID) -> dict:
     questions = get_list_result(questions_response, "fetching survey questions")
 
     # Sort options within each question
+    for q in questions:
+        q["options"] = sorted(q.get("options", []), key=lambda x: x["option_order"])
+
+    survey["questions"] = questions
+    return survey
+
+
+@router.get("/by-slug/{slug}", response_model=SurveyWithQuestions)
+def get_survey_by_slug(db: SupabaseClient, slug: str) -> dict:
+    """
+    Get a survey by its URL-friendly slug.
+    """
+    # Get survey by slug
+    survey_response = db.schema("surveys").table("surveys").select("*").eq("slug", slug).single().execute()
+    survey = require_single_result(survey_response, "Survey")
+
+    # Get questions with options
+    questions_response = (
+        db.schema("surveys")
+        .table("questions")
+        .select("*, options(*)")
+        .eq("survey_id", str(survey["id"]))
+        .order("question_order")
+        .execute()
+    )
+    questions = get_list_result(questions_response, "fetching survey questions")
+
     for q in questions:
         q["options"] = sorted(q.get("options", []), key=lambda x: x["option_order"])
 
