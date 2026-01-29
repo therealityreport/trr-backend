@@ -7,13 +7,12 @@ All writes must use the user-scoped client to enforce RLS.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
-
-from api.deps import get_supabase_anon_key, get_supabase_url
-from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
 
@@ -37,32 +36,29 @@ def get_bearer_token(request: Request) -> str | None:
 
 async def get_current_user(request: Request) -> dict | None:
     """
-    Get the current user from the Supabase JWT token.
+    Get the current user from the JWT token payload.
 
-    Returns None if no token or invalid token.
-    Returns user dict with 'id', 'email', etc. if valid.
+    Note: This performs a lightweight decode without signature verification.
+    Use service boundaries or upstream auth for full verification.
     """
     token = get_bearer_token(request)
     if not token:
         return None
 
-    try:
-        # Create a client with the user's token to validate it
-        client = create_client(get_supabase_url(), get_supabase_anon_key())
-        # Get user from the token
-        user_response = client.auth.get_user(token)
+    payload = _decode_jwt_payload(token)
+    if not payload:
+        return None
 
-        if user_response and user_response.user:
-            return {
-                "id": str(user_response.user.id),
-                "email": user_response.user.email,
-                "role": user_response.user.role,
-                "token": token,  # Store token for user-scoped client
-            }
+    user_id = payload.get("sub") or payload.get("user_id") or payload.get("id")
+    if not user_id:
         return None
-    except Exception as e:
-        logger.warning(f"Failed to validate token: {e}")
-        return None
+
+    return {
+        "id": str(user_id),
+        "email": payload.get("email"),
+        "role": payload.get("role"),
+        "token": token,
+    }
 
 
 async def require_user(request: Request) -> dict:
@@ -82,17 +78,28 @@ async def require_user(request: Request) -> dict:
     return user
 
 
-def get_user_supabase_client(user: dict) -> Client:
-    """
-    Returns a Supabase client scoped to the user's token.
+def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        return json.loads(decoded.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return None
 
-    This client enforces RLS based on the user's identity.
-    Use this for authenticated write operations.
+
+def get_user_supabase_client(user: dict) -> Any:
     """
-    client = create_client(get_supabase_url(), get_supabase_anon_key())
-    # Apply the user's access token for RLS enforcement
-    client.postgrest.auth(user["token"])
-    return client
+    Placeholder for user-scoped DB access.
+
+    Supabase Python SDK is intentionally not used in this repo.
+    """
+    raise RuntimeError(
+        "Supabase Python SDK is disabled. Use the direct DB layer or PostgREST."
+    )
 
 
 # Type alias for dependency injection

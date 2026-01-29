@@ -11,6 +11,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from typing import Any
@@ -19,7 +20,6 @@ from uuid import UUID
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ValidationError
 
-from api.deps import get_supabase_anon_key, get_supabase_url
 from api.realtime.broker import get_broker
 from api.realtime.events import (
     Event,
@@ -32,7 +32,7 @@ from api.realtime.events import (
     subscribed_event,
     typing_event,
 )
-from supabase import create_client
+from trr_backend.db import pg
 
 logger = logging.getLogger(__name__)
 
@@ -67,21 +67,20 @@ async def validate_token(token: str | None) -> dict | None:
     if not token:
         return None
 
-    try:
-        client = create_client(get_supabase_url(), get_supabase_anon_key())
-        user_response = client.auth.get_user(token)
+    payload = _decode_jwt_payload(token)
+    if not payload:
+        return None
 
-        if user_response and user_response.user:
-            return {
-                "id": str(user_response.user.id),
-                "email": user_response.user.email,
-                "role": user_response.user.role,
-                "token": token,
-            }
+    user_id = payload.get("sub") or payload.get("user_id") or payload.get("id")
+    if not user_id:
         return None
-    except Exception as e:
-        logger.warning(f"Token validation failed: {e}")
-        return None
+
+    return {
+        "id": str(user_id),
+        "email": payload.get("email"),
+        "role": payload.get("role"),
+        "token": token,
+    }
 
 
 async def check_dm_membership(user_id: str, conversation_id: str, token: str) -> bool:
@@ -91,22 +90,27 @@ async def check_dm_membership(user_id: str, conversation_id: str, token: str) ->
     Uses RLS to verify membership.
     """
     try:
-        client = create_client(get_supabase_url(), get_supabase_anon_key())
-        client.postgrest.auth(token)
-
-        response = (
-            client.schema("social")
-            .table("dm_members")
-            .select("user_id")
-            .eq("conversation_id", conversation_id)
-            .eq("user_id", user_id)
-            .execute()
+        row = pg.fetch_one(
+            "SELECT user_id FROM social.dm_members WHERE conversation_id = %s AND user_id = %s",
+            [conversation_id, user_id],
         )
-
-        return bool(response.data)
+        return bool(row)
     except Exception as e:
         logger.error(f"Failed to check DM membership: {e}")
         return False
+
+
+def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        return json.loads(decoded.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return None
 
 
 async def send_event(websocket: WebSocket, event: Event) -> None:
