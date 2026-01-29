@@ -73,12 +73,16 @@ See `docs/architecture.md` for the full TMDb enrichment pipeline.
 
 ## `surveys` tables
 
-- `surveys.surveys`: A survey scoped to a show/season/episode (`show_id` required; `season_id`/`episode_id` optional).
+- `surveys.surveys`: A survey scoped to a show/season/episode (`show_id` required; `season_id`/`episode_id` optional). Includes `slug` for URL-friendly identifiers.
 - `surveys.questions`: Questions for a survey; `question_order` is unique per survey.
 - `surveys.options`: Options for a question (for choice questions).
-- `surveys.responses`: Per-user response header for a survey (user-scoped).
+- `surveys.responses`: Per-user response header for a survey (user-scoped). **Unique constraint**: authenticated users can only submit one response per survey.
 - `surveys.answers`: Per-response per-question answers (user-scoped via the owning response); includes `survey_id` to enforce response/question scope.
 - `surveys.aggregates`: Live aggregates for survey questions (read-only to clients).
+
+### `surveys` RPC functions
+
+- `surveys.submit_response(survey_id uuid, answers jsonb) -> uuid`: Atomically submits a survey response with all answers. Uses `auth.uid()` internally for user identification. Prevents duplicate submissions for authenticated users. Returns the response_id.
 
 ## Games vs. surveys
 
