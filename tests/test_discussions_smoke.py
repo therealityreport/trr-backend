@@ -166,7 +166,7 @@ def client_with_threads(mock_supabase_with_threads):
     """Test client with thread data."""
     app.dependency_overrides[deps.get_supabase_client] = lambda: mock_supabase_with_threads
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_supabase_with_threads
-    yield TestClient(app)
+    yield TestClient (app)
     app.dependency_overrides.clear()
 
 
@@ -175,7 +175,7 @@ def client_with_posts(mock_supabase_with_posts):
     """Test client with post data."""
     app.dependency_overrides[deps.get_supabase_client] = lambda: mock_supabase_with_posts
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_supabase_with_posts
-    yield TestClient(app)
+    yield TestClient (app)
     app.dependency_overrides.clear()
 
 
@@ -184,7 +184,7 @@ def client_empty(mock_supabase_empty):
     """Test client with empty results."""
     app.dependency_overrides[deps.get_supabase_client] = lambda: mock_supabase_empty
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_supabase_empty
-    yield TestClient(app)
+    yield TestClient (app)
     app.dependency_overrides.clear()
 
 
@@ -193,7 +193,7 @@ def client_single(mock_supabase_single):
     """Test client that returns single items."""
     app.dependency_overrides[deps.get_supabase_client] = lambda: mock_supabase_single
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_supabase_single
-    yield TestClient(app)
+    yield TestClient (app)
     app.dependency_overrides.clear()
 
 
@@ -202,7 +202,7 @@ def client_none(mock_supabase_none):
     """Test client that returns None (not found)."""
     app.dependency_overrides[deps.get_supabase_client] = lambda: mock_supabase_none
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_supabase_none
-    yield TestClient(app)
+    yield TestClient (app)
     app.dependency_overrides.clear()
 
 
@@ -216,9 +216,9 @@ def authenticated_client():
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_db
     app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-    # Patch get_user_supabase_client to return our mock
-    with patch("api.routers.discussions.get_user_supabase_client", return_value=mock_db):
-        yield TestClient(app)
+    # Patch get_user_db_session to return our mock
+    with patch("api.routers.discussions.get_user_db_session", return_value=mock_db):
+        yield TestClient (app)
 
     app.dependency_overrides.clear()
 
@@ -354,8 +354,8 @@ class TestCreatePost:
         app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.discussions.get_user_supabase_client", return_value=mock_db):
-            client = TestClient(app)
+        with patch("api.routers.discussions.get_user_db_session", return_value=mock_db):
+            client = TestClient (app)
             response = client.post(
                 "/api/v1/threads/a1b2c3d4-e5f6-7890-abcd-ef1234567890/posts",
                 json={"body": "Test post content"},
@@ -413,8 +413,8 @@ class TestReactions:
         app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.discussions.get_user_supabase_client", return_value=user_mock):
-            client = TestClient(app)
+        with patch("api.routers.discussions.get_user_db_session", return_value=user_mock):
+            client = TestClient (app)
             response = client.post(
                 "/api/v1/posts/b2c3d4e5-f6a7-8901-bcde-f23456789012/reactions",
                 json={"reaction": "upvote"},
@@ -433,7 +433,7 @@ class TestReactions:
         app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        client = TestClient(app)
+        client = TestClient (app)
         response = client.post(
             "/api/v1/posts/b2c3d4e5-f6a7-8901-bcde-f23456789012/reactions",
             json={"reaction": "invalid_reaction"},

@@ -11,7 +11,6 @@ Provides:
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 from typing import Any
@@ -33,6 +32,7 @@ from api.realtime.events import (
     typing_event,
 )
 from trr_backend.db import pg
+from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +67,12 @@ async def validate_token(token: str | None) -> dict | None:
     if not token:
         return None
 
-    payload = _decode_jwt_payload(token)
-    if not payload:
+    try:
+        payload = verify_jwt_token(token)
+    except InvalidTokenError:
+        return None
+    except RuntimeError as exc:
+        logger.warning(f"Token validation failed: {exc}")
         return None
 
     user_id = payload.get("sub") or payload.get("user_id") or payload.get("id")
@@ -100,17 +104,6 @@ async def check_dm_membership(user_id: str, conversation_id: str, token: str) ->
         return False
 
 
-def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-    payload = parts[1]
-    padding = "=" * (-len(payload) % 4)
-    try:
-        decoded = base64.urlsafe_b64decode(payload + padding)
-        return json.loads(decoded.decode("utf-8"))
-    except (ValueError, json.JSONDecodeError):
-        return None
 
 
 async def send_event(websocket: WebSocket, event: Event) -> None:

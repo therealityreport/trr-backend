@@ -344,7 +344,7 @@ class TestWebSocketEndpoints:
     @pytest.fixture
     def client(self):
         """Create test client."""
-        return TestClient(app)
+        return TestClient (app)
 
     def test_discussion_websocket_accepts_connection(self, client):
         """Discussion WebSocket accepts connections."""

@@ -8,7 +8,7 @@ import sys
 from typing import Any
 from uuid import UUID
 
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.tmdb_person_images import (
     build_tmdb_cast_photo_rows,
     fetch_tmdb_person_profile_images,

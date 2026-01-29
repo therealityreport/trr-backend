@@ -33,9 +33,9 @@ from trr_backend.media.s3_mirror import (
 )
 
 if TYPE_CHECKING:
-    from supabase import Client
+    from trr_backend.db.session import DbSession
 else:
-    Client = Any
+    DbSession = Any
 
 # Configuration
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -191,7 +191,7 @@ def generate_presigned_post(
 
 
 def create_media_upload_session(
-    db: Client,
+    db: DbSession,
     *,
     entity_type: str,
     entity_id: str,
@@ -340,7 +340,7 @@ def _sanitize_etag(value: str | None) -> str | None:
 
 
 def finalize_media_upload_session(
-    db: Client,
+    db: DbSession,
     upload_id: str,
     *,
     s3_client: Any | None = None,
@@ -536,7 +536,7 @@ def finalize_media_upload_session(
 
 
 def set_primary_media_link(
-    db: Client,
+    db: DbSession,
     entity_type: str,
     entity_id: str,
     kind: str,
@@ -580,7 +580,7 @@ def set_primary_media_link(
 
 
 def cancel_media_upload_session(
-    db: Client,
+    db: DbSession,
     upload_id: str,
     *,
     s3_client: Any | None = None,
@@ -624,7 +624,7 @@ def cancel_media_upload_session(
 
 
 def get_upload_session_status(
-    db: Client,
+    db: DbSession,
     upload_id: str,
 ) -> dict[str, Any] | None:
     """

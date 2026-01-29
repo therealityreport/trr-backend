@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.media.s3_mirror import (
     get_cdn_base_url,
     mirror_cast_photo_row,

@@ -68,7 +68,7 @@ def test_upsert_cast_photos_retries_on_pgrst204(
     mock_sleep: MagicMock,
     mock_reload: MagicMock,
 ) -> None:
-    client = _FakeClient(fail_count=1)
+    client = _FakeClient (fail_count=1)
 
     upsert_cast_photos(client, [_sample_row()])
 
@@ -78,7 +78,7 @@ def test_upsert_cast_photos_retries_on_pgrst204(
 
 
 def test_upsert_cast_photos_uses_rpc_function() -> None:
-    client = _FakeClient()
+    client = _FakeClient ()
 
     upsert_cast_photos(client, [_sample_row()])
 
@@ -87,7 +87,7 @@ def test_upsert_cast_photos_uses_rpc_function() -> None:
 
 
 def test_upsert_cast_photos_uses_canonical_rpc() -> None:
-    client = _FakeClient()
+    client = _FakeClient ()
     row = _sample_row()
     row = CastPhotoUpsert(
         person_id=row.person_id,
@@ -107,7 +107,7 @@ def test_upsert_cast_photos_uses_canonical_rpc() -> None:
 
 
 def test_upsert_cast_photos_requires_source_image_id() -> None:
-    client = _FakeClient()
+    client = _FakeClient ()
     bad_row = CastPhotoUpsert(
         person_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
         imdb_person_id="nm11883948",
@@ -121,7 +121,7 @@ def test_upsert_cast_photos_requires_source_image_id() -> None:
 
 
 def test_upsert_cast_photos_requires_canonical_url() -> None:
-    client = _FakeClient()
+    client = _FakeClient ()
     bad_row = CastPhotoUpsert(
         person_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
         imdb_person_id="nm11883948",

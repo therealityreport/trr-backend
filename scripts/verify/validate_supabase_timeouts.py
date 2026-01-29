@@ -7,7 +7,7 @@ import time
 
 import httpx
 
-from trr_backend.db.supabase import (
+from trr_backend.db.admin import (
     create_supabase_httpx_client,
     get_supabase_timeout_config,
     is_timeout_error,

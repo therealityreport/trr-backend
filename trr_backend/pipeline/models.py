@@ -58,17 +58,27 @@ class RunContext:
     artifacts: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
-    def compute_input_hash(self) -> str:
-        """Compute SHA256 hash of config + show_ids for resume logic."""
-        data = {
-            "config": {
-                "from_stage": self.config.from_stage,
-                "to_stage": self.config.to_stage,
+    def compute_stage_input_hash(self, stage_name: str) -> str:
+        """
+        Compute stage-specific input hash for resume logic.
+
+        Stage 1: hash(show_filters, dry_run) - show_ids not yet known
+        Stage 2+: hash(show_filters, show_ids, dry_run)
+
+        Excludes: force, from_stage, to_stage, verbose, skip_s3
+        Includes: dry_run (prevents resuming dry-run → real run)
+        """
+        if stage_name == "01_collect":
+            data = {
                 "show_filters": self.config.show_filters,
-                "force": self.config.force,
-            },
-            "show_ids": sorted(self.show_ids),
-        }
+                "dry_run": self.config.dry_run,
+            }
+        else:
+            data = {
+                "show_filters": self.config.show_filters,
+                "show_ids": sorted(self.show_ids),
+                "dry_run": self.config.dry_run,
+            }
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 

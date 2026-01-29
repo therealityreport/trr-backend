@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import os
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-
-os.environ["TRR_SCREENALYTICS_ONLY"] = "1"
 
 from api.main import app
 from trr_backend.db import pg
@@ -56,13 +53,13 @@ def seeded_core_rows():
 
 
 def test_requires_token():
-    client = TestClient(app)
+    client = TestClient (app)
     response = client.post("/api/v1/screenalytics/v2/video-assets", json={})
     assert response.status_code == 401
 
 
 def test_screenalytics_flow(seeded_core_rows):
-    client = TestClient(app)
+    client = TestClient (app)
     response = client.post(
         "/api/v1/screenalytics/v2/video-assets",
         headers=_auth_headers(),
@@ -137,7 +134,7 @@ def test_screenalytics_flow(seeded_core_rows):
 
 
 def test_unknown_clusters_flow():
-    client = TestClient(app)
+    client = TestClient (app)
     # create minimal run + video asset
     show_id = uuid4()
     season_id = uuid4()
@@ -207,7 +204,7 @@ def test_unknown_clusters_flow():
 
 
 def test_idempotent_upserts(seeded_core_rows):
-    client = TestClient(app)
+    client = TestClient (app)
     video_asset = pg.execute_returning(
         "INSERT INTO screenalytics.video_assets (show_id, episode_id, source_url) VALUES (%s, %s, %s) RETURNING id",
         [

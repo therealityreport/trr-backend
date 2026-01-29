@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import os
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-
-os.environ["TRR_SCREENALYTICS_ONLY"] = "1"
 
 from api.main import app
 
@@ -22,13 +19,13 @@ def _auth_headers():
 
 
 def test_episode_cast_requires_token():
-    client = TestClient(app)
+    client = TestClient (app)
     response = client.get(f"/api/v1/screenalytics/episodes/{uuid4()}/cast")
     assert response.status_code == 401
 
 
 def test_episode_cast_rejects_wrong_token():
-    client = TestClient(app)
+    client = TestClient (app)
     response = client.get(
         f"/api/v1/screenalytics/episodes/{uuid4()}/cast",
         headers={"Authorization": "Bearer wrong"},
@@ -37,7 +34,7 @@ def test_episode_cast_rejects_wrong_token():
 
 
 def test_episode_cast_ok():
-    client = TestClient(app)
+    client = TestClient (app)
     response = client.get(
         f"/api/v1/screenalytics/episodes/{uuid4()}/cast",
         headers=_auth_headers(),
@@ -47,7 +44,7 @@ def test_episode_cast_ok():
 
 
 def test_season_cast_ok():
-    client = TestClient(app)
+    client = TestClient (app)
     response = client.get(
         f"/api/v1/screenalytics/seasons/{uuid4()}/cast",
         headers=_auth_headers(),
@@ -57,7 +54,7 @@ def test_season_cast_ok():
 
 
 def test_person_photos_ok():
-    client = TestClient(app)
+    client = TestClient (app)
     response = client.get(
         f"/api/v1/screenalytics/people/{uuid4()}/photos",
         headers=_auth_headers(),

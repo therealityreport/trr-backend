@@ -14,7 +14,7 @@ from scripts._sync_common import (
     filter_show_rows_for_sync,
     load_env_and_db,
 )
-from supabase import Client
+from trr_backend.db.session import DbSession
 from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_watch_providers, resolve_api_key
 from trr_backend.media.s3_mirror import mirror_tmdb_logo_row
 from trr_backend.repositories.sync_state import (
@@ -84,7 +84,7 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return ordered
 
 
-def _fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any]]:
+def _fetch_show_rows(db: DbSession, args: argparse.Namespace) -> list[dict[str, Any]]:
     fields = "id,name,tmdb_id,most_recent_episode"
     rows: list[dict[str, Any]] = []
 
@@ -191,7 +191,7 @@ def _compute_stale_provider_ids(existing_ids: set[int], current_ids: set[int]) -
     return sorted(existing_ids - current_ids)
 
 
-def _upsert_rows(db: Client, *, table: str, rows: list[dict[str, Any]], on_conflict: str) -> None:
+def _upsert_rows(db: DbSession, *, table: str, rows: list[dict[str, Any]], on_conflict: str) -> None:
     if not rows:
         return
     response = db.schema("core").table(table).upsert(rows, on_conflict=on_conflict).execute()
@@ -200,7 +200,7 @@ def _upsert_rows(db: Client, *, table: str, rows: list[dict[str, Any]], on_confl
 
 
 def _fetch_existing_provider_ids(
-    db: Client,
+    db: DbSession,
     *,
     show_id: str,
     region: str,
@@ -224,7 +224,7 @@ def _fetch_existing_provider_ids(
 
 
 def _prune_stale_watch_providers(
-    db: Client,
+    db: DbSession,
     *,
     show_id: str,
     region: str,
@@ -250,7 +250,7 @@ def _prune_stale_watch_providers(
     return len(stale_ids)
 
 
-def _fetch_providers_for_logo(db: Client, *, ids: list[int]) -> list[dict[str, Any]]:
+def _fetch_providers_for_logo(db: DbSession, *, ids: list[int]) -> list[dict[str, Any]]:
     if not ids:
         return []
     response = db.schema("core").table("watch_providers").select(PROVIDER_FIELDS).in_("provider_id", ids).execute()
@@ -261,7 +261,7 @@ def _fetch_providers_for_logo(db: Client, *, ids: list[int]) -> list[dict[str, A
 
 
 def _mirror_provider_logos(
-    db: Client,
+    db: DbSession,
     *,
     ids: list[int],
     processed: set[int],

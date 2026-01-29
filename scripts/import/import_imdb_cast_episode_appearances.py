@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env
 from trr_backend.integrations.imdb.episodic_client import (
     IMDB_JOB_CATEGORY_SELF,
@@ -227,7 +227,7 @@ def _fetch_episodic_credits(
     extra_headers: dict[str, str] | None,
 ) -> EpisodicCreditsResult:
     job_category_id = cast_row.job_category_id or IMDB_JOB_CATEGORY_SELF
-    client = HttpImdbEpisodicClient(extra_headers=extra_headers)
+    client = HttpImdbEpisodicClient (extra_headers=extra_headers)
     try:
         seasons = client.fetch_available_seasons(series_id, cast_row.name_id, job_category_id)
         credits = client.fetch_episode_credits_for_seasons(

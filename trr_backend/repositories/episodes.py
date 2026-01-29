@@ -4,14 +4,14 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 from uuid import UUID
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class EpisodeRepositoryError(RuntimeError):
     pass
 
 
-def assert_core_episodes_table_exists(db: Client) -> None:
+def assert_core_episodes_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.episodes` is missing in Supabase.
     """
@@ -77,7 +77,7 @@ def assert_core_episodes_table_exists(db: Client) -> None:
 
 
 def upsert_episodes(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     on_conflict: str = "show_id,season_number,episode_number",
@@ -94,7 +94,7 @@ def upsert_episodes(
 
 
 def fetch_episodes_for_show_season(
-    db: Client,
+    db: DbSession,
     *,
     show_id: UUID | str,
     season_number: int,
@@ -113,13 +113,13 @@ def fetch_episodes_for_show_season(
     return data if isinstance(data, list) else []
 
 
-def delete_episodes_for_show(db: Client, *, show_id: UUID | str) -> None:
+def delete_episodes_for_show(db: DbSession, *, show_id: UUID | str) -> None:
     response = db.schema("core").table("episodes").delete().eq("show_id", str(show_id)).execute()
     if hasattr(response, "error") and response.error:
         raise EpisodeRepositoryError(f"Supabase error deleting episodes for show_id={show_id}: {response.error}")
 
 
-def delete_episodes_for_tmdb_series(db: Client, *, tmdb_series_id: int) -> None:
+def delete_episodes_for_tmdb_series(db: DbSession, *, tmdb_series_id: int) -> None:
     response = db.schema("core").table("episodes").delete().eq("tmdb_series_id", str(int(tmdb_series_id))).execute()
     if hasattr(response, "error") and response.error:
         raise EpisodeRepositoryError(

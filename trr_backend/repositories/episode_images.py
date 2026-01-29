@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class EpisodeImageRepositoryError(RuntimeError):
     pass
 
 
-def assert_core_episode_images_table_exists(db: Client) -> None:
+def assert_core_episode_images_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.episode_images` is missing in Supabase.
     """
@@ -76,7 +76,7 @@ def assert_core_episode_images_table_exists(db: Client) -> None:
 
 
 def upsert_episode_images(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     on_conflict: str = "tmdb_series_id,season_number,episode_number,source,file_path",
@@ -92,7 +92,7 @@ def upsert_episode_images(
     return data if isinstance(data, list) else []
 
 
-def delete_tmdb_episode_images(db: Client, *, tmdb_series_id: int) -> None:
+def delete_tmdb_episode_images(db: DbSession, *, tmdb_series_id: int) -> None:
     response = (
         db.schema("core")
         .table("episode_images")
@@ -108,7 +108,7 @@ def delete_tmdb_episode_images(db: Client, *, tmdb_series_id: int) -> None:
 
 
 def fetch_episode_images_missing_hosted(
-    db: Client,
+    db: DbSession,
     *,
     show_id: str | None = None,
     episode_id: str | None = None,
@@ -184,7 +184,7 @@ def fetch_episode_images_missing_hosted(
 
 
 def update_episode_image_hosted_fields(
-    db: Client,
+    db: DbSession,
     image_id: str,
     patch: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -202,7 +202,7 @@ def update_episode_image_hosted_fields(
 
 
 def fetch_hosted_keys_for_show(
-    db: Client,
+    db: DbSession,
     *,
     show_id: str,
 ) -> set[str]:
@@ -221,7 +221,7 @@ def fetch_hosted_keys_for_show(
 
 
 def fetch_hosted_keys_for_episode(
-    db: Client,
+    db: DbSession,
     *,
     episode_id: str,
 ) -> set[str]:

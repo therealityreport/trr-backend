@@ -27,10 +27,10 @@ class TestLoadEnvAndDb:
         with (
             patch("scripts._sync_common.load_env"),
             patch("scripts._sync_common.assert_core_shows_table_exists") as assert_table,
-            patch("scripts._sync_common.create_supabase_admin_client") as create_client,
+            patch("scripts._sync_common.create_supabase_admin_client") as create_db_client,
         ):
             sentinel = MagicMock()
-            create_client.return_value = sentinel
+            create_db_client.return_value = sentinel
             db = load_env_and_db(skip_db=False)
             assert db is sentinel
             assert_table.assert_called_once_with(sentinel)

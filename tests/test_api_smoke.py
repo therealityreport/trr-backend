@@ -66,7 +66,7 @@ def client(mock_supabase):
     """Create a test client with mocked Supabase dependencies."""
     app.dependency_overrides[deps.get_supabase_client] = lambda: mock_supabase
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_supabase
-    yield TestClient(app)
+    yield TestClient (app)
     app.dependency_overrides.clear()
 
 

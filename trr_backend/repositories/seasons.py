@@ -4,14 +4,14 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 from uuid import UUID
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class SeasonRepositoryError(RuntimeError):
     pass
 
 
-def assert_core_seasons_table_exists(db: Client) -> None:
+def assert_core_seasons_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.seasons` is missing in Supabase.
     """
@@ -77,7 +77,7 @@ def assert_core_seasons_table_exists(db: Client) -> None:
 
 
 def upsert_seasons(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     on_conflict: str = "show_id,season_number",
@@ -94,7 +94,7 @@ def upsert_seasons(
 
 
 def fetch_seasons_by_show(
-    db: Client,
+    db: DbSession,
     *,
     show_id: UUID | str,
     season_numbers: Iterable[int],
@@ -117,7 +117,7 @@ def fetch_seasons_by_show(
     return data if isinstance(data, list) else []
 
 
-def delete_seasons_for_tmdb_series(db: Client, *, tmdb_series_id: int) -> None:
+def delete_seasons_for_tmdb_series(db: DbSession, *, tmdb_series_id: int) -> None:
     response = db.schema("core").table("seasons").delete().eq("tmdb_series_id", str(int(tmdb_series_id))).execute()
     if hasattr(response, "error") and response.error:
         raise SeasonRepositoryError(

@@ -8,7 +8,7 @@ from typing import Any
 import requests
 
 from scripts._sync_common import load_env_and_db
-from supabase import Client
+from trr_backend.db.session import DbSession
 from trr_backend.ingestion.tmdb_show_backfill import resolve_tmdb_id_from_find_payload
 from trr_backend.integrations.tmdb.client import TmdbClientError, find_by_imdb_id, resolve_api_key, resolve_bearer_token
 from trr_backend.repositories.shows import update_show
@@ -35,7 +35,7 @@ def _require_tmdb_auth() -> tuple[str | None, str | None]:
     return api_key, bearer
 
 
-def _fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any]]:
+def _fetch_show_rows(db: DbSession, args: argparse.Namespace) -> list[dict[str, Any]]:
     fields = "id,name,imdb_id,tmdb_id,premiere_date,needs_tmdb_resolution"
     rows: list[dict[str, Any]] = []
 

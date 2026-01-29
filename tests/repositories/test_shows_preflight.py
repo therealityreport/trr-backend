@@ -49,12 +49,12 @@ class _FakeClient:
 
 
 def test_assert_core_shows_table_exists_passes_when_no_error() -> None:
-    client = _FakeClient(response=_FakeResponse(error=None))
+    client = _FakeClient (response=_FakeResponse(error=None))
     assert_core_shows_table_exists(client)  # should not raise
 
 
 def test_assert_core_shows_table_exists_raises_on_missing_relation_error_code() -> None:
-    client = _FakeClient(
+    client = _FakeClient (
         response=_FakeResponse(error=_FakeError(code="42P01", message='relation "core.shows" does not exist'))
     )
     with pytest.raises(ShowRepositoryError) as excinfo:
@@ -65,7 +65,7 @@ def test_assert_core_shows_table_exists_raises_on_missing_relation_error_code() 
 
 
 def test_assert_core_shows_table_exists_raises_on_missing_relation_exception() -> None:
-    client = _FakeClient(exc=RuntimeError('relation "core.shows" does not exist'))
+    client = _FakeClient (exc=RuntimeError('relation "core.shows" does not exist'))
     with pytest.raises(ShowRepositoryError) as excinfo:
         assert_core_shows_table_exists(client)
     msg = str(excinfo.value)

@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from scripts._sync_common import load_env_and_db
-from supabase import Client
+from trr_backend.db.session import DbSession
 from trr_backend.repositories.media_assets import upsert_media_with_links
 
 
@@ -38,7 +38,7 @@ def _resolve_entity_type(args: argparse.Namespace) -> str:
     return args.entity_type
 
 
-def _fetch_show_images(db: Client, *, limit: int | None) -> list[dict[str, Any]]:
+def _fetch_show_images(db: DbSession, *, limit: int | None) -> list[dict[str, Any]]:
     fields = (
         "show_id,source,source_image_id,url,url_path,kind,iso_639_1,file_path,width,height,caption,position,"
         "image_type,metadata,hosted_bucket,hosted_key,hosted_url,hosted_sha256,hosted_content_type,hosted_bytes,"
@@ -54,7 +54,7 @@ def _fetch_show_images(db: Client, *, limit: int | None) -> list[dict[str, Any]]
     return data if isinstance(data, list) else []
 
 
-def _fetch_person_images(db: Client, *, limit: int | None) -> list[dict[str, Any]]:
+def _fetch_person_images(db: DbSession, *, limit: int | None) -> list[dict[str, Any]]:
     fields = "person_id,source,url,width,height,caption,is_primary"
     query = db.schema("core").table("person_images").select(fields)
     if limit is not None:
@@ -66,7 +66,7 @@ def _fetch_person_images(db: Client, *, limit: int | None) -> list[dict[str, Any
     return data if isinstance(data, list) else []
 
 
-def _backfill_show_images(db: Client, *, limit: int | None, verbose: bool) -> None:
+def _backfill_show_images(db: DbSession, *, limit: int | None, verbose: bool) -> None:
     rows = _fetch_show_images(db, limit=limit)
     if verbose:
         print(f"backfill_media_assets: show_images rows={len(rows)}")
@@ -77,7 +77,7 @@ def _backfill_show_images(db: Client, *, limit: int | None, verbose: bool) -> No
         print(f"backfill_media_assets: show assets={len(assets)} links={len(links)}")
 
 
-def _backfill_person_images(db: Client, *, limit: int | None, verbose: bool) -> None:
+def _backfill_person_images(db: DbSession, *, limit: int | None, verbose: bool) -> None:
     rows = _fetch_person_images(db, limit=limit)
     if verbose:
         print(f"backfill_media_assets: person_images rows={len(rows)}")

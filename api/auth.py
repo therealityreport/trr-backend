@@ -1,23 +1,22 @@
 """
 Authentication utilities for FastAPI.
 
-Extracts user information from Supabase JWT tokens.
-All writes must use the user-scoped client to enforce RLS.
+Extracts user information from verified Supabase JWT tokens.
+All user-scoped writes must enforce ownership using the JWT subject.
 """
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 
 from fastapi import Depends, HTTPException, Request
 
+from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 logger = logging.getLogger(__name__)
 
 
-def get_bearer_token(request: Request) -> str | None:
+def get_bearer_token(request: Request) -> Optional[str]:
     """
     Extract Bearer token from Authorization header.
 
@@ -34,20 +33,22 @@ def get_bearer_token(request: Request) -> str | None:
     return parts[1]
 
 
-async def get_current_user(request: Request) -> dict | None:
+async def get_current_user(request: Request) -> Optional[dict]:
     """
     Get the current user from the JWT token payload.
 
-    Note: This performs a lightweight decode without signature verification.
-    Use service boundaries or upstream auth for full verification.
+    The token is verified (signature + exp validated).
     """
     token = get_bearer_token(request)
     if not token:
         return None
 
-    payload = _decode_jwt_payload(token)
-    if not payload:
+    try:
+        payload = verify_jwt_token(token)
+    except InvalidTokenError:
         return None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     user_id = payload.get("sub") or payload.get("user_id") or payload.get("id")
     if not user_id:
@@ -78,30 +79,13 @@ async def require_user(request: Request) -> dict:
     return user
 
 
-def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-    payload = parts[1]
-    padding = "=" * (-len(payload) % 4)
-    try:
-        decoded = base64.urlsafe_b64decode(payload + padding)
-        return json.loads(decoded.decode("utf-8"))
-    except (ValueError, json.JSONDecodeError):
-        return None
+def get_user_db_session(user: dict) -> Any:
+    """Return a DB session for user-scoped operations."""
+    from trr_backend.db.session import get_db_session
 
-
-def get_user_supabase_client(user: dict) -> Any:
-    """
-    Placeholder for user-scoped DB access.
-
-    Supabase Python SDK is intentionally not used in this repo.
-    """
-    raise RuntimeError(
-        "Supabase Python SDK is disabled. Use the direct DB layer or PostgREST."
-    )
+    return get_db_session()
 
 
 # Type alias for dependency injection
 CurrentUser = Annotated[dict, Depends(require_user)]
-OptionalUser = Annotated[dict | None, Depends(get_current_user)]
+OptionalUser = Annotated[Optional[dict], Depends(get_current_user)]

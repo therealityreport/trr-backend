@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class ShowCastRepositoryError(RuntimeError):
     pass
 
 
-def assert_core_show_cast_table_exists(db: Client) -> None:
+def assert_core_show_cast_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.show_cast` is missing in Supabase.
     """
@@ -76,7 +76,7 @@ def assert_core_show_cast_table_exists(db: Client) -> None:
     raise ShowCastRepositoryError(f"Supabase error during core.show_cast preflight: {combined}")
 
 
-def delete_show_cast_for_show(db: Client, show_id: str) -> int:
+def delete_show_cast_for_show(db: DbSession, show_id: str) -> int:
     """Delete all show_cast rows for a given show."""
     response = db.schema("core").table("show_cast").delete().eq("show_id", show_id).execute()
     if hasattr(response, "error") and response.error:
@@ -86,7 +86,7 @@ def delete_show_cast_for_show(db: Client, show_id: str) -> int:
 
 
 def upsert_show_cast(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     on_conflict: str = "show_id,person_id,credit_category",

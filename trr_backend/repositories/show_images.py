@@ -7,9 +7,9 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from supabase import Client
+    from trr_backend.db.session import DbSession
 else:
-    Client = Any
+    DbSession = Any
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
 from trr_backend.repositories.media_assets import upsert_media_with_links
 
@@ -51,7 +51,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
     return True
 
 
-def assert_core_show_images_table_exists(db: Client) -> None:
+def assert_core_show_images_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.show_images` is missing in Supabase.
     """
@@ -126,7 +126,7 @@ def assert_core_show_images_table_exists(db: Client) -> None:
 
 
 def _upsert_show_images_table(
-    db: Client,
+    db: DbSession,
     rows: list[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     if not rows:
@@ -176,7 +176,7 @@ def _upsert_show_images_table(
 
 
 def upsert_show_images(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     payload = [dict(r) for r in rows]
@@ -192,7 +192,7 @@ def upsert_show_images(
     return results
 
 
-def delete_tmdb_show_images(db: Client, *, tmdb_id: int) -> None:
+def delete_tmdb_show_images(db: DbSession, *, tmdb_id: int) -> None:
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = (
@@ -213,7 +213,7 @@ def delete_tmdb_show_images(db: Client, *, tmdb_id: int) -> None:
 
 
 def fetch_show_images_missing_hosted(
-    db: Client,
+    db: DbSession,
     *,
     source: str | None = None,
     show_id: str | None = None,
@@ -298,7 +298,7 @@ def fetch_show_images_missing_hosted(
 
 
 def update_show_image_hosted_fields(
-    db: Client,
+    db: DbSession,
     image_id: str,
     patch: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -327,7 +327,7 @@ def update_show_image_hosted_fields(
 
 
 def fetch_hosted_keys_for_show(
-    db: Client,
+    db: DbSession,
     *,
     show_id: str,
 ) -> set[str]:

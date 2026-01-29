@@ -11,7 +11,7 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from supabase import Client
+    from trr_backend.db.session import DbSession
 
 
 class DatabasePreflightError(RuntimeError):
@@ -43,7 +43,7 @@ def _is_missing_table_error(message: str) -> bool:
     )
 
 
-def assert_core_schema_exists(db: Client) -> None:
+def assert_core_schema_exists(db: DbSession) -> None:
     """
     Verify that the `core` schema exists in the connected database.
 

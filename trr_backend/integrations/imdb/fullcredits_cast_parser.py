@@ -387,7 +387,7 @@ def fetch_fullcredits_cast(
     *,
     extra_headers: Mapping[str, str] | None = None,
 ) -> list[CastRow]:
-    client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+    client = HttpImdbFullCreditsClient (extra_headers=extra_headers)
     html = client.fetch_fullcredits_page(series_id)
     return parse_fullcredits_cast_html(html, series_id=series_id)
 
@@ -739,7 +739,7 @@ def _try_html_fetch(
     verbose: bool,
 ) -> tuple[list[CastRow], str, list[dict[str, Any]]]:
     """Try HTML scraping tier (no images extracted from HTML)."""
-    client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+    client = HttpImdbFullCreditsClient (extra_headers=extra_headers)
     html = client.fetch_fullcredits_page(series_id, verbose=verbose)
     cast_rows = parse_fullcredits_cast_html(html, series_id=series_id)
 
@@ -766,7 +766,7 @@ def _try_graphql_fetch(
     )
 
     # Create client with optional extra headers
-    graphql_client = ImdbGraphQLPersistedClient(extra_headers=extra_headers or {})
+    graphql_client = ImdbGraphQLPersistedClient (extra_headers=extra_headers or {})
 
     # Fetch all credits (unfiltered)
     all_edges = fetch_title_credits_paginated_v2(series_id, client=graphql_client)

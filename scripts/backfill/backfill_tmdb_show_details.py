@@ -9,7 +9,7 @@ from typing import Any
 import requests
 
 from scripts._sync_common import load_env_and_db
-from supabase import Client
+from trr_backend.db.session import DbSession
 from trr_backend.ingestion.tmdb_show_backfill import (
     build_tmdb_show_patch,
     extract_tmdb_network_ids,
@@ -46,7 +46,7 @@ def _require_tmdb_auth() -> tuple[str | None, str | None]:
     return api_key, bearer
 
 
-def _fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any]]:
+def _fetch_show_rows(db: DbSession, args: argparse.Namespace) -> list[dict[str, Any]]:
     fields = (
         "id,name,tmdb_id,tmdb_meta,tmdb_fetched_at,tmdb_vote_average,tmdb_vote_count,tmdb_popularity,"
         "tmdb_first_air_date,tmdb_last_air_date,tmdb_status,tmdb_type,tmdb_network_ids,tmdb_production_company_ids,"

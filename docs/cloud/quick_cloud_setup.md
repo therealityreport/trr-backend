@@ -13,11 +13,13 @@ sudo apt update
 sudo apt install -y python3 python3-venv python3-pip git
 ```
 
+Ensure Python 3.11+ is installed (use `python3.11` from deadsnakes if needed).
+
 ## Step 3: Clone + Configure (4 minutes)
 ```bash
 git clone https://github.com/therealityreport/trr-backend.git
 cd trr-backend
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 

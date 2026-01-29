@@ -64,7 +64,7 @@ def run(  # noqa: PLR0913
 @app.command()
 def status(run_id: UUID) -> None:
     """Show status of a pipeline run."""
-    from trr_backend.db.supabase import create_supabase_admin_client
+    from trr_backend.db.admin import create_supabase_admin_client
     from trr_backend.pipeline.repository import fetch_run_with_stages
     from trr_backend.utils.env import load_env
 
@@ -111,7 +111,7 @@ def list_runs(
     limit: Annotated[int, typer.Option(help="Number of runs to show")] = 10,
 ) -> None:
     """List recent pipeline runs."""
-    from trr_backend.db.supabase import create_supabase_admin_client
+    from trr_backend.db.admin import create_supabase_admin_client
     from trr_backend.pipeline.repository import list_runs as db_list_runs
     from trr_backend.utils.env import load_env
 

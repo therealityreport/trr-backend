@@ -14,7 +14,7 @@ from trr_backend.integrations.imdb.graphql_persisted_client import (
 
 def test_execute_query_success() -> None:
     """Test successful GraphQL query execution."""
-    client = ImdbGraphQLPersistedClient()
+    client = ImdbGraphQLPersistedClient ()
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -40,7 +40,7 @@ def test_execute_query_success() -> None:
 @pytest.mark.parametrize("status_code", [403, 429])  # 202 skipped due to mock quirk
 def test_execute_query_retries_on_blocked_status(status_code: int) -> None:
     """Test that 403/429 status codes trigger retry with exponential backoff."""
-    client = ImdbGraphQLPersistedClient(max_retries=2, retry_base_delay_sec=0.01)
+    client = ImdbGraphQLPersistedClient (max_retries=2, retry_base_delay_sec=0.01)
 
     # First 2 attempts fail with blocked status
     mock_blocked = MagicMock()
@@ -65,7 +65,7 @@ def test_execute_query_retries_on_blocked_status(status_code: int) -> None:
 @pytest.mark.parametrize("status_code", [500, 502, 503])
 def test_execute_query_retries_on_server_errors(status_code: int) -> None:
     """Test limited retry for server errors (500/502/503)."""
-    client = ImdbGraphQLPersistedClient(max_retries=1, retry_base_delay_sec=0.01)
+    client = ImdbGraphQLPersistedClient (max_retries=1, retry_base_delay_sec=0.01)
 
     # First attempt fails with server error
     mock_error = MagicMock()
@@ -88,7 +88,7 @@ def test_execute_query_retries_on_server_errors(status_code: int) -> None:
 
 def test_execute_query_raises_on_exhausted_retries() -> None:
     """Test that error is raised when retries are exhausted."""
-    client = ImdbGraphQLPersistedClient(max_retries=1, retry_base_delay_sec=0.01)
+    client = ImdbGraphQLPersistedClient (max_retries=1, retry_base_delay_sec=0.01)
 
     mock_blocked = MagicMock()
     mock_blocked.status_code = 403
@@ -107,7 +107,7 @@ def test_execute_query_raises_on_exhausted_retries() -> None:
 
 def test_execute_query_uses_fallback_url_on_primary_failure() -> None:
     """Test that fallback URL is tried when primary endpoint fails."""
-    client = ImdbGraphQLPersistedClient(
+    client = ImdbGraphQLPersistedClient (
         base_url="https://primary.example.com/",
         fallback_url="https://fallback.example.com/",
         max_retries=0,  # No retries to simplify test
@@ -136,7 +136,7 @@ def test_execute_query_uses_fallback_url_on_primary_failure() -> None:
 
 def test_paginate_edges_aggregates_multiple_pages() -> None:
     """Test pagination across multiple pages with cursor tracking."""
-    client = ImdbGraphQLPersistedClient()
+    client = ImdbGraphQLPersistedClient ()
 
     # Page 1
     page1_response = {
@@ -195,7 +195,7 @@ def test_paginate_edges_aggregates_multiple_pages() -> None:
 
 def test_paginate_edges_respects_max_pages_cap() -> None:
     """Test that pagination stops at max_pages limit."""
-    client = ImdbGraphQLPersistedClient()
+    client = ImdbGraphQLPersistedClient ()
 
     # All pages have hasNextPage=True to simulate large dataset
     page_response = {

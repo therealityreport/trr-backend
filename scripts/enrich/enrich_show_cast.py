@@ -34,7 +34,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.fandom_person_scraper import (
     fetch_fandom_person_html,
     parse_fandom_person_html,

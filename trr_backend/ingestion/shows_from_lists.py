@@ -624,7 +624,7 @@ def fetch_imdb_list_items(
 
     if use_graphql:
         try:
-            client = HttpImdbListGraphqlClient(session=session)
+            client = HttpImdbListGraphqlClient (session=session)
 
             items: list[ImdbListItem] = []
             total: int | None = None
