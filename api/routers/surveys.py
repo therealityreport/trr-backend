@@ -176,61 +176,62 @@ def submit_survey(
     """
     Submit a survey response and get instant live results.
 
-    This endpoint:
-    1. Creates a response record (user_id is server-derived, not from client)
-    2. Saves all answers
-    3. Updates the aggregate results
-    4. Returns the updated results immediately
+    This endpoint uses a transactional RPC to atomically:
+    1. Create a response record (user_id derived from auth.uid())
+    2. Save all answers
+    3. Return the response_id
+
+    Then computes and returns live results.
 
     Authentication: Optional. Anonymous submissions allowed.
-    - Authenticated: user_id derived from JWT token
+    - Authenticated: user_id derived from JWT token via RPC
     - Anonymous: user_id is NULL
 
     Security note: user_id is NEVER accepted from client payload.
+    The RPC uses auth.uid() internally.
     """
-    # Verify survey exists and is published
-    survey_response = (
-        db.schema("surveys").table("surveys").select("id, status").eq("id", str(survey_id)).single().execute()
-    )
-    survey = require_single_result(survey_response, "Survey")
-
-    if survey["status"] != "published":
-        raise HTTPException(status_code=400, detail="Survey is not accepting responses")
-
-    # Build response record - user_id derived from token (if authenticated)
-    # SECURITY: user_id is NEVER accepted from client payload
-    response_data: dict[str, str] = {"survey_id": str(survey_id)}
-    if user:
-        response_data["user_id"] = user["id"]
-
-    # Create response record using admin client to bypass RLS for anonymous submissions
-    response_record = admin_db.schema("surveys").table("responses").insert(response_data).execute()
-    raise_for_supabase_error(response_record, "creating survey response")
-
-    if not response_record.data:
-        raise HTTPException(status_code=500, detail="Failed to create response")
-
-    response_id = response_record.data[0]["id"]
-
-    # Save all answers
-    answers_to_insert = [
+    # Build answers array for RPC
+    answers_json = [
         {
-            "survey_id": str(survey_id),
-            "response_id": response_id,
             "question_id": str(answer.question_id),
             "answer": answer.answer if isinstance(answer.answer, dict) else {"value": answer.answer},
         }
         for answer in submission.answers
     ]
 
-    if answers_to_insert:
-        answers_response = admin_db.schema("surveys").table("answers").insert(answers_to_insert).execute()
-        raise_for_supabase_error(answers_response, "saving survey answers")
+    # Use the appropriate client based on authentication
+    # For authenticated users, use their client so auth.uid() works in RPC
+    # For anonymous, use admin client with explicit NULL handling
+    client = db if user else admin_db
+
+    try:
+        # Call the transactional RPC
+        rpc_response = (
+            client.schema("surveys")
+            .rpc("submit_response", {"p_survey_id": str(survey_id), "p_answers": answers_json})
+            .execute()
+        )
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "already submitted" in error_msg:
+            raise HTTPException(
+                status_code=409, detail="You have already submitted a response to this survey"
+            ) from None
+        if "not found" in error_msg:
+            raise HTTPException(status_code=404, detail="Survey not found") from None
+        if "not accepting" in error_msg:
+            raise HTTPException(status_code=400, detail="Survey is not accepting responses") from None
+        raise HTTPException(status_code=500, detail=f"Failed to submit survey: {e}") from e
+
+    if not rpc_response.data:
+        raise HTTPException(status_code=500, detail="Failed to create response")
+
+    response_id = rpc_response.data
 
     # Compute and return live results
     results = _compute_survey_results(admin_db, survey_id)
 
-    # Update aggregates table for caching (optional optimization)
+    # Update aggregates table for caching
     _update_aggregates(admin_db, survey_id, results)
 
     return {

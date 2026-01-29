@@ -55,6 +55,9 @@ def mock_supabase():
     # Desc order queries
     mock_client.schema.return_value.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = empty_list_response  # noqa: E501
 
+    # RPC calls - simulate survey not found
+    mock_client.schema.return_value.rpc.return_value.execute.side_effect = Exception("Survey not found")
+
     return mock_client
 
 
