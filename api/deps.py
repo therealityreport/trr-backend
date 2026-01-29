@@ -13,9 +13,6 @@ from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException
 
-from supabase import Client, create_client
-from trr_backend.db.supabase import create_supabase_admin_client
-
 # Load environment variables if running standalone
 try:
     from dotenv import load_dotenv
@@ -25,6 +22,14 @@ except ImportError:
     pass
 
 logger = logging.getLogger(__name__)
+
+_SUPABASE_IMPORT_ERROR: Exception | None = None
+try:
+    from supabase import Client, create_client
+except Exception as exc:  # pragma: no cover - defensive, surfaced at runtime when used
+    Client = Any  # type: ignore[assignment]
+    create_client = None
+    _SUPABASE_IMPORT_ERROR = exc
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
@@ -84,10 +89,16 @@ def get_supabase_service_key() -> str:
     return key
 
 
+
+
 def get_supabase_client() -> Client:
     """
     Returns a Supabase client using the anon key (for public read operations).
     """
+    if create_client is None:
+        raise RuntimeError(
+            "Supabase client not available. Install dependencies or avoid Supabase access."
+        ) from _SUPABASE_IMPORT_ERROR
     return create_client(get_supabase_url(), get_supabase_anon_key())
 
 
@@ -96,6 +107,8 @@ def get_supabase_admin_client() -> Client:
     Returns a Supabase client using the service role key (bypasses RLS).
     Use only for admin operations like updating aggregates.
     """
+    from trr_backend.db.supabase import create_supabase_admin_client
+
     return create_supabase_admin_client()
 
 
