@@ -6,11 +6,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.routers import screenalytics as screenalytics_router
 
 
 @pytest.fixture(autouse=True)
 def set_service_token(monkeypatch):
     monkeypatch.setenv("SCREENALYTICS_SERVICE_TOKEN", "test-token")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def mock_db_reads(monkeypatch):
+    monkeypatch.setattr(screenalytics_router.pg, "fetch_all", lambda *args, **kwargs: [])
     yield
 
 
