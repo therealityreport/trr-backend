@@ -169,7 +169,9 @@ def create_media_asset_from_scrape(
         "updated_at": now,
     }
 
-    result = db.schema("core").table("media_assets").upsert(row, on_conflict="sha256").execute()
+    # Use id for conflict resolution - the id is deterministically generated from source+sha256
+    # Note: on_conflict="sha256" doesn't work because it's a partial unique index
+    result = db.schema("core").table("media_assets").upsert(row, on_conflict="id").execute()
 
     if result.data:
         return result.data[0]
