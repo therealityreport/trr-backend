@@ -377,6 +377,7 @@ def upload_bytes_to_s3(
         Body=data,
         ContentType=content_type,
         CacheControl="public, max-age=31536000, immutable",
+        ACL="public-read",
     )
     etag = _sanitize_etag(response.get("ETag"))
     return etag, len(data)
