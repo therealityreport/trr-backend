@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncGenerator
+from difflib import SequenceMatcher
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -94,6 +96,9 @@ class ImportRequest(BaseModel):
     source_url: HttpUrl
     images: list[ImportImageItem] = Field(min_length=1, max_length=50)
 
+    # Cast matching - when True for season imports, auto-match filenames to cast
+    match_cast: bool = False
+
     @model_validator(mode="after")
     def validate_entity_fields(self):
         if self.entity_type == "season":
@@ -115,6 +120,9 @@ class MediaAssetSummary(BaseModel):
     width: int | None = None
     height: int | None = None
     caption: str | None = None
+    matched_person_id: str | None = None
+    matched_person_name: str | None = None
+    match_confidence: float | None = None
 
 
 class ImportResponse(BaseModel):
@@ -124,6 +132,84 @@ class ImportResponse(BaseModel):
     skipped_duplicates: int
     errors: list[str]
     assets: list[MediaAssetSummary]
+
+
+# Cast Member Matching Helpers
+
+
+def _extract_filename_from_url(url: str) -> str:
+    """Extract and clean filename from URL for cast matching."""
+    parsed = urlparse(url)
+    path = unquote(parsed.path)
+    filename = path.split("/")[-1] if "/" in path else path
+    return filename
+
+
+def _fuzzy_match_cast(filename: str, cast_members: list[dict]) -> tuple[dict | None, float]:
+    """
+    Match filename against cast member names.
+
+    Returns (best_match, confidence) where best_match is None if no match found.
+    """
+    # Clean filename for matching
+    clean_name = re.sub(r"[-_]", " ", filename.lower())
+    clean_name = re.sub(r"\.[a-z]{3,4}$", "", clean_name)  # Remove extension
+    clean_name = re.sub(r"\d+x\d+", "", clean_name)  # Remove dimensions
+    clean_name = re.sub(r"(scaled|large|medium|small|thumb)", "", clean_name)
+    clean_name = clean_name.strip()
+
+    if not clean_name:
+        return None, 0.0
+
+    best_match = None
+    best_score = 0.0
+
+    for member in cast_members:
+        full_name = (member.get("full_name") or "").lower()
+        if not full_name:
+            continue
+
+        # Try sequence matching
+        score = SequenceMatcher(None, clean_name, full_name).ratio()
+
+        # Boost if name parts are found in filename
+        name_parts = full_name.split()
+        for part in name_parts:
+            if len(part) > 2 and part in clean_name:
+                score = max(score, 0.7)  # Boost if name part found
+
+        # Exact full name match
+        if full_name in clean_name or clean_name in full_name:
+            score = max(score, 0.9)
+
+        if score > best_score and score >= 0.6:  # 60% threshold
+            best_score = score
+            best_match = member
+
+    return best_match, best_score
+
+
+def _get_season_cast(db, show_id: str, season_number: int) -> list[dict]:
+    """
+    Get cast members for a season with their names.
+
+    Returns list of dicts with person_id, full_name, identifier.
+    """
+    from trr_backend.db import pg
+
+    sql = """
+        SELECT DISTINCT
+            vsc.person_id::text,
+            p.full_name,
+            p.identifier
+        FROM core.v_season_cast vsc
+        JOIN core.people p ON p.id = vsc.person_id
+        JOIN core.seasons s ON s.id = vsc.season_id
+        WHERE vsc.show_id = %s
+          AND s.season_number = %s
+        ORDER BY p.full_name
+    """
+    return pg.fetch_all(sql, [show_id, season_number])
 
 
 # Endpoints
@@ -244,6 +330,12 @@ def import_images(
             "source_url": str(request.source_url),
         }
 
+    # Fetch cast members for matching if enabled
+    cast_members: list[dict] = []
+    if request.match_cast and request.entity_type == "season":
+        cast_members = _get_season_cast(db, str(request.show_id), request.season_number)
+        logger.info(f"Loaded {len(cast_members)} cast members for matching")
+
     s3_client = get_s3_client()
     bucket = get_s3_bucket()
 
@@ -253,6 +345,16 @@ def import_images(
     assets: list[MediaAssetSummary] = []
 
     for idx, img in enumerate(request.images):
+        # Cast matching - extract filename and try to match
+        matched_person: dict | None = None
+        match_confidence: float = 0.0
+        if cast_members:
+            filename = _extract_filename_from_url(str(img.url))
+            matched_person, match_confidence = _fuzzy_match_cast(filename, cast_members)
+            if matched_person:
+                logger.info(
+                    f"Matched '{filename}' to {matched_person['full_name']} (confidence: {match_confidence:.2f})"
+                )
         try:
             # Download image
             image_data, sha256, content_type = download_and_hash_image(
@@ -278,6 +380,25 @@ def import_images(
                     context=link_context,
                 )
 
+                # Also link to person if matched
+                if matched_person:
+                    person_link_ctx = {
+                        "entity_type": "person",
+                        "entity_id": matched_person["person_id"],
+                        "matched_from_season": True,
+                        "match_confidence": match_confidence,
+                        "source_url": str(request.source_url),
+                    }
+                    create_media_link_for_entity(
+                        db,
+                        entity_type="person",
+                        entity_id=matched_person["person_id"],
+                        media_asset_id=existing["id"],
+                        kind="gallery",
+                        position=idx,
+                        context=person_link_ctx,
+                    )
+
                 assets.append(
                     MediaAssetSummary(
                         id=existing["id"],
@@ -285,6 +406,9 @@ def import_images(
                         width=existing.get("width"),
                         height=existing.get("height"),
                         caption=img.caption,
+                        matched_person_id=matched_person["person_id"] if matched_person else None,
+                        matched_person_name=matched_person["full_name"] if matched_person else None,
+                        match_confidence=match_confidence if matched_person else None,
                     )
                 )
                 continue
@@ -349,6 +473,25 @@ def import_images(
                 context=link_context,
             )
 
+            # Also link to person if matched
+            if matched_person:
+                person_link_ctx = {
+                    "entity_type": "person",
+                    "entity_id": matched_person["person_id"],
+                    "matched_from_season": True,
+                    "match_confidence": match_confidence,
+                    "source_url": str(request.source_url),
+                }
+                create_media_link_for_entity(
+                    db,
+                    entity_type="person",
+                    entity_id=matched_person["person_id"],
+                    media_asset_id=asset["id"],
+                    kind="gallery",
+                    position=idx,
+                    context=person_link_ctx,
+                )
+
             imported_count += 1
             assets.append(
                 MediaAssetSummary(
@@ -357,6 +500,9 @@ def import_images(
                     width=asset.get("width"),
                     height=asset.get("height"),
                     caption=img.caption,
+                    matched_person_id=matched_person["person_id"] if matched_person else None,
+                    matched_person_name=matched_person["full_name"] if matched_person else None,
+                    match_confidence=match_confidence if matched_person else None,
                 )
             )
 
@@ -429,7 +575,8 @@ async def import_images_stream(
         elif request.entity_type == "person":
             person_info = get_person_identifier(db, str(request.person_id))
             if not person_info:
-                yield f"event: error\ndata: {json.dumps({'error': f'Person {request.person_id} not found'})}\n\n"
+                err_data = {"error": f"Person {request.person_id} not found"}
+                yield f"event: error\ndata: {json.dumps(err_data)}\n\n"
                 return
             entity_id = str(request.person_id)
             path_identifier = person_info["identifier"]
@@ -439,6 +586,12 @@ async def import_images_stream(
                 "person_full_name": person_info.get("full_name"),
                 "source_url": str(request.source_url),
             }
+
+        # Fetch cast members for matching if enabled
+        cast_members: list[dict] = []
+        if request.match_cast and request.entity_type == "season":
+            cast_members = _get_season_cast(db, str(request.show_id), request.season_number)
+            logger.info(f"Loaded {len(cast_members)} cast members for matching")
 
         s3_client = get_s3_client()
         bucket = get_s3_bucket()
@@ -452,6 +605,13 @@ async def import_images_stream(
         for idx, img in enumerate(request.images):
             current = idx + 1
             img_url = str(img.url)
+
+            # Cast matching - extract filename and try to match
+            matched_person: dict | None = None
+            match_confidence: float = 0.0
+            if cast_members:
+                filename = _extract_filename_from_url(img_url)
+                matched_person, match_confidence = _fuzzy_match_cast(filename, cast_members)
 
             # Yield progress event
             progress_data = {
@@ -486,6 +646,25 @@ async def import_images_stream(
                         context=link_context,
                     )
 
+                    # Also link to person if matched
+                    if matched_person:
+                        person_link_ctx = {
+                            "entity_type": "person",
+                            "entity_id": matched_person["person_id"],
+                            "matched_from_season": True,
+                            "match_confidence": match_confidence,
+                            "source_url": str(request.source_url),
+                        }
+                        create_media_link_for_entity(
+                            db,
+                            entity_type="person",
+                            entity_id=matched_person["person_id"],
+                            media_asset_id=existing["id"],
+                            kind="gallery",
+                            position=idx,
+                            context=person_link_ctx,
+                        )
+
                     assets.append(
                         {
                             "id": existing["id"],
@@ -493,6 +672,9 @@ async def import_images_stream(
                             "width": existing.get("width"),
                             "height": existing.get("height"),
                             "caption": img.caption,
+                            "matched_person_id": (matched_person["person_id"] if matched_person else None),
+                            "matched_person_name": (matched_person["full_name"] if matched_person else None),
+                            "match_confidence": (match_confidence if matched_person else None),
                         }
                     )
 
@@ -502,6 +684,7 @@ async def import_images_stream(
                         "url": img_url,
                         "asset_id": existing["id"],
                         "status": "duplicate",
+                        "matched_person_id": (matched_person["person_id"] if matched_person else None),
                     }
                     yield f"event: skipped\ndata: {json.dumps(skipped_data)}\n\n"
                     continue
@@ -566,6 +749,25 @@ async def import_images_stream(
                     context=link_context,
                 )
 
+                # Also link to person if matched
+                if matched_person:
+                    person_link_ctx = {
+                        "entity_type": "person",
+                        "entity_id": matched_person["person_id"],
+                        "matched_from_season": True,
+                        "match_confidence": match_confidence,
+                        "source_url": str(request.source_url),
+                    }
+                    create_media_link_for_entity(
+                        db,
+                        entity_type="person",
+                        entity_id=matched_person["person_id"],
+                        media_asset_id=asset["id"],
+                        kind="gallery",
+                        position=idx,
+                        context=person_link_ctx,
+                    )
+
                 imported_count += 1
                 assets.append(
                     {
@@ -574,6 +776,9 @@ async def import_images_stream(
                         "width": asset.get("width"),
                         "height": asset.get("height"),
                         "caption": img.caption,
+                        "matched_person_id": (matched_person["person_id"] if matched_person else None),
+                        "matched_person_name": (matched_person["full_name"] if matched_person else None),
+                        "match_confidence": (match_confidence if matched_person else None),
                     }
                 )
 
@@ -583,6 +788,7 @@ async def import_images_stream(
                     "url": img_url,
                     "asset_id": asset["id"],
                     "status": "success",
+                    "matched_person_id": (matched_person["person_id"] if matched_person else None),
                 }
                 yield f"event: imported\ndata: {json.dumps(imported_data)}\n\n"
 
