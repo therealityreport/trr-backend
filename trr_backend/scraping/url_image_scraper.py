@@ -62,6 +62,13 @@ _SKIP_RE = re.compile("|".join(_SKIP_PATTERNS), re.IGNORECASE)
 # Image file extensions for direct URL detection
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tiff", ".tif"}
 
+# CDN hostname → origin referer domain mapping
+# Some CDNs block requests without a valid referer from the origin domain
+_CDN_REFERER_MAP = {
+    "akns-images.eonline.com": "https://www.eonline.com/",
+    "images.eonline.com": "https://www.eonline.com/",
+}
+
 # Image content types for direct URL detection
 _IMAGE_CONTENT_TYPES = {
     "image/jpeg",
@@ -163,11 +170,7 @@ def _split_srcset(srcset: str) -> list[str]:
             while j < length and raw[j].isspace():
                 j += 1
             lookahead = raw[j : j + 8].lower()
-            if (
-                lookahead.startswith("http://")
-                or lookahead.startswith("https://")
-                or lookahead.startswith("//")
-            ):
+            if lookahead.startswith("http://") or lookahead.startswith("https://") or lookahead.startswith("//"):
                 part = "".join(buf).strip()
                 if part:
                     parts.append(part)
@@ -193,9 +196,7 @@ def _parse_srcset(srcset: str) -> list[tuple[str, str | None]]:
             continue
 
         url = tokens[0].strip().rstrip(",")
-        if not (
-            url.startswith("http://") or url.startswith("https://") or url.startswith("//")
-        ):
+        if not (url.startswith("http://") or url.startswith("https://") or url.startswith("//")):
             continue
 
         descriptor: str | None = None
@@ -321,7 +322,29 @@ def _is_direct_image_url(url: str) -> bool:
     return False
 
 
-def _fetch_direct_image_info(url: str, timeout: float = 30.0) -> ImageCandidate | None:
+def _derive_referer_for_url(url: str) -> str:
+    """
+    Derive appropriate Referer header for a URL.
+
+    For known CDN URLs, returns the origin domain.
+    For regular URLs, returns the URL's own origin.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.netloc.lower()
+
+    # Check known CDN mappings
+    if hostname in _CDN_REFERER_MAP:
+        return _CDN_REFERER_MAP[hostname]
+
+    # Default: use the URL's own origin as referer
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+def _fetch_direct_image_info(
+    url: str,
+    timeout: float = 30.0,
+    referer: str | None = None,
+) -> ImageCandidate | None:
     """
     Fetch a direct image URL and return it as an ImageCandidate.
 
@@ -329,6 +352,8 @@ def _fetch_direct_image_info(url: str, timeout: float = 30.0) -> ImageCandidate 
     the URL as a single candidate.
     """
     headers = {**_DEFAULT_HEADERS}
+    if referer:
+        headers["referer"] = referer
 
     try:
         # Do a HEAD request to check Content-Type without downloading
@@ -608,7 +633,8 @@ def scrape_url_for_images(
     try:
         # Check if this is a direct image URL first
         if _is_direct_image_url(url):
-            candidate = _fetch_direct_image_info(url)
+            referer = _derive_referer_for_url(url)
+            candidate = _fetch_direct_image_info(url, referer=referer)
             if candidate:
                 return ScrapeResult(
                     url=url,
