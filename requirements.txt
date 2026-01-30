@@ -28,6 +28,7 @@ uvicorn[standard]>=0.32.0
 pydantic>=2.10.0
 supabase==2.27.0
 postgrest==2.27.0
+sse-starlette>=2.0.0
 
 # Dev / test
 pytest>=8.0.0

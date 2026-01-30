@@ -4,15 +4,20 @@ Admin endpoints for URL-based image scraping.
 Provides endpoints to:
 1. Preview images from a URL (scrape without saving)
 2. Import selected images to S3 and database
+3. Import with SSE streaming progress
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import AsyncGenerator
 from typing import Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from api.auth import AdminUser
@@ -183,8 +188,6 @@ def import_images(
     3. Saved to media_assets table
     4. Linked to season via media_links table
     """
-    from urllib.parse import urlparse
-
     from trr_backend.media.s3_mirror import (
         build_cast_photo_s3_key,
         build_hosted_url,
@@ -366,4 +369,250 @@ def import_images(
         skipped_duplicates=skipped_count,
         errors=errors,
         assets=assets,
+    )
+
+
+@router.post("/import/stream")
+async def import_images_stream(
+    request: ImportRequest,
+    db: SupabaseAdminClient,
+    _: AdminUser,
+) -> StreamingResponse:
+    """
+    Import images with SSE streaming progress updates.
+
+    Streams events:
+    - progress: {"current": 1, "total": 5, "url": "...", "status": "downloading"}
+    - imported: {"current": 1, "url": "...", "asset_id": "...", "status": "success"}
+    - skipped: {"current": 1, "url": "...", "status": "duplicate"}
+    - error: {"current": 1, "url": "...", "error": "..."}
+    - complete: {"imported": 5, "skipped_duplicates": 0, "errors": [], "assets": [...]}
+    """
+    from trr_backend.media.s3_mirror import (
+        build_cast_photo_s3_key,
+        build_hosted_url,
+        build_season_image_s3_key,
+        get_s3_bucket,
+        get_s3_client,
+        guess_ext_from_content_type,
+        upload_bytes_to_s3,
+    )
+    from trr_backend.repositories.web_scrape_images import (
+        create_media_asset_from_scrape,
+        create_media_link_for_entity,
+        find_asset_by_sha256,
+        get_person_identifier,
+        get_season_and_show_identifiers,
+    )
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        # Extract domain for source naming
+        parsed_source = urlparse(str(request.source_url))
+        source_domain = parsed_source.netloc.replace("www.", "")
+        source = f"web_scrape:{source_domain}"
+
+        # Entity-specific setup
+        if request.entity_type == "season":
+            identifiers = get_season_and_show_identifiers(db, str(request.show_id), request.season_number)
+            if not identifiers:
+                yield f"event: error\ndata: {json.dumps({'error': f'Season {request.season_number} not found'})}\n\n"
+                return
+            entity_id = identifiers["season_id"]
+            path_identifier = identifiers["show_identifier"]
+            link_context = {
+                "entity_type": "season",
+                "entity_id": entity_id,
+                "show_id": str(request.show_id),
+                "season_number": request.season_number,
+                "source_url": str(request.source_url),
+            }
+        elif request.entity_type == "person":
+            person_info = get_person_identifier(db, str(request.person_id))
+            if not person_info:
+                yield f"event: error\ndata: {json.dumps({'error': f'Person {request.person_id} not found'})}\n\n"
+                return
+            entity_id = str(request.person_id)
+            path_identifier = person_info["identifier"]
+            link_context = {
+                "entity_type": "person",
+                "entity_id": entity_id,
+                "person_full_name": person_info.get("full_name"),
+                "source_url": str(request.source_url),
+            }
+
+        s3_client = get_s3_client()
+        bucket = get_s3_bucket()
+
+        imported_count = 0
+        skipped_count = 0
+        errors: list[str] = []
+        assets: list[dict] = []
+        total = len(request.images)
+
+        for idx, img in enumerate(request.images):
+            current = idx + 1
+            img_url = str(img.url)
+
+            # Yield progress event
+            progress_data = {
+                "current": current,
+                "total": total,
+                "url": img_url,
+                "status": "downloading",
+            }
+            yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
+
+            try:
+                # Download image
+                image_data, sha256, content_type = download_and_hash_image(
+                    img_url,
+                    referer=str(request.source_url),
+                )
+
+                # Check for duplicate
+                existing = find_asset_by_sha256(db, sha256)
+                if existing:
+                    logger.info(f"Image {idx} already exists with sha256={sha256[:16]}...")
+                    skipped_count += 1
+
+                    # Still create link to entity
+                    create_media_link_for_entity(
+                        db,
+                        entity_type=request.entity_type,
+                        entity_id=entity_id,
+                        media_asset_id=existing["id"],
+                        kind="gallery",
+                        position=idx,
+                        context=link_context,
+                    )
+
+                    assets.append(
+                        {
+                            "id": existing["id"],
+                            "hosted_url": existing.get("hosted_url", ""),
+                            "width": existing.get("width"),
+                            "height": existing.get("height"),
+                            "caption": img.caption,
+                        }
+                    )
+
+                    skipped_data = {
+                        "current": current,
+                        "total": total,
+                        "url": img_url,
+                        "asset_id": existing["id"],
+                        "status": "duplicate",
+                    }
+                    yield f"event: skipped\ndata: {json.dumps(skipped_data)}\n\n"
+                    continue
+
+                # Build S3 key based on entity type
+                ext = guess_ext_from_content_type(content_type)
+                if request.entity_type == "season":
+                    s3_key = build_season_image_s3_key(
+                        show_identifier=path_identifier,
+                        season_number=request.season_number,
+                        source="web_scrape",
+                        sha256=sha256,
+                        ext=ext,
+                    )
+                elif request.entity_type == "person":
+                    s3_key = build_cast_photo_s3_key(
+                        person_identifier=path_identifier,
+                        source="web_scrape",
+                        sha256=sha256,
+                        ext=ext,
+                    )
+
+                etag, file_size = upload_bytes_to_s3(
+                    s3_client,
+                    bucket=bucket,
+                    key=s3_key,
+                    data=image_data,
+                    content_type=content_type,
+                )
+
+                hosted_url = build_hosted_url(s3_key)
+
+                # Create media asset record
+                asset = create_media_asset_from_scrape(
+                    db,
+                    source=source,
+                    source_url=img_url,
+                    sha256=sha256,
+                    hosted_bucket=bucket,
+                    hosted_key=s3_key,
+                    hosted_url=hosted_url,
+                    hosted_bytes=file_size,
+                    hosted_etag=etag,
+                    content_type=content_type,
+                    width=None,
+                    height=None,
+                    caption=img.caption,
+                    metadata={
+                        "page_url": str(request.source_url),
+                        "candidate_id": img.candidate_id,
+                    },
+                )
+
+                # Create media link to entity
+                create_media_link_for_entity(
+                    db,
+                    entity_type=request.entity_type,
+                    entity_id=entity_id,
+                    media_asset_id=asset["id"],
+                    kind="gallery",
+                    position=idx,
+                    context=link_context,
+                )
+
+                imported_count += 1
+                assets.append(
+                    {
+                        "id": asset["id"],
+                        "hosted_url": hosted_url,
+                        "width": asset.get("width"),
+                        "height": asset.get("height"),
+                        "caption": img.caption,
+                    }
+                )
+
+                imported_data = {
+                    "current": current,
+                    "total": total,
+                    "url": img_url,
+                    "asset_id": asset["id"],
+                    "status": "success",
+                }
+                yield f"event: imported\ndata: {json.dumps(imported_data)}\n\n"
+
+            except Exception as exc:
+                logger.exception(f"Failed to import image {idx}: {img_url}")
+                error_msg = f"Image {idx}: {exc}"
+                errors.append(error_msg)
+                error_data = {
+                    "current": current,
+                    "total": total,
+                    "url": img_url,
+                    "error": str(exc),
+                }
+                yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+
+        # Final completion event
+        complete_data = {
+            "imported": imported_count,
+            "skipped_duplicates": skipped_count,
+            "errors": errors,
+            "assets": assets,
+        }
+        yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
