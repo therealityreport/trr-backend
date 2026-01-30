@@ -191,15 +191,13 @@ def fetch_cast_photos_missing_hosted(
     include_hosted: bool = False,
     cdn_base_url: str | None = None,
 ) -> list[dict[str, Any]]:
-    # Join with people table to get person name for S3 path
     def _base_query():
         return (
             db.schema("core")
             .table("cast_photos")
             .select(
                 "id,person_id,imdb_person_id,source,source_page_url,image_url,url,thumb_url,"
-                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
-                "people:person_id(full_name,external_ids)"
+                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type"
             )
         )
 
@@ -220,7 +218,7 @@ def fetch_cast_photos_missing_hosted(
             mismatch_query = (
                 _apply_filters(_base_query())
                 .not_.is_("hosted_url", "null")
-                .not_.like(
+                .not_.ilike(
                     "hosted_url",
                     f"{base}/%",
                 )

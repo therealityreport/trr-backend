@@ -70,6 +70,8 @@ app.add_middleware(
 
 # Include routers
 from api.routers import (  # noqa: E402
+    admin_cast,
+    admin_scrape,
     discussions,
     dms,
     screenalytics,
@@ -86,6 +88,8 @@ app.include_router(dms.router, prefix="/api/v1")
 app.include_router(ws.router, prefix="/api/v1")
 app.include_router(screenalytics.router, prefix="/api/v1")
 app.include_router(screenalytics_runs_v2.router, prefix="/api/v1")
+app.include_router(admin_cast.router, prefix="/api/v1")
+app.include_router(admin_scrape.router, prefix="/api/v1")
 
 
 @app.get("/")

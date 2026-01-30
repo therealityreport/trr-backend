@@ -8,6 +8,7 @@ All user-scoped writes must enforce ownership using the JWT subject.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
@@ -90,3 +91,24 @@ def get_user_db_session(user: dict) -> Any:
 # Type alias for dependency injection
 CurrentUser = Annotated[dict, Depends(require_user)]
 OptionalUser = Annotated[dict | None, Depends(get_current_user)]
+
+
+def _admin_email_allowlist() -> set[str]:
+    raw = os.getenv("ADMIN_EMAIL_ALLOWLIST", "").strip()
+    if not raw:
+        return set()
+    return {email.strip().lower() for email in raw.split(",") if email.strip()}
+
+
+async def require_admin(user: CurrentUser) -> dict:
+    role = (user.get("role") or "").lower()
+    if role in ("service_role", "admin"):
+        return user
+    allowlist = _admin_email_allowlist()
+    email = (user.get("email") or "").lower()
+    if allowlist and email in allowlist:
+        return user
+    raise HTTPException(status_code=403, detail="Admin access required")
+
+
+AdminUser = Annotated[dict, Depends(require_admin)]

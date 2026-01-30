@@ -237,8 +237,7 @@ def fetch_show_images_missing_hosted(
             .select(
                 "id,show_id,source,source_image_id,kind,file_path,url,url_path,"
                 "width,height,caption,position,image_type,tmdb_id,"
-                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
-                "shows:show_id(name,imdb_id,tmdb_id)"
+                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type"
             )
         )
 
@@ -247,9 +246,6 @@ def fetch_show_images_missing_hosted(
             query = query.eq("source", source)
         if show_id:
             query = query.eq("show_id", show_id)
-        if imdb_id:
-            # Filter via the joined shows table
-            query = query.eq("shows.imdb_id", imdb_id)
         if tmdb_id is not None:
             query = query.eq("tmdb_id", int(tmdb_id))
         if kind:
@@ -266,7 +262,7 @@ def fetch_show_images_missing_hosted(
             mismatch_query = (
                 _apply_filters(_base_query())
                 .not_.is_("hosted_url", "null")
-                .not_.like(
+                .not_.ilike(
                     "hosted_url",
                     f"{base}/%",
                 )

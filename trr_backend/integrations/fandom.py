@@ -427,9 +427,13 @@ def _extract_full_image_url(thumb_url: str) -> str:
 def _fandom_file_to_special_url(raw_url: str) -> str:
     parsed = urlparse(raw_url)
     path = parsed.path or ""
-    if "file:" not in path.lower():
+    path_lower = path.lower()
+    # Check for both literal colon and URL-encoded colon (%3A)
+    if "file:" not in path_lower and "file%3a" not in path_lower:
         return raw_url
-    file_part = path.split("File:", 1)[1].lstrip("/") if "File:" in path else path.split("file:", 1)[1].lstrip("/")
+    # Normalize URL-encoded colons for splitting
+    normalized_path = path.replace("%3A", ":").replace("%3a", ":")
+    file_part = normalized_path.split("File:", 1)[1].lstrip("/") if "File:" in normalized_path else normalized_path.split("file:", 1)[1].lstrip("/")
     if not file_part:
         return raw_url
     file_part = quote(unquote(file_part), safe="")

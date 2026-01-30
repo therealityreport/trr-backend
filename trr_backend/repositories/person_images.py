@@ -77,7 +77,7 @@ def upsert_person_images(
         db.schema("core")
         .table("people")
         .select("id,external_ids")
-        .in_("external_ids->>imdb", unique_imdb_ids)
+        .in_("external_ids->>'imdb'", unique_imdb_ids)
         .execute()
     )
     if hasattr(response, "error") and response.error:

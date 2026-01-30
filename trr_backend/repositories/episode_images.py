@@ -131,8 +131,7 @@ def fetch_episode_images_missing_hosted(
             .select(
                 "id,show_id,season_id,episode_id,season_number,episode_number,source,file_path,url,url_original,"
                 "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
-                "hosted_bytes,hosted_etag,hosted_at,"
-                "shows:show_id(imdb_id),episodes:episode_id(imdb_id:external_ids->>imdb_id)"
+                "hosted_bytes,hosted_etag,hosted_at"
             )
         )
 
@@ -141,8 +140,6 @@ def fetch_episode_images_missing_hosted(
             query = query.eq("show_id", show_id)
         if episode_id:
             query = query.eq("episode_id", episode_id)
-        if imdb_id:
-            query = query.eq("shows.imdb_id", imdb_id)
         if tmdb_id is not None:
             query = query.eq("tmdb_series_id", int(tmdb_id))
         if season_number is not None:
@@ -161,7 +158,7 @@ def fetch_episode_images_missing_hosted(
             mismatch_query = (
                 _apply_filters(_base_query())
                 .not_.is_("hosted_url", "null")
-                .not_.like(
+                .not_.ilike(
                     "hosted_url",
                     f"{base}/%",
                 )
