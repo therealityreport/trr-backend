@@ -125,7 +125,10 @@ def _mirror_person_photos(
     )
 
     cdn_base_url = None if force else get_cdn_base_url()
-    rows = fetch_cast_photos_missing_hosted(db, person_ids=[person_id], cdn_base_url=cdn_base_url)
+    # When force=True, include photos that already have hosted_url so they get re-uploaded
+    rows = fetch_cast_photos_missing_hosted(
+        db, person_ids=[person_id], cdn_base_url=cdn_base_url, include_hosted=force
+    )
     if not rows:
         return 0, 0
 
@@ -325,7 +328,10 @@ async def refresh_person_images_stream(
             from trr_backend.media.s3_mirror import get_cdn_base_url
 
             cdn_url = None if request.force_mirror else get_cdn_base_url()
-            rows = fetch_cast_photos_missing_hosted(db, person_ids=[person_id_str], cdn_base_url=cdn_url)
+            # When force_mirror=True, include photos that already have hosted_url so they get re-uploaded
+            rows = fetch_cast_photos_missing_hosted(
+                db, person_ids=[person_id_str], cdn_base_url=cdn_url, include_hosted=request.force_mirror
+            )
             for idx, row in enumerate(rows):
                 if not row.get("imdb_person_id") and imdb_person_id:
                     row["imdb_person_id"] = imdb_person_id
