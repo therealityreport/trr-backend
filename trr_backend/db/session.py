@@ -252,7 +252,7 @@ class DbQuery:
         if not rows:
             return [], []
         columns = sorted({key for row in rows for key in row.keys()})
-        values = [[row.get(col) for col in columns] for row in rows]
+        values = [[Json(row.get(col)) if isinstance(row.get(col), (dict, list)) else row.get(col) for col in columns] for row in rows]
         return columns, values
 
     def _execute_insert(self) -> DbResponse:
@@ -274,7 +274,7 @@ class DbQuery:
         if not set_cols:
             return DbResponse(data=[], error=None)
         set_sql = ",".join([f"{col} = %s" for col in set_cols])
-        params = [self._payload[col] for col in set_cols]
+        params = [Json(self._payload[col]) if isinstance(self._payload[col], (dict, list)) else self._payload[col] for col in set_cols]
         where_sql, where_params = self._build_where()
         sql = f"UPDATE {self._schema}.{self._table} SET {set_sql}{where_sql} RETURNING *"
         with db_connection() as conn:
