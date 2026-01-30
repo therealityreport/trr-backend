@@ -40,6 +40,7 @@ async def get_current_user(request: Request) -> dict | None:
     Get the current user from the JWT token payload.
 
     The token is verified (signature + exp validated).
+    Supports both user JWTs (with sub) and service role JWTs (with role=service_role).
     """
     token = get_bearer_token(request)
     if not token:
@@ -47,10 +48,22 @@ async def get_current_user(request: Request) -> dict | None:
 
     try:
         payload = verify_jwt_token(token)
-    except InvalidTokenError:
+    except InvalidTokenError as e:
+        logger.debug(f"JWT verification failed: {e}")
         return None
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    role = payload.get("role")
+
+    # Service role tokens don't have a user ID - use the project ref as identifier
+    if role == "service_role":
+        return {
+            "id": f"service_role:{payload.get('ref', 'unknown')}",
+            "email": None,
+            "role": "service_role",
+            "token": token,
+        }
 
     user_id = payload.get("sub") or payload.get("user_id") or payload.get("id")
     if not user_id:
@@ -59,7 +72,7 @@ async def get_current_user(request: Request) -> dict | None:
     return {
         "id": str(user_id),
         "email": payload.get("email"),
-        "role": payload.get("role"),
+        "role": role,
         "token": token,
     }
 
