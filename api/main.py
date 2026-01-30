@@ -19,7 +19,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.realtime.broker import init_broker, shutdown_broker
-from api.routers import discussions, dms, shows, surveys, ws
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +69,23 @@ app.add_middleware(
 )
 
 # Include routers
+from api.routers import (  # noqa: E402
+    discussions,
+    dms,
+    screenalytics,
+    screenalytics_runs_v2,
+    shows,
+    surveys,
+    ws,
+)
+
 app.include_router(shows.router, prefix="/api/v1")
 app.include_router(surveys.router, prefix="/api/v1")
 app.include_router(discussions.router, prefix="/api/v1")
 app.include_router(dms.router, prefix="/api/v1")
 app.include_router(ws.router, prefix="/api/v1")
+app.include_router(screenalytics.router, prefix="/api/v1")
+app.include_router(screenalytics_runs_v2.router, prefix="/api/v1")
 
 
 @app.get("/")

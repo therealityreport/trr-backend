@@ -346,7 +346,7 @@ pytest tests/integrations/imdb/test_fullcredits_resilience.py::test_retry_logic_
 # Manual test (will take ~15s due to backoff):
 IMDB_FULLCREDITS_MAX_RETRIES=1 PYTHONPATH=. python -c "
 from trr_backend.integrations.imdb.fullcredits_cast_parser import HttpImdbFullCreditsClient
-client = HttpImdbFullCreditsClient()
+client = HttpImdbFullCreditsClient ()
 try:
     html = client.fetch_fullcredits_page('tt1720601', verbose=True)
     print('SUCCESS - HTML length:', len(html))
@@ -502,7 +502,7 @@ def fetch_fullcredits_cast_with_fallback(
     enable_fallback = os.getenv("IMDB_FULLCREDITS_ENABLE_API_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
 
     # Try HTML first
-    client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+    client = HttpImdbFullCreditsClient (extra_headers=extra_headers)
     try:
         html = client.fetch_fullcredits_page(series_id, verbose=verbose)
         cast_rows = parse_fullcredits_cast(html, series_id)
@@ -794,7 +794,7 @@ class TestRetryLogic:
 
     def test_retry_202_then_success(self) -> None:
         """Should retry 202 responses and succeed on subsequent 200."""
-        client = HttpImdbFullCreditsClient()
+        client = HttpImdbFullCreditsClient ()
 
         # Mock session to return [202, 202, 200]
         responses = [
@@ -811,7 +811,7 @@ class TestRetryLogic:
 
     def test_retry_202_exhausted_raises_with_is_blocked(self) -> None:
         """Should raise ImdbFullCreditsError with is_blocked=True after max retries."""
-        client = HttpImdbFullCreditsClient()
+        client = HttpImdbFullCreditsClient ()
 
         # Mock session to always return 202
         response = Mock(status_code=202, text="<html>Blocked</html>")
@@ -829,7 +829,7 @@ class TestRetryLogic:
 
     def test_403_raises_with_is_blocked(self) -> None:
         """Should raise ImdbFullCreditsError with is_blocked=True for 403."""
-        client = HttpImdbFullCreditsClient()
+        client = HttpImdbFullCreditsClient ()
 
         response = Mock(status_code=403, text="<html>Forbidden</html>")
 
@@ -844,7 +844,7 @@ class TestRetryLogic:
 
     def test_429_raises_with_is_blocked(self) -> None:
         """Should raise ImdbFullCreditsError with is_blocked=True for 429 (rate limit)."""
-        client = HttpImdbFullCreditsClient()
+        client = HttpImdbFullCreditsClient ()
 
         response = Mock(status_code=429, text="<html>Too Many Requests</html>")
 
@@ -859,7 +859,7 @@ class TestRetryLogic:
 
     def test_500_raises_without_is_blocked(self) -> None:
         """Should raise ImdbFullCreditsError with is_blocked=False for server errors."""
-        client = HttpImdbFullCreditsClient()
+        client = HttpImdbFullCreditsClient ()
 
         response = Mock(status_code=500, text="<html>Server Error</html>")
 
@@ -873,7 +873,7 @@ class TestRetryLogic:
 
     def test_network_error_raises(self) -> None:
         """Should raise ImdbFullCreditsError on network failures."""
-        client = HttpImdbFullCreditsClient()
+        client = HttpImdbFullCreditsClient ()
 
         with patch.object(
             client._session,
@@ -897,7 +897,7 @@ class TestDebugHTMLSaving:
         # ✅ FIXED: use monkeypatch.chdir instead of patching Path.cwd
         monkeypatch.chdir(tmp_path)
 
-        client = HttpImdbFullCreditsClient()
+        client = HttpImdbFullCreditsClient ()
         response = Mock(status_code=202, text="<html>Blocked content</html>")
 
         with patch.object(client._session, "get", return_value=response):
@@ -919,7 +919,7 @@ class TestDebugHTMLSaving:
         """Should NOT save debug HTML when verbose=False."""
         monkeypatch.chdir(tmp_path)
 
-        client = HttpImdbFullCreditsClient()
+        client = HttpImdbFullCreditsClient ()
         response = Mock(status_code=202, text="<html>Blocked</html>")
 
         with patch.object(client._session, "get", return_value=response):

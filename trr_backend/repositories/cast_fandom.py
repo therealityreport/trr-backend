@@ -4,8 +4,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from supabase import Client
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
+from trr_backend.db.session import DbSession
 
 
 class CastFandomRepositoryError(RuntimeError):
@@ -37,7 +37,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
     return True
 
 
-def assert_core_cast_fandom_table_exists(db: Client) -> None:
+def assert_core_cast_fandom_table_exists(db: DbSession) -> None:
     def is_missing_relation(message: str) -> bool:
         msg = (message or "").casefold()
         return (
@@ -98,7 +98,7 @@ def assert_core_cast_fandom_table_exists(db: Client) -> None:
     raise CastFandomRepositoryError(f"Supabase error during core.cast_fandom preflight: {combined}")
 
 
-def upsert_cast_fandom(db: Client, row: Mapping[str, Any]) -> dict[str, Any]:
+def upsert_cast_fandom(db: DbSession, row: Mapping[str, Any]) -> dict[str, Any]:
     payload = {k: v for k, v in dict(row).items() if v is not None}
     if not payload:
         raise CastFandomRepositoryError("cast_fandom upsert payload is empty.")

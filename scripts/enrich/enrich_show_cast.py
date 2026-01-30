@@ -19,7 +19,8 @@ Usage:
     PYTHONPATH=. python scripts/enrich/enrich_show_cast.py --imdb-id tt1628033 --limit 5
 
     # Only run TMDb enrichment (skip Fandom and gallery)
-    PYTHONPATH=. python scripts/enrich/enrich_show_cast.py --imdb-id tt1628033 --skip-fandom-profile --skip-gallery --skip-s3
+    PYTHONPATH=. python scripts/enrich/enrich_show_cast.py --imdb-id tt1628033 \\
+        --skip-fandom-profile --skip-gallery --skip-s3
 
     # Skip TMDb enrichment
     PYTHONPATH=. python scripts/enrich/enrich_show_cast.py --imdb-id tt1628033 --skip-tmdb
@@ -34,7 +35,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.fandom_person_scraper import (
     fetch_fandom_person_html,
     parse_fandom_person_html,

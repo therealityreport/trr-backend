@@ -7,7 +7,7 @@ import argparse
 import sys
 from typing import Any
 
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.media.s3_mirror import get_cdn_base_url, mirror_show_image_row
 from trr_backend.repositories.show_images import (
     assert_core_show_images_table_exists,

@@ -17,19 +17,14 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 
-from api.auth import CurrentUser, get_user_supabase_client
-from api.deps import (
-    SupabaseClient,
-    get_list_result,
-    raise_for_supabase_error,
-    require_single_result,
-)
+from api.auth import CurrentUser, get_user_db_session  # noqa: F401
 from api.realtime.broker import get_broker
 from api.realtime.events import (
     dm_message_created_event,
     dm_read_updated_event,
     get_dm_room,
 )
+from trr_backend.db import pg
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +110,15 @@ class ReadReceipt(BaseModel):
 # --- Endpoints ---
 
 
+def _require_membership(conversation_id: str, user_id: str) -> None:
+    row = pg.fetch_one(
+        "SELECT user_id FROM social.dm_members WHERE conversation_id = %s AND user_id = %s",
+        [conversation_id, user_id],
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Conversation not found or you don't have access")
+
+
 @router.post("", response_model=Conversation)
 def create_or_get_conversation(
     payload: ConversationCreate,
@@ -128,32 +132,46 @@ def create_or_get_conversation(
 
     Requires authentication.
     """
-    user_db = get_user_supabase_client(user)
+    user_id = str(user["id"])
+    other_id = str(payload.other_user_id)
 
-    # Call the RPC function to get or create conversation
-    response = user_db.rpc("get_or_create_direct_conversation", {"other_user_id": str(payload.other_user_id)}).execute()
-
-    if response.data is None:
-        raise HTTPException(status_code=500, detail="Failed to create conversation")
-
-    conversation_id = response.data
-
-    # Fetch the conversation details with members
-    conv_response = (
-        user_db.schema("social").table("dm_conversations").select("*").eq("id", conversation_id).single().execute()
+    existing = pg.fetch_one(
+        """
+        SELECT m1.conversation_id
+        FROM social.dm_members m1
+        JOIN social.dm_members m2 ON m1.conversation_id = m2.conversation_id
+        WHERE m1.user_id = %s AND m2.user_id = %s
+        LIMIT 1
+        """,
+        [user_id, other_id],
     )
-    conversation = require_single_result(conv_response, "Conversation")
+    conversation_id = existing["conversation_id"] if existing else None
 
-    # Fetch members
-    members_response = (
-        user_db.schema("social")
-        .table("dm_members")
-        .select("user_id, role, joined_at")
-        .eq("conversation_id", conversation_id)
-        .execute()
+    if not conversation_id:
+        conversation = pg.fetch_one("INSERT INTO social.dm_conversations (is_group) VALUES (false) RETURNING *")
+        if not conversation:
+            raise HTTPException(status_code=500, detail="Failed to create conversation")
+        conversation_id = conversation["id"]
+        pg.execute_returning(
+            """
+            INSERT INTO social.dm_members (conversation_id, user_id, role)
+            VALUES (%s, %s, 'member'), (%s, %s, 'member')
+            RETURNING user_id, role, joined_at
+            """,
+            [conversation_id, user_id, conversation_id, other_id],
+        )
+
+    conversation = pg.fetch_one(
+        "SELECT * FROM social.dm_conversations WHERE id = %s",
+        [conversation_id],
     )
-    members = get_list_result(members_response, "fetching members")
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
+    members = pg.fetch_all(
+        "SELECT user_id, role, joined_at FROM social.dm_members WHERE conversation_id = %s",
+        [conversation_id],
+    )
     conversation["members"] = members
     return conversation
 
@@ -170,20 +188,18 @@ def list_conversations(
     Ordered by last_message_at (most recent first), then created_at.
     Requires authentication.
     """
-    user_db = get_user_supabase_client(user)
-
-    # Get conversations where user is a member
-    # RLS will filter to only conversations the user is in
-    response = (
-        user_db.schema("social")
-        .table("dm_conversations")
-        .select("id, is_group, created_at, last_message_at")
-        .order("last_message_at", desc=True, nullsfirst=False)
-        .order("created_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
+    rows = pg.fetch_all(
+        """
+        SELECT c.id, c.is_group, c.created_at, c.last_message_at
+        FROM social.dm_conversations c
+        JOIN social.dm_members m ON m.conversation_id = c.id
+        WHERE m.user_id = %s
+        ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        [str(user["id"]), limit, offset],
     )
-    return get_list_result(response, "listing conversations")
+    return rows
 
 
 @router.get("/{conversation_id}/messages", response_model=list[Message])
@@ -201,31 +217,25 @@ def list_messages(
 
     Requires authentication. RLS enforces member-only access.
     """
-    user_db = get_user_supabase_client(user)
+    conv_id = str(conversation_id)
+    _require_membership(conv_id, str(user["id"]))
 
-    # Verify user has access (RLS will block if not a member)
-    query = user_db.schema("social").table("dm_messages").select("*").eq("conversation_id", str(conversation_id))
-
+    params: list[object] = [conv_id]
+    cursor_clause = ""
     if cursor:
-        query = query.gt("created_at", cursor)
+        cursor_clause = " AND created_at > %s"
+        params.append(cursor)
+    params.append(limit)
 
-    response = query.order("created_at", desc=False).limit(limit).execute()
-
-    messages = get_list_result(response, "listing messages")
-
-    # If no messages and no cursor, verify conversation exists and user has access
-    if not messages and not cursor:
-        # This will raise 404 if conversation doesn't exist or user has no access
-        conv_response = (
-            user_db.schema("social")
-            .table("dm_conversations")
-            .select("id")
-            .eq("id", str(conversation_id))
-            .single()
-            .execute()
-        )
-        if conv_response.data is None:
-            raise HTTPException(status_code=404, detail="Conversation not found or you don't have access")
+    messages = pg.fetch_all(
+        f"""
+        SELECT * FROM social.dm_messages
+        WHERE conversation_id = %s{cursor_clause}
+        ORDER BY created_at ASC
+        LIMIT %s
+        """,
+        params,
+    )
 
     return messages
 
@@ -235,7 +245,6 @@ def send_message(
     conversation_id: UUID,
     payload: MessageCreate,
     user: CurrentUser,
-    db: SupabaseClient,
     background_tasks: BackgroundTasks,
 ) -> dict:
     """
@@ -246,36 +255,23 @@ def send_message(
 
     Requires authentication. RLS enforces member-only access.
     """
-    user_db = get_user_supabase_client(user)
+    conv_id = str(conversation_id)
+    _require_membership(conv_id, str(user["id"]))
 
-    # Insert message (RLS will verify membership and sender_id)
-    message_response = (
-        user_db.schema("social")
-        .table("dm_messages")
-        .insert(
-            {
-                "conversation_id": str(conversation_id),
-                "sender_id": user["id"],
-                "body": payload.body,
-            }
-        )
-        .execute()
+    message = pg.fetch_one(
+        """
+        INSERT INTO social.dm_messages (conversation_id, sender_id, body)
+        VALUES (%s, %s, %s)
+        RETURNING *
+        """,
+        [conv_id, str(user["id"]), payload.body],
     )
-    raise_for_supabase_error(message_response, "sending message")
-
-    if not message_response.data:
+    if not message:
         raise HTTPException(status_code=500, detail="Failed to send message")
 
-    message = message_response.data[0]
-
-    # Update conversation's last_message_at
-    # Note: This uses user client, will only work if user is member (RLS)
-    (
-        user_db.schema("social")
-        .table("dm_conversations")
-        .update({"last_message_at": message["created_at"]})
-        .eq("id", str(conversation_id))
-        .execute()
+    pg.execute_returning(
+        "UPDATE social.dm_conversations SET last_message_at = %s WHERE id = %s RETURNING id",
+        [message["created_at"], conv_id],
     )
     # Don't fail if this update fails - the message was still sent
 
@@ -300,44 +296,33 @@ def update_read_receipt(
     Only updates the authenticated user's read receipt.
     Requires authentication.
     """
-    user_db = get_user_supabase_client(user)
+    conv_id = str(conversation_id)
+    user_id = str(user["id"])
+    _require_membership(conv_id, user_id)
 
-    # Verify the message exists and belongs to this conversation
-    message_response = (
-        user_db.schema("social")
-        .table("dm_messages")
-        .select("id, conversation_id")
-        .eq("id", str(payload.last_read_message_id))
-        .eq("conversation_id", str(conversation_id))
-        .single()
-        .execute()
+    message = pg.fetch_one(
+        """
+        SELECT id FROM social.dm_messages
+        WHERE id = %s AND conversation_id = %s
+        """,
+        [str(payload.last_read_message_id), conv_id],
     )
-
-    if message_response.data is None:
+    if not message:
         raise HTTPException(status_code=404, detail="Message not found in this conversation")
 
-    # Update the read receipt (upsert in case it doesn't exist)
-    # RLS enforces that user can only update their own read receipt
-    update_response = (
-        user_db.schema("social")
-        .table("dm_read_receipts")
-        .upsert(
-            {
-                "conversation_id": str(conversation_id),
-                "user_id": user["id"],
-                "last_read_message_id": str(payload.last_read_message_id),
-                "last_read_at": datetime.now(UTC).isoformat(),
-            },
-            on_conflict="conversation_id,user_id",
-        )
-        .execute()
+    receipt = pg.fetch_one(
+        """
+        INSERT INTO social.dm_read_receipts (conversation_id, user_id, last_read_message_id, last_read_at)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (conversation_id, user_id)
+        DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id,
+                      last_read_at = EXCLUDED.last_read_at
+        RETURNING *
+        """,
+        [conv_id, user_id, str(payload.last_read_message_id), datetime.now(UTC).isoformat()],
     )
-    raise_for_supabase_error(update_response, "updating read receipt")
-
-    if not update_response.data:
+    if not receipt:
         raise HTTPException(status_code=500, detail="Failed to update read receipt")
-
-    receipt = update_response.data[0]
 
     # Publish event to WebSocket subscribers
     room = get_dm_room(str(conversation_id))

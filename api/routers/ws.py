@@ -19,7 +19,6 @@ from uuid import UUID
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ValidationError
 
-from api.deps import get_supabase_anon_key, get_supabase_url
 from api.realtime.broker import get_broker
 from api.realtime.events import (
     Event,
@@ -32,7 +31,8 @@ from api.realtime.events import (
     subscribed_event,
     typing_event,
 )
-from supabase import create_client
+from trr_backend.db import pg
+from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 
 logger = logging.getLogger(__name__)
 
@@ -68,20 +68,23 @@ async def validate_token(token: str | None) -> dict | None:
         return None
 
     try:
-        client = create_client(get_supabase_url(), get_supabase_anon_key())
-        user_response = client.auth.get_user(token)
+        payload = verify_jwt_token(token)
+    except InvalidTokenError:
+        return None
+    except RuntimeError as exc:
+        logger.warning(f"Token validation failed: {exc}")
+        return None
 
-        if user_response and user_response.user:
-            return {
-                "id": str(user_response.user.id),
-                "email": user_response.user.email,
-                "role": user_response.user.role,
-                "token": token,
-            }
+    user_id = payload.get("sub") or payload.get("user_id") or payload.get("id")
+    if not user_id:
         return None
-    except Exception as e:
-        logger.warning(f"Token validation failed: {e}")
-        return None
+
+    return {
+        "id": str(user_id),
+        "email": payload.get("email"),
+        "role": payload.get("role"),
+        "token": token,
+    }
 
 
 async def check_dm_membership(user_id: str, conversation_id: str, token: str) -> bool:
@@ -91,19 +94,11 @@ async def check_dm_membership(user_id: str, conversation_id: str, token: str) ->
     Uses RLS to verify membership.
     """
     try:
-        client = create_client(get_supabase_url(), get_supabase_anon_key())
-        client.postgrest.auth(token)
-
-        response = (
-            client.schema("social")
-            .table("dm_members")
-            .select("user_id")
-            .eq("conversation_id", conversation_id)
-            .eq("user_id", user_id)
-            .execute()
+        row = pg.fetch_one(
+            "SELECT user_id FROM social.dm_members WHERE conversation_id = %s AND user_id = %s",
+            [conversation_id, user_id],
         )
-
-        return bool(response.data)
+        return bool(row)
     except Exception as e:
         logger.error(f"Failed to check DM membership: {e}")
         return False

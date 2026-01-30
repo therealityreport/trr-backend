@@ -178,7 +178,7 @@ class TestValidation:
         app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        with patch("api.routers.dms.get_user_db_session", return_value=mock_db):
             client = TestClient(app)
             response = client.post("/api/v1/dms", json={})
             assert response.status_code == 422
@@ -191,7 +191,7 @@ class TestValidation:
         app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        with patch("api.routers.dms.get_user_db_session", return_value=mock_db):
             client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages",
@@ -207,7 +207,7 @@ class TestValidation:
         app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        with patch("api.routers.dms.get_user_db_session", return_value=mock_db):
             client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/read",
@@ -226,48 +226,19 @@ class TestCreateConversation:
 
     def test_create_conversation_success(self):
         """Create conversation succeeds with valid auth."""
-        # Build mock with properly typed responses
-        mock_db = MagicMock()
-
-        # RPC response returns conversation ID
-        rpc_response = MagicMock()
-        rpc_response.data = MOCK_CONVERSATION["id"]
-        rpc_response.error = None
-        mock_db.rpc.return_value.execute.return_value = rpc_response
-
-        # Conversation single() query response
-        conv_response = MagicMock()
-        conv_response.data = MOCK_CONVERSATION.copy()
-        conv_response.error = None
-
-        # Members list query response
         mock_member = {
             "user_id": MOCK_USER["id"],
             "role": "member",
             "joined_at": "2025-01-01T00:00:00Z",
         }
-        members_response = MagicMock()
-        members_response.data = [mock_member]
-        members_response.error = None
 
-        # Set up the chained mock
-        single_mock = MagicMock()
-        single_mock.execute.return_value = conv_response
-
-        chain_mock = MagicMock()
-        chain_mock.single.return_value = single_mock
-        chain_mock.execute.return_value = members_response
-
-        # All chainable methods return chain_mock
-        mock_db.schema.return_value = chain_mock
-        chain_mock.table.return_value = chain_mock
-        chain_mock.select.return_value = chain_mock
-        chain_mock.eq.return_value = chain_mock
-
-        app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        with (
+            patch("api.routers.dms.pg.fetch_one", side_effect=[None, MOCK_CONVERSATION, MOCK_CONVERSATION]),
+            patch("api.routers.dms.pg.execute_returning", return_value=[mock_member]),
+            patch("api.routers.dms.pg.fetch_all", return_value=[mock_member]),
+        ):
             client = TestClient(app)
             response = client.post(
                 "/api/v1/dms",
@@ -286,12 +257,9 @@ class TestListConversations:
 
     def test_list_conversations_success(self):
         """List conversations succeeds with valid auth."""
-        mock_db = create_chainable_mock([MOCK_CONVERSATION])
-
-        app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        with patch("api.routers.dms.pg.fetch_all", return_value=[MOCK_CONVERSATION]):
             client = TestClient(app)
             response = client.get("/api/v1/dms")
             assert response.status_code == 200
@@ -306,12 +274,12 @@ class TestMessages:
 
     def test_list_messages_success(self):
         """List messages succeeds with valid auth."""
-        mock_db = create_chainable_mock([MOCK_MESSAGE], single_data=MOCK_CONVERSATION)
-
-        app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        with (
+            patch("api.routers.dms._require_membership", return_value=None),
+            patch("api.routers.dms.pg.fetch_all", return_value=[MOCK_MESSAGE]),
+        ):
             client = TestClient(app)
             response = client.get(f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages")
             assert response.status_code == 200
@@ -322,12 +290,16 @@ class TestMessages:
 
     def test_send_message_success(self):
         """Send message succeeds with valid auth."""
-        mock_db = create_chainable_mock([MOCK_MESSAGE], single_data=MOCK_MESSAGE)
-
-        app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        mock_sent = MOCK_MESSAGE.copy()
+        mock_sent["body"] = "Hello!"
+        mock_sent["sender_id"] = MOCK_USER["id"]
+        with (
+            patch("api.routers.dms._require_membership", return_value=None),
+            patch("api.routers.dms.pg.fetch_one", return_value=mock_sent),
+            patch("api.routers.dms.pg.execute_returning", return_value=None),
+        ):
             client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages",
@@ -342,12 +314,12 @@ class TestMessages:
 
     def test_list_messages_accepts_cursor(self):
         """List messages accepts cursor parameter."""
-        mock_db = create_chainable_mock([])
-
-        app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        with (
+            patch("api.routers.dms._require_membership", return_value=None),
+            patch("api.routers.dms.pg.fetch_all", return_value=[]),
+        ):
             client = TestClient(app)
             response = client.get(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/messages",
@@ -365,12 +337,12 @@ class TestReadReceipts:
     def test_update_read_receipt_success(self):
         """Update read receipt succeeds with valid auth."""
         # Mock that returns message for verification, then upsert result
-        mock_db = create_chainable_mock([MOCK_READ_RECEIPT], single_data=MOCK_MESSAGE)
-
-        app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.dms.get_user_supabase_client", return_value=mock_db):
+        with (
+            patch("api.routers.dms._require_membership", return_value=None),
+            patch("api.routers.dms.pg.fetch_one", side_effect=[MOCK_MESSAGE, MOCK_READ_RECEIPT]),
+        ):
             client = TestClient(app)
             response = client.post(
                 f"/api/v1/dms/{MOCK_CONVERSATION['id']}/read",

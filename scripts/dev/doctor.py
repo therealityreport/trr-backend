@@ -65,7 +65,7 @@ def check_package(name: str, min_version: str | None = None) -> bool:
 def check_supabase_location() -> bool:
     """Verify supabase package resolves to site-packages, not local directory."""
     try:
-        import supabase
+        import trr_backend.db.admin as supabase
 
         pkg_file = getattr(supabase, "__file__", None)
         if pkg_file is None:
@@ -86,7 +86,7 @@ def check_supabase_location() -> bool:
             return False
     except ImportError as e:
         print(f"supabase: IMPORT ERROR - {e}")
-        print("  FAIL: Cannot import supabase. Run: pip install -r requirements.txt")
+        print("  FAIL: Cannot import trr_backend.db.admin as supabase. Run: pip install -r requirements.txt")
         return False
 
 

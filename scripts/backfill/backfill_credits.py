@@ -16,7 +16,7 @@ import sys
 from typing import Any
 
 from scripts._sync_common import load_env_and_db
-from supabase import Client
+from trr_backend.db.session import DbSession
 from trr_backend.repositories.credits import (
     assert_core_credit_occurrences_table_exists,
     assert_core_credits_table_exists,
@@ -48,7 +48,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _fetch_show_cast(db: Client, *, limit: int | None, show_id: str | None) -> list[dict[str, Any]]:
+def _fetch_show_cast(db: DbSession, *, limit: int | None, show_id: str | None) -> list[dict[str, Any]]:
     """Fetch show_cast rows to backfill into credits."""
     fields = "id,show_id,person_id,billing_order,role,credit_category,source_type,created_at,updated_at"
     query = db.schema("core").table("show_cast").select(fields)
@@ -63,7 +63,7 @@ def _fetch_show_cast(db: Client, *, limit: int | None, show_id: str | None) -> l
     return data if isinstance(data, list) else []
 
 
-def _fetch_episode_appearances(db: Client, *, limit: int | None, show_id: str | None) -> list[dict[str, Any]]:
+def _fetch_episode_appearances(db: DbSession, *, limit: int | None, show_id: str | None) -> list[dict[str, Any]]:
     """Fetch episode_appearances rows to backfill into credit_occurrences."""
     fields = "id,show_id,person_id,imdb_episode_title_ids,tmdb_episode_ids"
     query = db.schema("core").table("episode_appearances").select(fields)
@@ -78,7 +78,7 @@ def _fetch_episode_appearances(db: Client, *, limit: int | None, show_id: str | 
     return data if isinstance(data, list) else []
 
 
-def _fetch_episodes_by_imdb_ids(db: Client, imdb_ids: list[str]) -> dict[str, str]:
+def _fetch_episodes_by_imdb_ids(db: DbSession, imdb_ids: list[str]) -> dict[str, str]:
     """Fetch episode UUIDs by IMDB episode IDs. Returns {imdb_id: episode_uuid}."""
     if not imdb_ids:
         return {}
@@ -103,7 +103,7 @@ def _fetch_episodes_by_imdb_ids(db: Client, imdb_ids: list[str]) -> dict[str, st
     return result
 
 
-def _fetch_credits_lookup(db: Client, show_id: str) -> dict[tuple[str, str, str, str, str], str]:
+def _fetch_credits_lookup(db: DbSession, show_id: str) -> dict[tuple[str, str, str, str, str], str]:
     """
     Fetch existing credits for a show and build lookup by unique key.
     Returns {(show_id, person_id, credit_category, role_or_empty, source_type): credit_id}
@@ -133,7 +133,7 @@ def _fetch_credits_lookup(db: Client, show_id: str) -> dict[tuple[str, str, str,
 
 
 def _pass_a_show_cast_to_credits(
-    db: Client,
+    db: DbSession,
     *,
     limit: int | None,
     show_id: str | None,
@@ -185,7 +185,7 @@ def _pass_a_show_cast_to_credits(
 
 
 def _pass_b_episode_appearances_to_occurrences(
-    db: Client,
+    db: DbSession,
     *,
     limit: int | None,
     show_id: str | None,

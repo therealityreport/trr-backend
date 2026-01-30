@@ -8,8 +8,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
-from trr_backend.db.supabase import create_supabase_admin_client
-from trr_backend.pipeline.manifests import write_manifest
+from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.pipeline.manifests import read_manifest, write_manifest
 from trr_backend.pipeline.models import (
     RunConfig,
     RunContext,
@@ -21,6 +21,7 @@ from trr_backend.pipeline.models import (
 from trr_backend.pipeline.repository import (
     create_run,
     create_run_stages,
+    ensure_run_stages,
     fetch_run_with_stages,
     get_stage_prior_state,
     update_run,
@@ -74,6 +75,8 @@ class PipelineOrchestrator:
             existing = fetch_run_with_stages(db, run_id)
             if not existing:
                 raise ValueError(f"Run {run_id} not found")
+            # Ensure all active stages have rows (handles --to extension)
+            ensure_run_stages(db, run_id, [name for name, _ in active_stages])
             if config.verbose:
                 print(f"Resuming run {run_id}")
         else:
@@ -93,11 +96,19 @@ class PipelineOrchestrator:
 
         try:
             for stage_name, stage_fn in active_stages:
-                # Compute current input hash
-                current_input_hash = context.compute_input_hash()
+                # Compute stage-specific input hash
+                current_input_hash = context.compute_stage_input_hash(stage_name)
 
                 # Check if stage should be skipped (resume logic)
                 if resume_run_id and self._should_skip_stage(db, run_id, stage_name, current_input_hash, config):
+                    # CRITICAL: Hydrate context.show_ids from manifest when Stage 1 skipped
+                    if stage_name == "01_collect":
+                        manifest = read_manifest(str(run_id), stage_name)
+                        if manifest:
+                            context.show_ids = manifest.show_ids
+                            if config.verbose:
+                                print(f"    Hydrated {len(context.show_ids)} show_ids from manifest")
+
                     if config.verbose:
                         print(f"  \u25cb {stage_name}: SKIPPED (hash match)")
                     results.append(
@@ -227,6 +238,7 @@ class PipelineOrchestrator:
         1. Prior status = success
         2. input_hash matches current
         3. Not forced
+        4. Manifest exists when required (Stage 1 always, others when skip_s3=False)
 
         Args:
             db: Supabase client
@@ -249,6 +261,14 @@ class PipelineOrchestrator:
             return False
 
         if prior.get("input_hash") != current_input_hash:
+            return False
+
+        # Stage 1 ALWAYS requires manifest for hydration (otherwise context.show_ids stays empty)
+        if stage_name == "01_collect" and not prior.get("manifest_key"):
+            return False
+
+        # Other stages require manifest when skip_s3=False
+        if stage_name != "01_collect" and not config.skip_s3 and not prior.get("manifest_key"):
             return False
 
         return True

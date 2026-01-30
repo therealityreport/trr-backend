@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env
 from trr_backend.integrations.imdb.episodic_client import (
     IMDB_JOB_CATEGORY_SELF,
@@ -262,7 +262,8 @@ def main(argv: list[str] | None = None) -> int:
     show = find_show_by_imdb_id(db, series_id)
     if not show:
         print(
-            f\"ERROR: core.shows missing imdb id {series_id}. Run list import first (scripts/import/import_shows_from_lists.py).\",
+            f"ERROR: core.shows missing imdb id {series_id}. "
+            "Run list import first (scripts/import/import_shows_from_lists.py).",
             file=sys.stderr,
         )
         return 1

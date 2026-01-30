@@ -1,19 +1,18 @@
 """
 Authentication utilities for FastAPI.
 
-Extracts user information from Supabase JWT tokens.
-All writes must use the user-scoped client to enforce RLS.
+Extracts user information from verified Supabase JWT tokens.
+All user-scoped writes must enforce ownership using the JWT subject.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
 
-from api.deps import get_supabase_anon_key, get_supabase_url
-from supabase import Client, create_client
+from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 
 logger = logging.getLogger(__name__)
 
@@ -37,32 +36,31 @@ def get_bearer_token(request: Request) -> str | None:
 
 async def get_current_user(request: Request) -> dict | None:
     """
-    Get the current user from the Supabase JWT token.
+    Get the current user from the JWT token payload.
 
-    Returns None if no token or invalid token.
-    Returns user dict with 'id', 'email', etc. if valid.
+    The token is verified (signature + exp validated).
     """
     token = get_bearer_token(request)
     if not token:
         return None
 
     try:
-        # Create a client with the user's token to validate it
-        client = create_client(get_supabase_url(), get_supabase_anon_key())
-        # Get user from the token
-        user_response = client.auth.get_user(token)
+        payload = verify_jwt_token(token)
+    except InvalidTokenError:
+        return None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        if user_response and user_response.user:
-            return {
-                "id": str(user_response.user.id),
-                "email": user_response.user.email,
-                "role": user_response.user.role,
-                "token": token,  # Store token for user-scoped client
-            }
+    user_id = payload.get("sub") or payload.get("user_id") or payload.get("id")
+    if not user_id:
         return None
-    except Exception as e:
-        logger.warning(f"Failed to validate token: {e}")
-        return None
+
+    return {
+        "id": str(user_id),
+        "email": payload.get("email"),
+        "role": payload.get("role"),
+        "token": token,
+    }
 
 
 async def require_user(request: Request) -> dict:
@@ -82,17 +80,11 @@ async def require_user(request: Request) -> dict:
     return user
 
 
-def get_user_supabase_client(user: dict) -> Client:
-    """
-    Returns a Supabase client scoped to the user's token.
+def get_user_db_session(user: dict) -> Any:
+    """Return a DB session for user-scoped operations."""
+    from trr_backend.db.session import get_db_session
 
-    This client enforces RLS based on the user's identity.
-    Use this for authenticated write operations.
-    """
-    client = create_client(get_supabase_url(), get_supabase_anon_key())
-    # Apply the user's access token for RLS enforcement
-    client.postgrest.auth(user["token"])
-    return client
+    return get_db_session()
 
 
 # Type alias for dependency injection

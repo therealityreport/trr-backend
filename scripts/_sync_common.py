@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from supabase import Client
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.db.session import DbSession
 from trr_backend.repositories.shows import assert_core_shows_table_exists, update_show
 from trr_backend.repositories.sync_state import assert_core_sync_state_table_exists, fetch_sync_state_map
 from trr_backend.utils.env import load_env
@@ -71,7 +71,7 @@ def add_show_filter_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def load_env_and_db(*, skip_db: bool = False) -> Client | None:
+def load_env_and_db(*, skip_db: bool = False) -> DbSession | None:
     """
     Load environment and create Supabase client.
 
@@ -79,7 +79,7 @@ def load_env_and_db(*, skip_db: bool = False) -> Client | None:
         skip_db: If True, return None (no database connection)
 
     Returns:
-        Supabase Client instance, or None if skip_db=True
+        Supabase DbSession instance, or None if skip_db=True
     """
     load_env()
 
@@ -105,7 +105,7 @@ def _dedupe_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _fetch_by_in(
-    db: Client,
+    db: DbSession,
     *,
     column: str,
     values: list[Any],
@@ -207,7 +207,7 @@ def _chunked(values: list[str], chunk_size: int) -> Iterable[list[str]]:
 
 
 def fetch_show_season_counts(
-    db: Client,
+    db: DbSession,
     *,
     show_ids: Iterable[str],
     chunk_size: int = 200,
@@ -234,7 +234,7 @@ def fetch_show_season_counts(
     return {show_id: len(seasons) for show_id, seasons in buckets.items()}
 
 
-def fetch_show_season_count(db: Client, *, show_id: str) -> int | None:
+def fetch_show_season_count(db: DbSession, *, show_id: str) -> int | None:
     show_id = str(show_id or "").strip()
     if not show_id:
         return None
@@ -253,7 +253,7 @@ def fetch_show_season_count(db: Client, *, show_id: str) -> int | None:
 
 
 def reconcile_show_total_seasons(
-    db: Client,
+    db: DbSession,
     *,
     show_id: str,
     current_total_seasons: int | None,
@@ -319,7 +319,7 @@ def should_sync_show(
 
 
 def filter_show_rows_for_sync(
-    db: Client | None,
+    db: DbSession | None,
     show_rows: Iterable[dict[str, Any]],
     *,
     table_name: str,
@@ -403,7 +403,7 @@ def should_process_all(args: argparse.Namespace) -> bool:
     return bool(args.all) or not (args.show_id or args.tmdb_show_id or args.imdb_series_id)
 
 
-def fetch_show_rows(db: Client | None, args: argparse.Namespace) -> list[dict[str, Any]]:
+def fetch_show_rows(db: DbSession | None, args: argparse.Namespace) -> list[dict[str, Any]]:
     """
     Fetch show rows from database or create synthetic rows for --skip-db mode.
 

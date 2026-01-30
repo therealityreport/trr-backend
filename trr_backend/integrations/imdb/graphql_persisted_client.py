@@ -41,7 +41,7 @@ class ImdbGraphQLPersistedClient:
     - Optional custom headers (use with caution)
 
     Usage:
-        >>> client = ImdbGraphQLPersistedClient()
+        >>> client = ImdbGraphQLPersistedClient ()
         >>> result = client.execute_query(
         ...     operation_name="TitleCreditPaginationV2",
         ...     sha256_hash="abc123...",

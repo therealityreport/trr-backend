@@ -76,6 +76,7 @@ def read_manifest(run_id: str, stage_name: str) -> StageManifest | None:
         data = json.loads(response["Body"].read())
         return StageManifest(**data)
     except ClientError as e:
-        if e.response.get("Error", {}).get("Code") == "NoSuchKey":
+        # boto3 raises ClientError - check for NoSuchKey or 404
+        if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
             return None
         raise

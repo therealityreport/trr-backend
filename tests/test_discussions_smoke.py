@@ -216,8 +216,8 @@ def authenticated_client():
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_db
     app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-    # Patch get_user_supabase_client to return our mock
-    with patch("api.routers.discussions.get_user_supabase_client", return_value=mock_db):
+    # Patch get_user_db_session to return our mock
+    with patch("api.routers.discussions.get_user_db_session", return_value=mock_db):
         yield TestClient(app)
 
     app.dependency_overrides.clear()
@@ -354,7 +354,7 @@ class TestCreatePost:
         app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.discussions.get_user_supabase_client", return_value=mock_db):
+        with patch("api.routers.discussions.get_user_db_session", return_value=mock_db):
             client = TestClient(app)
             response = client.post(
                 "/api/v1/threads/a1b2c3d4-e5f6-7890-abcd-ef1234567890/posts",
@@ -413,7 +413,7 @@ class TestReactions:
         app.dependency_overrides[deps.get_supabase_client] = lambda: mock_db
         app.dependency_overrides[auth.require_user] = lambda: MOCK_USER
 
-        with patch("api.routers.discussions.get_user_supabase_client", return_value=user_mock):
+        with patch("api.routers.discussions.get_user_db_session", return_value=user_mock):
             client = TestClient(app)
             response = client.post(
                 "/api/v1/posts/b2c3d4e5-f6a7-8901-bcde-f23456789012/reactions",

@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class PeopleRepositoryError(RuntimeError):
     pass
 
 
-def assert_core_people_table_exists(db: Client) -> None:
+def assert_core_people_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.people` is missing in Supabase.
     """
@@ -75,7 +75,7 @@ def assert_core_people_table_exists(db: Client) -> None:
     raise PeopleRepositoryError(f"Supabase error during core.people preflight: {combined}")
 
 
-def fetch_people_by_imdb_ids(db: Client, imdb_ids: Iterable[str]) -> list[dict[str, Any]]:
+def fetch_people_by_imdb_ids(db: DbSession, imdb_ids: Iterable[str]) -> list[dict[str, Any]]:
     ids = [str(i).strip() for i in imdb_ids if str(i).strip()]
     if not ids:
         return []
@@ -99,7 +99,7 @@ def fetch_people_by_imdb_ids(db: Client, imdb_ids: Iterable[str]) -> list[dict[s
     return rows
 
 
-def insert_people(db: Client, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def insert_people(db: DbSession, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     payload = [{k: v for k, v in dict(r).items() if v is not None} for r in rows]
     payload = [r for r in payload if r]
     if not payload:

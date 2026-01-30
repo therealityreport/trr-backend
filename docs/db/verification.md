@@ -36,7 +36,7 @@ Run in the Supabase SQL editor to confirm applied migrations and whether any `_o
 
 ```sql
 select version
-from supabase_migrations.schema_migrations
+FROM supabase_migrations.schema_migrations
 order by version;
 
 select

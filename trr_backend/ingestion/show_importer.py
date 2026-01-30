@@ -13,8 +13,8 @@ from uuid import UUID, uuid4
 
 import requests
 
-from supabase import Client
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.db.session import DbSession
 from trr_backend.ingestion.show_metadata_enricher import enrich_shows_after_upsert
 from trr_backend.ingestion.showinfo_overrides import (
     ShowInfoOverridesError,
@@ -319,7 +319,7 @@ def _load_showinfo_overrides(*, url: str | None, session: requests.Session) -> S
 
 def _ingest_imdb_cast(
     *,
-    db: Client | None,
+    db: DbSession | None,
     show_rows: list[dict[str, Any]],
     dry_run: bool,
     refresh_cast: bool,
@@ -1103,7 +1103,7 @@ def upsert_candidates_into_supabase(
     enrich_max_enrich: int | None = None,
     enrich_force_refresh: bool = False,
     enrich_imdb_sleep_ms: int = 0,
-    supabase_client: Client | None = None,
+    supabase_client: DbSession | None = None,
     imdb_episodic_probe_name_id: str | None = None,
     imdb_episodic_probe_job_category_id: str = IMDB_JOB_CATEGORY_SELF,
     imdb_episodic_extra_headers: Mapping[str, str] | None = None,

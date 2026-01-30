@@ -6,8 +6,8 @@ from dataclasses import asdict
 from typing import Any
 from uuid import UUID
 
-from supabase import Client
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
+from trr_backend.db.session import DbSession
 from trr_backend.models.cast_photos import CastPhotoUpsert
 
 
@@ -41,7 +41,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
     return True
 
 
-def assert_core_cast_photos_table_exists(db: Client) -> None:
+def assert_core_cast_photos_table_exists(db: DbSession) -> None:
     def is_missing_relation(message: str) -> bool:
         msg = (message or "").casefold()
         return (
@@ -123,7 +123,7 @@ def _serialize_row(row: Mapping[str, Any] | CastPhotoUpsert) -> dict[str, Any]:
 
 
 def upsert_cast_photos(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any] | CastPhotoUpsert],
     *,
     dedupe_on: str = "source_image_id",
@@ -160,7 +160,7 @@ def upsert_cast_photos(
     return data if isinstance(data, list) else []
 
 
-def update_cast_photo_hosted_fields(db: Client, photo_id: str, patch: Mapping[str, Any]) -> dict[str, Any]:
+def update_cast_photo_hosted_fields(db: DbSession, photo_id: str, patch: Mapping[str, Any]) -> dict[str, Any]:
     payload = {k: v for k, v in dict(patch).items() if v is not None}
     if not payload:
         raise CastPhotoRepositoryError("Hosted fields update payload is empty.")
@@ -183,7 +183,7 @@ def update_cast_photo_hosted_fields(db: Client, photo_id: str, patch: Mapping[st
 
 
 def fetch_cast_photos_missing_hosted(
-    db: Client,
+    db: DbSession,
     *,
     source: str | None = None,
     person_ids: list[str] | None = None,
@@ -243,7 +243,7 @@ def fetch_cast_photos_missing_hosted(
 
 
 def fetch_hosted_keys_for_person(
-    db: Client,
+    db: DbSession,
     person_identifier: str,
 ) -> set[str]:
     """
@@ -289,7 +289,7 @@ def fetch_hosted_keys_for_person(
 
 
 def fetch_cast_photos_for_person(
-    db: Client,
+    db: DbSession,
     person_id: str,
     *,
     sources: list[str] | None = None,

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 from trr_backend.pipeline.models import RunConfig, RunStatus, StageStatus
 
 # Stage name to global order mapping
@@ -20,7 +20,7 @@ STAGE_ORDER = {
 }
 
 
-def create_run(db: Client, config: RunConfig) -> UUID:
+def create_run(db: DbSession, config: RunConfig) -> UUID:
     """Create a new pipeline run record."""
     response = (
         db.schema("pipeline")
@@ -44,7 +44,7 @@ def create_run(db: Client, config: RunConfig) -> UUID:
     return UUID(response.data[0]["id"])
 
 
-def create_run_stages(db: Client, run_id: UUID, stage_names: list[str]) -> None:
+def create_run_stages(db: DbSession, run_id: UUID, stage_names: list[str]) -> None:
     """Create stage records with global stage_order."""
     rows = [
         {
@@ -57,8 +57,26 @@ def create_run_stages(db: Client, run_id: UUID, stage_names: list[str]) -> None:
     db.schema("pipeline").table("run_stages").insert(rows).execute()
 
 
+def ensure_run_stages(db: DbSession, run_id: UUID, stage_names: list[str]) -> None:
+    """Ensure stage rows exist for all given stages (upsert missing).
+
+    This handles the case where a run was created with --to 2 and later
+    resumed with --to 5 - stages 3-5 need rows to be created.
+    """
+    for name in stage_names:
+        order = STAGE_ORDER.get(name, 99)
+        db.schema("pipeline").table("run_stages").upsert(
+            {
+                "run_id": str(run_id),
+                "stage_name": name,
+                "stage_order": order,
+            },
+            on_conflict="run_id,stage_name",
+        ).execute()
+
+
 def update_run(
-    db: Client,
+    db: DbSession,
     run_id: UUID,
     *,
     status: RunStatus | None = None,
@@ -85,7 +103,7 @@ def update_run(
 
 
 def update_run_stage(
-    db: Client,
+    db: DbSession,
     run_id: UUID,
     stage_name: str,
     *,
@@ -140,7 +158,7 @@ def update_run_stage(
         )
 
 
-def fetch_run_with_stages(db: Client, run_id: UUID) -> dict | None:
+def fetch_run_with_stages(db: DbSession, run_id: UUID) -> dict | None:
     """Fetch run and its stages."""
     response = db.schema("pipeline").table("runs").select("*").eq("id", str(run_id)).execute()
     if not response.data:
@@ -154,7 +172,7 @@ def fetch_run_with_stages(db: Client, run_id: UUID) -> dict | None:
     return run
 
 
-def get_stage_prior_state(db: Client, run_id: UUID, stage_name: str) -> dict | None:
+def get_stage_prior_state(db: DbSession, run_id: UUID, stage_name: str) -> dict | None:
     """Get prior stage state for resume logic."""
     response = (
         db.schema("pipeline")
@@ -167,7 +185,7 @@ def get_stage_prior_state(db: Client, run_id: UUID, stage_name: str) -> dict | N
     return response.data[0] if response.data else None
 
 
-def list_runs(db: Client, *, limit: int = 10) -> list[dict]:
+def list_runs(db: DbSession, *, limit: int = 10) -> list[dict]:
     """List recent pipeline runs."""
     response = (
         db.schema("pipeline")

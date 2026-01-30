@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 import requests
 
 from scripts._sync_common import load_env_and_db
-from supabase import Client
+from trr_backend.db.session import DbSession
 from trr_backend.repositories.media_assets import (
     fetch_assets_for_mirroring,
     update_asset_with_mirror_result,
@@ -147,7 +147,7 @@ def _compute_next_retry_at(retry_count: int, backoff_hours: float) -> str:
 
 
 def mirror_single_asset(
-    db: Client,
+    db: DbSession,
     asset: dict[str, Any],
     *,
     s3_client: Any,
@@ -294,7 +294,7 @@ def mirror_single_asset(
 
 
 def _handle_retryable_error(
-    db: Client,
+    db: DbSession,
     asset_id: str,
     current_retry_count: int,
     error: str,
@@ -343,7 +343,7 @@ def _handle_retryable_error(
 
 
 def process_batch(
-    db: Client,
+    db: DbSession,
     assets: list[dict[str, Any]],
     *,
     s3_client: Any,

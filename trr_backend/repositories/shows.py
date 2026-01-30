@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
-from supabase import Client
 from trr_backend.db.postgrest_cache import is_pgrst204_error, reload_postgrest_schema
+from trr_backend.db.session import DbSession
 from trr_backend.models.shows import ShowUpsert
 
 
@@ -55,7 +55,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
     return True
 
 
-def assert_core_shows_table_exists(db: Client) -> None:
+def assert_core_shows_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.shows` is missing in Supabase.
 
@@ -127,7 +127,7 @@ def _raise_for_supabase_error(response: Any, context: str) -> None:
         raise ShowRepositoryError(f"Supabase error during {context}: {response.error}")
 
 
-def find_show_by_imdb_id(db: Client, imdb_id: str) -> dict[str, Any] | None:
+def find_show_by_imdb_id(db: DbSession, imdb_id: str) -> dict[str, Any] | None:
     response = db.schema("core").table("shows").select("*").eq("imdb_id", imdb_id).limit(1).execute()
     _raise_for_supabase_error(response, "finding show by imdb id")
     data = response.data or []
@@ -136,7 +136,7 @@ def find_show_by_imdb_id(db: Client, imdb_id: str) -> dict[str, Any] | None:
     return None
 
 
-def find_show_by_tmdb_id(db: Client, tmdb_id: int) -> dict[str, Any] | None:
+def find_show_by_tmdb_id(db: DbSession, tmdb_id: int) -> dict[str, Any] | None:
     response = db.schema("core").table("shows").select("*").eq("tmdb_id", int(tmdb_id)).limit(1).execute()
     _raise_for_supabase_error(response, "finding show by tmdb id")
     data = response.data or []
@@ -145,7 +145,7 @@ def find_show_by_tmdb_id(db: Client, tmdb_id: int) -> dict[str, Any] | None:
     return None
 
 
-def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
+def insert_show(db: DbSession, show: ShowUpsert) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "name": show.name,
         "description": show.description,
@@ -229,7 +229,7 @@ def insert_show(db: Client, show: ShowUpsert) -> dict[str, Any]:
     raise ShowRepositoryError("Supabase insert returned no data for show.")
 
 
-def update_show(db: Client, show_id: UUID | str, patch: Mapping[str, Any]) -> dict[str, Any]:
+def update_show(db: DbSession, show_id: UUID | str, patch: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(patch)
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
@@ -265,7 +265,7 @@ def update_show(db: Client, show_id: UUID | str, patch: Mapping[str, Any]) -> di
     raise ShowRepositoryError("Supabase update returned no data for show.")
 
 
-def merge_shows(db: Client, *, source_show_id: UUID | str, target_show_id: UUID | str) -> None:
+def merge_shows(db: DbSession, *, source_show_id: UUID | str, target_show_id: UUID | str) -> None:
     try:
         response = (
             db.schema("core")

@@ -7,7 +7,7 @@ import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def is_credits_v2_read_enabled() -> bool:
     return os.environ.get("ENABLE_CREDITS_V2_READ", "").lower() in ("1", "true", "yes")
 
 
-def assert_core_credits_table_exists(db: Client) -> None:
+def assert_core_credits_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.credits` is missing in Supabase.
     """
@@ -91,7 +91,7 @@ def assert_core_credits_table_exists(db: Client) -> None:
     raise CreditsRepositoryError(f"Supabase error during core.credits preflight: {combined}")
 
 
-def assert_core_credit_occurrences_table_exists(db: Client) -> None:
+def assert_core_credit_occurrences_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.credit_occurrences` is missing in Supabase.
     """
@@ -158,7 +158,7 @@ def assert_core_credit_occurrences_table_exists(db: Client) -> None:
 
 
 def upsert_credits(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     chunk_size: int = 500,
@@ -196,7 +196,7 @@ def upsert_credits(
 
 
 def insert_credits_ignore_conflicts(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     chunk_size: int = 500,
@@ -271,7 +271,7 @@ def insert_credits_ignore_conflicts(
 
 
 def insert_credit_occurrences_ignore_conflicts(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     chunk_size: int = 500,
@@ -307,7 +307,7 @@ def insert_credit_occurrences_ignore_conflicts(
     return results
 
 
-def fetch_credits_by_show(db: Client, show_id: str) -> list[dict[str, Any]]:
+def fetch_credits_by_show(db: DbSession, show_id: str) -> list[dict[str, Any]]:
     """Fetch all credits for a given show."""
     response = (
         db.schema("core")
@@ -322,7 +322,7 @@ def fetch_credits_by_show(db: Client, show_id: str) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-def fetch_all_credits(db: Client, *, limit: int | None = None) -> list[dict[str, Any]]:
+def fetch_all_credits(db: DbSession, *, limit: int | None = None) -> list[dict[str, Any]]:
     """Fetch all credits, optionally limited."""
     query = (
         db.schema("core").table("credits").select("id,show_id,person_id,credit_category,role,billing_order,source_type")
@@ -336,7 +336,7 @@ def fetch_all_credits(db: Client, *, limit: int | None = None) -> list[dict[str,
     return data if isinstance(data, list) else []
 
 
-def delete_credits_for_show(db: Client, show_id: str) -> int:
+def delete_credits_for_show(db: DbSession, show_id: str) -> int:
     """Delete all credits for a given show (cascades to occurrences)."""
     response = db.schema("core").table("credits").delete().eq("show_id", show_id).execute()
     if hasattr(response, "error") and response.error:
@@ -346,7 +346,7 @@ def delete_credits_for_show(db: Client, show_id: str) -> int:
 
 
 def fetch_show_cast_from_credits(
-    db: Client,
+    db: DbSession,
     show_id: str,
     *,
     limit: int = 50,
@@ -382,7 +382,7 @@ def fetch_show_cast_from_credits(
 
 
 def fetch_episode_credits(
-    db: Client,
+    db: DbSession,
     episode_id: str,
     *,
     limit: int = 50,
@@ -417,7 +417,7 @@ def fetch_episode_credits(
 
 
 def fetch_person_show_seasons(
-    db: Client,
+    db: DbSession,
     show_id: str,
     person_id: str,
 ) -> dict[str, Any] | None:

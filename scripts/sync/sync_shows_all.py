@@ -4,10 +4,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from scripts.sync import sync_shows
-from scripts.sync import sync_tmdb_show_entities
-from scripts.sync import sync_tmdb_watch_providers
 from scripts._sync_common import add_show_filter_args
+from scripts.sync import sync_shows, sync_tmdb_show_entities, sync_tmdb_watch_providers
 from trr_backend.db.postgrest_cache import PostgrestCacheError, reload_postgrest_schema
 from trr_backend.utils.env import load_env
 

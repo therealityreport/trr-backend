@@ -6,7 +6,7 @@ from datetime import UTC
 from typing import Any
 from uuid import UUID
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class CastTMDbRepositoryError(RuntimeError):
@@ -29,7 +29,7 @@ def _serialize_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def upsert_cast_tmdb(
-    db: Client,
+    db: DbSession,
     row: dict[str, Any],
 ) -> dict[str, Any]:
     """
@@ -63,7 +63,7 @@ def upsert_cast_tmdb(
 
 
 def get_cast_tmdb_by_person_id(
-    db: Client,
+    db: DbSession,
     person_id: str,
 ) -> dict[str, Any] | None:
     """
@@ -91,7 +91,7 @@ def get_cast_tmdb_by_person_id(
 
 
 def get_cast_tmdb_by_tmdb_id(
-    db: Client,
+    db: DbSession,
     tmdb_id: int,
 ) -> dict[str, Any] | None:
     """
@@ -119,7 +119,7 @@ def get_cast_tmdb_by_tmdb_id(
 
 
 def fetch_people_missing_tmdb(
-    db: Client,
+    db: DbSession,
     *,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
@@ -185,7 +185,7 @@ def fetch_people_missing_tmdb(
 
 
 def fetch_cast_tmdb_needing_refresh(
-    db: Client,
+    db: DbSession,
     *,
     days_old: int = 30,
     limit: int = 100,

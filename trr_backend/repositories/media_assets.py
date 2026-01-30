@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid5
 
 if TYPE_CHECKING:
-    from supabase import Client
+    from trr_backend.db.session import DbSession
 else:
-    Client = Any
+    DbSession = Any
 
 _ASSET_ID_NAMESPACE = UUID("52f296b6-0f8d-4bfb-8f39-6e7e5ea8a3a6")
 _LINK_ID_NAMESPACE = UUID("3e73e1b4-6b0f-4cbf-a0f4-9029a4f9f2b7")
@@ -251,7 +251,7 @@ def transform_person_images_to_media(
     return list(assets_by_id.values()), links
 
 
-def upsert_media_assets(db: Client, assets: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def upsert_media_assets(db: DbSession, assets: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     payload = [dict(asset) for asset in assets]
     if not payload:
         return []
@@ -265,7 +265,7 @@ def upsert_media_assets(db: Client, assets: Iterable[Mapping[str, Any]]) -> list
     return data if isinstance(data, list) else []
 
 
-def upsert_media_links(db: Client, links: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def upsert_media_links(db: DbSession, links: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     payload = [dict(link) for link in links]
     if not payload:
         return []
@@ -278,7 +278,7 @@ def upsert_media_links(db: Client, links: Iterable[Mapping[str, Any]]) -> list[d
 
 
 def upsert_media_with_links(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     entity_type: str,
@@ -301,7 +301,7 @@ def upsert_media_with_links(
 
 
 def update_ingest_status(
-    db: Client,
+    db: DbSession,
     asset_id: str,
     status: str,
     *,
@@ -358,7 +358,7 @@ def update_ingest_status(
 
 
 def update_asset_with_mirror_result(
-    db: Client,
+    db: DbSession,
     asset_id: str,
     *,
     sha256: str,
@@ -422,7 +422,7 @@ def update_asset_with_mirror_result(
 
 
 def fetch_assets_for_mirroring(
-    db: Client,
+    db: DbSession,
     *,
     source: str | None = None,
     status: str = "pending",

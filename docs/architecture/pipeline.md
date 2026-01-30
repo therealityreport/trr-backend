@@ -69,18 +69,49 @@ make pipeline-list
 
 ## Resume Logic
 
-The pipeline supports resuming interrupted runs via input hash comparison:
+The pipeline supports resuming interrupted runs via stage-specific input hash comparison:
 
-1. Each stage computes an `input_hash` from:
-   - Run configuration (from_stage, to_stage, show_filters, force)
-   - List of show_ids being processed
+### Stage-Specific Hash Computation
 
-2. When resuming (`--resume <run-id>`), stages are skipped if:
-   - Prior status = `success`
-   - Prior `input_hash` matches current computed hash
-   - `--force` flag is NOT set
+Each stage computes its own `input_hash` based on what it actually depends on:
 
-3. If inputs change (different shows, different config), the stage re-runs.
+| Stage | Hash Inputs |
+|-------|-------------|
+| Stage 1 (collect) | `show_filters`, `dry_run` |
+| Stage 2-6 | `show_filters`, `show_ids`, `dry_run` |
+
+**Excluded from hash:** `force`, `from_stage`, `to_stage`, `verbose`, `skip_s3`
+
+**Why stage-specific?** Stage 1 doesn't know `show_ids` yet (it discovers them). Including `dry_run` prevents resuming a dry-run into a real run.
+
+### Skip Conditions
+
+When resuming (`--resume <run-id>`), a stage is skipped if ALL conditions are met:
+
+1. Prior status = `success`
+2. Prior `input_hash` matches current computed hash
+3. `--force` flag is NOT set
+4. Stage 1 ALWAYS requires `manifest_key` to exist (needed for hydration)
+5. Other stages require `manifest_key` when `skip_s3=False`
+
+### Context Hydration
+
+When Stage 1 is skipped, `context.show_ids` is populated from the Stage 1 manifest. This ensures subsequent stages know which shows to process.
+
+### Show Snapshot Behavior
+
+**When resuming a run, Stage 1 uses the prior show snapshot from its manifest rather than re-expanding `--all`.** This ensures reproducible runs - the same set of shows is processed regardless of database changes since the original run.
+
+To re-collect shows with current database contents, start a fresh run (omit `--resume`).
+
+### Local Development with `--skip-s3`
+
+Runs executed with `--skip-s3` do not persist manifests to S3. This affects resume behavior:
+
+- **Stage 1 will always re-run on resume** because `manifest_key` is required for hydration (skip condition #4)
+- **Other stages may skip on resume** if `skip_s3=True` was also used during the resume (skip condition #5 only applies when `skip_s3=False`)
+
+This is intentional: local development runs can safely re-run Stage 1 to re-materialize `show_ids`. Production runs should always write manifests.
 
 ## Manifests
 

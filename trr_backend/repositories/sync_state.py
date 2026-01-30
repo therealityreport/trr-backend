@@ -4,8 +4,8 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from supabase import Client
-from trr_backend.db.supabase import is_timeout_error
+from trr_backend.db.admin import is_timeout_error
+from trr_backend.db.session import DbSession
 
 
 class SyncStateRepositoryError(RuntimeError):
@@ -37,7 +37,7 @@ def _timeout_help_message(exc: Exception, url: str) -> str:
     )
 
 
-def assert_core_sync_state_table_exists(db: Client) -> None:
+def assert_core_sync_state_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.sync_state` is missing in Supabase.
     """
@@ -131,7 +131,7 @@ def _truncate_error(value: object, *, max_length: int = 1000) -> str | None:
 
 
 def fetch_sync_state_map(
-    db: Client,
+    db: DbSession,
     *,
     table_name: str,
     show_ids: Iterable[str],
@@ -166,7 +166,7 @@ def fetch_sync_state_map(
 
 
 def _upsert_sync_state(
-    db: Client,
+    db: DbSession,
     *,
     table_name: str,
     show_id: str,
@@ -196,12 +196,12 @@ def _upsert_sync_state(
         )
 
 
-def mark_sync_state_in_progress(db: Client, *, table_name: str, show_id: str) -> None:
+def mark_sync_state_in_progress(db: DbSession, *, table_name: str, show_id: str) -> None:
     _upsert_sync_state(db, table_name=table_name, show_id=show_id, status="in_progress", last_error=None)
 
 
 def mark_sync_state_success(
-    db: Client,
+    db: DbSession,
     *,
     table_name: str,
     show_id: str,
@@ -220,7 +220,7 @@ def mark_sync_state_success(
 
 
 def mark_sync_state_failed(
-    db: Client,
+    db: DbSession,
     *,
     table_name: str,
     show_id: str,

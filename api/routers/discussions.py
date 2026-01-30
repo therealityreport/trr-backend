@@ -16,7 +16,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 
-from api.auth import CurrentUser, get_user_supabase_client
+from api.auth import CurrentUser, get_user_db_session
 from api.deps import (
     SupabaseClient,
     get_list_result,
@@ -173,7 +173,7 @@ def create_thread(
     require_single_result(episode_response, "Episode")
 
     # Create thread using user-scoped client (RLS enforces created_by = auth.uid())
-    user_db = get_user_supabase_client(user)
+    user_db = get_user_db_session(user)
     response = (
         user_db.schema("social")
         .table("threads")
@@ -315,7 +315,7 @@ def create_post(
             raise HTTPException(status_code=400, detail="Parent post is not in this thread")
 
     # Create post using user-scoped client (RLS enforces user_id = auth.uid())
-    user_db = get_user_supabase_client(user)
+    user_db = get_user_db_session(user)
     insert_data = {
         "thread_id": str(thread_id),
         "body": post.body,
@@ -382,7 +382,7 @@ def toggle_reaction(
         raise HTTPException(status_code=403, detail="Thread is locked")
 
     # Use user-scoped client for writes
-    user_db = get_user_supabase_client(user)
+    user_db = get_user_db_session(user)
 
     # Check if reaction already exists
     existing_response = (

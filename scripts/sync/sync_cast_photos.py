@@ -34,8 +34,8 @@ try:
 except Exception:  # noqa: BLE001
     requests = None
 
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.db.postgrest_cache import is_pgrst204_error
-from trr_backend.db.supabase import create_supabase_admin_client
 from trr_backend.ingestion.cast_photo_sources import fetch_all_cast_photos
 from trr_backend.repositories.cast_photos import (
     assert_core_cast_photos_table_exists,

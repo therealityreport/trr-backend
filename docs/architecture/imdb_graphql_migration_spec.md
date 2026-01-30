@@ -541,7 +541,7 @@ resp = requests.post(
 # Use unified client
 from trr_backend.integrations.imdb.graphql_persisted_client import ImdbGraphQLPersistedClient
 
-client = ImdbGraphQLPersistedClient()
+client = ImdbGraphQLPersistedClient ()
 result = client.execute_query(
     operation_name="TitleListQuery",
     sha256_hash="...",

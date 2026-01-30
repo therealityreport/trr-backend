@@ -25,7 +25,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.integrations.fandom import FandomGalleryImage, fetch_fandom_gallery
 from trr_backend.repositories.cast_photos import upsert_cast_photos
 from trr_backend.repositories.people import fetch_people_by_imdb_ids

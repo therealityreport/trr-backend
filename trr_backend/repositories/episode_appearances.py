@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class EpisodeAppearancesRepositoryError(RuntimeError):
     pass
 
 
-def assert_core_episode_appearances_table_exists(db: Client) -> None:
+def assert_core_episode_appearances_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.episode_appearances` is missing in Supabase.
     """
@@ -79,7 +79,7 @@ def assert_core_episode_appearances_table_exists(db: Client) -> None:
 
 
 def upsert_episode_appearances(
-    db: Client,
+    db: DbSession,
     rows: Iterable[Mapping[str, Any]],
     *,
     on_conflict: str = "show_id,person_id",

@@ -10,9 +10,11 @@ Supabase-first data pipeline and API for reality TV show/cast metadata.
 
 ## Setup
 
+Python 3.11+ is required.
+
 1. **Create venv + install deps**
    ```bash
-   python3 -m venv .venv
+   python3.11 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    ```

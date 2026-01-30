@@ -14,7 +14,7 @@ from scripts._sync_common import (
     filter_show_rows_for_sync,
     load_env_and_db,
 )
-from supabase import Client
+from trr_backend.db.session import DbSession
 from trr_backend.integrations.tmdb.client import TmdbClientError, fetch_tv_details, resolve_api_key
 from trr_backend.media.s3_mirror import mirror_tmdb_logo_row
 from trr_backend.repositories.shows import update_show
@@ -85,7 +85,7 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return ordered
 
 
-def _fetch_show_rows(db: Client, args: argparse.Namespace) -> list[dict[str, Any]]:
+def _fetch_show_rows(db: DbSession, args: argparse.Namespace) -> list[dict[str, Any]]:
     fields = "id,name,tmdb_id,networks,tmdb_network_ids,tmdb_production_company_ids,most_recent_episode"
     rows: list[dict[str, Any]] = []
 
@@ -209,7 +209,7 @@ def _extract_company_rows(details: Mapping[str, Any], *, fetched_at: str) -> lis
     return rows
 
 
-def _upsert_rows(db: Client, *, table: str, rows: list[dict[str, Any]], on_conflict: str) -> list[dict[str, Any]]:
+def _upsert_rows(db: DbSession, *, table: str, rows: list[dict[str, Any]], on_conflict: str) -> list[dict[str, Any]]:
     if not rows:
         return []
     response = db.schema("core").table(table).upsert(rows, on_conflict=on_conflict).execute()
@@ -219,7 +219,7 @@ def _upsert_rows(db: Client, *, table: str, rows: list[dict[str, Any]], on_confl
     return data if isinstance(data, list) else []
 
 
-def _fetch_entities_for_logo(db: Client, *, table: str, ids: list[int]) -> list[dict[str, Any]]:
+def _fetch_entities_for_logo(db: DbSession, *, table: str, ids: list[int]) -> list[dict[str, Any]]:
     if not ids:
         return []
     response = db.schema("core").table(table).select(NETWORK_FIELDS).in_("id", ids).execute()
@@ -230,7 +230,7 @@ def _fetch_entities_for_logo(db: Client, *, table: str, ids: list[int]) -> list[
 
 
 def _mirror_logo_rows(
-    db: Client,
+    db: DbSession,
     *,
     table: str,
     kind: str,

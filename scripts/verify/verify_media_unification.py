@@ -161,7 +161,7 @@ def main() -> int:
 
     local_url = _detect_local_db_url()
     if local_url:
-        print(f"Using local URL from supabase status: {local_url}")
+        print(f"Using local URL from Supabase status: {local_url}")
         if _run_psql(local_url, sql_path):
             return 0 if _run_scoped_grep() else 1
 

@@ -7,17 +7,17 @@ import os
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from trr_backend.db.supabase import call_rpc_with_cache_reload_hint
+from trr_backend.db.admin import call_rpc_with_cache_reload_hint
 from trr_backend.repositories.media_assets import upsert_media_with_links
 
 if TYPE_CHECKING:
-    from supabase import Client
+    from trr_backend.db.session import DbSession
 else:
-    Client = Any
+    DbSession = Any
 
 
 def upsert_person_images(
-    db: Client,
+    db: DbSession,
     image_rows: list[dict[str, Any]],
     *,
     verbose: bool = False,

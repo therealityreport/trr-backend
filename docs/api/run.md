@@ -36,11 +36,13 @@ When origins are explicitly set:
 
 ## Running Locally
 
+Python 3.11+ is required.
+
 ### 1. Set up Python environment
 
 ```bash
 # Create and activate virtual environment
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Install dependencies

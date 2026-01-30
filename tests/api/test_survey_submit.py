@@ -9,6 +9,7 @@ def test_submit_survey_uses_rpc():
 
     # For now, just verify the endpoint structure exists
     from api.routers.surveys import submit_survey
+
     assert callable(submit_survey)
 
 

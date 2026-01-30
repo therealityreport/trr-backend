@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class ImdbSeriesRepositoryError(RuntimeError):
@@ -15,7 +15,7 @@ def _raise_for_supabase_error(response: Any, context: str) -> None:
         raise ImdbSeriesRepositoryError(f"Supabase error during {context}: {response.error}")
 
 
-def upsert_imdb_series(db: Client, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def upsert_imdb_series(db: DbSession, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     payload = [dict(r) for r in rows]
     if not payload:
         return []

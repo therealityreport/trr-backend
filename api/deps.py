@@ -1,6 +1,4 @@
-"""
-Dependency injection for Supabase client and other shared resources.
-"""
+"""Dependency injection for DB access and shared resources."""
 
 from __future__ import annotations
 
@@ -13,8 +11,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException
 
-from supabase import Client, create_client
-from trr_backend.db.supabase import create_supabase_admin_client
+from trr_backend.db.session import DbSession, get_db_session
 
 # Load environment variables if running standalone
 try:
@@ -25,6 +22,8 @@ except ImportError:
     pass
 
 logger = logging.getLogger(__name__)
+
+Client = DbSession
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
@@ -86,16 +85,17 @@ def get_supabase_service_key() -> str:
 
 def get_supabase_client() -> Client:
     """
-    Returns a Supabase client using the anon key (for public read operations).
+    Returns a DB session for public read operations.
     """
-    return create_client(get_supabase_url(), get_supabase_anon_key())
+    return get_db_session()
 
 
 def get_supabase_admin_client() -> Client:
     """
-    Returns a Supabase client using the service role key (bypasses RLS).
-    Use only for admin operations like updating aggregates.
+    Returns a DB session for admin operations.
     """
+    from trr_backend.db.admin import create_supabase_admin_client
+
     return create_supabase_admin_client()
 
 

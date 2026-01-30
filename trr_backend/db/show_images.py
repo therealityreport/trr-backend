@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from supabase import Client
+from trr_backend.db.session import DbSession
 
 
 class ShowImagesError(RuntimeError):
@@ -11,7 +11,7 @@ class ShowImagesError(RuntimeError):
 
 
 def list_tmdb_show_images(
-    db: Client,
+    db: DbSession,
     *,
     show_id: UUID | str,
     kind: str | None = None,
