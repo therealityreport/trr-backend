@@ -186,6 +186,7 @@ def import_images(
     from urllib.parse import urlparse
 
     from trr_backend.media.s3_mirror import (
+        build_cast_photo_s3_key,
         build_hosted_url,
         build_season_image_s3_key,
         get_s3_bucket,
@@ -195,26 +196,50 @@ def import_images(
     )
     from trr_backend.repositories.web_scrape_images import (
         create_media_asset_from_scrape,
-        create_media_link_for_season,
+        create_media_link_for_entity,
         find_asset_by_sha256,
+        get_person_identifier,
         get_season_and_show_identifiers,
     )
-
-    # Get show identifier for S3 path
-    identifiers = get_season_and_show_identifiers(db, str(request.show_id), request.season_number)
-    if not identifiers:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Season {request.season_number} not found for show {request.show_id}",
-        )
-
-    season_id = identifiers["season_id"]
-    show_identifier = identifiers["show_identifier"]
 
     # Extract domain for source naming
     parsed_source = urlparse(str(request.source_url))
     source_domain = parsed_source.netloc.replace("www.", "")
     source = f"web_scrape:{source_domain}"
+
+    # Entity-specific setup
+    if request.entity_type == "season":
+        identifiers = get_season_and_show_identifiers(db, str(request.show_id), request.season_number)
+        if not identifiers:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Season {request.season_number} not found for show {request.show_id}",
+            )
+        entity_id = identifiers["season_id"]
+        path_identifier = identifiers["show_identifier"]
+        link_context = {
+            "entity_type": "season",
+            "entity_id": entity_id,
+            "show_id": str(request.show_id),
+            "season_number": request.season_number,
+            "source_url": str(request.source_url),
+        }
+
+    elif request.entity_type == "person":
+        person_info = get_person_identifier(db, str(request.person_id))
+        if not person_info:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Person {request.person_id} not found",
+            )
+        entity_id = str(request.person_id)
+        path_identifier = person_info["identifier"]
+        link_context = {
+            "entity_type": "person",
+            "entity_id": entity_id,
+            "person_full_name": person_info.get("full_name"),
+            "source_url": str(request.source_url),
+        }
 
     s3_client = get_s3_client()
     bucket = get_s3_bucket()
@@ -239,14 +264,15 @@ def import_images(
                 logger.info(f"Image {idx} already exists with sha256={sha256[:16]}...")
                 skipped_count += 1
 
-                # Still create link to season
-                create_media_link_for_season(
+                # Still create link to entity
+                create_media_link_for_entity(
                     db,
-                    season_id=season_id,
+                    entity_type=request.entity_type,
+                    entity_id=entity_id,
                     media_asset_id=existing["id"],
                     kind="gallery",
                     position=idx,
-                    context={"source_page": str(request.source_url)},
+                    context=link_context,
                 )
 
                 assets.append(
@@ -260,15 +286,23 @@ def import_images(
                 )
                 continue
 
-            # Build S3 key and upload
+            # Build S3 key based on entity type
             ext = guess_ext_from_content_type(content_type)
-            s3_key = build_season_image_s3_key(
-                show_identifier=show_identifier,
-                season_number=request.season_number,
-                source="web_scrape",
-                sha256=sha256,
-                ext=ext,
-            )
+            if request.entity_type == "season":
+                s3_key = build_season_image_s3_key(
+                    show_identifier=path_identifier,
+                    season_number=request.season_number,
+                    source="web_scrape",
+                    sha256=sha256,
+                    ext=ext,
+                )
+            elif request.entity_type == "person":
+                s3_key = build_cast_photo_s3_key(
+                    person_identifier=path_identifier,
+                    source="web_scrape",
+                    sha256=sha256,
+                    ext=ext,
+                )
 
             etag, file_size = upload_bytes_to_s3(
                 s3_client,
@@ -301,14 +335,15 @@ def import_images(
                 },
             )
 
-            # Create media link to season
-            create_media_link_for_season(
+            # Create media link to entity
+            create_media_link_for_entity(
                 db,
-                season_id=season_id,
+                entity_type=request.entity_type,
+                entity_id=entity_id,
                 media_asset_id=asset["id"],
                 kind="gallery",
                 position=idx,
-                context={"source_page": str(request.source_url)},
+                context=link_context,
             )
 
             imported_count += 1
