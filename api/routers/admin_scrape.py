@@ -127,7 +127,7 @@ class ImportResponse(BaseModel):
 @router.post("/preview", response_model=ScrapePreviewResponse)
 def preview_scrape(
     request: ScrapePreviewRequest,
-    _: AdminUser = Depends(),
+    _: AdminUser,
 ) -> ScrapePreviewResponse:
     """
     Scrape a URL and return image candidates for preview.
@@ -172,7 +172,7 @@ def preview_scrape(
 def import_images(
     request: ImportRequest,
     db: SupabaseAdminClient,
-    _: AdminUser = Depends(),
+    _: AdminUser,
 ) -> ImportResponse:
     """
     Import selected images to S3 and save metadata to database.
