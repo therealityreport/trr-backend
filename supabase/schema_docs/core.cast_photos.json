@@ -321,6 +321,30 @@
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_by_firebase_uid",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_reason",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -425,6 +449,14 @@
       "definition": "CREATE INDEX core_cast_photos_source_source_image_id_idx ON core.cast_photos USING btree (source, source_image_id)"
     },
     {
+      "name": "idx_cast_photos_archived",
+      "columns": [
+        "archived_at) WHERE (archived_at IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_cast_photos_archived ON core.cast_photos USING btree (archived_at) WHERE (archived_at IS NOT NULL)"
+    },
+    {
       "name": "idx_cast_photos_source_tmdb",
       "columns": [
         "person_id",
@@ -475,6 +507,9 @@
     "hosted_content_type": "example",
     "hosted_bytes": 0,
     "hosted_etag": "example",
-    "hosted_at": "1970-01-01T00:00:00Z"
+    "hosted_at": "1970-01-01T00:00:00Z",
+    "archived_at": "1970-01-01T00:00:00Z",
+    "archived_by_firebase_uid": "example",
+    "archived_reason": "example"
   }
 }

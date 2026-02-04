@@ -54,7 +54,10 @@ class TestRefreshPersonImages:
         mock_response = MagicMock()
         mock_response.data = []
         mock_response.error = None
-        mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = mock_response
+        query = (
+            mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        )
+        query.execute.return_value = mock_response
 
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
             response = client.post(
@@ -82,7 +85,10 @@ class TestRefreshPersonImages:
         mock_response = MagicMock()
         mock_response.data = [person_data]
         mock_response.error = None
-        mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = mock_response
+        query = (
+            mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        )
+        query.execute.return_value = mock_response
 
         # Mock the module-level functions
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -137,7 +143,10 @@ class TestRefreshPersonImages:
         mock_response = MagicMock()
         mock_response.data = [person_data]
         mock_response.error = None
-        mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = mock_response
+        query = (
+            mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        )
+        query.execute.return_value = mock_response
 
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
             with patch(

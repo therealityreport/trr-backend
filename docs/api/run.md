@@ -19,8 +19,9 @@ The API requires the following environment variables to be set:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `SCREENALYTICS_SERVICE_TOKEN` | Shared service token for Screenalytics endpoints | `change-me-long-random-token` |
+| `SCREENALYTICS_API_URL` | Base URL for the Screenalytics service (auto-count) | `https://screenalytics.example.com` |
 
-If you call `/api/v1/screenalytics/*` or `/api/v1/screenalytics/v2/*`, the backend must have `SCREENALYTICS_SERVICE_TOKEN` set and clients must send it as a Bearer token.
+If you call `/api/v1/screenalytics/*` or `/api/v1/screenalytics/v2/*`, the backend must have `SCREENALYTICS_SERVICE_TOKEN` set and clients must send it as a Bearer token. If the backend needs to call Screenalytics for auto-counting, set `SCREENALYTICS_API_URL` to the Screenalytics base URL.
 
 ### Redis (Optional)
 

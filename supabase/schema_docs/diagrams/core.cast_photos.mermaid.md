@@ -44,5 +44,8 @@ erDiagram
         INTEGER hosted_bytes
         TEXT hosted_etag
         TIMESTAMP_WITH_TIME_ZONE hosted_at
+        TIMESTAMP_WITH_TIME_ZONE archived_at
+        TEXT archived_by_firebase_uid
+        TEXT archived_reason
     }
 ```

@@ -162,6 +162,86 @@ def _prune_person_s3_objects(db: SupabaseAdminClient, person_identifier: str) ->
         return 0
 
 
+def _auto_count_cast_photos(
+    db: SupabaseAdminClient,
+    person_id: str,
+    sources: list[SourceType],
+    *,
+    photo_ids: list[str] | None = None,
+) -> tuple[int, int, int]:
+    """Auto-count people for selected cast photos. Returns (attempted, succeeded, failed)."""
+    auto_counts_attempted = 0
+    auto_counts_succeeded = 0
+    auto_counts_failed = 0
+
+    candidate_sources = [s for s in sources if s in ("tmdb", "fandom", "fandom-gallery")]
+    if not candidate_sources:
+        return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
+    if photo_ids is not None and not photo_ids:
+        return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
+
+    try:
+        from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
+        from trr_backend.repositories.cast_photo_tags import (
+            get_tags_by_photo_ids,
+            has_manual_tags,
+            upsert_cast_photo_tags,
+        )
+
+        query = (
+            db.schema("core")
+            .table("cast_photos")
+            .select("id, hosted_url, url, people_names, source")
+            .eq("person_id", person_id)
+            .in_("source", candidate_sources)
+        )
+        if photo_ids:
+            query = query.in_("id", photo_ids)
+        response = query.execute()
+
+        if hasattr(response, "error") and response.error:
+            logger.warning("Auto-count query failed for %s: %s", person_id, response.error)
+            return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
+
+        rows = response.data or []
+        if not rows:
+            return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
+
+        tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in rows])
+        for row in rows:
+            if row.get("people_names"):
+                continue
+            tag_row = tag_rows.get(str(row["id"]))
+            if has_manual_tags(tag_row):
+                continue
+            if tag_row and tag_row.get("people_count") is not None:
+                continue
+            image_url = row.get("hosted_url") or row.get("url")
+            if not image_url:
+                continue
+            auto_counts_attempted += 1
+            try:
+                result = count_people(image_url)
+                upsert_cast_photo_tags(
+                    db,
+                    cast_photo_id=str(row["id"]),
+                    people_names=None,
+                    people_ids=None,
+                    people_count=result.people_count,
+                    people_count_source="auto",
+                    detector=result.detector,
+                    updated_by_firebase_uid="system:auto",
+                )
+                auto_counts_succeeded += 1
+            except ScreenalyticsClientError as exc:
+                auto_counts_failed += 1
+                logger.warning("Auto-count failed for %s: %s", row.get("id"), exc)
+    except Exception as exc:
+        logger.exception("Auto-count setup failed for %s: %s", person_id, exc)
+
+    return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -214,14 +294,19 @@ def refresh_person_images(
 
     # 3. Upsert to database
     photos_upserted = 0
+    upserted_photo_ids: list[str] = []
     if photos:
         imdb_photos = [p for p in photos if p.get("source") == "imdb"]
         other_photos = [p for p in photos if p.get("source") != "imdb"]
         try:
             if imdb_photos:
-                photos_upserted += len(upsert_cast_photos(db, imdb_photos, dedupe_on="source_image_id"))
+                upserted = upsert_cast_photos(db, imdb_photos, dedupe_on="source_image_id")
+                photos_upserted += len(upserted)
+                upserted_photo_ids.extend([str(row["id"]) for row in upserted if row.get("id")])
             if other_photos:
-                photos_upserted += len(upsert_cast_photos(db, other_photos, dedupe_on="image_url_canonical"))
+                upserted = upsert_cast_photos(db, other_photos, dedupe_on="image_url_canonical")
+                photos_upserted += len(upserted)
+                upserted_photo_ids.extend([str(row["id"]) for row in upserted if row.get("id")])
         except Exception as exc:
             logger.exception(f"Upsert error for {person_id}")
             errors.append(f"Upsert: {exc}")
@@ -237,63 +322,13 @@ def refresh_person_images(
             logger.exception(f"Mirror error for {person_id}")
             errors.append(f"Mirror: {exc}")
 
-    # 4.5 Auto-count people for TMDb/Fandom photos (only when no manual tags)
-    auto_counts_attempted = 0
-    auto_counts_succeeded = 0
-    auto_counts_failed = 0
-    try:
-        from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
-        from trr_backend.repositories.cast_photo_tags import (
-            get_tags_by_photo_ids,
-            has_manual_tags,
-            upsert_cast_photo_tags,
-        )
-
-        candidate_sources = [s for s in sources if s in ("tmdb", "fandom", "fandom-gallery")]
-        if candidate_sources:
-            response = (
-                db.schema("core")
-                .table("cast_photos")
-                .select("id, hosted_url, url, people_names, source")
-                .eq("person_id", person_id_str)
-                .in_("source", candidate_sources)
-                .execute()
-            )
-            if hasattr(response, "error") and response.error:
-                logger.warning("Auto-count query failed for %s: %s", person_id_str, response.error)
-            else:
-                rows = response.data or []
-                tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in rows])
-                for row in rows:
-                    if row.get("people_names"):
-                        continue
-                    tag_row = tag_rows.get(str(row["id"]))
-                    if has_manual_tags(tag_row):
-                        continue
-                    if tag_row and tag_row.get("people_count") is not None:
-                        continue
-                    image_url = row.get("hosted_url") or row.get("url")
-                    if not image_url:
-                        continue
-                    auto_counts_attempted += 1
-                    try:
-                        result = count_people(image_url)
-                        upsert_cast_photo_tags(
-                            db,
-                            cast_photo_id=str(row["id"]),
-                            people_names=None,
-                            people_ids=None,
-                            people_count=result.people_count,
-                            people_count_source="auto",
-                            detector=result.detector,
-                            updated_by_firebase_uid="system:auto",
-                        )
-                        auto_counts_succeeded += 1
-                    except ScreenalyticsClientError as exc:
-                        auto_counts_failed += 1
-                        logger.warning("Auto-count failed for %s: %s", row.get("id"), exc)
-    except Exception as exc:
-        logger.exception("Auto-count setup failed for %s: %s", person_id_str, exc)
+    # 4.5 Auto-count people for newly upserted TMDb/Fandom photos (only when no manual tags)
+    auto_counts_attempted, auto_counts_succeeded, auto_counts_failed = _auto_count_cast_photos(
+        db,
+        person_id_str,
+        sources,
+        photo_ids=upserted_photo_ids,
+    )
 
     # 5. Prune orphaned S3 objects
     photos_pruned = 0
@@ -340,6 +375,7 @@ async def refresh_person_images_stream(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         errors: list[str] = []
+        upserted_photo_ids: list[str] = []
 
         # 1. Get person
         person = _get_person_details(db, person_id_str)
@@ -378,9 +414,13 @@ async def refresh_person_images_stream(
             other_photos = [p for p in photos if p.get("source") != "imdb"]
             try:
                 if imdb_photos:
-                    photos_upserted += len(upsert_cast_photos(db, imdb_photos, dedupe_on="source_image_id"))
+                    upserted = upsert_cast_photos(db, imdb_photos, dedupe_on="source_image_id")
+                    photos_upserted += len(upserted)
+                    upserted_photo_ids.extend([str(row["id"]) for row in upserted if row.get("id")])
                 if other_photos:
-                    photos_upserted += len(upsert_cast_photos(db, other_photos, dedupe_on="image_url_canonical"))
+                    upserted = upsert_cast_photos(db, other_photos, dedupe_on="image_url_canonical")
+                    photos_upserted += len(upserted)
+                    upserted_photo_ids.extend([str(row["id"]) for row in upserted if row.get("id")])
             except Exception as exc:
                 errors.append(str(exc))
             yield f"event: progress\ndata: {json.dumps({'stage': 'upserting', 'current': photos_upserted})}\n\n"
@@ -416,6 +456,14 @@ async def refresh_person_images_stream(
             yield f"event: progress\ndata: {json.dumps({'stage': 'pruning'})}\n\n"
             photos_pruned = _prune_person_s3_objects(db, imdb_person_id or person_id_str)
 
+        # 5.5 Auto-count people for newly upserted TMDb/Fandom photos (only when no manual tags)
+        auto_counts_attempted, auto_counts_succeeded, auto_counts_failed = _auto_count_cast_photos(
+            db,
+            person_id_str,
+            sources,
+            photo_ids=upserted_photo_ids,
+        )
+
         # 6. Complete
         complete_data = {
             "person_id": person_id_str,
@@ -424,6 +472,9 @@ async def refresh_person_images_stream(
             "photos_mirrored": photos_mirrored,
             "photos_failed": photos_failed,
             "photos_pruned": photos_pruned,
+            "auto_counts_attempted": auto_counts_attempted,
+            "auto_counts_succeeded": auto_counts_succeeded,
+            "auto_counts_failed": auto_counts_failed,
             "errors": errors,
         }
         yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"

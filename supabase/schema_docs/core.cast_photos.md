@@ -44,6 +44,9 @@
 | hosted_bytes | integer | YES |  | NO | NEVER |
 | hosted_etag | text | YES |  | NO | NEVER |
 | hosted_at | timestamp with time zone | YES |  | NO | NEVER |
+| archived_at | timestamp with time zone | YES |  | NO | NEVER |
+| archived_by_firebase_uid | text | YES |  | NO | NEVER |
+| archived_reason | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -69,6 +72,7 @@ id
 - core_cast_photos_imdb_person_id_idx (non-unique): imdb_person_id
 - core_cast_photos_person_id_idx (non-unique): person_id
 - core_cast_photos_source_source_image_id_idx (non-unique): source, source_image_id
+- idx_cast_photos_archived (non-unique): archived_at) WHERE (archived_at IS NOT NULL
 - idx_cast_photos_source_tmdb (non-unique): person_id, source) WHERE (source = 'tmdb'::text
 
 ## RLS Enabled
@@ -118,6 +122,9 @@ false
   "hosted_content_type": "example",
   "hosted_bytes": 0,
   "hosted_etag": "example",
-  "hosted_at": "1970-01-01T00:00:00Z"
+  "hosted_at": "1970-01-01T00:00:00Z",
+  "archived_at": "1970-01-01T00:00:00Z",
+  "archived_by_firebase_uid": "example",
+  "archived_reason": "example"
 }
 ```
