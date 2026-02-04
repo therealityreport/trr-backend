@@ -13,6 +13,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from typing import Literal
 from urllib.parse import unquote, urlparse
@@ -283,6 +284,7 @@ def import_images(
         guess_ext_from_content_type,
         upload_bytes_to_s3,
     )
+    from trr_backend.repositories.media_assets import update_asset_with_mirror_result
     from trr_backend.repositories.web_scrape_images import (
         create_media_asset_from_scrape,
         create_media_link_for_entity,
@@ -363,12 +365,57 @@ def import_images(
                 referer=str(request.source_url),
             )
 
+            # Build S3 key based on entity type (used for mirror updates too)
+            ext = guess_ext_from_content_type(content_type)
+            if request.entity_type == "season":
+                s3_key = build_season_image_s3_key(
+                    show_identifier=path_identifier,
+                    season_number=request.season_number,
+                    source="web_scrape",
+                    sha256=sha256,
+                    ext=ext,
+                )
+            elif request.entity_type == "person":
+                s3_key = build_cast_photo_s3_key(
+                    person_identifier=path_identifier,
+                    source="web_scrape",
+                    sha256=sha256,
+                    ext=ext,
+                )
+
             # Check for duplicate
             existing = find_asset_by_sha256(db, sha256)
             if existing:
                 # Asset exists - just create a link if needed
                 logger.info(f"Image {idx} already exists with sha256={sha256[:16]}...")
                 skipped_count += 1
+
+                # If existing asset is not mirrored, mirror it now using the downloaded bytes
+                if not existing.get("hosted_url"):
+                    try:
+                        etag, file_size = upload_bytes_to_s3(
+                            s3_client,
+                            bucket=bucket,
+                            key=s3_key,
+                            data=image_data,
+                            content_type=content_type,
+                        )
+                        hosted_url = build_hosted_url(s3_key)
+                        update_asset_with_mirror_result(
+                            db,
+                            asset_id=existing["id"],
+                            sha256=sha256,
+                            hosted_bucket=bucket,
+                            hosted_key=s3_key,
+                            hosted_url=hosted_url,
+                            hosted_bytes=file_size,
+                            hosted_content_type=content_type,
+                            hosted_etag=etag,
+                            completed_at=datetime.now(UTC).isoformat(),
+                        )
+                        existing["hosted_url"] = hosted_url
+                    except Exception as exc:
+                        logger.warning("Failed to mirror existing media_asset %s: %s", existing.get("id"), exc)
 
                 # Still create link to entity
                 create_media_link_for_entity(
@@ -401,7 +448,8 @@ def import_images(
                     )
 
                 if request.entity_type == "person" or matched_person:
-                    auto_count_assets[existing["id"]] = existing.get("hosted_url") or existing.get("source_url") or str(img.url)
+                    if existing.get("hosted_url"):
+                        auto_count_assets[existing["id"]] = existing.get("hosted_url")
 
                 assets.append(
                     MediaAssetSummary(
@@ -416,24 +464,6 @@ def import_images(
                     )
                 )
                 continue
-
-            # Build S3 key based on entity type
-            ext = guess_ext_from_content_type(content_type)
-            if request.entity_type == "season":
-                s3_key = build_season_image_s3_key(
-                    show_identifier=path_identifier,
-                    season_number=request.season_number,
-                    source="web_scrape",
-                    sha256=sha256,
-                    ext=ext,
-                )
-            elif request.entity_type == "person":
-                s3_key = build_cast_photo_s3_key(
-                    person_identifier=path_identifier,
-                    source="web_scrape",
-                    sha256=sha256,
-                    ext=ext,
-                )
 
             etag, file_size = upload_bytes_to_s3(
                 s3_client,
@@ -497,7 +527,8 @@ def import_images(
                 )
 
             if request.entity_type == "person" or matched_person:
-                auto_count_assets[asset["id"]] = hosted_url or str(img.url)
+                if hosted_url:
+                    auto_count_assets[asset["id"]] = hosted_url
 
             imported_count += 1
             assets.append(
@@ -586,6 +617,7 @@ async def import_images_stream(
         guess_ext_from_content_type,
         upload_bytes_to_s3,
     )
+    from trr_backend.repositories.media_assets import update_asset_with_mirror_result
     from trr_backend.repositories.web_scrape_images import (
         create_media_asset_from_scrape,
         create_media_link_for_entity,
@@ -643,6 +675,7 @@ async def import_images_stream(
         skipped_count = 0
         errors: list[str] = []
         assets: list[dict] = []
+        auto_count_assets: dict[str, str] = {}
         total = len(request.images)
 
         for idx, img in enumerate(request.images):
@@ -672,11 +705,60 @@ async def import_images_stream(
                     referer=str(request.source_url),
                 )
 
+                # Build S3 key based on entity type (used for mirror updates too)
+                ext = guess_ext_from_content_type(content_type)
+                if request.entity_type == "season":
+                    s3_key = build_season_image_s3_key(
+                        show_identifier=path_identifier,
+                        season_number=request.season_number,
+                        source="web_scrape",
+                        sha256=sha256,
+                        ext=ext,
+                    )
+                elif request.entity_type == "person":
+                    s3_key = build_cast_photo_s3_key(
+                        person_identifier=path_identifier,
+                        source="web_scrape",
+                        sha256=sha256,
+                        ext=ext,
+                    )
+
                 # Check for duplicate
                 existing = find_asset_by_sha256(db, sha256)
                 if existing:
                     logger.info(f"Image {idx} already exists with sha256={sha256[:16]}...")
                     skipped_count += 1
+
+                    # If existing asset is not mirrored, mirror it now using the downloaded bytes
+                    if not existing.get("hosted_url"):
+                        try:
+                            etag, file_size = upload_bytes_to_s3(
+                                s3_client,
+                                bucket=bucket,
+                                key=s3_key,
+                                data=image_data,
+                                content_type=content_type,
+                            )
+                            hosted_url = build_hosted_url(s3_key)
+                            update_asset_with_mirror_result(
+                                db,
+                                asset_id=existing["id"],
+                                sha256=sha256,
+                                hosted_bucket=bucket,
+                                hosted_key=s3_key,
+                                hosted_url=hosted_url,
+                                hosted_bytes=file_size,
+                                hosted_content_type=content_type,
+                                hosted_etag=etag,
+                                completed_at=datetime.now(UTC).isoformat(),
+                            )
+                            existing["hosted_url"] = hosted_url
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to mirror existing media_asset %s: %s",
+                                existing.get("id"),
+                                exc,
+                            )
 
                     # Still create link to entity
                     create_media_link_for_entity(
@@ -721,6 +803,12 @@ async def import_images_stream(
                         }
                     )
 
+                    if request.entity_type == "person" or matched_person:
+                        if existing.get("hosted_url"):
+                            auto_count_assets[existing["id"]] = existing.get(
+                                "hosted_url"
+                            )
+
                     skipped_data = {
                         "current": current,
                         "total": total,
@@ -731,24 +819,6 @@ async def import_images_stream(
                     }
                     yield f"event: skipped\ndata: {json.dumps(skipped_data)}\n\n"
                     continue
-
-                # Build S3 key based on entity type
-                ext = guess_ext_from_content_type(content_type)
-                if request.entity_type == "season":
-                    s3_key = build_season_image_s3_key(
-                        show_identifier=path_identifier,
-                        season_number=request.season_number,
-                        source="web_scrape",
-                        sha256=sha256,
-                        ext=ext,
-                    )
-                elif request.entity_type == "person":
-                    s3_key = build_cast_photo_s3_key(
-                        person_identifier=path_identifier,
-                        source="web_scrape",
-                        sha256=sha256,
-                        ext=ext,
-                    )
 
                 etag, file_size = upload_bytes_to_s3(
                     s3_client,
@@ -809,7 +879,11 @@ async def import_images_stream(
                         kind="gallery",
                         position=idx,
                         context=person_link_ctx,
-                    )
+                )
+
+                if request.entity_type == "person" or matched_person:
+                    if hosted_url:
+                        auto_count_assets[asset["id"]] = hosted_url
 
                 imported_count += 1
                 assets.append(
@@ -846,6 +920,42 @@ async def import_images_stream(
                     "error": str(exc),
                 }
                 yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+
+        if auto_count_assets:
+            try:
+                from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
+                from trr_backend.repositories.media_links import (
+                    has_manual_people_tags,
+                    has_people_count,
+                    list_person_links_by_asset_id,
+                    update_person_links_context,
+                )
+
+                for asset_id, image_url in auto_count_assets.items():
+                    links = list_person_links_by_asset_id(db, asset_id)
+                    if not links:
+                        continue
+                    if any(has_manual_people_tags(link.get("context")) for link in links):
+                        continue
+                    if any(has_people_count(link.get("context")) for link in links):
+                        continue
+                    if not image_url:
+                        continue
+                    try:
+                        result = count_people(image_url)
+                        update_person_links_context(
+                            db,
+                            links,
+                            {
+                                "people_count": result.people_count,
+                                "people_count_source": "auto",
+                                "people_count_detector": result.detector,
+                            },
+                        )
+                    except ScreenalyticsClientError as exc:
+                        logger.warning("Auto-count failed for media_asset %s: %s", asset_id, exc)
+            except Exception as exc:
+                logger.warning("Auto-count setup failed: %s", exc)
 
         # Final completion event
         complete_data = {

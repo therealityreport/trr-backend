@@ -178,7 +178,8 @@ def _auto_count_cast_photos(
     if not candidate_sources:
         return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
     if photo_ids is not None and not photo_ids:
-        return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
+        # No new photos, but still allow backfill of missing counts.
+        photo_ids = None
 
     try:
         from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
@@ -216,7 +217,7 @@ def _auto_count_cast_photos(
                 continue
             if tag_row and tag_row.get("people_count") is not None:
                 continue
-            image_url = row.get("hosted_url") or row.get("url")
+            image_url = row.get("hosted_url")
             if not image_url:
                 continue
             auto_counts_attempted += 1
