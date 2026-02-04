@@ -343,6 +343,7 @@ def import_images(
     skipped_count = 0
     errors: list[str] = []
     assets: list[MediaAssetSummary] = []
+    auto_count_assets: dict[str, str] = {}
 
     for idx, img in enumerate(request.images):
         # Cast matching - extract filename and try to match
@@ -398,6 +399,9 @@ def import_images(
                         position=idx,
                         context=person_link_ctx,
                     )
+
+                if request.entity_type == "person" or matched_person:
+                    auto_count_assets[existing["id"]] = existing.get("hosted_url") or existing.get("source_url") or str(img.url)
 
                 assets.append(
                     MediaAssetSummary(
@@ -492,6 +496,9 @@ def import_images(
                     context=person_link_ctx,
                 )
 
+            if request.entity_type == "person" or matched_person:
+                auto_count_assets[asset["id"]] = hosted_url or str(img.url)
+
             imported_count += 1
             assets.append(
                 MediaAssetSummary(
@@ -509,6 +516,42 @@ def import_images(
         except Exception as exc:
             logger.exception(f"Failed to import image {idx}: {img.url}")
             errors.append(f"Image {idx}: {exc}")
+
+    if auto_count_assets:
+        try:
+            from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
+            from trr_backend.repositories.media_links import (
+                has_manual_people_tags,
+                has_people_count,
+                list_person_links_by_asset_id,
+                update_person_links_context,
+            )
+
+            for asset_id, image_url in auto_count_assets.items():
+                links = list_person_links_by_asset_id(db, asset_id)
+                if not links:
+                    continue
+                if any(has_manual_people_tags(link.get("context")) for link in links):
+                    continue
+                if any(has_people_count(link.get("context")) for link in links):
+                    continue
+                if not image_url:
+                    continue
+                try:
+                    result = count_people(image_url)
+                    update_person_links_context(
+                        db,
+                        links,
+                        {
+                            "people_count": result.people_count,
+                            "people_count_source": "auto",
+                            "people_count_detector": result.detector,
+                        },
+                    )
+                except ScreenalyticsClientError as exc:
+                    logger.warning("Auto-count failed for media_asset %s: %s", asset_id, exc)
+        except Exception as exc:
+            logger.warning("Auto-count setup failed: %s", exc)
 
     return ImportResponse(
         imported=imported_count,
