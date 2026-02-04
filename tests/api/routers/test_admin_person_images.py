@@ -36,7 +36,11 @@ class TestRefreshPersonImages:
     def test_returns_401_without_auth(self, client):
         """Unauthenticated requests should return 401."""
         person_id = str(uuid4())
-        response = client.post(f"/api/v1/admin/person/{person_id}/refresh-images")
+
+        # Mock the database client to avoid DatabaseConnectionError in CI
+        mock_db = MagicMock()
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.post(f"/api/v1/admin/person/{person_id}/refresh-images")
         assert response.status_code == 401
 
     def test_returns_404_for_unknown_person(self, client, monkeypatch):
