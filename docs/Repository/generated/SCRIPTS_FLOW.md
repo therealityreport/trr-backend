@@ -65,42 +65,45 @@ flowchart LR
         s49["import_shows_from_lists"]
         s50["run_show_import_job"]
     end
-    subgraph sg5["scripts/media"]
-        s51["cleanup_expired_media_uploads"]
-        s52["mirror_cast_photos_to_s3"]
-        s53["mirror_media_assets_to_s3"]
-        s54["mirror_show_images_to_s3"]
-        s55["rebuild_hosted_urls"]
+    subgraph sg5["scripts/legacy"]
+        s51["test_connection"]
     end
-    subgraph sg6["scripts/supabase"]
-        s56["generate_schema_docs"]
+    subgraph sg6["scripts/media"]
+        s52["cleanup_expired_media_uploads"]
+        s53["mirror_cast_photos_to_s3"]
+        s54["mirror_media_assets_to_s3"]
+        s55["mirror_show_images_to_s3"]
+        s56["rebuild_hosted_urls"]
     end
-    subgraph sg7["scripts/sync"]
-        s57["resolve_tmdb_ids_via_find"]
-        s58["sync_all_tables"]
-        s59["sync_cast_batch"]
-        s60["sync_cast_photos"]
-        s61["sync_episode_appearances"]
-        s62["sync_episodes"]
-        s63["sync_people"]
-        s64["sync_season_episode_images"]
-        s65["sync_seasons"]
-        s66["sync_seasons_episodes"]
-        s67["sync_show_batch"]
-        s68["sync_show_cast"]
-        s69["sync_show_complete"]
-        s70["sync_show_images"]
-        s71["sync_shows"]
-        s72["sync_shows_all"]
-        s73["sync_tmdb_person_images"]
-        s74["sync_tmdb_show_entities"]
-        s75["sync_tmdb_watch_providers"]
+    subgraph sg7["scripts/supabase"]
+        s57["generate_schema_docs"]
     end
-    subgraph sg8["scripts/verify"]
-        s76["validate_supabase_timeouts"]
-        s77["verify_credits_parity"]
-        s78["verify_media_unification"]
-        s79["verify_schema"]
+    subgraph sg8["scripts/sync"]
+        s58["resolve_tmdb_ids_via_find"]
+        s59["sync_all_tables"]
+        s60["sync_cast_batch"]
+        s61["sync_cast_photos"]
+        s62["sync_episode_appearances"]
+        s63["sync_episodes"]
+        s64["sync_people"]
+        s65["sync_season_episode_images"]
+        s66["sync_seasons"]
+        s67["sync_seasons_episodes"]
+        s68["sync_show_batch"]
+        s69["sync_show_cast"]
+        s70["sync_show_complete"]
+        s71["sync_show_images"]
+        s72["sync_shows"]
+        s73["sync_shows_all"]
+        s74["sync_tmdb_person_images"]
+        s75["sync_tmdb_show_entities"]
+        s76["sync_tmdb_watch_providers"]
+    end
+    subgraph sg9["scripts/verify"]
+        s77["validate_supabase_timeouts"]
+        s78["verify_credits_parity"]
+        s79["verify_media_unification"]
+        s80["verify_schema"]
     end
     subgraph trr["trr_backend/"]
         ingestion["ingestion"]
@@ -126,47 +129,47 @@ flowchart LR
     s48 --> repos
     s49 --> ingestion
     s49 --> integrations
-    s51 --> media
     s52 --> media
-    s52 --> repos
+    s53 --> media
     s53 --> repos
-    s54 --> media
     s54 --> repos
     s55 --> media
-    s57 --> ingestion
-    s57 --> integrations
-    s57 --> repos
-    s60 --> ingestion
-    s60 --> media
-    s60 --> repos
+    s55 --> repos
+    s56 --> media
+    s58 --> ingestion
+    s58 --> integrations
+    s58 --> repos
     s61 --> ingestion
-    s61 --> integrations
+    s61 --> media
     s61 --> repos
     s62 --> ingestion
+    s62 --> integrations
     s62 --> repos
     s63 --> ingestion
-    s63 --> integrations
     s63 --> repos
+    s64 --> ingestion
     s64 --> integrations
-    s64 --> media
     s64 --> repos
-    s65 --> ingestion
+    s65 --> integrations
+    s65 --> media
     s65 --> repos
+    s66 --> ingestion
     s66 --> repos
-    s68 --> ingestion
-    s68 --> integrations
-    s68 --> repos
-    s70 --> ingestion
-    s70 --> media
-    s70 --> repos
+    s67 --> repos
+    s69 --> ingestion
+    s69 --> integrations
+    s69 --> repos
     s71 --> ingestion
+    s71 --> media
     s71 --> repos
-    s73 --> ingestion
-    s73 --> repos
-    s74 --> integrations
-    s74 --> media
+    s72 --> ingestion
+    s72 --> repos
+    s74 --> ingestion
     s74 --> repos
     s75 --> integrations
     s75 --> media
     s75 --> repos
+    s76 --> integrations
+    s76 --> media
+    s76 --> repos
 ```
