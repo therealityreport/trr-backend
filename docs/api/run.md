@@ -14,6 +14,14 @@ The API requires the following environment variables to be set:
 | `SUPABASE_ANON_KEY` | Supabase anonymous/public key | `eyJhbGciOiJIUzI1NiIs...` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (for admin operations) | `eyJhbGciOiJIUzI1NiIs...` |
 
+### Screenalytics (Service-to-service)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SCREENALYTICS_SERVICE_TOKEN` | Shared service token for Screenalytics endpoints | `change-me-long-random-token` |
+
+If you call `/api/v1/screenalytics/*` or `/api/v1/screenalytics/v2/*`, the backend must have `SCREENALYTICS_SERVICE_TOKEN` set and clients must send it as a Bearer token.
+
 ### Redis (Optional)
 
 | Variable | Description | Example |
@@ -86,6 +94,40 @@ curl http://localhost:8000/health
 
 # List shows (requires Supabase connection)
 curl http://localhost:8000/api/v1/shows
+```
+
+## API Docs UI
+
+FastAPI ships with interactive API docs and an OpenAPI schema:
+
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+- OpenAPI schema: `http://localhost:8000/openapi.json`
+
+## Client Access & Auth
+
+**Auth matrix**
+
+| Client | Auth Header | Notes |
+| --- | --- | --- |
+| TRR App | `Authorization: Bearer <Supabase access token>` | Use for user-scoped endpoints under `/api/v1/*`. |
+| Screenalytics | `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` | Use for `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*`. |
+
+**CORS guidance**
+
+- TRR App: set `CORS_ALLOW_ORIGINS` in the backend env to the app domain(s) so credentials are allowed.
+- Screenalytics: server-to-server calls do not require CORS.
+
+**Example calls**
+
+```bash
+# TRR App (Supabase JWT)
+curl -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  http://localhost:8000/api/v1/shows
+
+# Screenalytics (service token)
+curl -H "Authorization: Bearer $SCREENALYTICS_SERVICE_TOKEN" \
+  http://localhost:8000/api/v1/screenalytics/episodes/<episode_id>/cast
 ```
 
 ## Running Tests

@@ -71,6 +71,9 @@ class RefreshImagesResponse(BaseModel):
     photos_mirrored: int
     photos_failed: int
     photos_pruned: int
+    auto_counts_attempted: int = 0
+    auto_counts_succeeded: int = 0
+    auto_counts_failed: int = 0
     errors: list[str]
 
 
@@ -234,6 +237,64 @@ def refresh_person_images(
             logger.exception(f"Mirror error for {person_id}")
             errors.append(f"Mirror: {exc}")
 
+    # 4.5 Auto-count people for TMDb/Fandom photos (only when no manual tags)
+    auto_counts_attempted = 0
+    auto_counts_succeeded = 0
+    auto_counts_failed = 0
+    try:
+        from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
+        from trr_backend.repositories.cast_photo_tags import (
+            get_tags_by_photo_ids,
+            has_manual_tags,
+            upsert_cast_photo_tags,
+        )
+
+        candidate_sources = [s for s in sources if s in ("tmdb", "fandom", "fandom-gallery")]
+        if candidate_sources:
+            response = (
+                db.schema("core")
+                .table("cast_photos")
+                .select("id, hosted_url, url, people_names, source")
+                .eq("person_id", person_id_str)
+                .in_("source", candidate_sources)
+                .execute()
+            )
+            if hasattr(response, "error") and response.error:
+                logger.warning("Auto-count query failed for %s: %s", person_id_str, response.error)
+            else:
+                rows = response.data or []
+                tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in rows])
+                for row in rows:
+                    if row.get("people_names"):
+                        continue
+                    tag_row = tag_rows.get(str(row["id"]))
+                    if has_manual_tags(tag_row):
+                        continue
+                    if tag_row and tag_row.get("people_count") is not None:
+                        continue
+                    image_url = row.get("hosted_url") or row.get("url")
+                    if not image_url:
+                        continue
+                    auto_counts_attempted += 1
+                    try:
+                        result = count_people(image_url)
+                        upsert_cast_photo_tags(
+                            db,
+                            cast_photo_id=str(row["id"]),
+                            people_names=None,
+                            people_ids=None,
+                            people_count=result.people_count,
+                            people_count_source="auto",
+                            detector=result.detector,
+                            updated_by_firebase_uid="system:auto",
+                        )
+                        auto_counts_succeeded += 1
+                    except ScreenalyticsClientError as exc:
+                        auto_counts_failed += 1
+                        logger.warning("Auto-count failed for %s: %s", row.get("id"), exc)
+    except Exception as exc:
+        logger.exception("Auto-count setup failed for %s: %s", person_id_str, exc)
+
     # 5. Prune orphaned S3 objects
     photos_pruned = 0
     if not request.skip_mirror and not request.skip_prune:
@@ -251,6 +312,9 @@ def refresh_person_images(
         photos_mirrored=photos_mirrored,
         photos_failed=photos_failed,
         photos_pruned=photos_pruned,
+        auto_counts_attempted=auto_counts_attempted,
+        auto_counts_succeeded=auto_counts_succeeded,
+        auto_counts_failed=auto_counts_failed,
         errors=errors,
     )
 

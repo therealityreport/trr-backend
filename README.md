@@ -325,6 +325,7 @@ See `docs/cloud/` for detailed cloud deployment guides.
 - **DB Schema**: See `docs/db/schema.md` for core tables and views
 - **Setup Guides**: See `docs/cloud/` for deployment documentation
 - **Local Development**: See `docs/README_local.md` for additional setup notes
+- **API Docs UI**: See `docs/api/run.md` for `/docs`, `/redoc`, and `/openapi.json`
 - **Legacy Google Sheets Pipeline**: See `docs/legacy/google_sheets_pipeline.md`
 
 ## 🤝 Contributing
