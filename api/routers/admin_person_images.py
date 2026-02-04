@@ -182,12 +182,19 @@ def _auto_count_cast_photos(
         photo_ids = None
 
     try:
-        from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
+        from trr_backend.clients.screenalytics import (
+            ScreenalyticsClientError,
+            count_people,
+            is_screenalytics_configured,
+        )
         from trr_backend.repositories.cast_photo_tags import (
             get_tags_by_photo_ids,
             has_manual_tags,
             upsert_cast_photo_tags,
         )
+
+        if not is_screenalytics_configured():
+            return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
 
         query = (
             db.schema("core")
@@ -209,6 +216,7 @@ def _auto_count_cast_photos(
             return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
 
         tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in rows])
+        screenalytics_available = True
         for row in rows:
             if row.get("people_names"):
                 continue
@@ -217,6 +225,8 @@ def _auto_count_cast_photos(
                 continue
             if tag_row and tag_row.get("people_count") is not None:
                 continue
+            if not screenalytics_available:
+                break
             image_url = row.get("hosted_url")
             if not image_url:
                 continue
@@ -237,10 +247,91 @@ def _auto_count_cast_photos(
             except ScreenalyticsClientError as exc:
                 auto_counts_failed += 1
                 logger.warning("Auto-count failed for %s: %s", row.get("id"), exc)
+                message = str(exc).lower()
+                if "404" in message or "not found" in message:
+                    screenalytics_available = False
     except Exception as exc:
         logger.exception("Auto-count setup failed for %s: %s", person_id, exc)
 
     return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
+
+
+def _chunked(values: list[str], size: int = 100) -> list[list[str]]:
+    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
+def _enrich_cast_photos_with_episode_metadata(
+    db: SupabaseAdminClient,
+    photos: list[dict[str, Any]],
+) -> None:
+    imdb_ids: list[str] = []
+    for row in photos:
+        if row.get("source") != "imdb":
+            continue
+        title_ids = row.get("title_imdb_ids") or []
+        if not isinstance(title_ids, list):
+            continue
+        for imdb_id in title_ids:
+            if isinstance(imdb_id, str) and imdb_id.strip():
+                imdb_ids.append(imdb_id.strip())
+
+    imdb_ids = list(dict.fromkeys(imdb_ids))
+    if not imdb_ids:
+        return
+
+    episodes_by_imdb: dict[str, dict[str, Any]] = {}
+    for chunk in _chunked(imdb_ids, 100):
+        response = (
+            db.schema("core")
+            .table("episodes")
+            .select(
+                "id,imdb_episode_id,title,episode_number,season_number,air_date,show_id,show_name"
+            )
+            .in_("imdb_episode_id", chunk)
+            .execute()
+        )
+        if hasattr(response, "error") and response.error:
+            logger.warning("Episode lookup failed: %s", response.error)
+            continue
+        for row in response.data or []:
+            imdb_episode_id = row.get("imdb_episode_id")
+            if imdb_episode_id:
+                episodes_by_imdb[str(imdb_episode_id)] = row
+
+    if not episodes_by_imdb:
+        return
+
+    for row in photos:
+        if row.get("source") != "imdb":
+            continue
+        title_ids = row.get("title_imdb_ids") or []
+        if not isinstance(title_ids, list):
+            continue
+        episode = None
+        for imdb_id in title_ids:
+            if imdb_id in episodes_by_imdb:
+                episode = episodes_by_imdb[imdb_id]
+                break
+        if not episode:
+            continue
+
+        metadata = dict(row.get("metadata") or {})
+        metadata.update(
+            {
+                "episode_id": episode.get("id"),
+                "episode_imdb_id": episode.get("imdb_episode_id"),
+                "episode_title": episode.get("title"),
+                "episode_number": episode.get("episode_number"),
+                "season_number": episode.get("season_number"),
+                "episode_air_date": episode.get("air_date"),
+                "show_id": episode.get("show_id"),
+                "show_name": episode.get("show_name"),
+                "source_created_at": episode.get("air_date"),
+            }
+        )
+        row["metadata"] = metadata
+        if not row.get("season") and episode.get("season_number"):
+            row["season"] = episode.get("season_number")
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +383,11 @@ def refresh_person_images(
         logger.exception(f"Fetch error for {person_id}")
         errors.append(f"Fetch: {exc}")
         photos = []
+    else:
+        try:
+            _enrich_cast_photos_with_episode_metadata(db, photos)
+        except Exception as exc:
+            logger.warning("Episode metadata enrichment failed for %s: %s", person_id, exc)
 
     # 3. Upsert to database
     photos_upserted = 0

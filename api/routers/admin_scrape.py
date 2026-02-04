@@ -550,13 +550,25 @@ def import_images(
 
     if auto_count_assets:
         try:
-            from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
+            from trr_backend.clients.screenalytics import (
+                ScreenalyticsClientError,
+                count_people,
+                is_screenalytics_configured,
+            )
             from trr_backend.repositories.media_links import (
                 has_manual_people_tags,
                 has_people_count,
                 list_person_links_by_asset_id,
                 update_person_links_context,
             )
+
+            if not is_screenalytics_configured():
+                return ImportResponse(
+                    imported=imported_count,
+                    skipped_duplicates=skipped_count,
+                    errors=errors,
+                    assets=assets,
+                )
 
             for asset_id, image_url in auto_count_assets.items():
                 links = list_person_links_by_asset_id(db, asset_id)
