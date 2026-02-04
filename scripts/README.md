@@ -14,8 +14,15 @@ This directory contains the **Supabase-first** ingestion, enrichment, and sync s
 - `scripts/media/` — media mirroring and cleanup
 - `scripts/verify/` — parity and validation checks
 - `scripts/enrich/` — targeted enrichment utilities
+- `scripts/legacy/` — legacy Google Sheets utilities (historical reference)
 
-Root-level script names remain as thin wrappers for backward compatibility.
+Root-level script names remain as thin wrappers for backward compatibility with older commands.
+
+### Legacy Utilities
+
+Legacy Google Sheets tooling is preserved in `scripts/legacy/` for reference only. For example:
+
+- `scripts/legacy/test_connection.py` — Google Sheets connection smoke test (legacy)
 
 ## Prerequisites
 
