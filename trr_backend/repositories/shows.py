@@ -17,6 +17,38 @@ class ShowRepositoryError(RuntimeError):
 
 _MISSING_COLUMN_RE = re.compile(r"could not find the '([^']+)' column", re.IGNORECASE)
 
+# Array columns that need PostgreSQL literal format for updates
+_ARRAY_COLUMNS = frozenset({
+    "genres", "keywords", "tags", "networks", "streaming_providers",
+    "listed_on", "tmdb_network_ids", "tmdb_production_company_ids",
+    "alternative_names",
+})
+
+
+def _to_pg_array(value: list[Any]) -> str:
+    """Convert Python list to PostgreSQL array literal format."""
+    if not value:
+        return "{}"
+    # Escape and quote string elements, leave ints as-is
+    elements = []
+    for v in value:
+        if isinstance(v, str):
+            # Escape backslashes and double quotes, then wrap in quotes
+            escaped = v.replace("\\", "\\\\").replace('"', '\\"')
+            elements.append(f'"{escaped}"')
+        else:
+            elements.append(str(v))
+    return "{" + ",".join(elements) + "}"
+
+
+def _prepare_payload_arrays(payload: dict[str, Any]) -> dict[str, Any]:
+    """Convert array columns in payload to PostgreSQL literal format."""
+    result = dict(payload)
+    for col in _ARRAY_COLUMNS:
+        if col in result and isinstance(result[col], list):
+            result[col] = _to_pg_array(result[col])
+    return result
+
 # PGRST204 retry configuration
 _PGRST204_MAX_RETRIES = 1
 _PGRST204_RETRY_DELAY = 0.5
@@ -230,7 +262,7 @@ def insert_show(db: DbSession, show: ShowUpsert) -> dict[str, Any]:
 
 
 def update_show(db: DbSession, show_id: UUID | str, patch: Mapping[str, Any]) -> dict[str, Any]:
-    payload = dict(patch)
+    payload = _prepare_payload_arrays(dict(patch))
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
@@ -249,6 +281,7 @@ def update_show(db: DbSession, show_id: UUID | str, patch: Mapping[str, Any]) ->
                     raise ShowRepositoryError(
                         "Supabase fetch returned no data for show after missing column skip."
                     ) from None  # noqa: E501
+                payload = _prepare_payload_arrays(payload)
                 response = db.schema("core").table("shows").update(payload).eq("id", str(show_id)).execute()
                 break
 
