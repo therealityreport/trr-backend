@@ -70,12 +70,17 @@ class ScrapePreviewResponse(BaseModel):
     error: str | None = None
 
 
+ImageKind = Literal["poster", "backdrop", "episode_still", "cast", "other"]
+
+
 class ImportImageItem(BaseModel):
     """Single image to import."""
 
     candidate_id: str
     url: HttpUrl
     caption: str | None = None
+    kind: ImageKind = "other"
+    person_ids: list[UUID] | None = None
 
 
 EntityType = Literal["season", "person"]
@@ -89,6 +94,7 @@ class ImportRequest(BaseModel):
     # Season-specific
     show_id: UUID | None = None
     season_number: int | None = Field(default=None, ge=0, le=100)
+    season_id: UUID | None = None
 
     # Person-specific
     person_id: UUID | None = None
@@ -103,10 +109,11 @@ class ImportRequest(BaseModel):
     @model_validator(mode="after")
     def validate_entity_fields(self):
         if self.entity_type == "season":
-            if not self.show_id:
-                raise ValueError("show_id required for season")
-            if self.season_number is None:
-                raise ValueError("season_number required for season")
+            if not self.season_id:
+                if not self.show_id:
+                    raise ValueError("show_id required for season")
+                if self.season_number is None:
+                    raise ValueError("season_number required for season")
         elif self.entity_type == "person":
             if not self.person_id:
                 raise ValueError("person_id required for person")
@@ -300,19 +307,33 @@ def import_images(
 
     # Entity-specific setup
     if request.entity_type == "season":
-        identifiers = get_season_and_show_identifiers(db, str(request.show_id), request.season_number)
-        if not identifiers:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Season {request.season_number} not found for show {request.show_id}",
+        if request.season_id:
+            # Trust season_id from caller to avoid hard dependency on season lookup.
+            entity_id = str(request.season_id)
+            resolved_show_id = str(request.show_id) if request.show_id else ""
+            resolved_season_number = request.season_number
+            path_identifier = resolved_show_id or entity_id
+        else:
+            identifiers = get_season_and_show_identifiers(
+                db,
+                str(request.show_id) if request.show_id else None,
+                request.season_number,
+                season_id=str(request.season_id) if request.season_id else None,
             )
-        entity_id = identifiers["season_id"]
-        path_identifier = identifiers["show_identifier"]
+            if not identifiers:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Season {request.season_number} not found for show {request.show_id}",
+                )
+            entity_id = identifiers["season_id"]
+            path_identifier = identifiers["show_identifier"]
+            resolved_show_id = identifiers.get("show_id") or str(request.show_id)
+            resolved_season_number = identifiers.get("season_number") or request.season_number
         link_context = {
             "entity_type": "season",
             "entity_id": entity_id,
-            "show_id": str(request.show_id),
-            "season_number": request.season_number,
+            "show_id": resolved_show_id,
+            "season_number": resolved_season_number,
             "source_url": str(request.source_url),
         }
 
@@ -335,8 +356,11 @@ def import_images(
     # Fetch cast members for matching if enabled
     cast_members: list[dict] = []
     if request.match_cast and request.entity_type == "season":
-        cast_members = _get_season_cast(db, str(request.show_id), request.season_number)
-        logger.info(f"Loaded {len(cast_members)} cast members for matching")
+        if resolved_season_number is None:
+            logger.warning("Season number missing for cast matching (show_id=%s, season_id=%s)", resolved_show_id, entity_id)
+        else:
+            cast_members = _get_season_cast(db, resolved_show_id, resolved_season_number)
+            logger.info(f"Loaded {len(cast_members)} cast members for matching")
 
     s3_client = get_s3_client()
     bucket = get_s3_bucket()
@@ -418,12 +442,13 @@ def import_images(
                         logger.warning("Failed to mirror existing media_asset %s: %s", existing.get("id"), exc)
 
                 # Still create link to entity
+                link_kind = img.kind if request.entity_type == "season" else "gallery"
                 create_media_link_for_entity(
                     db,
                     entity_type=request.entity_type,
                     entity_id=entity_id,
                     media_asset_id=existing["id"],
-                    kind="gallery",
+                    kind=link_kind,
                     position=idx,
                     context=link_context,
                 )
@@ -446,6 +471,29 @@ def import_images(
                         position=idx,
                         context=person_link_ctx,
                     )
+
+                if request.entity_type == "season" and img.person_ids:
+                    assigned_ids = {str(person_id) for person_id in img.person_ids}
+                    if matched_person:
+                        assigned_ids.discard(matched_person["person_id"])
+                    for person_id in assigned_ids:
+                        person_link_ctx = {
+                            "entity_type": "person",
+                            "entity_id": person_id,
+                            "assigned_from_season": True,
+                            "source_url": str(request.source_url),
+                            "show_id": resolved_show_id,
+                            "season_number": resolved_season_number,
+                        }
+                        create_media_link_for_entity(
+                            db,
+                            entity_type="person",
+                            entity_id=person_id,
+                            media_asset_id=existing["id"],
+                            kind="gallery",
+                            position=idx,
+                            context=person_link_ctx,
+                        )
 
                 if request.entity_type == "person" or matched_person:
                     if existing.get("hosted_url"):
@@ -497,12 +545,13 @@ def import_images(
             )
 
             # Create media link to entity
+            link_kind = img.kind if request.entity_type == "season" else "gallery"
             create_media_link_for_entity(
                 db,
                 entity_type=request.entity_type,
                 entity_id=entity_id,
                 media_asset_id=asset["id"],
-                kind="gallery",
+                kind=link_kind,
                 position=idx,
                 context=link_context,
             )
@@ -526,9 +575,33 @@ def import_images(
                     context=person_link_ctx,
                 )
 
+            if request.entity_type == "season" and img.person_ids:
+                assigned_ids = {str(person_id) for person_id in img.person_ids}
+                if matched_person:
+                    assigned_ids.discard(matched_person["person_id"])
+                for person_id in assigned_ids:
+                    person_link_ctx = {
+                        "entity_type": "person",
+                        "entity_id": person_id,
+                        "assigned_from_season": True,
+                        "source_url": str(request.source_url),
+                        "show_id": resolved_show_id,
+                        "season_number": resolved_season_number,
+                    }
+                    create_media_link_for_entity(
+                        db,
+                        entity_type="person",
+                        entity_id=person_id,
+                        media_asset_id=asset["id"],
+                        kind="gallery",
+                        position=idx,
+                        context=person_link_ctx,
+                    )
+
             if request.entity_type == "person" or matched_person:
-                if hosted_url:
-                    auto_count_assets[asset["id"]] = hosted_url
+                auto_count_url = img.url or hosted_url
+                if auto_count_url:
+                    auto_count_assets[asset["id"]] = auto_count_url
 
             imported_count += 1
             assets.append(
@@ -646,17 +719,30 @@ async def import_images_stream(
 
         # Entity-specific setup
         if request.entity_type == "season":
-            identifiers = get_season_and_show_identifiers(db, str(request.show_id), request.season_number)
-            if not identifiers:
-                yield f"event: error\ndata: {json.dumps({'error': f'Season {request.season_number} not found'})}\n\n"
-                return
-            entity_id = identifiers["season_id"]
-            path_identifier = identifiers["show_identifier"]
+            if request.season_id:
+                entity_id = str(request.season_id)
+                resolved_show_id = str(request.show_id) if request.show_id else ""
+                resolved_season_number = request.season_number
+                path_identifier = resolved_show_id or entity_id
+            else:
+                identifiers = get_season_and_show_identifiers(
+                    db,
+                    str(request.show_id) if request.show_id else None,
+                    request.season_number,
+                    season_id=str(request.season_id) if request.season_id else None,
+                )
+                if not identifiers:
+                    yield f"event: error\ndata: {json.dumps({'error': f'Season {request.season_number} not found'})}\n\n"
+                    return
+                entity_id = identifiers["season_id"]
+                path_identifier = identifiers["show_identifier"]
+                resolved_show_id = identifiers.get("show_id") or str(request.show_id)
+                resolved_season_number = identifiers.get("season_number") or request.season_number
             link_context = {
                 "entity_type": "season",
                 "entity_id": entity_id,
-                "show_id": str(request.show_id),
-                "season_number": request.season_number,
+                "show_id": resolved_show_id,
+                "season_number": resolved_season_number,
                 "source_url": str(request.source_url),
             }
         elif request.entity_type == "person":
@@ -677,8 +763,15 @@ async def import_images_stream(
         # Fetch cast members for matching if enabled
         cast_members: list[dict] = []
         if request.match_cast and request.entity_type == "season":
-            cast_members = _get_season_cast(db, str(request.show_id), request.season_number)
-            logger.info(f"Loaded {len(cast_members)} cast members for matching")
+            if resolved_season_number is None:
+                logger.warning(
+                    "Season number missing for cast matching (show_id=%s, season_id=%s)",
+                    resolved_show_id,
+                    entity_id,
+                )
+            else:
+                cast_members = _get_season_cast(db, resolved_show_id, resolved_season_number)
+                logger.info(f"Loaded {len(cast_members)} cast members for matching")
 
         s3_client = get_s3_client()
         bucket = get_s3_bucket()
@@ -773,12 +866,13 @@ async def import_images_stream(
                             )
 
                     # Still create link to entity
+                    link_kind = img.kind if request.entity_type == "season" else "gallery"
                     create_media_link_for_entity(
                         db,
                         entity_type=request.entity_type,
                         entity_id=entity_id,
                         media_asset_id=existing["id"],
-                        kind="gallery",
+                        kind=link_kind,
                         position=idx,
                         context=link_context,
                     )
@@ -801,6 +895,29 @@ async def import_images_stream(
                             position=idx,
                             context=person_link_ctx,
                         )
+
+                    if request.entity_type == "season" and img.person_ids:
+                        assigned_ids = {str(person_id) for person_id in img.person_ids}
+                        if matched_person:
+                            assigned_ids.discard(matched_person["person_id"])
+                        for person_id in assigned_ids:
+                            person_link_ctx = {
+                                "entity_type": "person",
+                                "entity_id": person_id,
+                                "assigned_from_season": True,
+                                "source_url": str(request.source_url),
+                                "show_id": resolved_show_id,
+                                "season_number": resolved_season_number,
+                            }
+                            create_media_link_for_entity(
+                                db,
+                                entity_type="person",
+                                entity_id=person_id,
+                                media_asset_id=existing["id"],
+                                kind="gallery",
+                                position=idx,
+                                context=person_link_ctx,
+                            )
 
                     assets.append(
                         {
@@ -864,12 +981,13 @@ async def import_images_stream(
                 )
 
                 # Create media link to entity
+                link_kind = img.kind if request.entity_type == "season" else "gallery"
                 create_media_link_for_entity(
                     db,
                     entity_type=request.entity_type,
                     entity_id=entity_id,
                     media_asset_id=asset["id"],
-                    kind="gallery",
+                    kind=link_kind,
                     position=idx,
                     context=link_context,
                 )
@@ -891,11 +1009,35 @@ async def import_images_stream(
                         kind="gallery",
                         position=idx,
                         context=person_link_ctx,
-                )
+                    )
 
-                if request.entity_type == "person" or matched_person:
-                    if hosted_url:
-                        auto_count_assets[asset["id"]] = hosted_url
+                if request.entity_type == "season" and img.person_ids:
+                    assigned_ids = {str(person_id) for person_id in img.person_ids}
+                    if matched_person:
+                        assigned_ids.discard(matched_person["person_id"])
+                    for person_id in assigned_ids:
+                        person_link_ctx = {
+                            "entity_type": "person",
+                            "entity_id": person_id,
+                            "assigned_from_season": True,
+                            "source_url": str(request.source_url),
+                            "show_id": resolved_show_id,
+                            "season_number": resolved_season_number,
+                        }
+                        create_media_link_for_entity(
+                            db,
+                            entity_type="person",
+                            entity_id=person_id,
+                            media_asset_id=asset["id"],
+                            kind="gallery",
+                            position=idx,
+                            context=person_link_ctx,
+                        )
+
+                    if request.entity_type == "person" or matched_person:
+                        auto_count_url = img.url or hosted_url
+                        if auto_count_url:
+                            auto_count_assets[asset["id"]] = auto_count_url
 
                 imported_count += 1
                 assets.append(

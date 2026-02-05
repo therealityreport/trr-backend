@@ -103,6 +103,16 @@ def upsert_cast_fandom(db: DbSession, row: Mapping[str, Any]) -> dict[str, Any]:
     if not payload:
         raise CastFandomRepositoryError("cast_fandom upsert payload is empty.")
 
+    romances = payload.get("romances")
+    if isinstance(romances, (list, tuple)):
+        def _escape(val: Any) -> str:
+            text = str(val)
+            text = text.replace("\\", "\\\\").replace('"', '\\"')
+            return f'"{text}"'
+
+        cleaned = [_escape(item) for item in romances if item is not None]
+        payload["romances"] = "{" + ",".join(cleaned) + "}" if cleaned else None
+
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").table("cast_fandom").upsert(payload, on_conflict="person_id,source").execute()

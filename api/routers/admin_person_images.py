@@ -124,6 +124,50 @@ def _get_tmdb_id(db: SupabaseAdminClient, person_id: str, external_ids: dict | N
     return None
 
 
+def _is_http_url(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    trimmed = value.strip().lower()
+    return trimmed.startswith("http://") or trimmed.startswith("https://")
+
+
+def _is_wikia_static_url(value: str | None) -> bool:
+    if not _is_http_url(value):
+        return False
+    return "static.wikia.nocookie.net" in value.lower()
+
+
+def _pick_autocount_url(row: dict[str, Any]) -> str | None:
+    source = str(row.get("source") or "").lower()
+    image_url = row.get("image_url") or row.get("url")
+    thumb_url = row.get("thumb_url")
+    hosted_url = row.get("hosted_url")
+
+    if source == "tmdb":
+        if _is_http_url(image_url):
+            return str(image_url)
+        if _is_http_url(row.get("url")):
+            return str(row.get("url"))
+
+    if source in ("fandom", "fandom-gallery"):
+        if _is_wikia_static_url(thumb_url):
+            return str(thumb_url)
+        if _is_http_url(image_url):
+            return str(image_url)
+        if _is_http_url(row.get("url")):
+            return str(row.get("url"))
+
+    if _is_http_url(image_url):
+        return str(image_url)
+    if _is_http_url(row.get("url")):
+        return str(row.get("url"))
+    if _is_http_url(thumb_url):
+        return str(thumb_url)
+    if _is_http_url(hosted_url):
+        return str(hosted_url)
+    return None
+
+
 def _mirror_person_photos(
     db: SupabaseAdminClient,
     person_id: str,
@@ -210,7 +254,7 @@ def _auto_count_cast_photos(
         query = (
             db.schema("core")
             .table("cast_photos")
-            .select("id, hosted_url, url, people_names, source")
+            .select("id, hosted_url, hosted_content_type, url, image_url, thumb_url, people_names, source")
             .eq("person_id", person_id)
             .in_("source", candidate_sources)
         )
@@ -238,7 +282,7 @@ def _auto_count_cast_photos(
                 continue
             if not screenalytics_available:
                 break
-            image_url = row.get("hosted_url")
+            image_url = _pick_autocount_url(row)
             if not image_url:
                 continue
             auto_counts_attempted += 1

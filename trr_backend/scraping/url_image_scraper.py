@@ -15,7 +15,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -29,6 +29,7 @@ _WIDTH_PARAM_RE = re.compile(r"[?&]w=(\d+)", re.IGNORECASE)
 _HEIGHT_PARAM_RE = re.compile(r"[?&]h=(\d+)", re.IGNORECASE)
 _RESIZE_RE = re.compile(r"/(\d+)x(\d+)/", re.IGNORECASE)
 _WP_RESIZE_RE = re.compile(r"-(\d+)x(\d+)\.", re.IGNORECASE)
+_EONLINE_RESIZE_RE = re.compile(r"/rs_(\d+)x(\d+)-", re.IGNORECASE)
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -216,6 +217,11 @@ def _extract_width_from_url(url: str) -> int:
     matches = [int(val) for val in _SIZE_RE.findall(url) if val.isdigit()]
     if matches:
         return max(matches)
+
+    # E! Online pattern: /rs_634x707-...
+    eonline_match = _EONLINE_RESIZE_RE.search(url)
+    if eonline_match:
+        return int(eonline_match.group(1))
 
     # WordPress style -WxH. pattern
     wp_match = _WP_RESIZE_RE.search(url)
@@ -463,6 +469,13 @@ def extract_images_from_html(
 
     # Find all img elements
     for img in soup.find_all("img"):
+        parent_link = img.find_parent("a")
+        if parent_link:
+            parent_href = parent_link.get("href") or ""
+            if parent_link.get("data-pin-do") == "buttonPin" or "pinterest.com/pin/create/button" in parent_href:
+                # Skip Pinterest button icons embedded in share links
+                continue
+
         src = img.get("src")
         srcset = img.get("srcset")
         data_src = img.get("data-src")
@@ -598,6 +611,61 @@ def extract_images_from_html(
                 source_element="picture",
             )
         )
+
+        if len(candidates) >= limit:
+            break
+
+    # Extract Pinterest share-link media URLs (common on galleries like E! Online)
+    for link in soup.find_all("a", href=True):
+        href = link.get("href")
+        if not href:
+            continue
+
+        is_pinterest_button = link.get("data-pin-do") == "buttonPin" or "pinterest.com/pin/create/button" in href
+        if not is_pinterest_button:
+            continue
+
+        parsed = urlparse(href)
+        query = parse_qs(parsed.query)
+        media_values = query.get("media") or []
+        if not media_values:
+            continue
+
+        description_values = query.get("description") or []
+        description = unquote(description_values[0]) if description_values else None
+
+        for media_url in media_values:
+            normalized = _normalize_url(unquote(media_url), base_url)
+            if not normalized or _should_skip_url(normalized):
+                continue
+
+            if normalized in seen_urls:
+                continue
+            seen_urls.add(normalized)
+
+            width = _extract_width_from_url(normalized)
+            if width > 0 and width < min_width:
+                continue
+
+            alt_text = description.strip()[:200] if description else None
+            context = _get_nearby_text(link)
+
+            candidates.append(
+                ImageCandidate(
+                    id=str(uuid.uuid4()),
+                    original_url=normalized,
+                    best_url=normalized,
+                    width=width if width > 0 else None,
+                    height=None,
+                    alt_text=alt_text,
+                    context=context,
+                    thumbnail_url=normalized,
+                    source_element="pinterest-link",
+                )
+            )
+
+            if len(candidates) >= limit:
+                break
 
         if len(candidates) >= limit:
             break

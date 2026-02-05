@@ -30,10 +30,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
+import unicodedata
 import sys
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.ingestion.fandom_person_scraper import (
@@ -155,23 +158,45 @@ def _get_cast_for_show(db, show_id: str) -> list[dict[str, Any]]:
     response = (
         db.schema("core")
         .table("show_cast")
-        .select("person_id,people:person_id(id,full_name,external_ids)")
+        .select("person_id,billing_order")
         .eq("show_id", show_id)
+        .order("billing_order", desc=False)
         .execute()
     )
-    if response.data:
-        seen = set()
-        people = []
-        for row in response.data:
-            person = row.get("people")
-            if isinstance(person, dict) and person.get("id"):
-                person_id = person["id"]
-                if person_id not in seen:
-                    seen.add(person_id)
-                    people.append(person)
-        return people
+    if not response.data:
+        return []
 
-    return []
+    person_ids = []
+    seen = set()
+    for row in response.data:
+        person_id = row.get("person_id")
+        if not person_id or person_id in seen:
+            continue
+        seen.add(person_id)
+        person_ids.append(person_id)
+
+    people = []
+    chunk_size = 200
+    for i in range(0, len(person_ids), chunk_size):
+        chunk = person_ids[i : i + chunk_size]
+        people_resp = (
+            db.schema("core")
+            .table("people")
+            .select("id,full_name,external_ids")
+            .in_("id", chunk)
+            .execute()
+        )
+        if people_resp.data:
+            people.extend(people_resp.data)
+
+    people_map = {p.get("id"): p for p in people if p.get("id")}
+    ordered = []
+    for pid in person_ids:
+        person = people_map.get(pid)
+        if person:
+            ordered.append(person)
+
+    return ordered
 
 
 def _canonical_url(url: str) -> str:
@@ -184,6 +209,113 @@ def _canonical_url(url: str) -> str:
 def _url_hash(url: str) -> str:
     """Generate a short hash of a URL for source_image_id."""
     return hashlib.sha256(_canonical_url(url).encode()).hexdigest()[:16]
+
+
+def _normalize_name_for_match(value: str | None) -> str:
+    if not value:
+        return ""
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"\(.*?\)", " ", text)
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-zA-Z0-9]+", " ", text)
+    return " ".join(text.split()).strip().lower()
+
+
+def _names_match(expected: str | None, candidate: str | None) -> bool:
+    expected_norm = _normalize_name_for_match(expected)
+    candidate_norm = _normalize_name_for_match(candidate)
+    if not expected_norm or not candidate_norm:
+        return False
+    if expected_norm == candidate_norm:
+        return True
+    if expected_norm in candidate_norm:
+        return True
+    if candidate_norm in expected_norm:
+        return True
+    expected_tokens = expected_norm.split()
+    candidate_tokens = candidate_norm.split()
+    if not expected_tokens or not candidate_tokens:
+        return False
+    if expected_tokens[-1] == candidate_tokens[-1]:
+        return True
+    if set(expected_tokens) & set(candidate_tokens):
+        return True
+    return False
+
+
+def _name_from_fandom_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    path = parsed.path or ""
+    if "/wiki/" not in path:
+        return None
+    slug = path.split("/wiki/", 1)[1]
+    slug = slug.split("/", 1)[0]
+    slug = unquote(slug)
+    slug = slug.replace("_", " ")
+    if slug.lower().endswith(" gallery"):
+        slug = slug[: -len(" gallery")]
+    return slug.strip() or None
+
+
+def _fandom_page_matches_name(
+    expected_name: str,
+    cast_fandom: dict[str, Any],
+    *,
+    page_url: str | None = None,
+) -> bool:
+    candidates = [
+        cast_fandom.get("full_name"),
+        cast_fandom.get("page_title"),
+        _name_from_fandom_url(page_url),
+    ]
+    return any(_names_match(expected_name, cand) for cand in candidates)
+
+
+def _fetch_valid_fandom_profile(
+    full_name: str,
+    *,
+    verbose: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]], str] | None:
+    candidate_urls: list[str] = []
+    search_url = search_real_housewives_wiki(full_name)
+    if search_url:
+        candidate_urls.append(search_url)
+
+    fallback_url = build_real_housewives_wiki_url_from_name(full_name)
+    if fallback_url not in candidate_urls:
+        candidate_urls.append(fallback_url)
+
+    for fandom_url in candidate_urls:
+        if not _names_match(full_name, _name_from_fandom_url(fandom_url)):
+            if verbose:
+                print(f"    Skipping Fandom URL (name mismatch): {fandom_url}")
+            continue
+
+        if verbose:
+            print(f"    Fetching Fandom profile: {fandom_url}")
+
+        html, final_url = fetch_fandom_person_html(fandom_url)
+        if not html or is_fandom_page_missing(html, 200):
+            if verbose:
+                print(f"    Fandom page not found for {full_name}")
+            continue
+
+        cast_fandom, photos = parse_fandom_person_html(html, source_url=final_url)
+
+        if not _fandom_page_matches_name(full_name, cast_fandom, page_url=final_url):
+            if verbose:
+                print(f"    Skipping Fandom page (name mismatch): {final_url}")
+            continue
+
+        return cast_fandom, photos, final_url
+
+    return None
 
 
 def _enrich_fandom_profile(
@@ -202,22 +334,11 @@ def _enrich_fandom_profile(
             print(f"    Skipping Fandom profile - no name for person {person_id}")
         return None
 
-    # Try to find Fandom page
-    fandom_url = search_real_housewives_wiki(full_name)
-    if not fandom_url:
-        fandom_url = build_real_housewives_wiki_url_from_name(full_name)
-
-    if verbose:
-        print(f"    Fetching Fandom profile: {fandom_url}")
-
     try:
-        html, final_url = fetch_fandom_person_html(fandom_url)
-        if not html or is_fandom_page_missing(html, 200):
-            if verbose:
-                print(f"    Fandom page not found for {full_name}")
+        resolved = _fetch_valid_fandom_profile(full_name, verbose=verbose)
+        if not resolved:
             return None
-
-        cast_fandom, photos = parse_fandom_person_html(html, source_url=final_url)
+        cast_fandom, photos, _final_url = resolved
         cast_fandom["person_id"] = person_id
 
         if dry_run:
@@ -360,6 +481,13 @@ def _import_gallery_photos(
         print(f"    Fetching gallery for {full_name}")
 
     try:
+        # Validate the base Fandom page before importing gallery photos
+        resolved = _fetch_valid_fandom_profile(full_name, verbose=verbose)
+        if not resolved:
+            if verbose:
+                print(f"    Skipping gallery - no valid Fandom profile for {full_name}")
+            return 0
+
         gallery = fetch_fandom_gallery(full_name)
 
         if gallery.error:
@@ -382,12 +510,19 @@ def _import_gallery_photos(
         now = datetime.now(UTC).isoformat()
         rows = []
         for img in images_to_import:
+            url_value = img.url
+            url_path = None
+            if url_value:
+                parsed = urlparse(url_value)
+                url_path = parsed.path if parsed.path else url_value
             rows.append(
                 {
                     "person_id": person_id,
                     "source": "fandom",
                     "source_page_url": img.source_page_url,
                     "source_image_id": f"fandom-gallery-{_url_hash(img.url)}",
+                    "url": url_value,
+                    "url_path": url_path,
                     "image_url": img.url,
                     "thumb_url": img.thumb_url,
                     "image_url_canonical": _canonical_url(img.url),

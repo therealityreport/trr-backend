@@ -1,6 +1,7 @@
 # TRR Backend API - Running Guide
 
 This document describes how to run the FastAPI-based TRR Backend API locally and deployment considerations.
+For production deployment, use `docs/deploy/cloud_run.md`.
 
 ## Required Environment Variables
 
@@ -147,79 +148,9 @@ pytest tests/test_ws_realtime_smoke.py -v
 python -m pytest tests/ --cov=api --cov-report=term-missing
 ```
 
-## Deployment Considerations
+## Production Deployment
 
-### Where to Host
-
-The TRR API is a **FastAPI application** that:
-- Uses synchronous Supabase client calls
-- Includes WebSocket support for real-time updates (discussions, DMs, typing, presence)
-- Requires persistent process (not serverless)
-
-**Recommended hosting options:**
-
-| Platform | Pros | Cons |
-|----------|------|------|
-| **Railway** | Easy deploy, good for Python, supports WebSockets | Cost scales with usage |
-| **Render** | Free tier, auto-deploy from GitHub | Cold starts on free tier |
-| **Fly.io** | Global edge deployment, WebSocket support | More complex setup |
-| **DigitalOcean App Platform** | Simple, predictable pricing | Less auto-scaling |
-| **AWS ECS/Fargate** | Full control, scalable | Complex setup |
-
-**Not recommended:**
-- **Vercel** - Optimized for Next.js/serverless, not ideal for long-running Python processes or WebSockets
-- **AWS Lambda** - Cold starts, 15-minute timeout, not ideal for potential real-time features
-
-### Production Configuration
-
-For production deployments:
-
-1. **Set explicit CORS origins:**
-   ```
-   CORS_ALLOW_ORIGINS=https://therealityreport.com,https://app.therealityreport.com
-   ```
-
-2. **Use a process manager:**
-   ```bash
-   # With gunicorn + uvicorn workers
-   gunicorn api.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
-   ```
-
-3. **Add to requirements.txt for production:**
-   ```
-   gunicorn>=21.0.0
-   ```
-
-4. **Configure logging:**
-   Set log level via environment or uvicorn args:
-   ```bash
-   uvicorn api.main:app --log-level info
-   ```
-
-### Docker Deployment
-
-Example `Dockerfile`:
-
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY api/ ./api/
-
-EXPOSE 8000
-
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-Build and run:
-```bash
-docker build -t trr-api .
-docker run -p 8000:8000 --env-file .env trr-api
-```
+This guide is for local development. For production Docker and Cloud Run deployment, use `docs/deploy/cloud_run.md`.
 
 ## API Endpoints
 

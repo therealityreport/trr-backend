@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.routers import admin_person_images
 
 
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
@@ -170,3 +171,30 @@ class TestRefreshPersonImages:
 
         assert response.status_code == 200
         mock_mirror.assert_not_called()
+
+
+def test_pick_autocount_url_prefers_fandom_thumb() -> None:
+    row = {
+        "source": "fandom",
+        "image_url": "https://real-housewives.fandom.com/wiki/Special:FilePath/Bad.png",
+        "thumb_url": "https://static.wikia.nocookie.net/real-housewives/images/1/1a/Good.png",
+        "hosted_url": "https://cdn.example.com/x.png",
+    }
+    assert admin_person_images._pick_autocount_url(row) == row["thumb_url"]
+
+
+def test_pick_autocount_url_prefers_tmdb_image() -> None:
+    row = {
+        "source": "tmdb",
+        "image_url": "https://image.tmdb.org/t/p/original/x.png",
+        "hosted_url": "https://cdn.example.com/x.png",
+    }
+    assert admin_person_images._pick_autocount_url(row) == row["image_url"]
+
+
+def test_pick_autocount_url_falls_back_to_hosted() -> None:
+    row = {
+        "source": "fandom",
+        "hosted_url": "https://cdn.example.com/x.png",
+    }
+    assert admin_person_images._pick_autocount_url(row) == row["hosted_url"]
