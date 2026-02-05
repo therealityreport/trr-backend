@@ -259,6 +259,46 @@ def _count_existing_cast_photos(db, person_id: str, source: str) -> int:
         return 0
 
 
+def _get_imdb_image_count(imdb_person_id: str, session: requests.Session | None = None) -> int | None:
+    """
+    Get total image count from IMDb person gallery without fetching all images.
+
+    Returns the total count or None if unavailable.
+    """
+    if not imdb_person_id:
+        return None
+    try:
+        from trr_backend.integrations.imdb.person_gallery import (
+            fetch_imdb_person_mediaindex_html,
+            parse_imdb_person_mediaindex_images,
+        )
+
+        html = fetch_imdb_person_mediaindex_html(imdb_person_id, session=session)
+        # The mediaindex page shows all images - count the parsed images
+        images = parse_imdb_person_mediaindex_images(html, imdb_person_id)
+        return len(images) if images else 0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _get_tmdb_image_count(tmdb_person_id: int, session: requests.Session | None = None) -> int | None:
+    """
+    Get total image count from TMDb person images without full processing.
+
+    Returns the profile count or None if unavailable.
+    """
+    if not tmdb_person_id:
+        return None
+    try:
+        from trr_backend.integrations.tmdb.client import fetch_person_images
+
+        response = fetch_person_images(tmdb_person_id, session=session)
+        profiles = response.get("profiles", [])
+        return len(profiles) if isinstance(profiles, list) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _mirror_person_photos(
     db,
     person_id: str,
@@ -429,12 +469,30 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  TMDb ID: {tmdb_person_id}")
 
         sources_for_person = list(sources)
-        if "imdb" in sources_for_person and not args.force_fetch:
-            existing = _count_existing_cast_photos(db, person_id, "imdb")
-            if existing > 0:
-                sources_for_person.remove("imdb")
-                if args.verbose:
-                    print(f"  Skipping IMDb fetch (already have {existing} photos)")
+
+        # Check IMDb - skip if DB count >= source count (no new images)
+        if "imdb" in sources_for_person and not args.force_fetch and imdb_person_id:
+            db_count = _count_existing_cast_photos(db, person_id, "imdb")
+            if db_count > 0:
+                source_count = _get_imdb_image_count(imdb_person_id, session=session)
+                if source_count is not None and db_count >= source_count:
+                    sources_for_person.remove("imdb")
+                    if args.verbose:
+                        print(f"  Skipping IMDb (DB has {db_count}, source has {source_count})")
+                elif args.verbose and source_count is not None:
+                    print(f"  IMDb: DB has {db_count}, source has {source_count} - will fetch")
+
+        # Check TMDb - skip if DB count >= source count (no new images)
+        if "tmdb" in sources_for_person and not args.force_fetch and tmdb_person_id:
+            db_count = _count_existing_cast_photos(db, person_id, "tmdb")
+            if db_count > 0:
+                source_count = _get_tmdb_image_count(tmdb_person_id, session=session)
+                if source_count is not None and db_count >= source_count:
+                    sources_for_person.remove("tmdb")
+                    if args.verbose:
+                        print(f"  Skipping TMDb (DB has {db_count}, source has {source_count})")
+                elif args.verbose and source_count is not None:
+                    print(f"  TMDb: DB has {db_count}, source has {source_count} - will fetch")
 
         # Fetch photos from all sources
         if sources_for_person:

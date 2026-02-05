@@ -404,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"WARNING: Unable to load seasons for show_id={show_id}: {exc}", file=sys.stderr)
                 season_tmdb_ids = {}
 
-            cast_rows, _source_type = fetch_fullcredits_cast_with_fallback(
+            cast_rows, _source_type, _person_images = fetch_fullcredits_cast_with_fallback(
                 imdb_series_id,
                 extra_headers=extra_headers,
                 verbose=bool(args.verbose),
