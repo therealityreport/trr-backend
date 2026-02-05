@@ -25,4 +25,5 @@ ENV PORT=8080
 
 EXPOSE ${PORT}
 
-CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT}
+# Use sh -c so env vars expand
+CMD ["sh", "-c", "gunicorn api.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8080} --workers ${WEB_CONCURRENCY:-1} --timeout 3600 --graceful-timeout 30 --access-logfile - --error-logfile -"]
