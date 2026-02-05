@@ -19,8 +19,9 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import AdminUser, AllowlistAdminUser
 from api.deps import SupabaseAdminClient
+from trr_backend.repositories.media_links import update_media_link_facebank_seed
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,16 @@ class RefreshImagesResponse(BaseModel):
     auto_counts_succeeded: int = 0
     auto_counts_failed: int = 0
     errors: list[str]
+
+
+class FacebankSeedRequest(BaseModel):
+    facebank_seed: bool = Field(..., description="Whether this image should seed facebank.")
+
+
+class FacebankSeedResponse(BaseModel):
+    link_id: str
+    person_id: str
+    facebank_seed: bool
 
 
 # ---------------------------------------------------------------------------
@@ -584,4 +595,43 @@ async def refresh_person_images_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.patch("/{person_id}/gallery/{link_id}/facebank-seed", response_model=FacebankSeedResponse)
+def update_facebank_seed(
+    person_id: UUID,
+    link_id: UUID,
+    payload: FacebankSeedRequest,
+    db: SupabaseAdminClient = None,
+    _: AllowlistAdminUser = None,
+) -> FacebankSeedResponse:
+    response = (
+        db.schema("core")
+        .table("media_links")
+        .select("id, entity_id, entity_type, kind, facebank_seed")
+        .eq("id", str(link_id))
+        .limit(1)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise HTTPException(status_code=502, detail="Database error fetching media link")
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Media link not found")
+
+    row = response.data[0]
+    if row.get("entity_type") != "person" or row.get("kind") != "gallery":
+        raise HTTPException(status_code=409, detail="Media link is not a person gallery image")
+    if str(row.get("entity_id")) != str(person_id):
+        raise HTTPException(status_code=409, detail="Media link does not belong to this person")
+
+    try:
+        updated = update_media_link_facebank_seed(db, str(link_id), payload.facebank_seed)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Database error updating facebank_seed: {exc}") from exc
+
+    return FacebankSeedResponse(
+        link_id=str(updated.get("id") or link_id),
+        person_id=str(row.get("entity_id")),
+        facebank_seed=bool(updated.get("facebank_seed")),
     )

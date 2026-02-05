@@ -125,3 +125,14 @@ async def require_admin(user: CurrentUser) -> dict:
 
 
 AdminUser = Annotated[dict, Depends(require_admin)]
+
+
+async def require_allowlist_admin(user: CurrentUser) -> dict:
+    allowlist = _admin_email_allowlist()
+    email = (user.get("email") or "").lower()
+    if allowlist and email in allowlist:
+        return user
+    raise HTTPException(status_code=403, detail="Allowlist admin access required")
+
+
+AllowlistAdminUser = Annotated[dict, Depends(require_allowlist_admin)]

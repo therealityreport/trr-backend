@@ -68,3 +68,25 @@ def update_person_links_context(
             continue
         if hasattr(response, "error") and response.error:
             logger.warning("Failed to update media_link %s: %s", link.get("id"), response.error)
+
+
+def update_media_link_facebank_seed(
+    db: Any,
+    link_id: str,
+    facebank_seed: bool,
+) -> dict[str, Any]:
+    payload = {"facebank_seed": bool(facebank_seed)}
+    try:
+        response = db.schema("core").table("media_links").update(payload).eq("id", link_id).execute()
+    except Exception as exc:
+        logger.warning("Failed to update media_link %s facebank_seed: %s", link_id, exc)
+        raise
+
+    if hasattr(response, "error") and response.error:
+        logger.warning("Failed to update media_link %s facebank_seed: %s", link_id, response.error)
+        raise RuntimeError("Database error updating facebank_seed")
+
+    data = response.data or []
+    if isinstance(data, list) and data:
+        return data[0]
+    raise RuntimeError("Media link update returned no data")
