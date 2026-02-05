@@ -52,13 +52,15 @@ def get_person_photos(
     person_id: UUID,
     limit: int = Query(default=200, le=500),
     offset: int = Query(default=0, ge=0),
+    seed_only: bool = Query(default=False),
     _: None = Depends(require_screenalytics_service_token),
 ) -> list[dict]:
     sql = (
         "SELECT served_url, hosted_key, is_primary, width, height, kind "
         "FROM core.v_person_images "
         "WHERE person_id = %s "
-        "ORDER BY is_primary DESC NULLS LAST, position ASC NULLS LAST "
-        "LIMIT %s OFFSET %s"
+        + ("AND facebank_seed = true " if seed_only else "")
+        + "ORDER BY is_primary DESC NULLS LAST, position ASC NULLS LAST "
+        + "LIMIT %s OFFSET %s"
     )
     return pg.fetch_all(sql, [str(person_id), limit, offset])

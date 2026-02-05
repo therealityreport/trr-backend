@@ -20,6 +20,10 @@ Survey definitions, user responses, user answers, and live aggregates for near-r
 
 Pipeline run tracking and stage-level execution metadata for the orchestrator.
 
+### `social`
+
+Social media content from external platforms (Instagram, TikTok, YouTube, Twitter/X). Includes in-app discussion threads and scraped content from external platforms.
+
 ## `core` tables
 
 - `core.shows`: Top-level show record.
@@ -35,7 +39,7 @@ Relationship chain: `shows -> seasons -> episodes`, with cast connected via `cas
 
 - `core.v_episode_cast`: episode-level cast (credit_occurrences joined to credits).
 - `core.v_season_cast`: season-level distinct cast, with episode counts per season.
-- `core.v_person_images`: person images joined from media_links + media_assets for facebank seeding.
+- `core.v_person_images`: person images joined from media_links + media_assets for facebank seeding; includes `facebank_seed` flag from `core.media_links`.
 
 ## TMDb entity tables
 
@@ -89,6 +93,31 @@ See `docs/architecture.md` for the full TMDb enrichment pipeline.
 - `games.*` supports scoring via `games.answer_keys` and session-based play via `games.sessions` + `games.responses`.
 - `surveys.*` focuses on opinion/feedback capture via `surveys.responses` + `surveys.answers`, plus live rollups in `surveys.aggregates`.
 
+## `social` tables
+
+### In-app discussion (Reddit-style)
+
+- `social.threads`: Discussion threads tied to episodes (type: episode_live, post_episode, spoilers, general).
+- `social.posts`: Posts/comments within threads (supports nesting via `parent_post_id`).
+- `social.reactions`: Reactions to posts (upvote, downvote, lol, shade, fire, heart).
+
+### External platform scrape data
+
+- `social.scrape_jobs`: Track scrape operations (platform, job_type, status, items_found).
+- `social.instagram_posts`: Instagram posts and reels (shortcode unique key).
+- `social.instagram_comments`: Instagram comments with reply support (parent_comment_id).
+- `social.tiktok_posts`: TikTok videos (video_id unique key).
+- `social.tiktok_comments`: TikTok comments with reply support (parent_comment_id).
+- `social.youtube_videos`: YouTube videos (video_id unique key).
+- `social.youtube_comments`: YouTube comments with reply support (parent_comment_id).
+- `social.twitter_tweets`: Twitter/X tweets including replies (tweet_id unique key, reply_to_tweet_id for threading).
+
+All scrape tables include:
+- Platform-specific IDs for deduplication
+- `scraped_at` timestamp
+- `raw_data` JSONB for full API responses
+- Optional `show_id` and `person_id` for entity associations
+
 ## RLS defaults
 
 Public read:
@@ -96,11 +125,14 @@ Public read:
 - `core.shows`, `core.seasons`, `core.episodes`, `core.people`, `core.cast_memberships`, `core.episode_cast`
 - `games.games`, `games.questions`, `games.options`, `games.stats`
 - `surveys.surveys`, `surveys.questions`, `surveys.options`, `surveys.aggregates`
+- `social.threads`, `social.posts`, `social.reactions` (in-app discussion)
+- `social.scrape_jobs`, `social.instagram_posts`, `social.instagram_comments`, `social.tiktok_posts`, `social.tiktok_comments`, `social.youtube_videos`, `social.youtube_comments`, `social.twitter_tweets` (scraped content)
 
 User-scoped read/write:
 
 - `games.sessions`, `games.responses` (owned by `auth.uid()`)
 - `surveys.responses`, `surveys.answers` (owned by `auth.uid()`)
+- `social.threads`, `social.posts`, `social.reactions` (owned by `auth.uid()` for create/update/delete)
 
 Read-only to clients:
 

@@ -114,6 +114,9 @@ FastAPI ships with interactive API docs and an OpenAPI schema:
 | TRR App | `Authorization: Bearer <Supabase access token>` | Use for user-scoped endpoints under `/api/v1/*`. |
 | Screenalytics | `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` | Use for `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*`. |
 
+Admin allowlist
+- New admin endpoints for facebank seed flagging require an authenticated user whose email is in `ADMIN_EMAIL_ALLOWLIST` (no role shortcuts).
+
 **CORS guidance**
 
 - TRR App: set `CORS_ALLOW_ORIGINS` in the backend env to the app domain(s) so credentials are allowed.

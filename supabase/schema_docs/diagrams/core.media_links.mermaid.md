@@ -14,5 +14,6 @@ erDiagram
         JSONB context
         TIMESTAMP_WITH_TIME_ZONE created_at
         TIMESTAMP_WITH_TIME_ZONE updated_at
+        BOOLEAN facebank_seed
     }
 ```
