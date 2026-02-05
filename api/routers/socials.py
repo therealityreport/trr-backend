@@ -20,7 +20,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
-from api.auth import AllowlistAdminUser
+from api.auth import AdminUser
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class SocialAccountConfig(BaseModel):
 @router.post("/instagram/scrape", response_model=InstagramScrapeResponse)
 async def scrape_instagram(
     request: InstagramScrapeRequest,
-    user: AllowlistAdminUser,
+    user: AdminUser,
 ) -> InstagramScrapeResponse:
     """
     Scrape Instagram posts from a profile with optional filtering.
@@ -165,7 +165,7 @@ async def scrape_instagram(
 async def scrape_instagram_async(
     request: InstagramScrapeRequest,
     background_tasks: BackgroundTasks,
-    user: AllowlistAdminUser,
+    user: AdminUser,
 ) -> dict:
     """
     Start an async Instagram scrape operation.
@@ -193,7 +193,7 @@ async def scrape_instagram_async(
 @router.get("/instagram/preview/{username}")
 async def preview_instagram_profile(
     username: str,
-    user: AllowlistAdminUser,
+    user: AdminUser,
 ) -> dict:
     """
     Preview basic info about an Instagram profile.
@@ -294,7 +294,7 @@ class TikTokScrapeResponse(BaseModel):
 @router.post("/tiktok/scrape", response_model=TikTokScrapeResponse)
 async def scrape_tiktok(
     request: TikTokScrapeRequest,
-    user: AllowlistAdminUser,
+    user: AdminUser,
 ) -> TikTokScrapeResponse:
     """
     Scrape TikTok posts from a profile with optional filtering.
@@ -366,7 +366,7 @@ async def scrape_tiktok(
 @router.get("/tiktok/preview/{username}")
 async def preview_tiktok_profile(
     username: str,
-    user: AllowlistAdminUser,
+    user: AdminUser,
 ) -> dict:
     """
     Preview basic info about a TikTok profile.
@@ -481,7 +481,7 @@ class TweetRepliesRequest(BaseModel):
 @router.post("/twitter/search", response_model=TwitterSearchResponse)
 async def search_twitter(
     request: TwitterSearchRequest,
-    user: AllowlistAdminUser,
+    user: AdminUser,
 ) -> TwitterSearchResponse:
     """
     Search Twitter/X for tweets matching a query (hashtag or phrase).
@@ -565,7 +565,7 @@ async def search_twitter(
 @router.post("/twitter/replies")
 async def fetch_tweet_replies(
     request: TweetRepliesRequest,
-    user: AllowlistAdminUser,
+    user: AdminUser,
 ) -> dict:
     """
     Fetch replies/comments for a specific tweet.
@@ -661,7 +661,7 @@ class YouTubeScrapeResponse(BaseModel):
 @router.post("/youtube/scrape", response_model=YouTubeScrapeResponse)
 async def scrape_youtube(
     request: YouTubeScrapeRequest,
-    user: AllowlistAdminUser,
+    user: AdminUser,
 ) -> YouTubeScrapeResponse:
     """
     Scrape YouTube channel videos with keyword filtering.

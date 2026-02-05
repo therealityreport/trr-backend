@@ -23,10 +23,10 @@ select
     ma.hosted_url,
     ml.is_primary,
     ml.position,
-    ml.facebank_seed,
     coalesce(ma.hosted_url, ma.source_url) as served_url,
     ma.created_at,
-    ma.updated_at
+    ma.updated_at,
+    ml.facebank_seed
 from core.media_links ml
 join core.media_assets ma on ml.media_asset_id = ma.id
 where ml.entity_type = 'person';
@@ -51,7 +51,6 @@ select
   ma.height,
   ma.caption,
   ml.is_primary,
-  ml.facebank_seed,
   ma.source_url as url,
   coalesce(ma.source_url, ma.hosted_url) as url_original,
   ma.hosted_url,
@@ -59,7 +58,8 @@ select
   ma.fetched_at,
   ma.created_at,
   ma.updated_at,
-  coalesce(ma.hosted_url, ma.source_url) as served_url
+  coalesce(ma.hosted_url, ma.source_url) as served_url,
+  ml.facebank_seed
 from core.media_links ml
 join core.media_assets ma on ml.media_asset_id = ma.id
 where ml.entity_type = 'person';

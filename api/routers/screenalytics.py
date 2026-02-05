@@ -60,7 +60,7 @@ def get_person_photos(
         "FROM core.v_person_images "
         "WHERE person_id = %s "
         + ("AND facebank_seed = true " if seed_only else "")
-        "ORDER BY is_primary DESC NULLS LAST, position ASC NULLS LAST "
-        "LIMIT %s OFFSET %s"
+        + "ORDER BY is_primary DESC NULLS LAST, position ASC NULLS LAST "
+        + "LIMIT %s OFFSET %s"
     )
     return pg.fetch_all(sql, [str(person_id), limit, offset])
