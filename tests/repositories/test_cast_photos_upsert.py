@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
@@ -133,3 +136,40 @@ def test_upsert_cast_photos_requires_canonical_url() -> None:
 
     with pytest.raises(CastPhotoRepositoryError):
         upsert_cast_photos(client, [bad_row], dedupe_on="image_url_canonical")
+
+
+def test_upsert_cast_photos_serializes_nested_metadata() -> None:
+    class _TestEnum(Enum):
+        SAMPLE = "sample"
+
+    client = _FakeClient()
+    nested_key = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    row = CastPhotoUpsert(
+        person_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        imdb_person_id="nm11883948",
+        source_image_id="MV5BTEST@",
+        url="https://m.media-amazon.com/images/M/MV5BTEST@._V1_.jpg",
+        url_path="/images/M/MV5BTEST@._V1_.jpg",
+        width=640,
+        metadata={
+            nested_key: {
+                "date_only": date(2024, 1, 2),
+                "date_time": datetime(2024, 1, 2, 3, 4, 5),
+                "values": [Decimal("12.34"), {"enum": _TestEnum.SAMPLE}],
+            },
+            "list": [date(2024, 1, 3), datetime(2024, 1, 3, 4, 5, 6)],
+        },
+    )
+
+    upsert_cast_photos(client, [row])
+
+    payload = client._rpc_calls[0][1]["rows"][0]
+    metadata = payload["metadata"]
+    key = str(nested_key)
+    assert key in metadata
+    assert metadata[key]["date_only"] == "2024-01-02"
+    assert metadata[key]["date_time"] == "2024-01-02T03:04:05"
+    assert metadata[key]["values"][0] == 12.34
+    assert metadata[key]["values"][1]["enum"] == "sample"
+    assert metadata["list"][0] == "2024-01-03"
+    assert metadata["list"][1] == "2024-01-03T04:05:06"
