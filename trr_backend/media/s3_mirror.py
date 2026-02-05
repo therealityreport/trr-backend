@@ -21,6 +21,27 @@ _DEFAULT_HEADERS = {
 }
 
 
+def _is_image_content_type(value: str | None) -> bool:
+    if not value:
+        return False
+    content_type = value.split(";", 1)[0].strip().lower()
+    return content_type.startswith("image/")
+
+
+def _sniff_image_content_type(data: bytes) -> str | None:
+    if not data:
+        return None
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _normalize_fandom_file_url(url: str, *, referer: str | None) -> str:
     cleaned = (url or "").strip()
     if not cleaned:
@@ -315,6 +336,12 @@ def download_image(
     data = resp.content or b""
     if not data:
         raise RuntimeError("Empty image response")
+    if not _is_image_content_type(content_type):
+        sniffed = _sniff_image_content_type(data)
+        if sniffed:
+            content_type = sniffed
+        else:
+            raise RuntimeError(f"Non-image response content-type: {content_type}")
     return data, content_type
 
 
@@ -402,6 +429,7 @@ def mirror_cast_photo_row(
 
     source = str(row.get("source") or "").strip() or "fandom"
     candidate_url = row.get("image_url") or row.get("url") or row.get("thumb_url")
+    thumb_url = row.get("thumb_url")
     if not candidate_url:
         return None
 
@@ -421,10 +449,17 @@ def mirror_cast_photo_row(
 
     referer = row.get("source_page_url")
     normalized_url = candidate_url
-    if source == "fandom" and isinstance(candidate_url, str):
+    if source in {"fandom", "fandom-gallery"} and isinstance(candidate_url, str):
         normalized_url = _normalize_fandom_file_url(candidate_url, referer=referer)
-        candidate_url = normalized_url
-    data, content_type = download_image(candidate_url, source=source, referer=referer)
+    used_url = normalized_url
+    try:
+        data, content_type = download_image(used_url, source=source, referer=referer)
+    except Exception as exc:
+        if source in {"fandom", "fandom-gallery"} and thumb_url and thumb_url != used_url:
+            data, content_type = download_image(thumb_url, source=source, referer=referer)
+            used_url = thumb_url
+        else:
+            raise exc
     sha256 = _sha256_bytes(data)
     current_sha = row.get("hosted_sha256")
 
@@ -471,11 +506,11 @@ def mirror_cast_photo_row(
         "hosted_etag": hosted_etag,
         "hosted_at": hosted_at,
     }
-    if source == "fandom" and isinstance(normalized_url, str) and normalized_url:
-        if normalized_url != row.get("image_url") or normalized_url != row.get("url"):
-            patch["image_url"] = normalized_url
-            patch["url"] = normalized_url
-            patch["image_url_canonical"] = normalized_url
+    if source in {"fandom", "fandom-gallery"} and isinstance(used_url, str) and used_url:
+        if used_url != row.get("image_url") or used_url != row.get("url"):
+            patch["image_url"] = used_url
+            patch["url"] = used_url
+            patch["image_url_canonical"] = used_url
     return patch
 
 

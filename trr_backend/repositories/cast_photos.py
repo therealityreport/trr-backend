@@ -103,22 +103,45 @@ def assert_core_cast_photos_table_exists(db: DbSession) -> None:
 
 
 def _serialize_row(row: Mapping[str, Any] | CastPhotoUpsert) -> dict[str, Any]:
-    from datetime import datetime
+    from datetime import date, datetime
+    from decimal import Decimal
+    from enum import Enum
 
     if isinstance(row, CastPhotoUpsert):
         data = asdict(row)
     else:
         data = dict(row)
+
+    def _serialize_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, Enum):
+            return value.value if isinstance(value.value, (str, int, float, bool)) else str(value.value)
+        if isinstance(value, Mapping):
+            serialized: dict[str, Any] = {}
+            for key, nested in value.items():
+                serialized_key = _serialize_value(key)
+                if not isinstance(serialized_key, str):
+                    serialized_key = str(serialized_key)
+                serialized[serialized_key] = _serialize_value(nested)
+            return serialized
+        if isinstance(value, (list, tuple)):
+            return [_serialize_value(item) for item in value]
+        return value
+
     cleaned: dict[str, Any] = {}
     for key, value in data.items():
         if value is None:
             continue
-        if isinstance(value, UUID):
-            cleaned[key] = str(value)
-        elif isinstance(value, datetime):
-            cleaned[key] = value.isoformat()
-        else:
-            cleaned[key] = value
+        cleaned[key] = _serialize_value(value)
     return cleaned
 
 

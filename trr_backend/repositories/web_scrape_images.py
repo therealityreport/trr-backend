@@ -59,44 +59,73 @@ def find_asset_by_sha256(db: DbSession, sha256: str) -> dict[str, Any] | None:
 
 def get_season_and_show_identifiers(
     db: DbSession,
-    show_id: str,
-    season_number: int,
+    show_id: str | None,
+    season_number: int | None,
+    *,
+    season_id: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Get season ID and show identifier (IMDb ID preferred) for S3 path construction.
 
     Returns:
-        Dict with 'season_id' and 'show_identifier', or None if not found.
+        Dict with 'season_id', 'show_identifier', 'show_id', and 'season_number', or None if not found.
     """
-    # Query seasons with show info
-    result = (
-        db.schema("core")
-        .table("seasons")
-        .select("id, show_id, shows!inner(id, external_ids)")
-        .eq("show_id", show_id)
-        .eq("season_number", season_number)
-        .limit(1)
-        .execute()
-    )
+    query = db.schema("core").table("seasons").select("id, season_number, show_id")
 
-    if not result.data:
+    def run_query(next_query) -> dict[str, Any] | None:
+        result = next_query.limit(1).execute()
+        if getattr(result, "error", None):
+            logger.error("Failed to lookup season identifiers: %s", result.error)
+            return None
+        if not result.data:
+            return None
+        return result.data[0]
+
+    season: dict[str, Any] | None = None
+
+    if season_id:
+        season = run_query(query.eq("id", season_id))
+
+    if season is None and show_id is not None and season_number is not None:
+        season = run_query(query.eq("show_id", show_id).eq("season_number", season_number))
+
+    if season is None:
+        logger.error(
+            "Season lookup returned no results: show_id=%s season_number=%s season_id=%s",
+            show_id,
+            season_number,
+            season_id,
+        )
         return None
-
-    season = result.data[0]
     season_id = season["id"]
+    resolved_show_id = season.get("show_id") or show_id
+    resolved_season_number = season.get("season_number") or season_number
 
     # Extract show identifier - prefer IMDb ID
-    show_data = season.get("shows", {})
-    external_ids = show_data.get("external_ids", {}) or {}
-    imdb_id = external_ids.get("imdb_id") or external_ids.get("imdb")
+    imdb_id = None
+    if resolved_show_id:
+        show_result = (
+            db.schema("core")
+            .table("shows")
+            .select("external_ids")
+            .eq("id", resolved_show_id)
+            .limit(1)
+            .execute()
+        )
+        if getattr(show_result, "error", None):
+            logger.error("Failed to lookup show external_ids: %s", show_result.error)
+        elif show_result.data:
+            external_ids = show_result.data[0].get("external_ids", {}) or {}
+            imdb_id = external_ids.get("imdb_id") or external_ids.get("imdb")
 
     # Use IMDb ID if available, otherwise fall back to show UUID
-    show_identifier = imdb_id if imdb_id else show_id
+    show_identifier = imdb_id if imdb_id else resolved_show_id
 
     return {
         "season_id": season_id,
         "show_identifier": show_identifier,
-        "show_id": show_id,
+        "show_id": resolved_show_id,
+        "season_number": resolved_season_number,
     }
 
 

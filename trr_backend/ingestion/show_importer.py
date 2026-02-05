@@ -1988,6 +1988,10 @@ def upsert_candidates_into_supabase(
                                     posters = images_map.get("posters")
                                     poster_rows: list[dict[str, Any]] = []
                                     if isinstance(posters, list):
+                                        shared_metadata = {
+                                            "image_roles": ["poster", "backdrop"],
+                                            "season_backdrop": True,
+                                        }
                                         for poster in posters:
                                             if not isinstance(poster, Mapping):
                                                 continue
@@ -2026,6 +2030,7 @@ def upsert_candidates_into_supabase(
                                                     "height": int(height),
                                                     "aspect_ratio": aspect_ratio_val,
                                                     "fetched_at": fetched_at,
+                                                    "metadata": dict(shared_metadata),
                                                 }
                                             )
 

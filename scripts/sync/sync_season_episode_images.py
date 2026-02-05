@@ -81,6 +81,8 @@ def _extract_posters(
     if not isinstance(posters, list):
         return poster_rows
 
+    shared_metadata = {"image_roles": ["poster", "backdrop"], "season_backdrop": True}
+
     for poster in posters:
         if not isinstance(poster, Mapping):
             continue
@@ -115,6 +117,7 @@ def _extract_posters(
                 "height": int(height),
                 "aspect_ratio": aspect_ratio_val,
                 "fetched_at": fetched_at,
+                "metadata": dict(shared_metadata),
             }
         )
 

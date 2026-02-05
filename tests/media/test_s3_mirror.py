@@ -103,6 +103,35 @@ def test_download_image_sets_referer_for_fandom(monkeypatch: pytest.MonkeyPatch)
     assert captured["headers"]["referer"] == "https://fandom.test"
 
 
+def test_download_image_rejects_non_image_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get(url, headers=None, timeout=None, stream=None):  # noqa: ANN001
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        response.content = b"<html>nope</html>"
+        return response
+
+    monkeypatch.setattr(s3_mirror.requests, "get", fake_get)
+    with pytest.raises(RuntimeError):
+        s3_mirror.download_image("https://example.com/x.html", source="fandom")
+
+
+def test_download_image_sniffs_image_type_when_missing_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"rest"
+
+    def fake_get(url, headers=None, timeout=None, stream=None):  # noqa: ANN001
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.headers = {}
+        response.content = png_bytes
+        return response
+
+    monkeypatch.setattr(s3_mirror.requests, "get", fake_get)
+    data, content_type = s3_mirror.download_image("https://example.com/x.png", source="fandom")
+    assert data == png_bytes
+    assert content_type == "image/png"
+
+
 def test_mirror_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
@@ -138,6 +167,39 @@ def test_mirror_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -
     assert result["hosted_etag"] == "etag"
     assert result["hosted_url"].startswith("https://cdn.example.com/")
 
+
+def test_mirror_cast_photo_fallbacks_to_thumb_when_primary_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_S3_PREFIX", "dev")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    fake_s3 = MagicMock()
+    monkeypatch.setattr(s3_mirror, "_head_object", lambda *args, **kwargs: None)
+
+    def fake_download(url, source=None, referer=None, headers=None):  # noqa: ANN001
+        if "Special:FilePath" in url:
+            raise RuntimeError("Non-image response content-type: text/html")
+        return b"\x89PNG\r\n\x1a\nrest", "image/png"
+
+    monkeypatch.setattr(s3_mirror, "download_image", fake_download)
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", lambda *args, **kwargs: ("etag", 10))
+
+    row = {
+        "id": "photo-1",
+        "person_id": "person-1",
+        "imdb_person_id": "nm123",
+        "source": "fandom",
+        "image_url": "https://real-housewives.fandom.com/wiki/Special:FilePath/Bad.png",
+        "thumb_url": "https://static.wikia.nocookie.net/real-housewives/images/1/1a/Good.png",
+        "source_page_url": "https://real-housewives.fandom.com/wiki/Test",
+    }
+
+    result = s3_mirror.mirror_cast_photo_row(row, s3_client=fake_s3)
+    assert result is not None
+    assert result["hosted_url"].startswith("https://cdn.example.com/")
+    assert result["hosted_content_type"] == "image/png"
+    assert result["image_url"] == row["thumb_url"]
 
 def test_mirror_tmdb_logo_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_REGION", "us-east-1")
