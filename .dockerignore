@@ -1,0 +1,15 @@
+.git/
+.github/
+.venv/
+venv/
+**/__pycache__/
+.env*
+!.env.example
+logs/
+debug_html/
+out/
+.cache/
+worktree-backups*
+*.patch
+.supabase/
+keys/
