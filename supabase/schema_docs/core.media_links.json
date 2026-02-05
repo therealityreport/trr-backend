@@ -81,6 +81,14 @@
       "default": "now()",
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "facebank_seed",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "false",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -114,6 +122,17 @@
       ],
       "unique": true,
       "definition": "CREATE UNIQUE INDEX media_links_entity_kind_asset_uq ON core.media_links USING btree (entity_type, entity_id, kind, media_asset_id)"
+    },
+    {
+      "name": "media_links_facebank_seed_idx",
+      "columns": [
+        "entity_type",
+        "entity_id",
+        "kind",
+        "facebank_seed"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_links_facebank_seed_idx ON core.media_links USING btree (entity_type, entity_id, kind, facebank_seed)"
     },
     {
       "name": "media_links_kind_idx",
@@ -184,6 +203,7 @@
     "is_primary": false,
     "context": {},
     "created_at": "1970-01-01T00:00:00Z",
-    "updated_at": "1970-01-01T00:00:00Z"
+    "updated_at": "1970-01-01T00:00:00Z",
+    "facebank_seed": false
   }
 }
