@@ -109,3 +109,9 @@ pk-*.pem
 
 # Local dumps
 backup_before_*.sql
+
+# Social media scraping
+scripts/socials/**/instagram_cookies.json
+scripts/socials/**/output/
+scripts/socials/**/*.csv
+!scripts/socials/**/instagram_cookies.example.json

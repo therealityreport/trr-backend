@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy this file to instagram_cookies.json and fill in your Instagram session cookies",
+  "_instructions": [
+    "1. Log into Instagram in your browser",
+    "2. Open Developer Tools (F12) > Application > Cookies > instagram.com",
+    "3. Copy the values for each cookie below",
+    "4. Save as instagram_cookies.json (which is gitignored)"
+  ],
+  "sessionid": "YOUR_SESSION_ID_HERE",
+  "csrftoken": "YOUR_CSRF_TOKEN_HERE",
+  "ds_user_id": "YOUR_USER_ID_HERE",
+  "ig_did": "YOUR_IG_DID_HERE",
+  "mid": "YOUR_MID_HERE",
+  "datr": "YOUR_DATR_HERE",
+  "rur": "YOUR_RUR_HERE",
+  "ig_nrcb": "1"
+}

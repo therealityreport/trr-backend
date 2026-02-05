@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+import re
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -47,6 +48,72 @@ def _url_path_with_query(raw_url: str | None) -> str | None:
 def _url_hash(url: str) -> str:
     """Generate a short hash of a URL for source_image_id."""
     return hashlib.sha256(_canonical_url(url).encode()).hexdigest()[:16]
+
+
+def _normalize_fandom_section_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = re.sub(r"[_-]+", " ", value).strip()
+    if not cleaned:
+        return None
+    if cleaned.lower() == cleaned:
+        return cleaned.title()
+    return cleaned
+
+
+def _extract_season_number(*values: str | None) -> int | None:
+    for value in values:
+        if not value:
+            continue
+        match = re.search(r"\b(?:season|s)\s*([0-9]{1,2})\b", value, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+        match = re.search(r"\b([0-9]{1,2})\b", value)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def _infer_fandom_section_tag(*values: str | None) -> str | None:
+    text = " ".join([v for v in values if v]).strip().lower()
+    if not text:
+        return None
+    if "confessional" in text:
+        return "CONFESSIONAL"
+    if "intro" in text or "tagline" in text or "opening" in text:
+        return "INTRO"
+    if "reunion" in text:
+        return "REUNION"
+    if "promo" in text or "promotional" in text:
+        return "PROMO"
+    if "episode" in text or "still" in text:
+        return "EPISODE STILL"
+    return "OTHER"
+
+
+def _build_fandom_metadata(
+    *,
+    section_tag: str | None,
+    section_label: str | None,
+    source_variant: str | None = None,
+    source_page_url: str | None = None,
+) -> dict[str, Any] | None:
+    metadata: dict[str, Any] = {}
+    if section_tag:
+        metadata["fandom_section_tag"] = section_tag
+    if section_label:
+        metadata["fandom_section_label"] = section_label
+    if source_variant:
+        metadata["source_variant"] = source_variant
+    if source_page_url:
+        metadata["source_page_url"] = source_page_url
+    return metadata or None
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +223,19 @@ def fetch_imdb_cast_photos(
         if tags:
             metadata = {"tags": tags}
 
+        source_page_url = None
+        if viewer_id:
+            source_page_url = f"https://www.imdb.com/name/{imdb_person_id}/mediaviewer/{viewer_id}/"
+        else:
+            source_page_url = f"https://www.imdb.com/name/{imdb_person_id}/mediaindex/"
+
+        if metadata is None:
+            metadata = {}
+        metadata["source_page_url"] = source_page_url
+        metadata["imdb_person_id"] = imdb_person_id
+        if viewer_id:
+            metadata["imdb_viewer_id"] = viewer_id
+
         rows.append(
             {
                 "person_id": str(person_id),
@@ -178,6 +258,7 @@ def fetch_imdb_cast_photos(
                 "people_names": details.get("people_names"),
                 "title_imdb_ids": details.get("title_imdb_ids"),
                 "title_names": details.get("title_names"),
+                "source_page_url": source_page_url,
                 "metadata": metadata,
                 "fetched_at": datetime.now(UTC).isoformat(),
             }
@@ -325,6 +406,24 @@ def fetch_fandom_person_cast_photos(
         if not image_url:
             continue
 
+        section_label = _normalize_fandom_section_label(photo.get("context_section"))
+        section_tag = _infer_fandom_section_tag(
+            photo.get("context_type"),
+            section_label,
+            photo.get("caption"),
+            photo.get("alt_text"),
+        )
+        metadata = _build_fandom_metadata(
+            section_tag=section_tag,
+            section_label=section_label,
+            source_page_url=source_page_url,
+        )
+        if metadata is None:
+            metadata = {}
+        season_value = photo.get("season")
+        if isinstance(season_value, int):
+            metadata.setdefault("season_number", season_value)
+
         # Ensure url and url_path are never null
         url_value = image_url
         url_path = photo.get("url_path") or _url_path_with_query(image_url) or image_url
@@ -348,6 +447,7 @@ def fetch_fandom_person_cast_photos(
                 "context_type": photo.get("context_type"),
                 "season": photo.get("season"),
                 "position": photo.get("position"),
+                "metadata": metadata,
                 "fetched_at": now,
             }
         )
@@ -366,6 +466,7 @@ def fetch_fandom_gallery_cast_photos(
     imdb_person_id: str | None = None,
     *,
     limit: int = 50,
+    resolve_file_pages: bool = True,
     verbose: bool = False,
 ) -> list[dict[str, Any]]:
     """
@@ -381,7 +482,7 @@ def fetch_fandom_gallery_cast_photos(
     Returns:
         List of normalized photo dicts for upsert
     """
-    from trr_backend.integrations.fandom import fetch_fandom_gallery
+    from trr_backend.integrations.fandom import fetch_fandom_file_metadata, fetch_fandom_gallery
 
     try:
         gallery = fetch_fandom_gallery(person_name)
@@ -401,29 +502,86 @@ def fetch_fandom_gallery_cast_photos(
     images = gallery.images[:limit] if limit else gallery.images
     rows: list[dict[str, Any]] = []
     now = datetime.now(UTC).isoformat()
+    file_meta_cache: dict[str, Any] = {}
 
     for image in images:
         image_url = image.url
         if not image_url:
             continue
 
+        section_label = _normalize_fandom_section_label(image.section_label)
+        section_tag = _infer_fandom_section_tag(section_label, image.caption)
+        season = _extract_season_number(section_label, image.caption)
+        file_page_url = image.file_page_url
+        file_meta = None
+        if resolve_file_pages and file_page_url:
+            cached = file_meta_cache.get(file_page_url)
+            if cached is None:
+                try:
+                    cached = fetch_fandom_file_metadata(file_page_url)
+                except Exception as exc:
+                    if verbose:
+                        print(f"  WARN Fandom file {file_page_url}: {exc}")
+                    cached = None
+                file_meta_cache[file_page_url] = cached
+            file_meta = cached
+
+        resolved_url = image_url
+        resolved_width = image.width
+        resolved_height = image.height
+        resolved_mime = None
+        resolved_created_at = None
+        if file_meta:
+            resolved_url = file_meta.file_url or resolved_url
+            resolved_width = file_meta.width or resolved_width
+            resolved_height = file_meta.height or resolved_height
+            resolved_mime = file_meta.mime_type
+            resolved_created_at = file_meta.created_at
+
+        metadata = _build_fandom_metadata(
+            section_tag=section_tag,
+            section_label=section_label,
+            source_variant="fandom_gallery",
+            source_page_url=file_page_url or image.source_page_url,
+        )
+        if metadata is None:
+            metadata = {}
+        if image.source_page_url:
+            metadata.setdefault("source_gallery_url", image.source_page_url)
+        if file_page_url:
+            metadata.setdefault("source_file_url", file_page_url)
+        if season:
+            metadata.setdefault("season_number", season)
+        if resolved_width:
+            metadata["image_width"] = resolved_width
+        if resolved_height:
+            metadata["image_height"] = resolved_height
+        if resolved_mime:
+            metadata["image_mime_type"] = resolved_mime
+        if resolved_created_at:
+            metadata["source_created_at"] = resolved_created_at
+
         # Ensure url and url_path are never null
-        url_value = image_url
-        url_path = _url_path_with_query(image_url) or image_url
+        url_value = resolved_url or image_url
+        url_path = _url_path_with_query(url_value) or url_value
 
         rows.append(
             {
                 "person_id": str(person_id),
                 "imdb_person_id": imdb_person_id,
                 "source": "fandom",
-                "source_image_id": f"fandom-gallery-{_url_hash(image_url)}",
-                "source_page_url": image.source_page_url or gallery.url,
+                "source_image_id": f"fandom-gallery-{_url_hash(url_value)}",
+                "source_page_url": file_page_url or image.source_page_url or gallery.url,
                 "url": url_value,
                 "url_path": url_path,
-                "image_url": image_url,
+                "image_url": url_value,
                 "thumb_url": image.thumb_url,
-                "image_url_canonical": _canonical_url(image_url),
+                "image_url_canonical": _canonical_url(url_value),
                 "caption": image.caption,
+                "season": season,
+                "width": resolved_width,
+                "height": resolved_height,
+                "metadata": metadata,
                 "fetched_at": now,
             }
         )

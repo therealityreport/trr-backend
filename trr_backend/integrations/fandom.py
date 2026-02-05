@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from typing import Any
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote, unquote, urlencode, urlparse
@@ -72,6 +73,10 @@ class FandomGalleryImage:
     thumb_url: str | None
     caption: str | None
     source_page_url: str
+    file_page_url: str | None = None
+    section_label: str | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,19 @@ class FandomGalleryResult:
     url: str
     person_name: str
     images: list[FandomGalleryImage]
+    error: str | None
+
+
+@dataclass(frozen=True)
+class FandomFileResult:
+    """Result of parsing a Fandom file page."""
+
+    url: str
+    file_url: str | None
+    width: int | None
+    height: int | None
+    mime_type: str | None
+    created_at: str | None
     error: str | None
 
 
@@ -424,6 +442,49 @@ def _extract_full_image_url(thumb_url: str) -> str:
     return url
 
 
+def _normalize_fandom_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    cleaned = url.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("//"):
+        return f"https:{cleaned}"
+    if cleaned.startswith("/"):
+        return f"https://real-housewives.fandom.com{cleaned}"
+    return cleaned
+
+
+def _looks_like_file_page_url(url: str | None) -> bool:
+    if not url:
+        return False
+    lower = url.lower()
+    return "/wiki/file:" in lower or "/wiki/file%3a" in lower
+
+
+def _extract_file_page_url(node) -> str | None:
+    if node is None:
+        return None
+    candidate = None
+    if getattr(node, "name", None) == "a" and node.get("href"):
+        candidate = node.get("href")
+    else:
+        link = node.find("a", href=True)
+        if link:
+            candidate = link.get("href")
+        if not candidate:
+            parent_link = node.find_parent("a", href=True)
+            if parent_link:
+                candidate = parent_link.get("href")
+    if not candidate:
+        data_href = node.get("data-href") if hasattr(node, "get") else None
+        if data_href:
+            candidate = data_href
+    if not _looks_like_file_page_url(candidate):
+        return None
+    return _normalize_fandom_url(candidate)
+
+
 def _fandom_file_to_special_url(raw_url: str) -> str:
     parsed = urlparse(raw_url)
     path = parsed.path or ""
@@ -463,6 +524,23 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
     images: list[FandomGalleryImage] = []
     seen_urls: set[str] = set()
 
+    def _normalize_heading(text: str | None) -> str | None:
+        if not text:
+            return None
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if not cleaned:
+            return None
+        lowered = cleaned.lower()
+        if lowered in ("gallery", "contents"):
+            return None
+        return cleaned
+
+    def _find_section_label(node) -> str | None:
+        heading = node.find_previous(["h2", "h3", "h4"])
+        if not heading:
+            return None
+        return _normalize_heading(heading.get_text(" ", strip=True))
+
     # Method 1: Look for gallery items (.wikia-gallery-item, .gallery-image-wrapper, etc.)
     gallery_selectors = [
         ".wikia-gallery-item",
@@ -494,12 +572,20 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
             if caption_el:
                 caption = caption_el.get_text(" ", strip=True) or None
 
+            section_label = _find_section_label(item)
+            width = _parse_int(img.get("data-image-width") or img.get("width"))
+            height = _parse_int(img.get("data-image-height") or img.get("height"))
+            file_page_url = _extract_file_page_url(item) or _extract_file_page_url(img)
             images.append(
                 FandomGalleryImage(
                     url=full_url,
                     thumb_url=thumb if thumb != full_url else None,
                     caption=caption,
                     source_page_url=url,
+                    file_page_url=file_page_url,
+                    section_label=section_label,
+                    width=width,
+                    height=height,
                 )
             )
 
@@ -520,12 +606,20 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
             if caption and caption.lower() in ("image", "photo", "gallery"):
                 caption = None
 
+            section_label = _find_section_label(img)
+            width = _parse_int(img.get("data-image-width") or img.get("width"))
+            height = _parse_int(img.get("data-image-height") or img.get("height"))
+            file_page_url = _extract_file_page_url(img)
             images.append(
                 FandomGalleryImage(
                     url=full_url,
                     thumb_url=thumb if thumb != full_url else None,
                     caption=caption,
                     source_page_url=url,
+                    file_page_url=file_page_url,
+                    section_label=section_label,
+                    width=width,
+                    height=height,
                 )
             )
 
@@ -554,12 +648,20 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
             if caption and caption.lower() in ("image", "photo", "gallery"):
                 caption = None
 
+            section_label = _find_section_label(img)
+            width = _parse_int(img.get("data-image-width") or img.get("width"))
+            height = _parse_int(img.get("data-image-height") or img.get("height"))
+            file_page_url = _extract_file_page_url(img)
             images.append(
                 FandomGalleryImage(
                     url=full_url,
                     thumb_url=thumb if thumb != full_url else None,
                     caption=caption,
                     source_page_url=url,
+                    file_page_url=file_page_url,
+                    section_label=section_label,
+                    width=width,
+                    height=height,
                 )
             )
 
@@ -568,6 +670,73 @@ def parse_fandom_gallery_html(html: str, *, url: str, person_name: str) -> Fando
         url=url,
         person_name=person_name,
         images=images,
+        error=None,
+    )
+
+
+def _parse_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    cleaned = value.replace(",", "").strip()
+    if not cleaned:
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        return None
+
+
+def parse_fandom_file_html(html: str, *, url: str) -> FandomFileResult:
+    if not html:
+        return FandomFileResult(
+            url=url,
+            file_url=None,
+            width=None,
+            height=None,
+            mime_type=None,
+            created_at=None,
+            error="Empty HTML response",
+        )
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    file_url = None
+    width = None
+    height = None
+    mime_type = None
+
+    link = soup.select_one("div.fullMedia a") or soup.select_one("a#file")
+    if link and link.get("href"):
+        file_url = _normalize_fandom_url(link.get("href"))
+
+    if not file_url:
+        meta_image = soup.select_one("meta[property='og:image']")
+        if meta_image and meta_image.get("content"):
+            file_url = _normalize_fandom_url(meta_image.get("content"))
+
+    meta_width = soup.select_one("meta[property='og:image:width']")
+    meta_height = soup.select_one("meta[property='og:image:height']")
+    width = _parse_int(meta_width.get("content") if meta_width else None)
+    height = _parse_int(meta_height.get("content") if meta_height else None)
+
+    full_media = soup.select_one("div.fullMedia") or soup.select_one("div.fullmedia")
+    if full_media:
+        text = full_media.get_text(" ", strip=True)
+        match = re.search(r"([0-9][0-9,]*)\\s*[×x]\\s*([0-9][0-9,]*)\\s*pixels", text)
+        if match and (width is None or height is None):
+            width = width or _parse_int(match.group(1))
+            height = height or _parse_int(match.group(2))
+        mime_match = re.search(r"MIME\\s+type:\\s*([a-z0-9/+.\\-]+)", text, re.IGNORECASE)
+        if mime_match:
+            mime_type = mime_match.group(1).lower()
+
+    return FandomFileResult(
+        url=url,
+        file_url=file_url,
+        width=width,
+        height=height,
+        mime_type=mime_type,
+        created_at=None,
         error=None,
     )
 
@@ -624,6 +793,114 @@ def _fetch_fandom_page_via_api(
         return None, str(exc)
     except Exception as exc:
         return None, str(exc)
+
+
+def _extract_file_title_from_url(file_page_url: str) -> str | None:
+    parsed = urlparse(file_page_url)
+    path = parsed.path or ""
+    if "/wiki/" in path:
+        title = path.split("/wiki/")[-1]
+    else:
+        title = path.rsplit("/", 1)[-1]
+    title = unquote(title)
+    if title.lower().startswith("special:filepath"):
+        name = title.split(":", 1)[-1].strip()
+        if name:
+            return f"File:{name}"
+        return None
+    if not title.lower().startswith("file:"):
+        return f"File:{title}"
+    return title
+
+
+def _fetch_fandom_file_info_via_api(
+    file_page_url: str,
+    *,
+    timeout_seconds: float = 20.0,
+) -> tuple[dict[str, Any] | None, str | None]:
+    title = _extract_file_title_from_url(file_page_url)
+    if not title:
+        return None, "Could not extract file title"
+    parsed = urlparse(file_page_url)
+    api_url = (
+        f"{parsed.scheme}://{parsed.netloc}/api.php?action=query&titles={quote(title)}"
+        "&prop=imageinfo&iiprop=url|size|mime|timestamp&format=json"
+    )
+    headers = {**_DEFAULT_HEADERS, "accept": "application/json"}
+    api_req = urllib.request.Request(api_url, headers=headers)
+    try:
+        with urllib.request.urlopen(api_req, timeout=timeout_seconds) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code}: {exc.reason}"
+    except urllib.error.URLError as exc:
+        return None, str(exc)
+    except Exception as exc:
+        return None, str(exc)
+
+    pages = data.get("query", {}).get("pages", {}) if isinstance(data, dict) else {}
+    if not isinstance(pages, dict) or not pages:
+        return None, "No pages in API response"
+    page = next(iter(pages.values()))
+    if not isinstance(page, dict):
+        return None, "Invalid page data"
+    infos = page.get("imageinfo")
+    if not isinstance(infos, list) or not infos:
+        return None, "Missing imageinfo"
+    return infos[0], None
+
+
+def fetch_fandom_file_metadata(
+    file_page_url: str,
+    *,
+    timeout_seconds: float = 20.0,
+) -> FandomFileResult:
+    """
+    Fetch and parse a Fandom file page to resolve the original image and dimensions.
+    """
+    api_info, api_error = _fetch_fandom_file_info_via_api(
+        file_page_url, timeout_seconds=timeout_seconds
+    )
+    if api_info:
+        return FandomFileResult(
+            url=file_page_url,
+            file_url=_normalize_fandom_url(api_info.get("url")),
+            width=api_info.get("width") if isinstance(api_info.get("width"), int) else None,
+            height=api_info.get("height") if isinstance(api_info.get("height"), int) else None,
+            mime_type=api_info.get("mime") if isinstance(api_info.get("mime"), str) else None,
+            created_at=api_info.get("timestamp") if isinstance(api_info.get("timestamp"), str) else None,
+            error=None,
+        )
+
+    status_code, html, error = fetch_html(file_page_url, timeout=timeout_seconds)
+    if html and _is_challenge_page(html):
+        html, api_error = _fetch_fandom_page_via_api(file_page_url, timeout_seconds=timeout_seconds)
+        if api_error and not error:
+            error = api_error
+
+    if not html:
+        return FandomFileResult(
+            url=file_page_url,
+            file_url=None,
+            width=None,
+            height=None,
+            mime_type=None,
+            created_at=None,
+            error=error or f"HTTP {status_code}" if status_code else (error or "No HTML"),
+        )
+
+    result = parse_fandom_file_html(html, url=file_page_url)
+    if result.file_url is None and error:
+        return FandomFileResult(
+            url=file_page_url,
+            file_url=None,
+            width=result.width,
+            height=result.height,
+            mime_type=result.mime_type,
+            created_at=result.created_at,
+            error=error,
+        )
+    return result
 
 
 def fetch_fandom_gallery(

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+import logging
 from typing import Literal
 
 import requests
 
 DetectorMode = Literal["faces_then_yolo", "faces", "yolo"]
+
+logger = logging.getLogger(__name__)
 
 
 class ScreenalyticsClientError(RuntimeError):
@@ -24,26 +27,63 @@ class PeopleCountResult:
 
 
 def _base_url() -> str:
-    return os.getenv("SCREENALYTICS_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    return os.getenv("SCREENALYTICS_API_URL", "").strip().rstrip("/")
+
+
+def _endpoint_candidates() -> list[str]:
+    configured = os.getenv("SCREENALYTICS_API_PATH", "").strip()
+    if configured:
+        paths = [p.strip() for p in configured.split(",") if p.strip()]
+        return paths
+    return ["/vision/people-count", "/api/v1/vision/people-count", "/people-count"]
+
+
+def is_screenalytics_configured() -> bool:
+    return bool(os.getenv("SCREENALYTICS_API_URL", "").strip())
 
 
 def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> PeopleCountResult:
     if not image_url:
         raise ScreenalyticsClientError("image_url is required")
 
-    url = f"{_base_url()}/vision/people-count"
+    base = _base_url()
+    if not base:
+        raise ScreenalyticsClientError("SCREENALYTICS_API_URL is not configured")
     payload = {"image_url": image_url, "mode": mode}
+    last_error: str | None = None
 
-    try:
-        response = requests.post(url, json=payload, timeout=(3.05, 20))
-    except requests.RequestException as exc:
-        raise ScreenalyticsClientError(f"Screenalytics request failed: {exc}") from exc
+    response: requests.Response | None = None
+    tried_urls: list[str] = []
+    for path in _endpoint_candidates():
+        url = f"{base}{path}"
+        tried_urls.append(url)
+        try:
+            response = requests.post(url, json=payload, timeout=(3.05, 20))
+        except requests.RequestException as exc:
+            last_error = f"Screenalytics request failed: {exc}"
+            continue
 
-    if response.status_code >= 400:
-        detail = response.text.strip()[:200]
-        raise ScreenalyticsClientError(
-            f"Screenalytics error {response.status_code}: {detail or 'unknown error'}"
+        if response.status_code == 404:
+            last_error = f"Screenalytics error {response.status_code}: {response.text.strip()[:200] or 'unknown error'}"
+            continue
+
+        if response.status_code >= 400:
+            detail = response.text.strip()[:200]
+            raise ScreenalyticsClientError(
+                f"Screenalytics error {response.status_code}: {detail or 'unknown error'}"
+            )
+        break
+    else:
+        logger.error(
+            "Screenalytics people-count endpoint not found. Tried: %s",
+            ", ".join(tried_urls),
         )
+        raise ScreenalyticsClientError(last_error or "Screenalytics request failed")
+
+    if response is None:
+        raise ScreenalyticsClientError(last_error or "Screenalytics request failed")
+
+    logger.info("Screenalytics people-count endpoint used: %s", response.url)
 
     try:
         data = response.json()
