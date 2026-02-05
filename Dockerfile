@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Safer than copying only two folders; .dockerignore keeps secrets out.
+# Copy application code
 COPY . .
 
 # Cloud Run uses PORT env var (defaults to 8080)
@@ -25,5 +25,4 @@ ENV PORT=8080
 
 EXPOSE ${PORT}
 
-# Use sh -c so env vars expand
-CMD ["sh", "-c", "gunicorn api.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8080} --workers ${WEB_CONCURRENCY:-1} --timeout 3600 --graceful-timeout 30 --access-logfile - --error-logfile -"]
+CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT}
