@@ -81,6 +81,7 @@ from api.routers import (  # noqa: E402
     screenalytics,
     screenalytics_runs_v2,
     shows,
+    socials,
     surveys,
     ws,
 )
@@ -98,6 +99,7 @@ app.include_router(admin_image_counts.router, prefix="/api/v1")
 app.include_router(admin_media_assets.router, prefix="/api/v1")
 app.include_router(admin_person_images.router, prefix="/api/v1")
 app.include_router(admin_scrape.router, prefix="/api/v1")
+app.include_router(socials.router, prefix="/api/v1")
 
 
 @app.get("/")
