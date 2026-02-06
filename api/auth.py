@@ -7,6 +7,7 @@ All user-scoped writes must enforce ownership using the JWT subject.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from typing import Annotated, Any
@@ -136,3 +137,27 @@ async def require_allowlist_admin(user: CurrentUser) -> dict:
 
 
 AllowlistAdminUser = Annotated[dict, Depends(require_allowlist_admin)]
+
+
+async def require_facebank_seed_admin(request: Request, user: CurrentUser) -> dict:
+    """Require allowlist admin, or internal service role with shared secret."""
+    allowlist = _admin_email_allowlist()
+    email = (user.get("email") or "").lower()
+    if allowlist and email in allowlist:
+        return user
+
+    role = (user.get("role") or "").lower()
+    shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
+    supplied_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
+    if (
+        role == "service_role"
+        and shared_secret
+        and supplied_secret
+        and hmac.compare_digest(supplied_secret, shared_secret)
+    ):
+        return user
+
+    raise HTTPException(status_code=403, detail="Allowlist admin access required")
+
+
+FacebankSeedAdminUser = Annotated[dict, Depends(require_facebank_seed_admin)]

@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser, AllowlistAdminUser
+from api.auth import AdminUser, FacebankSeedAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.repositories.media_links import update_media_link_facebank_seed
 
@@ -648,7 +648,7 @@ def update_facebank_seed(
     link_id: UUID,
     payload: FacebankSeedRequest,
     db: SupabaseAdminClient = None,
-    _: AllowlistAdminUser = None,
+    _: FacebankSeedAdminUser = None,
 ) -> FacebankSeedResponse:
     response = (
         db.schema("core")
