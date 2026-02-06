@@ -26,6 +26,30 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
+def _make_allowlist_user_token(secret: str, email: str, subject: str = "user-1") -> str:
+    """Create a valid user JWT token with allowlist-able email."""
+    now = datetime.now(tz=UTC)
+    payload = {
+        "sub": subject,
+        "email": email,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "role": "authenticated",
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def _mock_media_link_lookup(mock_db: MagicMock, row: dict | None, *, error: object | None = None) -> None:
+    """Mock media_links lookup query for facebank seed endpoint tests."""
+    mock_response = MagicMock()
+    mock_response.data = [row] if row is not None else []
+    mock_response.error = error
+    query = (
+        mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+    )
+    query.execute.return_value = mock_response
+
+
 @pytest.fixture
 def client():
     return TestClient(app)
@@ -171,6 +195,240 @@ class TestRefreshPersonImages:
 
         assert response.status_code == 200
         mock_mirror.assert_not_called()
+
+
+class TestUpdateFacebankSeed:
+    """Test PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed."""
+
+    def test_allows_allowlist_user(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+        person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+
+        mock_db = MagicMock()
+        _mock_media_link_lookup(
+            mock_db,
+            {
+                "id": link_id,
+                "entity_id": person_id,
+                "entity_type": "person",
+                "kind": "gallery",
+                "facebank_seed": False,
+            },
+        )
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images.update_media_link_facebank_seed",
+                return_value={"id": link_id, "facebank_seed": True},
+            ):
+                response = client.patch(
+                    f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                    json={"facebank_seed": True},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["link_id"] == link_id
+        assert data["person_id"] == person_id
+        assert data["facebank_seed"] is True
+
+    def test_rejects_service_role_without_internal_secret_header(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+        person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        mock_db = MagicMock()
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.patch(
+                f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                json={"facebank_seed": True},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 403
+        assert "Allowlist admin access required" in response.json()["detail"]
+
+    def test_rejects_service_role_with_invalid_internal_secret_header(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+        person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        mock_db = MagicMock()
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.patch(
+                f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                json={"facebank_seed": True},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-TRR-Internal-Admin-Secret": "wrong-secret",
+                },
+            )
+
+        assert response.status_code == 403
+        assert "Allowlist admin access required" in response.json()["detail"]
+
+    def test_allows_service_role_with_valid_internal_secret_header(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+        person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        mock_db = MagicMock()
+        _mock_media_link_lookup(
+            mock_db,
+            {
+                "id": link_id,
+                "entity_id": person_id,
+                "entity_type": "person",
+                "kind": "gallery",
+                "facebank_seed": False,
+            },
+        )
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images.update_media_link_facebank_seed",
+                return_value={"id": link_id, "facebank_seed": True},
+            ):
+                response = client.patch(
+                    f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                    json={"facebank_seed": True},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "X-TRR-Internal-Admin-Secret": "internal-secret",
+                    },
+                )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["link_id"] == link_id
+        assert data["person_id"] == person_id
+        assert data["facebank_seed"] is True
+
+    def test_returns_404_when_media_link_not_found(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+
+        mock_db = MagicMock()
+        _mock_media_link_lookup(mock_db, None)
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.patch(
+                f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                json={"facebank_seed": True},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 404
+        assert "Media link not found" in response.json()["detail"]
+
+    def test_returns_409_when_media_link_is_not_person_gallery(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+
+        mock_db = MagicMock()
+        _mock_media_link_lookup(
+            mock_db,
+            {
+                "id": link_id,
+                "entity_id": person_id,
+                "entity_type": "show",
+                "kind": "poster",
+                "facebank_seed": False,
+            },
+        )
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.patch(
+                f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                json={"facebank_seed": True},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 409
+        assert "not a person gallery image" in response.json()["detail"]
+
+    def test_returns_409_when_media_link_person_mismatch(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        person_id = str(uuid4())
+        other_person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+
+        mock_db = MagicMock()
+        _mock_media_link_lookup(
+            mock_db,
+            {
+                "id": link_id,
+                "entity_id": other_person_id,
+                "entity_type": "person",
+                "kind": "gallery",
+                "facebank_seed": False,
+            },
+        )
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.patch(
+                f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                json={"facebank_seed": True},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 409
+        assert "does not belong to this person" in response.json()["detail"]
+
+    def test_returns_502_when_update_media_link_fails(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+
+        mock_db = MagicMock()
+        _mock_media_link_lookup(
+            mock_db,
+            {
+                "id": link_id,
+                "entity_id": person_id,
+                "entity_type": "person",
+                "kind": "gallery",
+                "facebank_seed": False,
+            },
+        )
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images.update_media_link_facebank_seed",
+                side_effect=RuntimeError("db write failed"),
+            ):
+                response = client.patch(
+                    f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                    json={"facebank_seed": True},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+        assert response.status_code == 502
+        assert "Database error updating facebank_seed" in response.json()["detail"]
 
 
 def test_pick_autocount_url_prefers_fandom_thumb() -> None:

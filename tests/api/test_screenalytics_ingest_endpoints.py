@@ -68,3 +68,47 @@ def test_person_photos_ok():
     )
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+def test_person_photos_seed_only_true_adds_facebank_filter(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_fetch_all(sql: str, params: list[object]) -> list[dict]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(screenalytics_router.pg, "fetch_all", fake_fetch_all)
+    person_id = uuid4()
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/v1/screenalytics/people/{person_id}/photos?seed_only=true&limit=7&offset=2",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert "AND facebank_seed = true" in str(captured["sql"])
+    assert captured["params"] == [str(person_id), 7, 2]
+
+
+def test_person_photos_seed_only_false_omits_facebank_filter(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_fetch_all(sql: str, params: list[object]) -> list[dict]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(screenalytics_router.pg, "fetch_all", fake_fetch_all)
+    person_id = uuid4()
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/v1/screenalytics/people/{person_id}/photos?seed_only=false&limit=9&offset=1",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert "AND facebank_seed = true" not in str(captured["sql"])
+    assert captured["params"] == [str(person_id), 9, 1]
