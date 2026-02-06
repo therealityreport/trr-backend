@@ -6,13 +6,24 @@ Last updated: February 6, 2026
 Goal
 Allow admins to flag person gallery images as facebank seed candidates for SCREENALYTICS and keep downstream ingestion contract-safe.
 
+Scope Clarification (Task 1 vs Task 2)
+Task 1 (completed; contract scope)
+- Seed flagging (admin toggle)
+- `seed_only` photos contract + strict fallback behavior
+- Episode-level import hook + side effects (imports into `person` + `face_bank_images`)
+
+Task 2 (tracked separately; show-level SYNC)
+- Show-level SYNC endpoint + auth guard (`POST /shows/{show_id}/sync_facebank_seeds`)
+- Show-level orchestration + UI wiring (Streamlit + Next.js)
+- Note: show-level SYNC is not implemented by Task 1 and should not be inferred from Task 1 completion.
+
 Status Snapshot (As of February 6, 2026)
 - TRR-Backend PR `#44` merged.
 - TRR-APP PRs `#18` and `#19` merged.
 - SCREENALYTICS PR `#187` merged.
 - Code and CI are complete across all three repos.
 - Staging + production rollout smoke (including DB side effects) has been completed end-to-end.
-- Task 1 is complete.
+- Task 1 is complete for contract scope. Task 2 tracks show-level SYNC (not implemented here).
 
 Status Matrix
 | Repo | Code/CI | Rollout Smoke | Notes |

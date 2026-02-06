@@ -8,7 +8,11 @@ Cross-Repo Snapshot
 - TRR-APP PRs `#18` and `#19` merged.
 - SCREENALYTICS PR `#187` merged.
 - Code/CI is complete across repos; staging + production rollout smoke is complete (including DB side effects).
-- Task 1 is complete.
+- Task 1 is complete for contract scope. Task 2 tracks show-level SYNC (not implemented here).
+
+Scope Clarification (Task 1 vs Task 2)
+- Task 1 (completed; contract scope): seed flagging + `seed_only` contract + strict fallback + episode-level import side effects.
+- Task 2 (tracked separately): show-level SYNC endpoint + UI + orchestration (not part of Task 1 closeout).
 
 Locked Contracts (No Pending Changes)
 1. Backend toggle endpoint: `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`.
