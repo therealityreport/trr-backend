@@ -40,6 +40,14 @@ class MirrorMediaAssetResponse(BaseModel):
     content_type: str | None = None
 
 
+class DeleteMediaAssetResponse(BaseModel):
+    asset_id: str
+    deleted_links: int
+    deleted_asset: bool
+    s3_deleted: bool
+    s3_error: str | None = None
+
+
 def _build_media_asset_s3_key(sha256: str, ext: str) -> str:
     return f"media/{sha256[:2]}/{sha256}{ext}"
 
@@ -147,4 +155,85 @@ def mirror_media_asset(
         status="hosted",
         bytes=file_size,
         content_type=content_type,
+    )
+
+
+@router.delete("/media-assets/{asset_id}", response_model=DeleteMediaAssetResponse)
+def delete_media_asset(
+    asset_id: UUID,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> DeleteMediaAssetResponse:
+    """
+    Delete a media asset from the unified media_assets/media_links model.
+
+    This is intended for admin cleanup of web scrape imports.
+    Deletes:
+    - core.media_links rows referencing the asset
+    - core.media_assets row
+    - best-effort S3 object delete (hosted_key) if present
+    """
+    asset_id_str = str(asset_id)
+
+    response = (
+        db.schema("core")
+        .table("media_assets")
+        .select("id, hosted_bucket, hosted_key")
+        .eq("id", asset_id_str)
+        .limit(1)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise HTTPException(status_code=502, detail="Database error fetching media asset")
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Media asset not found")
+
+    row = response.data[0]
+    hosted_bucket = row.get("hosted_bucket") or None
+    hosted_key = row.get("hosted_key") or None
+
+    deleted_links = 0
+    try:
+        links_response = (
+            db.schema("core")
+            .table("media_links")
+            .delete()
+            .eq("media_asset_id", asset_id_str)
+            .execute()
+        )
+        deleted_links = len(links_response.data or [])
+    except Exception:
+        # If link deletion fails, do not proceed to delete the asset row.
+        raise HTTPException(status_code=502, detail="Database error deleting media links")
+
+    deleted_asset = False
+    try:
+        asset_delete_response = (
+            db.schema("core")
+            .table("media_assets")
+            .delete()
+            .eq("id", asset_id_str)
+            .execute()
+        )
+        deleted_asset = bool(asset_delete_response.data)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Database error deleting media asset")
+
+    s3_deleted = False
+    s3_error: str | None = None
+    if hosted_key:
+        try:
+            s3_client = get_s3_client()
+            bucket = hosted_bucket or get_s3_bucket()
+            s3_client.delete_object(Bucket=bucket, Key=hosted_key)
+            s3_deleted = True
+        except Exception as exc:
+            s3_error = str(exc)
+
+    return DeleteMediaAssetResponse(
+        asset_id=asset_id_str,
+        deleted_links=deleted_links,
+        deleted_asset=deleted_asset,
+        s3_deleted=s3_deleted,
+        s3_error=s3_error,
     )
