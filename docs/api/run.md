@@ -24,6 +24,16 @@ The API requires the following environment variables to be set:
 
 If you call `/api/v1/screenalytics/*` or `/api/v1/screenalytics/v2/*`, the backend must have `SCREENALYTICS_SERVICE_TOKEN` set and clients must send it as a Bearer token. If the backend needs to call Screenalytics for auto-counting, set `SCREENALYTICS_API_URL` to the Screenalytics base URL.
 
+### Internal Admin Proxy (TRR-APP -> TRR-Backend)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TRR_INTERNAL_ADMIN_SHARED_SECRET` | Shared secret required for service-role calls to facebank seed toggle admin endpoint | `long-random-shared-secret` |
+
+For `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`, backend accepts:
+- allowlisted user JWT (`ADMIN_EMAIL_ALLOWLIST`), or
+- `service_role` JWT **only** when header `X-TRR-Internal-Admin-Secret` matches `TRR_INTERNAL_ADMIN_SHARED_SECRET`.
+
 ### Redis (Optional)
 
 | Variable | Description | Example |
@@ -74,6 +84,7 @@ At minimum, set these in `.env`:
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your_anon_key
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+TRR_INTERNAL_ADMIN_SHARED_SECRET=your_internal_shared_secret
 ```
 
 ### 3. Run the development server
@@ -113,10 +124,11 @@ FastAPI ships with interactive API docs and an OpenAPI schema:
 | Client | Auth Header | Notes |
 | --- | --- | --- |
 | TRR App | `Authorization: Bearer <Supabase access token>` | Use for user-scoped endpoints under `/api/v1/*`. |
+| TRR App internal proxy (facebank toggle) | `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` + `X-TRR-Internal-Admin-Secret: <TRR_INTERNAL_ADMIN_SHARED_SECRET>` | Allowed only for `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`. |
 | Screenalytics | `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` | Use for `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*`. |
 
 Admin allowlist
-- New admin endpoints for facebank seed flagging require an authenticated user whose email is in `ADMIN_EMAIL_ALLOWLIST` (no role shortcuts).
+- Facebank seed toggle endpoint requires either allowlisted user JWT or service-role plus valid `X-TRR-Internal-Admin-Secret`.
 
 **CORS guidance**
 

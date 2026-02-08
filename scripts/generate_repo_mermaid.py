@@ -315,41 +315,29 @@ def ensure_git_workflow_template(diagrams_dir: Path) -> None:
 
     template = """# Git Workflow
 
-This diagram shows our standard branching strategy.
+This repo does not prescribe a branching/worktree strategy.
+
+- Default is work on `main`.
+- Only create/use a branch or worktree if explicitly asked.
 
 ```mermaid
 flowchart TB
-    main1[main branch] --> branch[Create feature branch]
-    branch --> dev1[Develop & commit]
-    dev1 --> dev2[Add tests]
-    dev2 --> pr[Open Pull Request]
-    pr --> ci[CI checks run]
-    ci --> review[Code review]
-    review --> merge[Merge to main]
-    merge --> main2[main branch updated]
+    main["main"] --> edit["Edit code"]
+    edit --> validate["Run fast checks (ruff + pytest)"]
+    validate --> commit["Commit"]
+    commit --> done["Done"]
 
-    style main1 fill:#90EE90
-    style main2 fill:#90EE90
-    style pr fill:#87CEEB
-    style merge fill:#FFD700
+    main --> optional["Branch/worktree (optional; only if explicitly asked)"]
+    optional --> edit
+
+    style main fill:#90EE90
+    style optional fill:#FFF2CC
 ```
 
-## Branching Strategy
+## Notes
 
-- **main**: Primary branch, always deployable
-- **feature/\***: New features and enhancements
-- **fix/\***: Bug fixes
-- **docs/\***: Documentation updates
-- **chore/\***: Maintenance and tooling
-
-## Workflow
-
-1. Create branch from `main`
-2. Make changes and commit
-3. Open Pull Request
-4. CI checks pass
-5. Code review
-6. Merge to `main`
+- If your collaboration flow requires a PR, create a branch (no naming conventions are enforced here).
+- Never force-push to `main`.
 """
 
     git_workflow_path.write_text(template)
