@@ -54,6 +54,7 @@ class ImageCandidateResponse(BaseModel):
     best_url: str
     width: int | None = None
     height: int | None = None
+    bytes: int | None = None
     alt_text: str | None = None
     context: str | None = None
     thumbnail_url: str
@@ -70,7 +71,18 @@ class ScrapePreviewResponse(BaseModel):
     error: str | None = None
 
 
-ImageKind = Literal["poster", "backdrop", "episode_still", "cast", "other"]
+# "kind" is stored in core.media_links.kind (text), so expanding is safe.
+# Keep values in sync with TRR-APP's ImageScrapeDrawer kind options.
+ImageKind = Literal[
+    "poster",
+    "backdrop",
+    "episode_still",
+    "cast",
+    "promo",
+    "intro",
+    "reunion",
+    "other",
+]
 
 
 class ImportImageItem(BaseModel):
@@ -120,6 +132,74 @@ class ImportRequest(BaseModel):
         return self
 
 
+def _build_people_tags_context(db: SupabaseAdminClient, person_ids: set[str]) -> dict:
+    """
+    Build a deterministic people tags payload for media_links.context.
+
+    Used to persist PEOPLE tags during URL import (so SOLO/GROUP filtering works),
+    and to prevent later auto-count steps from overwriting manual intent.
+    """
+    if not person_ids:
+        return {}
+
+    try:
+        response = (
+            db.schema("core")
+            .table("people")
+            .select("id, full_name")
+            .in_("id", list(person_ids))
+            .limit(500)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning("Failed to lookup people names for tags: %s", exc)
+        ids_sorted = sorted(person_ids)
+        return {
+            "people_ids": ids_sorted,
+            "people_names": ids_sorted,
+            "people_count": len(ids_sorted),
+            "people_count_source": "manual",
+        }
+
+    if hasattr(response, "error") and response.error:
+        logger.warning("People lookup error for tags: %s", response.error)
+        ids_sorted = sorted(person_ids)
+        return {
+            "people_ids": ids_sorted,
+            "people_names": ids_sorted,
+            "people_count": len(ids_sorted),
+            "people_count_source": "manual",
+        }
+
+    rows = response.data or []
+    cleaned: list[dict] = []
+    for row in rows:
+        pid = row.get("id")
+        name = row.get("full_name")
+        if pid and name:
+            cleaned.append({"id": str(pid), "full_name": str(name)})
+
+    cleaned.sort(key=lambda r: r["full_name"].lower())
+    people_ids = [r["id"] for r in cleaned]
+    people_names = [r["full_name"] for r in cleaned]
+
+    if not people_ids:
+        ids_sorted = sorted(person_ids)
+        return {
+            "people_ids": ids_sorted,
+            "people_names": ids_sorted,
+            "people_count": len(ids_sorted),
+            "people_count_source": "manual",
+        }
+
+    return {
+        "people_ids": people_ids,
+        "people_names": people_names,
+        "people_count": len(people_ids),
+        "people_count_source": "manual",
+    }
+
+
 class MediaAssetSummary(BaseModel):
     """Summary of an imported media asset."""
 
@@ -140,6 +220,9 @@ class ImportResponse(BaseModel):
     skipped_duplicates: int
     errors: list[str]
     assets: list[MediaAssetSummary]
+    text_overlay_attempted: int = 0
+    text_overlay_succeeded: int = 0
+    text_overlay_failed: int = 0
 
 
 # Cast Member Matching Helpers
@@ -256,6 +339,7 @@ def preview_scrape(
                 best_url=img.best_url,
                 width=img.width,
                 height=img.height,
+                bytes=getattr(img, "bytes", None),
                 alt_text=img.alt_text,
                 context=img.context,
                 thumbnail_url=img.thumbnail_url or img.best_url,
@@ -370,6 +454,7 @@ def import_images(
     errors: list[str] = []
     assets: list[MediaAssetSummary] = []
     auto_count_assets: dict[str, str] = {}
+    text_overlay_asset_ids: set[str] = set()
 
     for idx, img in enumerate(request.images):
         # Cast matching - extract filename and try to match
@@ -442,6 +527,13 @@ def import_images(
                         logger.warning("Failed to mirror existing media_asset %s: %s", existing.get("id"), exc)
 
                 # Still create link to entity
+                tag_person_ids: set[str] = set()
+                if img.person_ids:
+                    tag_person_ids.update({str(person_id) for person_id in img.person_ids})
+                if matched_person:
+                    tag_person_ids.add(str(matched_person["person_id"]))
+                tags_ctx = _build_people_tags_context(db, tag_person_ids)
+
                 link_kind = img.kind if request.entity_type == "season" else "gallery"
                 create_media_link_for_entity(
                     db,
@@ -450,7 +542,7 @@ def import_images(
                     media_asset_id=existing["id"],
                     kind=link_kind,
                     position=idx,
-                    context=link_context,
+                    context={**link_context, **tags_ctx},
                 )
 
                 # Also link to person if matched
@@ -469,7 +561,7 @@ def import_images(
                         media_asset_id=existing["id"],
                         kind="gallery",
                         position=idx,
-                        context=person_link_ctx,
+                        context={**person_link_ctx, **tags_ctx},
                     )
 
                 if request.entity_type == "season" and img.person_ids:
@@ -492,8 +584,11 @@ def import_images(
                             media_asset_id=existing["id"],
                             kind="gallery",
                             position=idx,
-                            context=person_link_ctx,
+                            context={**person_link_ctx, **tags_ctx},
                         )
+
+                if existing.get("hosted_url"):
+                    text_overlay_asset_ids.add(existing["id"])
 
                 if request.entity_type == "person" or matched_person:
                     if existing.get("hosted_url"):
@@ -545,6 +640,13 @@ def import_images(
             )
 
             # Create media link to entity
+            tag_person_ids: set[str] = set()
+            if img.person_ids:
+                tag_person_ids.update({str(person_id) for person_id in img.person_ids})
+            if matched_person:
+                tag_person_ids.add(str(matched_person["person_id"]))
+            tags_ctx = _build_people_tags_context(db, tag_person_ids)
+
             link_kind = img.kind if request.entity_type == "season" else "gallery"
             create_media_link_for_entity(
                 db,
@@ -553,7 +655,7 @@ def import_images(
                 media_asset_id=asset["id"],
                 kind=link_kind,
                 position=idx,
-                context=link_context,
+                context={**link_context, **tags_ctx},
             )
 
             # Also link to person if matched
@@ -572,7 +674,7 @@ def import_images(
                     media_asset_id=asset["id"],
                     kind="gallery",
                     position=idx,
-                    context=person_link_ctx,
+                    context={**person_link_ctx, **tags_ctx},
                 )
 
             if request.entity_type == "season" and img.person_ids:
@@ -595,8 +697,11 @@ def import_images(
                         media_asset_id=asset["id"],
                         kind="gallery",
                         position=idx,
-                        context=person_link_ctx,
+                        context={**person_link_ctx, **tags_ctx},
                     )
+
+            if hosted_url:
+                text_overlay_asset_ids.add(asset["id"])
 
             if request.entity_type == "person" or matched_person:
                 auto_count_url = img.url or hosted_url
@@ -636,44 +741,64 @@ def import_images(
             )
 
             if not is_screenalytics_configured():
-                return ImportResponse(
-                    imported=imported_count,
-                    skipped_duplicates=skipped_count,
-                    errors=errors,
-                    assets=assets,
-                )
-
-            for asset_id, image_url in auto_count_assets.items():
-                links = list_person_links_by_asset_id(db, asset_id)
-                if not links:
-                    continue
-                if any(has_manual_people_tags(link.get("context")) for link in links):
-                    continue
-                if any(has_people_count(link.get("context")) for link in links):
-                    continue
-                if not image_url:
-                    continue
-                try:
-                    result = count_people(image_url)
-                    update_person_links_context(
-                        db,
-                        links,
-                        {
-                            "people_count": result.people_count,
-                            "people_count_source": "auto",
-                            "people_count_detector": result.detector,
-                        },
-                    )
-                except ScreenalyticsClientError as exc:
-                    logger.warning("Auto-count failed for media_asset %s: %s", asset_id, exc)
+                auto_count_assets = {}
+            else:
+                for asset_id, image_url in auto_count_assets.items():
+                    links = list_person_links_by_asset_id(db, asset_id)
+                    if not links:
+                        continue
+                    if any(has_manual_people_tags(link.get("context")) for link in links):
+                        continue
+                    if any(has_people_count(link.get("context")) for link in links):
+                        continue
+                    if not image_url:
+                        continue
+                    try:
+                        result = count_people(image_url)
+                        update_person_links_context(
+                            db,
+                            links,
+                            {
+                                "people_count": result.people_count,
+                                "people_count_source": "auto",
+                                "people_count_detector": result.detector,
+                            },
+                        )
+                    except ScreenalyticsClientError as exc:
+                        logger.warning("Auto-count failed for media_asset %s: %s", asset_id, exc)
         except Exception as exc:
             logger.warning("Auto-count setup failed: %s", exc)
+
+    text_overlay_attempted = 0
+    text_overlay_succeeded = 0
+    text_overlay_failed = 0
+    if text_overlay_asset_ids:
+        try:
+            from trr_backend.vision.text_overlay import (
+                detect_and_update_media_asset_text_overlay,
+                is_text_overlay_detection_configured,
+            )
+
+            if is_text_overlay_detection_configured():
+                for asset_id in list(text_overlay_asset_ids)[:25]:
+                    text_overlay_attempted += 1
+                    try:
+                        detect_and_update_media_asset_text_overlay(db, asset_id, force=False)
+                        text_overlay_succeeded += 1
+                    except Exception as exc:
+                        text_overlay_failed += 1
+                        logger.warning("Text overlay detect failed for media_asset %s: %s", asset_id, exc)
+        except Exception as exc:
+            logger.warning("Text overlay setup failed: %s", exc)
 
     return ImportResponse(
         imported=imported_count,
         skipped_duplicates=skipped_count,
         errors=errors,
         assets=assets,
+        text_overlay_attempted=text_overlay_attempted,
+        text_overlay_succeeded=text_overlay_succeeded,
+        text_overlay_failed=text_overlay_failed,
     )
 
 
@@ -781,6 +906,7 @@ async def import_images_stream(
         errors: list[str] = []
         assets: list[dict] = []
         auto_count_assets: dict[str, str] = {}
+        text_overlay_asset_ids: set[str] = set()
         total = len(request.images)
 
         for idx, img in enumerate(request.images):
@@ -866,6 +992,13 @@ async def import_images_stream(
                             )
 
                     # Still create link to entity
+                    tag_person_ids: set[str] = set()
+                    if img.person_ids:
+                        tag_person_ids.update({str(person_id) for person_id in img.person_ids})
+                    if matched_person:
+                        tag_person_ids.add(str(matched_person["person_id"]))
+                    tags_ctx = _build_people_tags_context(db, tag_person_ids)
+
                     link_kind = img.kind if request.entity_type == "season" else "gallery"
                     create_media_link_for_entity(
                         db,
@@ -874,7 +1007,7 @@ async def import_images_stream(
                         media_asset_id=existing["id"],
                         kind=link_kind,
                         position=idx,
-                        context=link_context,
+                        context={**link_context, **tags_ctx},
                     )
 
                     # Also link to person if matched
@@ -893,7 +1026,7 @@ async def import_images_stream(
                             media_asset_id=existing["id"],
                             kind="gallery",
                             position=idx,
-                            context=person_link_ctx,
+                            context={**person_link_ctx, **tags_ctx},
                         )
 
                     if request.entity_type == "season" and img.person_ids:
@@ -916,8 +1049,11 @@ async def import_images_stream(
                                 media_asset_id=existing["id"],
                                 kind="gallery",
                                 position=idx,
-                                context=person_link_ctx,
+                                context={**person_link_ctx, **tags_ctx},
                             )
+
+                    if existing.get("hosted_url"):
+                        text_overlay_asset_ids.add(existing["id"])
 
                     assets.append(
                         {
@@ -981,6 +1117,13 @@ async def import_images_stream(
                 )
 
                 # Create media link to entity
+                tag_person_ids: set[str] = set()
+                if img.person_ids:
+                    tag_person_ids.update({str(person_id) for person_id in img.person_ids})
+                if matched_person:
+                    tag_person_ids.add(str(matched_person["person_id"]))
+                tags_ctx = _build_people_tags_context(db, tag_person_ids)
+
                 link_kind = img.kind if request.entity_type == "season" else "gallery"
                 create_media_link_for_entity(
                     db,
@@ -989,7 +1132,7 @@ async def import_images_stream(
                     media_asset_id=asset["id"],
                     kind=link_kind,
                     position=idx,
-                    context=link_context,
+                    context={**link_context, **tags_ctx},
                 )
 
                 # Also link to person if matched
@@ -1008,7 +1151,7 @@ async def import_images_stream(
                         media_asset_id=asset["id"],
                         kind="gallery",
                         position=idx,
-                        context=person_link_ctx,
+                        context={**person_link_ctx, **tags_ctx},
                     )
 
                 if request.entity_type == "season" and img.person_ids:
@@ -1031,8 +1174,11 @@ async def import_images_stream(
                             media_asset_id=asset["id"],
                             kind="gallery",
                             position=idx,
-                            context=person_link_ctx,
+                            context={**person_link_ctx, **tags_ctx},
                         )
+
+                if hosted_url:
+                    text_overlay_asset_ids.add(asset["id"])
 
                     if request.entity_type == "person" or matched_person:
                         auto_count_url = img.url or hosted_url
@@ -1111,12 +1257,41 @@ async def import_images_stream(
             except Exception as exc:
                 logger.warning("Auto-count setup failed: %s", exc)
 
+        text_overlay_attempted = 0
+        text_overlay_succeeded = 0
+        text_overlay_failed = 0
+        if text_overlay_asset_ids:
+            try:
+                from trr_backend.vision.text_overlay import (
+                    detect_and_update_media_asset_text_overlay,
+                    is_text_overlay_detection_configured,
+                )
+
+                if is_text_overlay_detection_configured():
+                    for asset_id in list(text_overlay_asset_ids)[:25]:
+                        text_overlay_attempted += 1
+                        try:
+                            detect_and_update_media_asset_text_overlay(db, asset_id, force=False)
+                            text_overlay_succeeded += 1
+                        except Exception as exc:
+                            text_overlay_failed += 1
+                            logger.warning(
+                                "Text overlay detect failed for media_asset %s: %s",
+                                asset_id,
+                                exc,
+                            )
+            except Exception as exc:
+                logger.warning("Text overlay setup failed: %s", exc)
+
         # Final completion event
         complete_data = {
             "imported": imported_count,
             "skipped_duplicates": skipped_count,
             "errors": errors,
             "assets": assets,
+            "text_overlay_attempted": text_overlay_attempted,
+            "text_overlay_succeeded": text_overlay_succeeded,
+            "text_overlay_failed": text_overlay_failed,
         }
         yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"
 

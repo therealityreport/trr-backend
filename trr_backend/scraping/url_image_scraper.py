@@ -11,8 +11,10 @@ This module provides functionality to:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
@@ -90,6 +92,7 @@ class ImageCandidate:
     best_url: str
     width: int | None = None
     height: int | None = None
+    bytes: int | None = None
     alt_text: str | None = None
     context: str | None = None
     thumbnail_url: str | None = None
@@ -102,6 +105,7 @@ class ImageCandidate:
             "best_url": self.best_url,
             "width": self.width,
             "height": self.height,
+            "bytes": self.bytes,
             "alt_text": self.alt_text,
             "context": self.context,
             "thumbnail_url": self.thumbnail_url or self.best_url,
@@ -373,8 +377,8 @@ def _fetch_direct_image_info(
             # Maybe the extension was misleading - not an image
             return None
 
-        # Try to get dimensions from Content-Length (can't get actual dimensions without downloading)
-        # We'll leave width/height as None since we can't determine without full download
+        # Content-Length is useful for preview display, even if we can't infer dimensions.
+        content_length = _parse_content_length(resp.headers.get("Content-Length"))
 
         # Extract filename for alt text
         parsed = urlparse(url)
@@ -392,6 +396,7 @@ def _fetch_direct_image_info(
             best_url=url,
             width=None,
             height=None,
+            bytes=content_length,
             alt_text=filename,
             context="Direct image URL",
             thumbnail_url=url,
@@ -400,6 +405,78 @@ def _fetch_direct_image_info(
 
     except requests.RequestException:
         return None
+
+
+def _parse_content_length(value: str | None) -> int | None:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _fetch_content_length(
+    url: str,
+    *,
+    timeout: float = 3.0,
+    referer: str | None = None,
+) -> int | None:
+    """
+    Best-effort HEAD request to get Content-Length for display in preview.
+    Returns None if not available or HEAD is blocked.
+    """
+    headers = {**_DEFAULT_HEADERS}
+    if referer:
+        headers["referer"] = referer
+    try:
+        resp = requests.head(url, headers=headers, timeout=timeout, allow_redirects=True)
+        if resp.status_code >= 400:
+            return None
+        return _parse_content_length(resp.headers.get("Content-Length"))
+    except requests.RequestException:
+        return None
+
+
+def _populate_candidate_content_lengths(
+    candidates: list[ImageCandidate],
+    *,
+    max_heads: int,
+    timeout_s: float,
+    max_workers: int,
+) -> None:
+    """
+    Populate candidate.bytes using best-effort HEAD requests (Content-Length).
+    Mutates the candidates list in place.
+    """
+    if not candidates or max_heads <= 0:
+        return
+
+    targets = [c for c in candidates if c.bytes is None][:max_heads]
+    if not targets:
+        return
+
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+        future_map = {
+            executor.submit(
+                _fetch_content_length,
+                candidate.best_url,
+                timeout=timeout_s,
+                referer=_derive_referer_for_url(candidate.best_url),
+            ): candidate
+            for candidate in targets
+        }
+
+        for future in as_completed(future_map):
+            candidate = future_map[future]
+            try:
+                candidate.bytes = future.result()
+            except Exception:
+                candidate.bytes = None
 
 
 def _get_nearby_text(element) -> str | None:
@@ -718,6 +795,27 @@ def scrape_url_for_images(
         # Standard web page scraping
         html, page_title = fetch_page_html(url)
         images = extract_images_from_html(html, url, min_width=min_width, limit=limit)
+
+        # Best-effort: fetch Content-Length for preview display (do not fail scrape if blocked).
+        try:
+            max_heads = int(os.getenv("SCRAPE_PREVIEW_HEAD_MAX", "30"))
+        except ValueError:
+            max_heads = 30
+        try:
+            timeout_s = float(os.getenv("SCRAPE_PREVIEW_HEAD_TIMEOUT_S", "3"))
+        except ValueError:
+            timeout_s = 3.0
+        try:
+            max_workers = int(os.getenv("SCRAPE_PREVIEW_HEAD_WORKERS", "8"))
+        except ValueError:
+            max_workers = 8
+
+        _populate_candidate_content_lengths(
+            images,
+            max_heads=max_heads,
+            timeout_s=timeout_s,
+            max_workers=max_workers,
+        )
 
         return ScrapeResult(
             url=url,
