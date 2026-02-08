@@ -8,6 +8,9 @@ This task adds backend support needed by TRR-APP’s upgraded admin media workfl
 - Persist manual People tagging during scrape imports (so SOLO/GROUP filtering works deterministically).
 - Add a text-overlay detector and persist results to `core.media_assets.metadata`.
 - Run “agent-like” text-overlay detection opportunistically during import and refresh flows (capped) to reduce unknowns.
+- Improve gallery scrape context extraction for cast-photo style pages (e.g. E! Online) so per-image context includes the person name + caption/bio.
+- For cast-photo imports (kind=`cast`), persist article publish date into `core.media_assets.metadata.source_created_at` (and per-link context) so UI can show **Created**.
+- Support admin cleanup via `DELETE /api/v1/admin/media-assets/{asset_id}` (delete unified `media_assets` + `media_links`, best-effort S3 delete).
 
 ## Locked Contracts / Interfaces
 
@@ -23,6 +26,16 @@ This task adds backend support needed by TRR-APP’s upgraded admin media workfl
   - `images[].kind` allowed values include:
     - Existing: `poster`, `backdrop`, `episode_still`, `cast`, `other`
     - Added: `promo`, `intro`, `reunion`
+
+### Cast photo created date (admin scrape import)
+- When `images[].kind="cast"`:
+  - Backend will fetch the source page HTML best-effort and extract an article/gallery publish date.
+  - Persist into `core.media_assets.metadata.source_created_at` and also include on the created `core.media_links.context`.
+
+### Delete unified media assets (admin)
+- `DELETE /api/v1/admin/media-assets/{asset_id}`
+  - Deletes `core.media_links` referencing the asset and then deletes the `core.media_assets` row.
+  - Best-effort deletes the S3 object (`hosted_key`) when present.
 
 ### Text overlay detection endpoint (admin)
 - `POST /api/v1/admin/media-assets/{asset_id}/detect-text-overlay`
