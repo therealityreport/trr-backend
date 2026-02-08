@@ -22,6 +22,10 @@ Locked Contracts (No Pending Changes)
 5. Service auth for app proxy path: `Authorization: Bearer <service_role>` + `X-TRR-Internal-Admin-Secret`.
 6. Screenalytics must use `served_url` and strict fallback: only call `seed_only=false` after successful empty `seed_only=true`.
 
+Addendum (Admin Media Enhancements)
+- TRR-Backend calls the people-count endpoint; ensure `/vision/people-count` is reachable at `SCREENALYTICS_API_URL` (TRR-Backend side).
+- If TRR-Backend is configured with an incompatible path, set `SCREENALYTICS_API_PATH=/vision/people-count` (TRR-Backend) rather than changing SCREENALYTICS routing.
+
 Responsibility Alignment
 - TRR-Backend
   - Owns `core.media_links.facebank_seed` schema + view exposure.
