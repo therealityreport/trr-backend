@@ -11,6 +11,7 @@ This module provides functionality to:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import uuid
@@ -120,6 +121,7 @@ class ScrapeResult:
     url: str
     page_title: str | None
     domain: str
+    page_published_at: str | None = None
     images: list[ImageCandidate] = field(default_factory=list)
     total_found: int = 0
     error: str | None = None
@@ -128,6 +130,7 @@ class ScrapeResult:
         return {
             "url": self.url,
             "page_title": self.page_title,
+            "page_published_at": self.page_published_at,
             "domain": self.domain,
             "images": [img.to_dict() for img in self.images],
             "total_found": self.total_found,
@@ -158,6 +161,63 @@ def fetch_page_html(
     page_title = title_tag.get_text(strip=True) if title_tag else None
 
     return html, page_title
+
+
+def extract_page_published_at(html: str) -> str | None:
+    """
+    Best-effort extraction of a page publish timestamp.
+
+    Prefer JSON-LD `datePublished` (common for galleries/article pages),
+    falling back to meta tags when present.
+    """
+    if not html:
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # JSON-LD scripts (e.g. E! Online galleries expose `datePublished`).
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = script.string or script.get_text() or ""
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+
+        def iter_nodes(obj: Any):
+            if isinstance(obj, dict):
+                yield obj
+                graph = obj.get("@graph")
+                if isinstance(graph, list):
+                    for node in graph:
+                        yield from iter_nodes(node)
+            elif isinstance(obj, list):
+                for node in obj:
+                    yield from iter_nodes(node)
+
+        for node in iter_nodes(payload):
+            value = node.get("datePublished") or node.get("dateCreated") or node.get("uploadDate")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    # Meta tags
+    meta_candidates = [
+        ("property", "article:published_time"),
+        ("name", "article:published_time"),
+        ("name", "pubdate"),
+        ("name", "publishdate"),
+        ("name", "date"),
+    ]
+    for attr, key in meta_candidates:
+        tag = soup.find("meta", attrs={attr: key})
+        if tag and tag.get("content"):
+            value = str(tag.get("content")).strip()
+            if value:
+                return value
+
+    return None
 
 
 def _split_srcset(srcset: str) -> list[str]:
@@ -480,20 +540,32 @@ def _populate_candidate_content_lengths(
 
 
 def _get_nearby_text(element) -> str | None:
-    """Extract nearby text that might be a caption."""
+    """Extract nearby text that might be a caption (best-effort, page-dependent)."""
+    max_len = 2000
+
     # Check for figcaption in parent figure
     parent = element.find_parent("figure")
     if parent:
+        title_text = None
+        title_tag = parent.find(["h1", "h2", "h3"])
+        if title_tag:
+            title_text = title_tag.get_text(separator=" ", strip=True)
+
         figcaption = parent.find("figcaption")
         if figcaption:
-            return figcaption.get_text(strip=True)[:200]
+            caption_text = figcaption.get_text(separator="\n", strip=True)
+            parts = [p for p in (title_text, caption_text) if p]
+            combined = "\n".join(parts).strip()
+            return combined[:max_len] if combined else None
+        if title_text:
+            return title_text[:max_len]
 
     # Check for nearby paragraph or span
     next_sibling = element.find_next_sibling()
     if next_sibling and next_sibling.name in ("p", "span", "div"):
-        text = next_sibling.get_text(strip=True)
-        if text and len(text) < 300:
-            return text[:200]
+        text = next_sibling.get_text(separator="\n", strip=True)
+        if text and len(text) <= max_len:
+            return text
 
     return None
 
@@ -794,6 +866,7 @@ def scrape_url_for_images(
 
         # Standard web page scraping
         html, page_title = fetch_page_html(url)
+        page_published_at = extract_page_published_at(html)
         images = extract_images_from_html(html, url, min_width=min_width, limit=limit)
 
         # Best-effort: fetch Content-Length for preview display (do not fail scrape if blocked).
@@ -820,6 +893,7 @@ def scrape_url_for_images(
         return ScrapeResult(
             url=url,
             page_title=page_title,
+            page_published_at=page_published_at,
             domain=domain,
             images=images,
             total_found=len(images),

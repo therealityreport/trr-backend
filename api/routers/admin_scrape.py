@@ -446,6 +446,25 @@ def import_images(
             cast_members = _get_season_cast(db, resolved_show_id, resolved_season_number)
             logger.info(f"Loaded {len(cast_members)} cast members for matching")
 
+    # Best-effort: fetch page metadata for CAST imports (publish date, title).
+    page_title: str | None = None
+    page_published_at: str | None = None
+    wants_cast_meta = request.entity_type == "season" and any(i.kind == "cast" for i in request.images)
+    if wants_cast_meta:
+        try:
+            from trr_backend.scraping.url_image_scraper import (
+                extract_page_published_at,
+                fetch_page_html,
+            )
+
+            html, page_title = fetch_page_html(str(request.source_url), timeout=20.0)
+            page_published_at = extract_page_published_at(html)
+            if page_title:
+                link_context["source_page_title"] = page_title
+                link_context["source_page_url"] = str(request.source_url)
+        except Exception as exc:
+            logger.warning("Failed to fetch page metadata for %s: %s", request.source_url, exc)
+
     s3_client = get_s3_client()
     bucket = get_s3_bucket()
 
@@ -535,6 +554,9 @@ def import_images(
                 tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
                 link_kind = img.kind if request.entity_type == "season" else "gallery"
+                season_link_ctx = {**link_context, **tags_ctx}
+                if img.kind == "cast" and page_published_at:
+                    season_link_ctx["source_created_at"] = page_published_at
                 create_media_link_for_entity(
                     db,
                     entity_type=request.entity_type,
@@ -542,7 +564,7 @@ def import_images(
                     media_asset_id=existing["id"],
                     kind=link_kind,
                     position=idx,
-                    context={**link_context, **tags_ctx},
+                    context=season_link_ctx,
                 )
 
                 # Also link to person if matched
@@ -554,6 +576,8 @@ def import_images(
                         "match_confidence": match_confidence,
                         "source_url": str(request.source_url),
                     }
+                    if img.kind == "cast" and page_published_at:
+                        person_link_ctx["source_created_at"] = page_published_at
                     create_media_link_for_entity(
                         db,
                         entity_type="person",
@@ -577,6 +601,8 @@ def import_images(
                             "show_id": resolved_show_id,
                             "season_number": resolved_season_number,
                         }
+                        if img.kind == "cast" and page_published_at:
+                            person_link_ctx["source_created_at"] = page_published_at
                         create_media_link_for_entity(
                             db,
                             entity_type="person",
@@ -635,6 +661,10 @@ def import_images(
                 caption=img.caption,
                 metadata={
                     "page_url": str(request.source_url),
+                    "source_page_url": str(request.source_url),
+                    "source_page_title": page_title,
+                    "page_title": page_title,
+                    "source_created_at": page_published_at if img.kind == "cast" else None,
                     "candidate_id": img.candidate_id,
                 },
             )
@@ -648,6 +678,9 @@ def import_images(
             tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
             link_kind = img.kind if request.entity_type == "season" else "gallery"
+            season_link_ctx = {**link_context, **tags_ctx}
+            if img.kind == "cast" and page_published_at:
+                season_link_ctx["source_created_at"] = page_published_at
             create_media_link_for_entity(
                 db,
                 entity_type=request.entity_type,
@@ -655,7 +688,7 @@ def import_images(
                 media_asset_id=asset["id"],
                 kind=link_kind,
                 position=idx,
-                context={**link_context, **tags_ctx},
+                context=season_link_ctx,
             )
 
             # Also link to person if matched
@@ -667,6 +700,8 @@ def import_images(
                     "match_confidence": match_confidence,
                     "source_url": str(request.source_url),
                 }
+                if img.kind == "cast" and page_published_at:
+                    person_link_ctx["source_created_at"] = page_published_at
                 create_media_link_for_entity(
                     db,
                     entity_type="person",
@@ -690,6 +725,8 @@ def import_images(
                         "show_id": resolved_show_id,
                         "season_number": resolved_season_number,
                     }
+                    if img.kind == "cast" and page_published_at:
+                        person_link_ctx["source_created_at"] = page_published_at
                     create_media_link_for_entity(
                         db,
                         entity_type="person",
@@ -898,6 +935,25 @@ async def import_images_stream(
                 cast_members = _get_season_cast(db, resolved_show_id, resolved_season_number)
                 logger.info(f"Loaded {len(cast_members)} cast members for matching")
 
+        # Best-effort: fetch page metadata for CAST imports (publish date, title).
+        page_title: str | None = None
+        page_published_at: str | None = None
+        wants_cast_meta = request.entity_type == "season" and any(i.kind == "cast" for i in request.images)
+        if wants_cast_meta:
+            try:
+                from trr_backend.scraping.url_image_scraper import (
+                    extract_page_published_at,
+                    fetch_page_html,
+                )
+
+                html, page_title = fetch_page_html(str(request.source_url), timeout=20.0)
+                page_published_at = extract_page_published_at(html)
+                if page_title:
+                    link_context["source_page_title"] = page_title
+                    link_context["source_page_url"] = str(request.source_url)
+            except Exception as exc:
+                logger.warning("Failed to fetch page metadata for %s: %s", request.source_url, exc)
+
         s3_client = get_s3_client()
         bucket = get_s3_bucket()
 
@@ -997,60 +1053,67 @@ async def import_images_stream(
                         tag_person_ids.update({str(person_id) for person_id in img.person_ids})
                     if matched_person:
                         tag_person_ids.add(str(matched_person["person_id"]))
-                    tags_ctx = _build_people_tags_context(db, tag_person_ids)
+                        tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
-                    link_kind = img.kind if request.entity_type == "season" else "gallery"
-                    create_media_link_for_entity(
-                        db,
-                        entity_type=request.entity_type,
-                        entity_id=entity_id,
-                        media_asset_id=existing["id"],
-                        kind=link_kind,
-                        position=idx,
-                        context={**link_context, **tags_ctx},
-                    )
+                        link_kind = img.kind if request.entity_type == "season" else "gallery"
+                        season_link_ctx = {**link_context, **tags_ctx}
+                        if img.kind == "cast" and page_published_at:
+                            season_link_ctx["source_created_at"] = page_published_at
+                        create_media_link_for_entity(
+                            db,
+                            entity_type=request.entity_type,
+                            entity_id=entity_id,
+                            media_asset_id=existing["id"],
+                            kind=link_kind,
+                            position=idx,
+                            context=season_link_ctx,
+                        )
 
                     # Also link to person if matched
                     if matched_person:
-                        person_link_ctx = {
-                            "entity_type": "person",
-                            "entity_id": matched_person["person_id"],
-                            "matched_from_season": True,
-                            "match_confidence": match_confidence,
-                            "source_url": str(request.source_url),
-                        }
-                        create_media_link_for_entity(
-                            db,
-                            entity_type="person",
-                            entity_id=matched_person["person_id"],
-                            media_asset_id=existing["id"],
-                            kind="gallery",
-                            position=idx,
-                            context={**person_link_ctx, **tags_ctx},
-                        )
+                            person_link_ctx = {
+                                "entity_type": "person",
+                                "entity_id": matched_person["person_id"],
+                                "matched_from_season": True,
+                                "match_confidence": match_confidence,
+                                "source_url": str(request.source_url),
+                            }
+                            if img.kind == "cast" and page_published_at:
+                                person_link_ctx["source_created_at"] = page_published_at
+                            create_media_link_for_entity(
+                                db,
+                                entity_type="person",
+                                entity_id=matched_person["person_id"],
+                                media_asset_id=existing["id"],
+                                kind="gallery",
+                                position=idx,
+                                context={**person_link_ctx, **tags_ctx},
+                            )
 
                     if request.entity_type == "season" and img.person_ids:
                         assigned_ids = {str(person_id) for person_id in img.person_ids}
                         if matched_person:
                             assigned_ids.discard(matched_person["person_id"])
                         for person_id in assigned_ids:
-                            person_link_ctx = {
-                                "entity_type": "person",
-                                "entity_id": person_id,
-                                "assigned_from_season": True,
-                                "source_url": str(request.source_url),
-                                "show_id": resolved_show_id,
-                                "season_number": resolved_season_number,
-                            }
-                            create_media_link_for_entity(
-                                db,
-                                entity_type="person",
-                                entity_id=person_id,
-                                media_asset_id=existing["id"],
-                                kind="gallery",
-                                position=idx,
-                                context={**person_link_ctx, **tags_ctx},
-                            )
+                                person_link_ctx = {
+                                    "entity_type": "person",
+                                    "entity_id": person_id,
+                                    "assigned_from_season": True,
+                                    "source_url": str(request.source_url),
+                                    "show_id": resolved_show_id,
+                                    "season_number": resolved_season_number,
+                                }
+                                if img.kind == "cast" and page_published_at:
+                                    person_link_ctx["source_created_at"] = page_published_at
+                                create_media_link_for_entity(
+                                    db,
+                                    entity_type="person",
+                                    entity_id=person_id,
+                                    media_asset_id=existing["id"],
+                                    kind="gallery",
+                                    position=idx,
+                                    context={**person_link_ctx, **tags_ctx},
+                                )
 
                     if existing.get("hosted_url"):
                         text_overlay_asset_ids.add(existing["id"])
@@ -1109,12 +1172,16 @@ async def import_images_stream(
                     content_type=content_type,
                     width=None,
                     height=None,
-                    caption=img.caption,
-                    metadata={
-                        "page_url": str(request.source_url),
-                        "candidate_id": img.candidate_id,
-                    },
-                )
+                        caption=img.caption,
+                        metadata={
+                            "page_url": str(request.source_url),
+                            "source_page_url": str(request.source_url),
+                            "source_page_title": page_title,
+                            "page_title": page_title,
+                            "source_created_at": (page_published_at if img.kind == "cast" else None),
+                            "candidate_id": img.candidate_id,
+                        },
+                    )
 
                 # Create media link to entity
                 tag_person_ids: set[str] = set()
@@ -1122,60 +1189,67 @@ async def import_images_stream(
                     tag_person_ids.update({str(person_id) for person_id in img.person_ids})
                 if matched_person:
                     tag_person_ids.add(str(matched_person["person_id"]))
-                tags_ctx = _build_people_tags_context(db, tag_person_ids)
+                    tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
-                link_kind = img.kind if request.entity_type == "season" else "gallery"
-                create_media_link_for_entity(
-                    db,
-                    entity_type=request.entity_type,
-                    entity_id=entity_id,
-                    media_asset_id=asset["id"],
-                    kind=link_kind,
-                    position=idx,
-                    context={**link_context, **tags_ctx},
-                )
+                    link_kind = img.kind if request.entity_type == "season" else "gallery"
+                    season_link_ctx = {**link_context, **tags_ctx}
+                    if img.kind == "cast" and page_published_at:
+                        season_link_ctx["source_created_at"] = page_published_at
+                    create_media_link_for_entity(
+                        db,
+                        entity_type=request.entity_type,
+                        entity_id=entity_id,
+                        media_asset_id=asset["id"],
+                        kind=link_kind,
+                        position=idx,
+                        context=season_link_ctx,
+                    )
 
                 # Also link to person if matched
                 if matched_person:
-                    person_link_ctx = {
-                        "entity_type": "person",
-                        "entity_id": matched_person["person_id"],
-                        "matched_from_season": True,
-                        "match_confidence": match_confidence,
-                        "source_url": str(request.source_url),
-                    }
-                    create_media_link_for_entity(
-                        db,
-                        entity_type="person",
-                        entity_id=matched_person["person_id"],
-                        media_asset_id=asset["id"],
-                        kind="gallery",
-                        position=idx,
-                        context={**person_link_ctx, **tags_ctx},
-                    )
-
-                if request.entity_type == "season" and img.person_ids:
-                    assigned_ids = {str(person_id) for person_id in img.person_ids}
-                    if matched_person:
-                        assigned_ids.discard(matched_person["person_id"])
-                    for person_id in assigned_ids:
                         person_link_ctx = {
                             "entity_type": "person",
-                            "entity_id": person_id,
-                            "assigned_from_season": True,
+                            "entity_id": matched_person["person_id"],
+                            "matched_from_season": True,
+                            "match_confidence": match_confidence,
                             "source_url": str(request.source_url),
-                            "show_id": resolved_show_id,
-                            "season_number": resolved_season_number,
                         }
+                        if img.kind == "cast" and page_published_at:
+                            person_link_ctx["source_created_at"] = page_published_at
                         create_media_link_for_entity(
                             db,
                             entity_type="person",
-                            entity_id=person_id,
+                            entity_id=matched_person["person_id"],
                             media_asset_id=asset["id"],
                             kind="gallery",
                             position=idx,
                             context={**person_link_ctx, **tags_ctx},
                         )
+
+                if request.entity_type == "season" and img.person_ids:
+                    assigned_ids = {str(person_id) for person_id in img.person_ids}
+                    if matched_person:
+                        assigned_ids.discard(matched_person["person_id"])
+                        for person_id in assigned_ids:
+                            person_link_ctx = {
+                                "entity_type": "person",
+                                "entity_id": person_id,
+                                "assigned_from_season": True,
+                                "source_url": str(request.source_url),
+                                "show_id": resolved_show_id,
+                                "season_number": resolved_season_number,
+                            }
+                            if img.kind == "cast" and page_published_at:
+                                person_link_ctx["source_created_at"] = page_published_at
+                            create_media_link_for_entity(
+                                db,
+                                entity_type="person",
+                                entity_id=person_id,
+                                media_asset_id=asset["id"],
+                                kind="gallery",
+                                position=idx,
+                                context={**person_link_ctx, **tags_ctx},
+                            )
 
                 if hosted_url:
                     text_overlay_asset_ids.add(asset["id"])
