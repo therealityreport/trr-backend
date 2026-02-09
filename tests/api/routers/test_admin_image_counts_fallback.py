@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from api.routers import admin_image_counts as counts
 
@@ -127,6 +128,6 @@ def test_auto_count_media_asset_still_requires_any_link(monkeypatch) -> None:
     )
     monkeypatch.setattr(counts, "list_person_links_by_asset_id", lambda _db, _id: [])
 
-    with pytest.raises(Exception):
+    with pytest.raises(HTTPException) as excinfo:
         counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
-
+    assert excinfo.value.status_code == 404

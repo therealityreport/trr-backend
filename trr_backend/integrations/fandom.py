@@ -7,9 +7,9 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
-from typing import Any
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from urllib.parse import quote, unquote, urlencode, urlparse
 
 try:
@@ -494,7 +494,10 @@ def _fandom_file_to_special_url(raw_url: str) -> str:
         return raw_url
     # Normalize URL-encoded colons for splitting
     normalized_path = path.replace("%3A", ":").replace("%3a", ":")
-    file_part = normalized_path.split("File:", 1)[1].lstrip("/") if "File:" in normalized_path else normalized_path.split("file:", 1)[1].lstrip("/")
+    if "File:" in normalized_path:
+        file_part = normalized_path.split("File:", 1)[1].lstrip("/")
+    else:
+        file_part = normalized_path.split("file:", 1)[1].lstrip("/")
     if not file_part:
         return raw_url
     file_part = quote(unquote(file_part), safe="")
@@ -858,9 +861,7 @@ def fetch_fandom_file_metadata(
     """
     Fetch and parse a Fandom file page to resolve the original image and dimensions.
     """
-    api_info, api_error = _fetch_fandom_file_info_via_api(
-        file_page_url, timeout_seconds=timeout_seconds
-    )
+    api_info, api_error = _fetch_fandom_file_info_via_api(file_page_url, timeout_seconds=timeout_seconds)
     if api_info:
         return FandomFileResult(
             url=file_page_url,

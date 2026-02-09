@@ -59,6 +59,10 @@ from trr_backend.integrations.tmdb.client import (
     resolve_api_key,
 )
 from trr_backend.models.shows import ShowRecord, ShowUpsert
+
+# Child table functions removed - data now written directly to core.shows array columns
+# from trr_backend.repositories.show_child_tables import (...)
+from trr_backend.repositories.credits import assert_core_credits_table_exists, insert_credits_ignore_conflicts
 from trr_backend.repositories.episodes import (
     assert_core_episodes_table_exists,
     delete_episodes_for_show,
@@ -82,14 +86,6 @@ from trr_backend.repositories.seasons import (
     delete_seasons_for_tmdb_series,
     fetch_seasons_by_show,
     upsert_seasons,
-)
-
-# Child table functions removed - data now written directly to core.shows array columns
-# from trr_backend.repositories.show_child_tables import (...)
-from trr_backend.repositories.show_cast import (
-    assert_core_show_cast_table_exists,
-    delete_show_cast_for_show,
-    upsert_show_cast,
 )
 from trr_backend.repositories.show_images import (
     assert_core_show_images_table_exists,
@@ -332,7 +328,7 @@ def _ingest_imdb_cast(
         return
 
     assert_core_people_table_exists(db)
-    assert_core_show_cast_table_exists(db)
+    assert_core_credits_table_exists(db)
 
     overrides_session = requests.Session()
     overrides = _load_showinfo_overrides(url=overrides_url, session=overrides_session)
@@ -365,7 +361,14 @@ def _ingest_imdb_cast(
 
         tmdb_id = _coerce_int(row.get("tmdb_id"))
         show_name = row.get("name") if isinstance(row.get("name"), str) else None
+        # `core.shows.network` was dropped in favor of `networks[]` (Phase 6d).
         show_network = row.get("network") if isinstance(row.get("network"), str) else None
+        if not show_network:
+            networks_value = row.get("networks")
+            if isinstance(networks_value, list) and networks_value:
+                first_network = networks_value[0]
+                if isinstance(first_network, str) and first_network.strip():
+                    show_network = first_network.strip()
 
         override = overrides.lookup(imdb_id=imdb_id, tmdb_id=tmdb_id, title=show_name, network=show_network)
         if override and override.skip:
@@ -378,9 +381,25 @@ def _ingest_imdb_cast(
             min_episodes = int(override.min_episodes)
 
         if refresh_cast:
-            delete_show_cast_for_show(db, show_id=show_id)
+            # Remove non-manual scraped credits so this run is authoritative.
+            # Keep any manual credits intact.
+            try:
+                delete_resp = (
+                    db.schema("core")
+                    .table("credits")
+                    .delete()
+                    .eq("show_id", show_id)
+                    .eq("credit_category", "Self")
+                    .neq("source_type", "manual")
+                    .execute()
+                )
+                if hasattr(delete_resp, "error") and delete_resp.error:
+                    raise RuntimeError(str(delete_resp.error))
+            except Exception as exc:  # noqa: BLE001
+                print(f"IMDb cast: WARNING failed to delete existing credits show_id={show_id} error={exc}")
 
         cast_rows = []
+        source_type = "fullcredits_html"
         person_images: list[dict[str, Any]] = []
         try:
             if imdb_sleep_ms:
@@ -393,6 +412,7 @@ def _ingest_imdb_cast(
             )
             cast_rows = normalize_graphql_credits_to_cast_rows(filtered_edges)
             person_images = extract_person_images_from_graphql(filtered_edges)
+            source_type = "credits_graphql_paginated_partial" if is_partial else "credits_graphql_paginated"
             if is_partial:
                 print(
                     f"IMDb cast: partial GraphQL results show_id={show_id} imdb_id={imdb_id}",
@@ -401,7 +421,7 @@ def _ingest_imdb_cast(
         except Exception as exc:  # noqa: BLE001
             print(f"IMDb cast: GraphQL failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
             try:
-                cast_rows, _source_type, person_images = fetch_fullcredits_cast_with_fallback(
+                cast_rows, source_type, person_images = fetch_fullcredits_cast_with_fallback(
                     imdb_id,
                     extra_headers=extra_headers,
                     primary_source="html",
@@ -502,24 +522,26 @@ def _ingest_imdb_cast(
                 if isinstance(person_imdb, str) and person_imdb.strip():
                     people_cache[person_imdb.strip().lower()] = str(person.get("id"))
 
-        show_cast_rows: list[dict[str, Any]] = []
+        credit_rows: list[dict[str, Any]] = []
         for row in cast_rows:
             person_id = people_cache.get(row.name_id.strip().lower())
             if not person_id:
                 continue
-            show_cast_rows.append(
+            credit_rows.append(
                 {
                     "show_id": show_id,
                     "person_id": person_id,
                     "billing_order": row.billing_order,
                     "role": row.raw_role_text,
                     "credit_category": "Self",
+                    "source_type": source_type,
+                    "metadata": {},
                 }
             )
 
-        if show_cast_rows:
-            upsert_show_cast(db, show_cast_rows)
-            total_memberships += len(show_cast_rows)
+        if credit_rows:
+            insert_credits_ignore_conflicts(db, credit_rows)
+            total_memberships += len(credit_rows)
 
         if person_images:
             try:
@@ -549,8 +571,6 @@ def _candidate_to_show_upsert(
     candidate: CandidateShow,
     *,
     resolved_imdb_id: str | None,
-    needs_imdb_resolution: bool,
-    needs_tmdb_resolution: bool = False,
 ) -> ShowUpsert:
     tmdb_id_column = int(candidate.tmdb_id) if candidate.tmdb_id is not None else None
 
@@ -574,8 +594,6 @@ def _candidate_to_show_upsert(
         imdb_id=resolved_imdb_id,
         premiere_date=candidate.first_air_date,
         description=None,
-        needs_imdb_resolution=needs_imdb_resolution,
-        needs_tmdb_resolution=needs_tmdb_resolution,
         listed_on=sorted(listed_on) if listed_on else None,
         genres=genres,
     )
@@ -1262,13 +1280,9 @@ def upsert_candidates_into_supabase(
             tmdb_network_names, tmdb_network_ids = _extract_tmdb_networks(tmdb_details)
             tmdb_production_company_ids = _extract_tmdb_production_company_ids(tmdb_details)
 
-        needs_imdb_resolution = tmdb_id is not None and not resolved_imdb_id
-        needs_tmdb_resolution = resolved_imdb_id is not None and tmdb_id is None
         show_upsert = _candidate_to_show_upsert(
             candidate,
             resolved_imdb_id=resolved_imdb_id,
-            needs_imdb_resolution=needs_imdb_resolution,
-            needs_tmdb_resolution=needs_tmdb_resolution,
         )
 
         existing = existing_by_imdb or existing_by_tmdb
@@ -1300,7 +1314,6 @@ def upsert_candidates_into_supabase(
                         "premiere_date": show_upsert.premiere_date,
                         "tmdb_id": show_upsert.tmdb_id,
                         "imdb_id": show_upsert.imdb_id,
-                        "needs_imdb_resolution": show_upsert.needs_imdb_resolution,
                     }
                 )
             else:
@@ -1316,16 +1329,6 @@ def upsert_candidates_into_supabase(
                 patch["imdb_id"] = resolved_imdb_id
             if tmdb_id is not None and existing.get("tmdb_id") is None:
                 patch["tmdb_id"] = tmdb_id
-            if (
-                show_upsert.needs_imdb_resolution is not None
-                and existing.get("needs_imdb_resolution") != show_upsert.needs_imdb_resolution
-            ):
-                patch["needs_imdb_resolution"] = show_upsert.needs_imdb_resolution
-            if (
-                show_upsert.needs_tmdb_resolution is not None
-                and existing.get("needs_tmdb_resolution") != show_upsert.needs_tmdb_resolution
-            ):
-                patch["needs_tmdb_resolution"] = show_upsert.needs_tmdb_resolution
             if not existing.get("premiere_date") and show_upsert.premiere_date:
                 patch["premiere_date"] = show_upsert.premiere_date
 

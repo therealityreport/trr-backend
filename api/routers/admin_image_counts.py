@@ -54,12 +54,7 @@ def auto_count_cast_photo(
     _: AdminUser = None,
 ) -> AutoCountResponse:
     response = (
-        db.schema("core")
-        .table("cast_photos")
-        .select("id, hosted_url, url")
-        .eq("id", str(photo_id))
-        .limit(1)
-        .execute()
+        db.schema("core").table("cast_photos").select("id, hosted_url, url").eq("id", str(photo_id)).limit(1).execute()
     )
     if hasattr(response, "error") and response.error:
         raise HTTPException(status_code=502, detail="Database error fetching cast photo")
@@ -170,12 +165,7 @@ def auto_count_show_images(
     show_id_str = str(show_id)
 
     # Fetch seasons for the show (optionally filter by season_number)
-    season_query = (
-        db.schema("core")
-        .table("seasons")
-        .select("id, season_number")
-        .eq("show_id", show_id_str)
-    )
+    season_query = db.schema("core").table("seasons").select("id, season_number").eq("show_id", show_id_str)
     if payload.season_number is not None:
         season_query = season_query.eq("season_number", payload.season_number)
     season_response = season_query.execute()
@@ -194,12 +184,7 @@ def auto_count_show_images(
         )
 
     # Fetch episodes for the show (optionally filter by season)
-    episode_query = (
-        db.schema("core")
-        .table("episodes")
-        .select("id, season_id")
-        .eq("show_id", show_id_str)
-    )
+    episode_query = db.schema("core").table("episodes").select("id, season_id").eq("show_id", show_id_str)
     if season_ids:
         episode_query = episode_query.in_("season_id", season_ids)
     episode_response = episode_query.execute()
@@ -268,11 +253,7 @@ def auto_count_show_images(
         )
 
     assets_response = (
-        db.schema("core")
-        .table("media_assets")
-        .select("id, hosted_url, source_url")
-        .in_("id", asset_ids)
-        .execute()
+        db.schema("core").table("media_assets").select("id, hosted_url, source_url").in_("id", asset_ids).execute()
     )
     if hasattr(assets_response, "error") and assets_response.error:
         raise HTTPException(status_code=502, detail="Database error fetching media assets")

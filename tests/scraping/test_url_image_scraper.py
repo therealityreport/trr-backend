@@ -6,8 +6,8 @@ from trr_backend.scraping.url_image_scraper import ImageCandidate, extract_image
 
 
 def _read_fixture(name: str) -> str:
-  base = Path(__file__).resolve().parents[1] / "fixtures" / "scraping"
-  return (base / name).read_text(encoding="utf-8")
+    base = Path(__file__).resolve().parents[1] / "fixtures" / "scraping"
+    return (base / name).read_text(encoding="utf-8")
 
 
 def test_extracts_pinterest_media_and_skips_icons() -> None:

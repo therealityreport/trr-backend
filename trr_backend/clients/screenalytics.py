@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
-import logging
 from typing import Literal
 
 import requests
@@ -69,9 +69,7 @@ def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> P
 
         if response.status_code >= 400:
             detail = response.text.strip()[:200]
-            raise ScreenalyticsClientError(
-                f"Screenalytics error {response.status_code}: {detail or 'unknown error'}"
-            )
+            raise ScreenalyticsClientError(f"Screenalytics error {response.status_code}: {detail or 'unknown error'}")
         break
     else:
         logger.error(

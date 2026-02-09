@@ -194,30 +194,18 @@ def delete_media_asset(
 
     deleted_links = 0
     try:
-        links_response = (
-            db.schema("core")
-            .table("media_links")
-            .delete()
-            .eq("media_asset_id", asset_id_str)
-            .execute()
-        )
+        links_response = db.schema("core").table("media_links").delete().eq("media_asset_id", asset_id_str).execute()
         deleted_links = len(links_response.data or [])
-    except Exception:
+    except Exception as exc:
         # If link deletion fails, do not proceed to delete the asset row.
-        raise HTTPException(status_code=502, detail="Database error deleting media links")
+        raise HTTPException(status_code=502, detail="Database error deleting media links") from exc
 
     deleted_asset = False
     try:
-        asset_delete_response = (
-            db.schema("core")
-            .table("media_assets")
-            .delete()
-            .eq("id", asset_id_str)
-            .execute()
-        )
+        asset_delete_response = db.schema("core").table("media_assets").delete().eq("id", asset_id_str).execute()
         deleted_asset = bool(asset_delete_response.data)
-    except Exception:
-        raise HTTPException(status_code=502, detail="Database error deleting media asset")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Database error deleting media asset") from exc
 
     s3_deleted = False
     s3_error: str | None = None

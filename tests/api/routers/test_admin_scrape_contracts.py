@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from api.routers.admin_scrape import ImportImageItem
 
@@ -18,10 +19,9 @@ def test_import_image_item_accepts_new_kinds() -> None:
 
 
 def test_import_image_item_rejects_unknown_kind() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ImportImageItem(
             candidate_id="abc",
             url="https://example.com/x.jpg",
             kind="not-a-kind",
         )
-

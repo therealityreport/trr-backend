@@ -6,12 +6,12 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
 
-class RunStatus(str, Enum):
+class RunStatus(StrEnum):
     """Status of a pipeline run."""
 
     PENDING = "pending"
@@ -21,7 +21,7 @@ class RunStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class StageStatus(str, Enum):
+class StageStatus(StrEnum):
     """Status of a pipeline stage."""
 
     PENDING = "pending"

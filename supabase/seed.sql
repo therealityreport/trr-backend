@@ -1,8 +1,8 @@
 begin;
 
 -- Small but real seed data for end-to-end schema verification.
--- Note: user-owned tables (games.sessions/games.responses, surveys.responses/surveys.answers)
--- are intentionally NOT seeded because they require an authenticated user_id.
+-- Note: user-owned tables (surveys.responses/surveys.answers) are intentionally NOT seeded
+-- because they require an authenticated user_id.
 
 -- ---------------------------------------------------------------------------
 -- core
@@ -12,7 +12,7 @@ insert into core.shows (id, name, description, premiere_date)
 values (
   'd1fdacc4-ccb0-4d52-8096-89889db83282',
   'TRR Sample Show',
-  'Seed show for validating the core/games/surveys schemas.',
+  'Seed show for validating the core/surveys schemas.',
   '2025-01-01'
 )
 on conflict (id) do nothing;
@@ -69,103 +69,115 @@ values
   ('37fe973a-3038-40b1-9622-b3f5f4f485ff', 'Emery Brooks', 'Cast')
 on conflict (id) do nothing;
 
-insert into core.cast_memberships (id, show_id, season_id, person_id, role, billing_order)
+-- Seed credits model (canonical show-level cast membership)
+insert into core.credits (id, show_id, person_id, credit_category, role, billing_order, source_type, metadata)
 values
   (
     '4338a8b0-b689-4dd0-9e87-87a7950eb540',
     'd1fdacc4-ccb0-4d52-8096-89889db83282',
-    '2ea88321-cb37-4527-892f-0441030b6e68',
     '8ba911f0-777c-45c8-adad-5599624ad845',
+    'Self',
     'cast',
-    1
+    1,
+    'manual',
+    '{}'::jsonb
   ),
   (
     '1108bd61-5ef0-4f49-afd7-9964d090bf40',
     'd1fdacc4-ccb0-4d52-8096-89889db83282',
-    '2ea88321-cb37-4527-892f-0441030b6e68',
     '69ce5e76-12c0-4a71-b426-1e8efaba3f0b',
+    'Self',
     'cast',
-    2
+    2,
+    'manual',
+    '{}'::jsonb
   ),
   (
     '668a80ac-f19c-47e8-9c83-98946b30ff72',
     'd1fdacc4-ccb0-4d52-8096-89889db83282',
-    '2ea88321-cb37-4527-892f-0441030b6e68',
     '71d85ea4-d629-426d-b4fd-72777d8ae26c',
+    'Self',
     'guest',
-    3
+    3,
+    'manual',
+    '{}'::jsonb
   ),
   (
     '22c69b44-5362-4626-98cd-34bdb6ec68ae',
     'd1fdacc4-ccb0-4d52-8096-89889db83282',
-    '2ea88321-cb37-4527-892f-0441030b6e68',
     '4f877630-0477-48f1-9ff4-ee0d296f6e7a',
+    'Self',
     'host',
-    0
+    0,
+    'manual',
+    '{}'::jsonb
   ),
   (
     'bedc02d5-8292-4993-a054-fd2f7ab40550',
     'd1fdacc4-ccb0-4d52-8096-89889db83282',
-    '2ea88321-cb37-4527-892f-0441030b6e68',
     '37fe973a-3038-40b1-9622-b3f5f4f485ff',
+    'Self',
     'cast',
-    4
+    4,
+    'manual',
+    '{}'::jsonb
   )
 on conflict (id) do nothing;
 
-insert into core.episode_cast (id, episode_id, cast_membership_id)
+-- Seed episode-level presence via credit_occurrences
+insert into core.credit_occurrences (credit_id, episode_id, appearance_type)
 values
   (
-    '9a060f4a-fa33-4faf-896b-2ca598540d3a',
+    '4338a8b0-b689-4dd0-9e87-87a7950eb540',
     '3d037712-54b6-4037-8109-1c69ab00448a',
-    '4338a8b0-b689-4dd0-9e87-87a7950eb540'
+    'appears'
   ),
   (
-    '4ba12fbc-9ece-4db8-9bd8-9f067b3c6508',
+    '1108bd61-5ef0-4f49-afd7-9964d090bf40',
     '3d037712-54b6-4037-8109-1c69ab00448a',
-    '1108bd61-5ef0-4f49-afd7-9964d090bf40'
+    'appears'
   ),
   (
-    '02e5a066-980e-475f-87a2-9ef9e045a488',
+    '668a80ac-f19c-47e8-9c83-98946b30ff72',
     '3d037712-54b6-4037-8109-1c69ab00448a',
-    '668a80ac-f19c-47e8-9c83-98946b30ff72'
+    'appears'
   ),
   (
-    'b1a6c04f-b449-47ff-aaa2-65f99b684e53',
+    '22c69b44-5362-4626-98cd-34bdb6ec68ae',
     '3d037712-54b6-4037-8109-1c69ab00448a',
-    '22c69b44-5362-4626-98cd-34bdb6ec68ae'
+    'appears'
   ),
   (
-    'e6a1e8da-ac9c-4a5a-ba1e-9d1bab58af7c',
+    'bedc02d5-8292-4993-a054-fd2f7ab40550',
     '3d037712-54b6-4037-8109-1c69ab00448a',
-    'bedc02d5-8292-4993-a054-fd2f7ab40550'
+    'appears'
   ),
   (
-    '56d1b336-e945-45b2-820c-18c2840800b2',
+    '4338a8b0-b689-4dd0-9e87-87a7950eb540',
     '1a9ba2e1-031e-4279-a2fe-2f09deb8d2d0',
-    '4338a8b0-b689-4dd0-9e87-87a7950eb540'
+    'appears'
   ),
   (
-    'a4639d9f-a7f6-443c-928f-a6d72db4a064',
+    '1108bd61-5ef0-4f49-afd7-9964d090bf40',
     '1a9ba2e1-031e-4279-a2fe-2f09deb8d2d0',
-    '1108bd61-5ef0-4f49-afd7-9964d090bf40'
+    'appears'
   ),
   (
-    '39f6e886-1fa4-4446-afdb-8f31f2987329',
+    '668a80ac-f19c-47e8-9c83-98946b30ff72',
     '1a9ba2e1-031e-4279-a2fe-2f09deb8d2d0',
-    '668a80ac-f19c-47e8-9c83-98946b30ff72'
+    'appears'
   ),
   (
-    '9891e619-de67-42ba-b129-71c678c851c3',
+    '22c69b44-5362-4626-98cd-34bdb6ec68ae',
     '1a9ba2e1-031e-4279-a2fe-2f09deb8d2d0',
-    '22c69b44-5362-4626-98cd-34bdb6ec68ae'
+    'appears'
   ),
   (
-    '0a8a702c-2c6b-40b2-86be-ba50ed31ed0d',
+    'bedc02d5-8292-4993-a054-fd2f7ab40550',
     '1a9ba2e1-031e-4279-a2fe-2f09deb8d2d0',
-    'bedc02d5-8292-4993-a054-fd2f7ab40550'
+    'appears'
   )
-on conflict (id) do nothing;
+on conflict (credit_id, episode_id) do nothing;
 
 -- ---------------------------------------------------------------------------
 -- surveys
@@ -242,92 +254,6 @@ values
     now()
   )
 on conflict (survey_id, question_id) do nothing;
-
--- ---------------------------------------------------------------------------
--- games
--- ---------------------------------------------------------------------------
-
-insert into games.games (id, show_id, season_id, episode_id, game_type, title, description, status, starts_at)
-values (
-  '44c17a72-6264-496c-ad0f-24e374e2ba39',
-  'd1fdacc4-ccb0-4d52-8096-89889db83282',
-  '2ea88321-cb37-4527-892f-0441030b6e68',
-  '3d037712-54b6-4037-8109-1c69ab00448a',
-  'quiz',
-  'Episode 1 Quick Quiz',
-  'Seed game for validation (questions/options + answer keys).',
-  'published',
-  now()
-)
-on conflict (id) do nothing;
-
-insert into games.questions (id, game_id, question_order, prompt, question_type)
-values
-  (
-    '5925bde7-82c9-4b63-acfa-2c7757b2182c',
-    '44c17a72-6264-496c-ad0f-24e374e2ba39',
-    1,
-    'Who hosted Episode 1?',
-    'single_choice'
-  ),
-  (
-    'f371e10f-179d-4e32-9286-cbbe0d21b3fd',
-    '44c17a72-6264-496c-ad0f-24e374e2ba39',
-    2,
-    'Pick the best description of the opening scene.',
-    'single_choice'
-  )
-on conflict (id) do nothing;
-
-insert into games.options (id, question_id, option_order, label, value)
-values
-  ('65eeaefb-9c3c-4c56-9f9d-a1481f3fc8f4', '5925bde7-82c9-4b63-acfa-2c7757b2182c', 1, 'Drew Patel', 'drew'),
-  ('d95c9eb2-556b-4f9b-8e83-fa8cdb3c4b0a', '5925bde7-82c9-4b63-acfa-2c7757b2182c', 2, 'Ava Stone', 'ava'),
-  ('8c2a9367-6fb9-4048-8e03-98fc3e38c3cc', '5925bde7-82c9-4b63-acfa-2c7757b2182c', 3, 'Ben Carter', 'ben'),
-  ('0074fd18-1b9a-45ef-b77e-79e8e0d770e3', '5925bde7-82c9-4b63-acfa-2c7757b2182c', 4, 'Casey Nguyen', 'casey'),
-  ('f3ba48d7-0345-46ae-b4bc-865b69d4af62', 'f371e10f-179d-4e32-9286-cbbe0d21b3fd', 1, 'A surprise arrival', 'surprise'),
-  ('b4a1b9d0-86fb-4f0b-a61e-e31c1b6e3d3e', 'f371e10f-179d-4e32-9286-cbbe0d21b3fd', 2, 'A tense argument', 'argument'),
-  ('459b73ab-ad23-49db-a0e6-326fe563067a', 'f371e10f-179d-4e32-9286-cbbe0d21b3fd', 3, 'A group challenge', 'challenge'),
-  ('75ee4598-568f-4824-bb71-1716ebecf8b2', 'f371e10f-179d-4e32-9286-cbbe0d21b3fd', 4, 'A flashback montage', 'flashback')
-on conflict (id) do nothing;
-
-insert into games.answer_keys (id, question_id, answer, explanation)
-values
-  (
-    '000504db-dbda-4086-a982-4d6c4a1a56a6',
-    '5925bde7-82c9-4b63-acfa-2c7757b2182c',
-    '{"correct_option_id":"65eeaefb-9c3c-4c56-9f9d-a1481f3fc8f4"}'::jsonb,
-    'Host credit from seed cast list.'
-  ),
-  (
-    'c35a3602-96c5-4c7e-81aa-0bcffdf0bcb4',
-    'f371e10f-179d-4e32-9286-cbbe0d21b3fd',
-    '{"correct_option_id":"f3ba48d7-0345-46ae-b4bc-865b69d4af62"}'::jsonb,
-    'Arbitrary seed answer for validation.'
-  )
-on conflict (id) do nothing;
-
-insert into games.stats (id, game_id, question_id, stats)
-values
-  (
-    '33e28107-2056-402c-afca-c41e0a07dfe2',
-    '44c17a72-6264-496c-ad0f-24e374e2ba39',
-    null,
-    '{"total":0}'::jsonb
-  ),
-  (
-    '0e7c4468-ea31-4543-8a83-816ac391140d',
-    '44c17a72-6264-496c-ad0f-24e374e2ba39',
-    '5925bde7-82c9-4b63-acfa-2c7757b2182c',
-    '{"total":0,"by_option":{}}'::jsonb
-  ),
-  (
-    'b1348709-18ea-415f-b7e2-1e4858cc19b8',
-    '44c17a72-6264-496c-ad0f-24e374e2ba39',
-    'f371e10f-179d-4e32-9286-cbbe0d21b3fd',
-    '{"total":0,"by_option":{}}'::jsonb
-  )
-on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------
 -- social (discussions)

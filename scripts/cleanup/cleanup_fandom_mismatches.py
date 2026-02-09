@@ -4,6 +4,7 @@ Clean up Fandom profile/gallery data that was attached to the wrong person.
 
 Default is dry-run. Use --apply to delete mismatched rows.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -80,13 +81,7 @@ def _fetch_people_map(db, person_ids: list[str]) -> dict[str, str | None]:
     chunk = 200
     for i in range(0, len(person_ids), chunk):
         batch = person_ids[i : i + chunk]
-        resp = (
-            db.schema("core")
-            .table("people")
-            .select("id,full_name")
-            .in_("id", batch)
-            .execute()
-        )
+        resp = db.schema("core").table("people").select("id,full_name").in_("id", batch).execute()
         if getattr(resp, "error", None):
             raise RuntimeError(f"Supabase error fetching people: {resp.error}")
         for row in resp.data or []:
@@ -109,9 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     db = create_supabase_admin_client()
 
     # Fetch cast_fandom rows
-    fandom_query = db.schema("core").table("cast_fandom").select(
-        "id,person_id,source_url,page_title,full_name"
-    )
+    fandom_query = db.schema("core").table("cast_fandom").select("id,person_id,source_url,page_title,full_name")
     if args.limit:
         fandom_query = fandom_query.limit(args.limit)
     fandom_resp = fandom_query.execute()
@@ -192,13 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Deleted cast_photos rows: {len(resp.data or [])}")
 
         # Clean media_links that were generated from those cast_photos
-        links_resp = (
-            db.schema("core")
-            .table("media_links")
-            .select("id,context")
-            .eq("entity_type", "person")
-            .execute()
-        )
+        links_resp = db.schema("core").table("media_links").select("id,context").eq("entity_type", "person").execute()
         if getattr(links_resp, "error", None):
             raise RuntimeError(f"Supabase error fetching media_links: {links_resp.error}")
 

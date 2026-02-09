@@ -17,8 +17,8 @@ from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     fetch_fullcredits_cast_with_fallback,
     filter_self_cast_rows,
 )
+from trr_backend.repositories.credits import assert_core_credits_table_exists, insert_credits_ignore_conflicts
 from trr_backend.repositories.people import assert_core_people_table_exists, fetch_people_by_imdb_ids, insert_people
-from trr_backend.repositories.show_cast import assert_core_show_cast_table_exists, upsert_show_cast
 from trr_backend.repositories.sync_state import (
     assert_core_sync_state_table_exists,
     mark_sync_state_failed,
@@ -30,7 +30,7 @@ from trr_backend.repositories.sync_state import (
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sync_people",
-        description="Sync core.people and core.show_cast from IMDb full credits (Self only).",
+        description="Sync core.people and core.credits from IMDb full credits (Self only).",
     )
     add_show_filter_args(parser)
     return parser.parse_args(argv)
@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     db = load_env_and_db(skip_db=args.skip_db)
     assert_core_people_table_exists(db)
-    assert_core_show_cast_table_exists(db)
+    assert_core_credits_table_exists(db)
     if not args.dry_run and not args.skip_db:
         assert_core_sync_state_table_exists(db)
 
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             mark_sync_state_in_progress(db, table_name="show_cast", show_id=show_id)
 
         try:
-            cast_rows, _source_type, _images = fetch_fullcredits_cast_with_fallback(
+            cast_rows, source_type, _images = fetch_fullcredits_cast_with_fallback(
                 imdb_id,
                 extra_headers=extra_headers,
                 verbose=bool(args.verbose),
@@ -149,25 +149,40 @@ def main(argv: list[str] | None = None) -> int:
                         if imdb_value:
                             people_cache[imdb_value] = f"dry-run-{imdb_value}"
 
-            show_cast_rows: list[dict[str, object]] = []
+            credit_rows: list[dict[str, object]] = []
             for row in self_rows:
                 person_id = people_cache.get(row.name_id.strip().lower())
                 if not person_id:
                     continue
-                show_cast_rows.append(
+                credit_rows.append(
                     {
                         "show_id": show_id,
                         "person_id": person_id,
                         "billing_order": row.billing_order,
                         "role": row.raw_role_text,
                         "credit_category": "Self",
+                        "source_type": source_type,
+                        "metadata": {},
                     }
                 )
 
-            if show_cast_rows and not args.dry_run:
-                show_cast_upserted += len(upsert_show_cast(db, show_cast_rows))
-            elif show_cast_rows:
-                show_cast_upserted += len(show_cast_rows)
+            if credit_rows and not args.dry_run:
+                # Keep scraped credits in sync and avoid duplicates across source_type runs.
+                delete_resp = (
+                    db.schema("core")
+                    .table("credits")
+                    .delete()
+                    .eq("show_id", show_id)
+                    .eq("credit_category", "Self")
+                    .neq("source_type", "manual")
+                    .execute()
+                )
+                if hasattr(delete_resp, "error") and delete_resp.error:
+                    raise RuntimeError(f"Supabase error deleting existing credits: {delete_resp.error}")
+                inserted = insert_credits_ignore_conflicts(db, credit_rows)
+                show_cast_upserted += len(inserted)
+            elif credit_rows:
+                show_cast_upserted += len(credit_rows)
 
             if not args.dry_run:
                 last_seen = extract_most_recent_episode(show)

@@ -36,7 +36,7 @@ def _require_tmdb_auth() -> tuple[str | None, str | None]:
 
 
 def _fetch_show_rows(db: DbSession, args: argparse.Namespace) -> list[dict[str, Any]]:
-    fields = "id,name,imdb_id,tmdb_id,premiere_date,needs_tmdb_resolution"
+    fields = "id,name,imdb_id,tmdb_id,premiere_date"
     rows: list[dict[str, Any]] = []
 
     show_ids = [str(show_id).strip() for show_id in (args.show_id or []) if str(show_id).strip()]
@@ -115,20 +115,13 @@ def main(argv: list[str] | None = None) -> int:
         if resolved_tmdb_id is None:
             unresolved += 1
             print(f"UNRESOLVED imdb_id={imdb_id} reason={reason}")
-            if not args.dry_run and show_id:
-                if row.get("needs_tmdb_resolution") is not True:
-                    update_show(db, show_id, {"needs_tmdb_resolution": True})
             continue
 
         resolved += 1
         if args.verbose:
             print(f"RESOLVED imdb_id={imdb_id} -> tmdb_id={resolved_tmdb_id} ({reason})")
         if not args.dry_run and show_id:
-            update_show(
-                db,
-                show_id,
-                {"tmdb_id": int(resolved_tmdb_id), "needs_tmdb_resolution": False},
-            )
+            update_show(db, show_id, {"tmdb_id": int(resolved_tmdb_id)})
 
     print(
         "resolve_tmdb_ids_via_find: "

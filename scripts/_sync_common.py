@@ -193,7 +193,39 @@ def _parse_since(value: object) -> datetime | None:
 
 
 def extract_most_recent_episode(show: Mapping[str, Any]) -> str | None:
-    return _normalize_marker(show.get("most_recent_episode"))
+    value = show.get("most_recent_episode")
+    if isinstance(value, str):
+        return _normalize_marker(value)
+
+    def format_one(obj: Mapping[str, Any], *, source: str) -> str | None:
+        season = _coerce_int(obj.get("season"))
+        episode = _coerce_int(obj.get("episode"))
+        title = _normalize_marker(obj.get("title"))
+        air_date = _normalize_marker(obj.get("air_date"))
+        imdb_episode_id = _normalize_marker(obj.get("imdb_id"))
+
+        parts: list[str] = []
+        if season is not None and episode is not None:
+            parts.append(f"S{season}.E{episode}")
+        if title:
+            parts.append(f"- {title}" if parts else title)
+        if air_date:
+            parts.append(f"({air_date})")
+        marker = " ".join(parts).strip()
+        if not marker:
+            return None
+        if imdb_episode_id:
+            return f"{marker} [src={source};imdbEpisodeId={imdb_episode_id}]"
+        return f"{marker} [src={source}]"
+
+    if isinstance(value, Mapping):
+        for source in ("tmdb", "imdb"):
+            obj = value.get(source)
+            if isinstance(obj, Mapping):
+                formatted = format_one(obj, source=source)
+                if formatted:
+                    return formatted
+    return None
 
 
 def extract_show_total_seasons(show: Mapping[str, Any]) -> int | None:

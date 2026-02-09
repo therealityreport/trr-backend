@@ -12,13 +12,13 @@ All events follow a consistent envelope format:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Event types for real-time communication."""
 
     # Discussion events

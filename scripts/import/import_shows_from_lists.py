@@ -72,7 +72,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         dest="imdb_fetch_cast",
         action="store_true",
         default=False,
-        help="Fetch IMDb credits and populate core.people/core.show_cast (default: off).",
+        help="Fetch IMDb credits and populate core.people/core.credits (default: off).",
     )
     imdb_cast.add_argument(
         "--imdb-no-cast",
@@ -83,7 +83,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--imdb-refresh-cast",
         action="store_true",
-        help="When fetching IMDb cast, delete existing cast memberships for each show_id before upserting.",
+        help="When fetching IMDb cast, delete existing non-manual scraped Self credits for each show_id before inserting.",  # noqa: E501
     )
     parser.add_argument(
         "--imdb-cast-overrides-url",

@@ -320,6 +320,46 @@ def _build_most_recent_episode_string(ep: Mapping[str, Any]) -> str | None:
     return s
 
 
+def _build_most_recent_episode_obj(ep: Mapping[str, Any]) -> dict[str, Any] | None:
+    season = _as_int(ep.get("season"))
+    episode = _as_int(ep.get("episode"))
+    title = _as_str(ep.get("title"))
+    air_date = _as_str(ep.get("air_date"))
+    imdb_episode_id = _as_str(ep.get("imdb_episode_id"))
+
+    obj: dict[str, Any] = {
+        "season": season,
+        "episode": episode,
+        "title": title,
+        "air_date": air_date,
+        "imdb_id": imdb_episode_id,
+    }
+    obj = {k: v for k, v in obj.items() if v not in (None, "")}
+    return obj or None
+
+
+def _merge_most_recent_episode_json(
+    existing: Any,
+    *,
+    source: str,
+    episode_obj: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    base = existing if isinstance(existing, Mapping) else {}
+    merged: dict[str, Any] = dict(base)
+    if episode_obj:
+        merged[source] = dict(episode_obj)
+    # Strip empty keys for stability
+    merged = {k: v for k, v in merged.items() if v not in (None, {}, [])}
+    return merged or None
+
+
+def _has_most_recent_episode_source(value: Any, source: str) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    source_value = value.get(source)
+    return isinstance(source_value, Mapping) and bool(source_value)
+
+
 def _extract_tmdb_id_from_find(payload: Mapping[str, Any]) -> int | None:
     tv_results = payload.get("tv_results")
     if not isinstance(tv_results, list) or not tv_results:
@@ -590,9 +630,6 @@ def _build_tmdb_external_ids(details: Mapping[str, Any], *, tmdb_id: int) -> dic
         "tvdb_id": _as_int(ext.get("tvdb_id")),
         "tvrage_id": _as_int(ext.get("tvrage_id")),
         "wikidata_id": _as_str(ext.get("wikidata_id")),
-        "facebook_id": _as_str(ext.get("facebook_id")),
-        "instagram_id": _as_str(ext.get("instagram_id")),
-        "twitter_id": _as_str(ext.get("twitter_id")),
     }
     return payload
 
@@ -664,8 +701,8 @@ def _enrich_one_show(
             imdb_id = imdb_val
             show_update["imdb_id"] = imdb_val
             tmdb_sources.append("external_ids")
-        # Also capture other external ids if present (TVDb/TVRage/Wikidata/social).
-        for ext_key in ("tvdb_id", "tvrage_id", "wikidata_id", "facebook_id", "instagram_id", "twitter_id"):
+        # Also capture other external ids if present.
+        for ext_key in ("tvdb_id", "tvrage_id", "wikidata_id"):
             ext_val = ext_ids.get(ext_key)
             if ext_val is not None:
                 show_update[ext_key] = ext_val
@@ -692,7 +729,7 @@ def _enrich_one_show(
         # Extract external IDs and add to show_update
         ext_ids = _build_tmdb_external_ids(details, tmdb_id=tmdb_id)
         if ext_ids:
-            for ext_key in ("tvdb_id", "tvrage_id", "wikidata_id", "facebook_id", "instagram_id", "twitter_id"):
+            for ext_key in ("tvdb_id", "tvrage_id", "wikidata_id"):
                 ext_val = ext_ids.get(ext_key)
                 if ext_val is not None:
                     show_update[ext_key] = ext_val
@@ -747,12 +784,14 @@ def _enrich_one_show(
                 "air_date": _as_str(last.get("air_date")),
                 "imdb_episode_id": None,
             }
-            show_update["most_recent_episode"] = _build_most_recent_episode_string(ep_obj)
-            show_update["most_recent_episode_season"] = ep_obj["season"]
-            show_update["most_recent_episode_number"] = ep_obj["episode"]
-            show_update["most_recent_episode_title"] = ep_obj["title"]
-            show_update["most_recent_episode_air_date"] = ep_obj["air_date"]
-            show_update["most_recent_episode_imdb_id"] = None
+            episode_obj = _build_most_recent_episode_obj(ep_obj)
+            merged = _merge_most_recent_episode_json(
+                show_update.get("most_recent_episode") or show.most_recent_episode,
+                source="tmdb",
+                episode_obj=episode_obj,
+            )
+            if merged is not None:
+                show_update["most_recent_episode"] = merged
 
         with cache_lock:
             providers_payload = tmdb_watch_cache.get(tmdb_id)
@@ -769,7 +808,8 @@ def _enrich_one_show(
     # IMDb title + episodes for missing values.
     if imdb_id:
         # GraphQL-first: episode summary + totals (fastest, lowest block rate).
-        need_imdb_episodes = force_refresh or show_update.get("most_recent_episode") is None
+        most_recent_existing = show_update.get("most_recent_episode") or show.most_recent_episode
+        need_imdb_episodes = force_refresh or not _has_most_recent_episode_source(most_recent_existing, "imdb")
         graphql_title_prompt_meta: dict[str, Any] | None = None
         if need_imdb_episodes or show.show_total_episodes is None:
             graphql_client: ImdbGraphQLPersistedClient | None = None
@@ -781,18 +821,29 @@ def _enrich_one_show(
                 total, recent = _extract_imdb_episode_summary_from_graphql(hero_payload)
                 if (force_refresh or show.show_total_episodes is None) and total is not None:
                     show_update["show_total_episodes"] = int(total)
-                if recent and (force_refresh or show_update.get("most_recent_episode") is None):
-                    show_update["most_recent_episode"] = _build_most_recent_episode_string(recent)
-                    show_update["most_recent_episode_season"] = recent.get("season")
-                    show_update["most_recent_episode_number"] = recent.get("episode")
-                    show_update["most_recent_episode_title"] = recent.get("title")
-                    show_update["most_recent_episode_air_date"] = recent.get("air_date")
-                    show_update["most_recent_episode_imdb_id"] = recent.get("imdb_episode_id")
+                if recent and (
+                    force_refresh
+                    or not _has_most_recent_episode_source(
+                        show_update.get("most_recent_episode") or show.most_recent_episode,
+                        "imdb",
+                    )
+                ):
+                    episode_obj = _build_most_recent_episode_obj(recent)
+                    merged = _merge_most_recent_episode_json(
+                        show_update.get("most_recent_episode") or show.most_recent_episode,
+                        source="imdb",
+                        episode_obj=episode_obj,
+                    )
+                    if merged is not None:
+                        show_update["most_recent_episode"] = merged
                 imdb_sources.append("episodes_graphql")
             except Exception as exc:  # noqa: BLE001
                 print(f"IMDb episodes (GraphQL): failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
 
-            if force_refresh or show_update.get("most_recent_episode") is None:
+            if force_refresh or not _has_most_recent_episode_source(
+                show_update.get("most_recent_episode") or show.most_recent_episode,
+                "imdb",
+            ):
                 try:
                     if graphql_client is None:
                         graphql_client = ImdbGraphQLPersistedClient()
@@ -801,12 +852,14 @@ def _enrich_one_show(
                     widget_payload = fetch_episodes_widget_container(imdb_id, client=graphql_client)
                     widget_recent = _extract_imdb_episode_summary_from_widget(widget_payload)
                     if widget_recent:
-                        show_update["most_recent_episode"] = _build_most_recent_episode_string(widget_recent)
-                        show_update["most_recent_episode_season"] = widget_recent.get("season")
-                        show_update["most_recent_episode_number"] = widget_recent.get("episode")
-                        show_update["most_recent_episode_title"] = widget_recent.get("title")
-                        show_update["most_recent_episode_air_date"] = widget_recent.get("air_date")
-                        show_update["most_recent_episode_imdb_id"] = widget_recent.get("imdb_episode_id")
+                        episode_obj = _build_most_recent_episode_obj(widget_recent)
+                        merged = _merge_most_recent_episode_json(
+                            show_update.get("most_recent_episode") or show.most_recent_episode,
+                            source="imdb",
+                            episode_obj=episode_obj,
+                        )
+                        if merged is not None:
+                            show_update["most_recent_episode"] = merged
                         imdb_sources.append("episodes_graphql_widget")
                 except Exception as exc:  # noqa: BLE001
                     print(f"IMDb episodes (GraphQL widget): failed imdb_id={imdb_id} error={exc}", file=sys.stderr)
@@ -874,7 +927,10 @@ def _enrich_one_show(
             show_update["imdb_meta"] = {"graphql_title_prompt": graphql_title_prompt_meta}
             show_update["imdb_fetched_at"] = fetched_at
 
-        need_imdb_episodes = force_refresh or show_update.get("most_recent_episode") is None
+        need_imdb_episodes = force_refresh or not _has_most_recent_episode_source(
+            show_update.get("most_recent_episode") or show.most_recent_episode,
+            "imdb",
+        )
         if need_imdb_episodes:
             client = HttpImdbTitleMetadataClient(sleep_ms=imdb_sleep_ms)
             key = (imdb_id, None)
@@ -909,12 +965,14 @@ def _enrich_one_show(
                         "air_date": picked.air_date,
                         "imdb_episode_id": picked.imdb_episode_id,
                     }
-                    show_update["most_recent_episode"] = _build_most_recent_episode_string(ep_obj)
-                    show_update["most_recent_episode_season"] = ep_obj["season"]
-                    show_update["most_recent_episode_number"] = ep_obj["episode"]
-                    show_update["most_recent_episode_title"] = ep_obj["title"]
-                    show_update["most_recent_episode_air_date"] = ep_obj["air_date"]
-                    show_update["most_recent_episode_imdb_id"] = ep_obj["imdb_episode_id"]
+                    episode_obj = _build_most_recent_episode_obj(ep_obj)
+                    merged = _merge_most_recent_episode_json(
+                        show_update.get("most_recent_episode") or show.most_recent_episode,
+                        source="imdb",
+                        episode_obj=episode_obj,
+                    )
+                    if merged is not None:
+                        show_update["most_recent_episode"] = merged
 
         # IMDb images: prefer section-images from title page, fallback to mediaindex
         with cache_lock:

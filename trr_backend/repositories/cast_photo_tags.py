@@ -71,12 +71,7 @@ def upsert_cast_photo_tags(
         row["created_by_firebase_uid"] = created_by_firebase_uid
 
     try:
-        response = (
-            db.schema("admin")
-            .table("cast_photo_people_tags")
-            .upsert(row, on_conflict="cast_photo_id")
-            .execute()
-        )
+        response = db.schema("admin").table("cast_photo_people_tags").upsert(row, on_conflict="cast_photo_id").execute()
     except Exception as exc:
         logger.warning("Failed to upsert cast_photo_people_tags: %s", exc)
         return None

@@ -17,7 +17,6 @@ from api.deps import (
     require_single_result,
 )
 from trr_backend.db.show_images import ShowImagesError, list_tmdb_show_images
-from trr_backend.repositories.credits import is_credits_v2_read_enabled
 
 router = APIRouter(prefix="/shows", tags=["shows"])
 
@@ -127,6 +126,13 @@ class Person(BaseModel):
     full_name: str
     known_for: str | None
     external_ids: dict[str, Any]
+    # Multi-source canonical fields (jsonb keyed by source; e.g. {"tmdb": "...", "fandom": "..."})
+    birthday: dict[str, Any] | None = None
+    gender: dict[str, Any] | None = None
+    biography: dict[str, Any] | None = None
+    place_of_birth: dict[str, Any] | None = None
+    homepage: dict[str, Any] | None = None
+    profile_image_url: dict[str, Any] | None = None
 
 
 class CastMember(BaseModel):
@@ -134,7 +140,8 @@ class CastMember(BaseModel):
     show_id: UUID
     season_id: UUID | None = None
     person_id: UUID
-    role: str
+    role: str | None = None
+    credit_category: str | None = None
     billing_order: int | None = None
     notes: str | None = None
     person: Person | None = None
@@ -240,7 +247,7 @@ def _build_show_external_ids(show: dict[str, Any]) -> dict[str, Any]:
     if tmdb_id is not None:
         external_ids["tmdb_id"] = tmdb_id
         external_ids["tmdb"] = tmdb_id
-    for key in ("tvdb_id", "tvrage_id", "wikidata_id", "facebook_id", "instagram_id", "twitter_id"):
+    for key in ("tvdb_id", "tvrage_id", "wikidata_id"):
         value = show.get(key)
         if value not in (None, ""):
             external_ids[key] = value
@@ -418,20 +425,31 @@ def list_show_cast(
     """
     List cast members for a show.
 
-    When ENABLE_CREDITS_V2_READ=1, reads from v_show_cast_from_credits view
-    (backed by core.credits table). Otherwise reads from legacy core.show_cast table.
+    Reads from credits-backed views (core.v_show_cast).
     """
-    table = "v_show_cast_from_credits" if is_credits_v2_read_enabled() else "show_cast"
     response = (
         db.schema("core")
-        .table(table)
-        .select("*, person:people(*)", count="exact")
+        .table("v_show_cast")
+        .select("*", count="exact")
         .eq("show_id", str(show_id))
         .order("billing_order", nullsfirst=False)
         .range(offset, offset + limit - 1)
         .execute()
     )
-    rows = get_list_result(response, "listing cast")
+    cast_rows = get_list_result(response, "listing cast")
+    person_ids = [str(r.get("person_id") or "") for r in cast_rows if r.get("person_id")]
+    person_ids = [pid for pid in person_ids if pid]
+
+    people_by_id: dict[str, dict[str, Any]] = {}
+    if person_ids:
+        people_resp = db.schema("core").table("people").select("*").in_("id", person_ids).execute()
+        people_rows = get_list_result(people_resp, "listing cast people")
+        people_by_id = {str(p.get("id") or ""): p for p in people_rows if p.get("id")}
+
+    rows: list[dict[str, Any]] = []
+    for r in cast_rows:
+        pid = str(r.get("person_id") or "")
+        rows.append({**r, "person": people_by_id.get(pid)})
     total_count = getattr(response, "count", None)
     if isinstance(total_count, int):
         total_count = total_count
@@ -440,7 +458,7 @@ def list_show_cast(
     elif isinstance(total_count, str) and total_count.isdigit():
         total_count = int(total_count)
     else:
-        total_count = len(rows)
+        total_count = len(cast_rows)
     has_more = offset + limit < total_count
     return {"count": len(rows), "total_count": total_count, "has_more": has_more, "cast": rows}
 
