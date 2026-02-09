@@ -1,7 +1,7 @@
 # Supabase Schema Cleanup — Task 4 Plan
 
 Repo: TRR-Backend
-Last updated: February 8, 2026
+Last updated: February 9, 2026
 
 ## Goal
 
@@ -9,7 +9,7 @@ Execute owner-approved schema cleanup: drop unused tables, consolidate redundant
 
 ## Status Snapshot
 
-Not yet started. Most sub-phases are independent and can run in parallel, except the cast model migration (6b -> 6c -> 6f/6l) which is sequential.
+Complete. Merged via PR #48; staging Supabase up to migrations 0102–0115.
 
 ## Scope
 

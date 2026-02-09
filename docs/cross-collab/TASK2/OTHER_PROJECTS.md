@@ -1,7 +1,7 @@
 # Other Projects — Task 2
 
 Repo: TRR-Backend  
-Last updated: February 6, 2026
+Last updated: February 9, 2026
 
 Scope Clarification (Task 1 vs Task 2)
 - Task 1: seed flagging + `seed_only` contract + strict fallback + episode-level import side effects (completed).
@@ -10,7 +10,7 @@ Scope Clarification (Task 1 vs Task 2)
 Cross-Repo Responsibilities (Day 1)
 - TRR-Backend
   - Ensures TRR metadata DB data is reliable for read-only consumption:
-    - `core.show_cast`
+    - `core.v_show_cast`
     - `core.people.external_ids->>'imdb'`
   - No Day-1 API/UI changes required for Task 2.
 - TRR-APP
@@ -24,4 +24,3 @@ Known Preconditions / Risks
 - TRR metadata DB must be reachable from SCREENALYTICS API for show-cast query.
 - Local/staging DB must have `person` and `face_bank_images` tables to avoid persistence failures.
 - Day 1 is import-only: no facebank manifests/embeddings are produced yet.
-

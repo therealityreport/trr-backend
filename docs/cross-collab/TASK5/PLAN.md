@@ -9,7 +9,7 @@ Add missing screenalytics tables to Supabase (migrations 0102-0105) and verify T
 
 ## Status Snapshot
 
-Not yet started.
+Complete. Merged via PR #48; migrations 0102–0105 applied on staging; drift reconciled via 0115.
 
 ## Scope
 

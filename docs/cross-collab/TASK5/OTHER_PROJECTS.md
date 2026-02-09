@@ -5,8 +5,8 @@ Last updated: February 9, 2026
 
 ## Cross-Repo Snapshot
 
-- TRR-Backend: Not yet started. Owns Phase 1 (migrations) and Phase 3 (integration file verification).
-- screenalytics: Not yet started. Owns Phases 2-5 (code changes, data migration, Docker removal). See screenalytics TASK4.
+- TRR-Backend: Complete. Merged via PR #48; staging Supabase up to migrations 0102-0115.
+- screenalytics: Complete. Pushed to `main`; Supabase-only wiring live. See screenalytics TASK4.
 - TRR-APP: No changes required for this task.
 
 ## Responsibility Alignment

@@ -1,13 +1,14 @@
 # Show-Level SYNC Facebank Seeds — Task 2 Plan
 
 Repo: TRR-Backend  
-Last updated: February 6, 2026
+Last updated: February 9, 2026
 
 Goal
 Add a show-level SYNC flow that imports TRR cast face images into SCREENALYTICS `person` + `face_bank_images`.
 
-Status Snapshot (As of February 6, 2026)
+Status Snapshot (As of February 9, 2026)
 - Not yet implemented. (Task 2 tracks the show-level SYNC work after Task 1 contract closeout.)
+- Prereq: schema cleanup must be applied in the target environment; cast reads should use credits-backed compatibility views (e.g. `core.v_show_cast`), not legacy tables.
 
 Locked Day-1 Scope (Import-Only)
 - Day 1 is **import-only into `person` + `face_bank_images`**.
@@ -28,13 +29,13 @@ Locked Contracts (Day 1)
    - `status: ok|partial|error`
    - Counts + per-person results (no secret leakage)
 5. TRR cast source:
-   - Read-only query of TRR metadata DB `core.show_cast` joined to `core.people`
+- Read-only query of TRR metadata DB `core.v_show_cast` joined to `core.people`
    - IMDb person ID read from `core.people.external_ids->>'imdb'` (nullable)
    - Internal default filter: `credit_category='Self'` (not request-exposed Day 1)
 
 Implementation Outline (Day 1)
 1. Load local show record and require it be TRR-linked (`trr_show_id` present).
-2. Fetch TRR show cast from TRR metadata DB (`core.show_cast`).
+2. Fetch TRR show cast from TRR metadata DB (`core.v_show_cast`).
 3. Match or auto-create local cast members:
    - Strict match order: `trr_person_id`, then `imdb_id`, then exact normalized name/alias.
    - Auto-create with conservative defaults: `role="other"`, `status="active"`.
@@ -50,4 +51,3 @@ Deferred Scope (Not Day 1)
 - Overrides / non-`Self` credit categories (request-configurable).
 - Any fuzzy matching logic (Day 1 is exact-only).
 - Any browser-visible admin secret handling (client must not receive secret).
-

@@ -5,9 +5,9 @@ Last updated: February 9, 2026
 
 ## Cross-Repo Snapshot
 
-- TRR-Backend: Not yet started. Owns all migrations (0106-0113), data migration scripts, replacement views, and its own code changes.
-- TRR-APP: Not yet started. Owns code changes for Phase 6c (cast query updates) and Phase 6e (people enrichment display). See TRR-APP TASK4.
-- screenalytics: Not yet started. Owns Phase 6c code change only (replace `core.show_cast` reads). See screenalytics TASK5.
+- TRR-Backend: Complete. Merged via PR #48; staging Supabase up to migrations 0102-0115.
+- TRR-APP: Complete. Merged via PR #23; Vercel preview deployed. See TRR-APP TASK4.
+- screenalytics: Complete. Pushed to `main`; Supabase-only wiring live. See screenalytics TASK5.
 
 ## Responsibility Alignment
 
