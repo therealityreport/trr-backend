@@ -330,10 +330,12 @@ See `docs/cloud/` for detailed cloud deployment guides.
 
 ## 🤝 Contributing
 
+See `CONTRIBUTING.md`.
+
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
+2. Make your changes (default: `main`; this repo does not enforce a branch naming convention)
+3. Commit your changes (`git commit -m 'Describe your change'`)
+4. Push your changes
 5. Open a Pull Request
 
 ### Development Guidelines

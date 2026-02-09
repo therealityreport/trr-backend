@@ -49,8 +49,7 @@ def _require_tmdb_auth() -> tuple[str | None, str | None]:
 def _fetch_show_rows(db: DbSession, args: argparse.Namespace) -> list[dict[str, Any]]:
     fields = (
         "id,name,tmdb_id,tmdb_meta,tmdb_fetched_at,tmdb_vote_average,tmdb_vote_count,tmdb_popularity,"
-        "tmdb_first_air_date,tmdb_last_air_date,tmdb_status,tmdb_type,tmdb_network_ids,tmdb_production_company_ids,"
-        "needs_tmdb_resolution"
+        "tmdb_first_air_date,tmdb_last_air_date,tmdb_status,tmdb_type,tmdb_network_ids,tmdb_production_company_ids"
     )
     rows: list[dict[str, Any]] = []
 
@@ -145,9 +144,6 @@ def main(argv: list[str] | None = None) -> int:
         merged_company_ids = _merge_int_arrays(row.get("tmdb_production_company_ids"), company_ids)
         if merged_company_ids is not None:
             patch["tmdb_production_company_ids"] = merged_company_ids
-
-        if row.get("needs_tmdb_resolution") is not False:
-            patch["needs_tmdb_resolution"] = False
 
         enriched += 1
         if args.verbose:

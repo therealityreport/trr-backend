@@ -54,12 +54,7 @@ def auto_count_cast_photo(
     _: AdminUser = None,
 ) -> AutoCountResponse:
     response = (
-        db.schema("core")
-        .table("cast_photos")
-        .select("id, hosted_url, url")
-        .eq("id", str(photo_id))
-        .limit(1)
-        .execute()
+        db.schema("core").table("cast_photos").select("id, hosted_url, url").eq("id", str(photo_id)).limit(1).execute()
     )
     if hasattr(response, "error") and response.error:
         raise HTTPException(status_code=502, detail="Database error fetching cast photo")
@@ -67,9 +62,12 @@ def auto_count_cast_photo(
         raise HTTPException(status_code=404, detail="Cast photo not found")
 
     row = response.data[0]
-    image_url = row.get("hosted_url")
+    image_url = row.get("hosted_url") or row.get("url")
     if not image_url:
-        raise HTTPException(status_code=409, detail="Cast photo is not mirrored (hosted_url missing)")
+        raise HTTPException(
+            status_code=409,
+            detail="Cast photo has no hosted_url or url to analyze",
+        )
 
     tag_rows = get_tags_by_photo_ids(db, [str(photo_id)])
     tag_row = tag_rows.get(str(photo_id))
@@ -121,9 +119,12 @@ def auto_count_media_asset(
         raise HTTPException(status_code=404, detail="Media asset not found")
 
     row = response.data[0]
-    image_url = row.get("hosted_url")
+    image_url = row.get("hosted_url") or row.get("source_url")
     if not image_url:
-        raise HTTPException(status_code=409, detail="Media asset is not mirrored (hosted_url missing)")
+        raise HTTPException(
+            status_code=409,
+            detail="Media asset has no hosted_url or source_url to analyze",
+        )
 
     links = list_person_links_by_asset_id(db, str(asset_id))
     if not links:
@@ -164,12 +165,7 @@ def auto_count_show_images(
     show_id_str = str(show_id)
 
     # Fetch seasons for the show (optionally filter by season_number)
-    season_query = (
-        db.schema("core")
-        .table("seasons")
-        .select("id, season_number")
-        .eq("show_id", show_id_str)
-    )
+    season_query = db.schema("core").table("seasons").select("id, season_number").eq("show_id", show_id_str)
     if payload.season_number is not None:
         season_query = season_query.eq("season_number", payload.season_number)
     season_response = season_query.execute()
@@ -188,12 +184,7 @@ def auto_count_show_images(
         )
 
     # Fetch episodes for the show (optionally filter by season)
-    episode_query = (
-        db.schema("core")
-        .table("episodes")
-        .select("id, season_id")
-        .eq("show_id", show_id_str)
-    )
+    episode_query = db.schema("core").table("episodes").select("id, season_id").eq("show_id", show_id_str)
     if season_ids:
         episode_query = episode_query.in_("season_id", season_ids)
     episode_response = episode_query.execute()
@@ -262,11 +253,7 @@ def auto_count_show_images(
         )
 
     assets_response = (
-        db.schema("core")
-        .table("media_assets")
-        .select("id, hosted_url, source_url")
-        .in_("id", asset_ids)
-        .execute()
+        db.schema("core").table("media_assets").select("id, hosted_url, source_url").in_("id", asset_ids).execute()
     )
     if hasattr(assets_response, "error") and assets_response.error:
         raise HTTPException(status_code=502, detail="Database error fetching media assets")

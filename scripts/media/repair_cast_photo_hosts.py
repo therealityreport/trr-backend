@@ -8,9 +8,8 @@ Defaults to dry-run. Use --apply to perform updates.
 from __future__ import annotations
 
 import argparse
-from typing import Any
-
 import sys
+from typing import Any
 
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.media.s3_mirror import mirror_cast_photo_row

@@ -201,6 +201,7 @@ def test_mirror_cast_photo_fallbacks_to_thumb_when_primary_fails(monkeypatch: py
     assert result["hosted_content_type"] == "image/png"
     assert result["image_url"] == row["thumb_url"]
 
+
 def test_mirror_tmdb_logo_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("AWS_S3_BUCKET", "bucket")

@@ -1,20 +1,30 @@
-# Other Projects — Task 1
+# Other Projects — Task 1 (Media Workflow Enhancements)
 
 Repo: TRR-Backend  
-Last updated: February 6, 2026
+Last updated: February 9, 2026
 
-Cross-Repo Snapshot
-- TRR-Backend PR `#44` merged.
-- TRR-APP PRs `#18` and `#19` merged.
-- SCREENALYTICS PR `#187` merged.
-- Code/CI is complete across repos; staging + production rollout smoke is complete (including DB side effects).
-- Task 1 is complete for contract scope. Task 2 tracks show-level SYNC (not implemented here).
+## Cross-Repo Dependency Snapshot
+- TRR-Backend provides the text-overlay detector endpoint and persists `has_text_overlay` into `core.media_assets.metadata`.
+- TRR-Backend persists manual People tags during scrape import when `person_ids` are provided.
+- TRR-Backend URL scrape preview (`/admin/scrape/preview`) may include `bytes` per candidate for UI display (best-effort).
+- TRR-Backend scrape import kind allowlist includes `promo`, `intro`, `reunion` in addition to existing kinds.
+- TRR-Backend improves scrape context extraction for cast-photo pages (per-image context includes name + caption).
+- TRR-Backend persists article publish date for cast-photo imports into `metadata.source_created_at` (so UI shows **Created**).
+- TRR-Backend supports admin cleanup via `DELETE /api/v1/admin/media-assets/{asset_id}`.
+- TRR-APP consumes both capabilities and exposes allowlist-only admin UI and proxy routes.
+- SCREENALYTICS has no required changes for this task set.
 
-Scope Clarification (Task 1 vs Task 2)
-- Task 1 (completed; contract scope): seed flagging + `seed_only` contract + strict fallback + episode-level import side effects.
-- Task 2 (tracked separately): show-level SYNC endpoint + UI + orchestration (not part of Task 1 closeout).
+## TRR-APP (Consumes Backend Contracts)
+- Proxies detection via:
+  - `POST /api/admin/trr-api/media-assets/[assetId]/detect-text-overlay`
+- Uses `core.media_links.context.people_*` fields (written on import) to drive SOLO/GROUP filtering.
+- Expects show/season galleries to render assets linked through `core.media_links` + `core.media_assets`.
 
-Locked Contracts (No Pending Changes)
+## SCREENALYTICS (No Code Change)
+- No required changes.
+- If SCREENALYTICS later wants to consume text-overlay status, the single source of truth is `core.media_assets.metadata.has_text_overlay`.
+
+## Locked Contracts (No Pending Changes)
 1. Backend toggle endpoint: `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`.
 2. Toggle payload: `{ "facebank_seed": boolean }`.
 3. Toggle response: `{ "link_id": string, "person_id": string, "facebank_seed": boolean }`.
@@ -22,11 +32,11 @@ Locked Contracts (No Pending Changes)
 5. Service auth for app proxy path: `Authorization: Bearer <service_role>` + `X-TRR-Internal-Admin-Secret`.
 6. Screenalytics must use `served_url` and strict fallback: only call `seed_only=false` after successful empty `seed_only=true`.
 
-Addendum (Admin Media Enhancements)
+## Addendum (Admin Media Enhancements)
 - TRR-Backend calls the people-count endpoint; ensure `/vision/people-count` is reachable at `SCREENALYTICS_API_URL` (TRR-Backend side).
 - If TRR-Backend is configured with an incompatible path, set `SCREENALYTICS_API_PATH=/vision/people-count` (TRR-Backend) rather than changing SCREENALYTICS routing.
 
-Responsibility Alignment
+## Responsibility Alignment
 - TRR-Backend
   - Owns `core.media_links.facebank_seed` schema + view exposure.
   - Enforces allowlist-only admin auth and scoped service-role + internal-secret auth for toggle endpoint.
@@ -38,7 +48,7 @@ Responsibility Alignment
   - Owns seed-first fetch behavior and strict fallback logic.
   - Uses `served_url` and persists rows through `import_facebank_images`.
 
-Operational Findings (Completed)
+## Operational Findings (Completed)
 1. Targeted regression suites passed in all repos.
 2. Backend local auth guard behavior verified (`403`, `403`, `200`).
 3. Backend local `seed_only=true/false` subset behavior verified.
@@ -49,10 +59,10 @@ Operational Findings (Completed)
 8. SCREENALYTICS `sync_cast_from_trr` import hook verified (seeded + unseeded) with `import_errors=0`.
 9. SCREENALYTICS DB side effects verified (`face_bank_images` inserts + dedupe).
 
-Open Operational Risks / Blockers
+## Open Operational Risks / Blockers
 - None.
 
-Dependency Order (For Final Closeout)
+## Dependency Order (For Final Closeout)
 1. Deploy TRR-Backend (`main`, includes PR `#44`).
 2. Deploy TRR-APP (`main`, includes PR `#18/#19`).
 3. Deploy SCREENALYTICS (`main`, includes PR `#187`).
@@ -60,7 +70,7 @@ Dependency Order (For Final Closeout)
 5. Roll production in same order and run minimal smoke.
 6. Mark all Task 1 docs completed only after both environments pass. (Now complete as of February 6, 2026.)
 
-Completion Metadata
+## Completion Metadata
 - Completion date: February 6, 2026
 - PR references:
   - TRR-Backend `#44`

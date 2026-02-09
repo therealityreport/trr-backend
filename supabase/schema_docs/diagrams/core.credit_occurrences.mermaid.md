@@ -9,5 +9,9 @@ erDiagram
         TEXT appearance_type
         TIMESTAMP_WITH_TIME_ZONE created_at
         TIMESTAMP_WITH_TIME_ZONE updated_at
+        INTEGER air_year
+        TEXT credit_text
+        JSONB attributes
+        BOOLEAN is_archive_footage
     }
 ```

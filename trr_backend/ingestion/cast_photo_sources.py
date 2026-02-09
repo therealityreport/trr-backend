@@ -14,8 +14,8 @@ All rows include:
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
 import re
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID

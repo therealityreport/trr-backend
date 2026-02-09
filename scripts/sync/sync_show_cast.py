@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 import requests
@@ -21,10 +20,9 @@ from trr_backend.integrations.imdb.fullcredits_cast_parser import (
     filter_self_cast_rows,
 )
 from trr_backend.integrations.tmdb.client import TmdbClientError, find_by_imdb_id, resolve_api_key
-from trr_backend.repositories.credits import insert_credits_ignore_conflicts
+from trr_backend.repositories.credits import assert_core_credits_table_exists, insert_credits_ignore_conflicts
 from trr_backend.repositories.people import assert_core_people_table_exists, fetch_people_by_imdb_ids, insert_people
 from trr_backend.repositories.person_images import upsert_person_images
-from trr_backend.repositories.show_cast import assert_core_show_cast_table_exists, upsert_show_cast
 from trr_backend.repositories.sync_state import (
     assert_core_sync_state_table_exists,
     mark_sync_state_failed,
@@ -33,15 +31,10 @@ from trr_backend.repositories.sync_state import (
 )
 
 
-def _is_credits_v2_enabled() -> bool:
-    """Check if credits v2 dual-write is enabled via environment variable."""
-    return os.environ.get("ENABLE_CREDITS_V2_WRITE", "").lower() in ("1", "true", "yes")
-
-
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sync_show_cast",
-        description="Sync core.show_cast from IMDb full credits (Self only).",
+        description="Sync show-level cast credits from IMDb full credits (Self only).",
     )
     add_show_filter_args(parser)
     return parser.parse_args(argv)
@@ -112,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     db = load_env_and_db(skip_db=args.skip_db)
     assert_core_people_table_exists(db)
-    assert_core_show_cast_table_exists(db)
+    assert_core_credits_table_exists(db)
     if not args.dry_run and not args.skip_db:
         assert_core_sync_state_table_exists(db)
 
@@ -131,9 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[str] = []
     people_cache: dict[str, str] = {}
     people_inserted = 0
-    show_cast_upserted = 0
-    credits_v2_inserted = 0
-    credits_v2_enabled = _is_credits_v2_enabled()
+    credits_inserted = 0
 
     filter_result = filter_show_rows_for_sync(
         db,
@@ -271,30 +262,35 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if show_cast_rows and not args.dry_run:
-                # Inject source_type into each row dict (no repo signature change)
-                rows_with_source = [{**row, "source_type": source_type} for row in show_cast_rows]
-                show_cast_upserted += len(upsert_show_cast(db, rows_with_source))
+                # Replace all non-manual scraped Self credits so this run is authoritative.
+                delete_resp = (
+                    db.schema("core")
+                    .table("credits")
+                    .delete()
+                    .eq("show_id", show_id)
+                    .eq("credit_category", "Self")
+                    .neq("source_type", "manual")
+                    .execute()
+                )
+                if hasattr(delete_resp, "error") and delete_resp.error:
+                    raise RuntimeError(f"Supabase error deleting credits for show_id={show_id}: {delete_resp.error}")
 
-                # Dual-write to core.credits if enabled
-                if credits_v2_enabled:
-                    credit_rows = [
-                        {
-                            "show_id": row["show_id"],
-                            "person_id": row["person_id"],
-                            "credit_category": row.get("credit_category") or "Self",
-                            "role": row.get("role"),
-                            "billing_order": row.get("billing_order"),
-                            "source_type": source_type,
-                            "metadata": {},
-                        }
-                        for row in rows_with_source
-                    ]
-                    inserted = insert_credits_ignore_conflicts(db, credit_rows)
-                    credits_v2_inserted += len(inserted)
+                credit_rows = [
+                    {
+                        "show_id": row["show_id"],
+                        "person_id": row["person_id"],
+                        "credit_category": row.get("credit_category") or "Self",
+                        "role": row.get("role"),
+                        "billing_order": row.get("billing_order"),
+                        "source_type": source_type,
+                        "metadata": {},
+                    }
+                    for row in show_cast_rows
+                ]
+                inserted = insert_credits_ignore_conflicts(db, credit_rows)
+                credits_inserted += len(inserted)
             elif show_cast_rows:
-                show_cast_upserted += len(show_cast_rows)
-                if credits_v2_enabled:
-                    credits_v2_inserted += len(show_cast_rows)
+                credits_inserted += len(show_cast_rows)
 
             if not args.dry_run:
                 mark_sync_state_success(
@@ -313,10 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"cast_rows_total={cast_rows_total}")
     print(f"cast_rows_self={cast_rows_self}")
     print(f"people_inserted={people_inserted}")
-    print(f"show_cast_upserted={show_cast_upserted}")
+    print(f"credits_inserted={credits_inserted}")
     print(f"person_images_upserted={person_images_upserted}")
-    if credits_v2_enabled:
-        print(f"credits_v2_inserted={credits_v2_inserted}")
     print(f"failures={len(failures)}")
 
     if failures:

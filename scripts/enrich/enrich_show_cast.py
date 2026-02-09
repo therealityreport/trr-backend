@@ -31,9 +31,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
-import unicodedata
 import sys
 import time
+import unicodedata
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -182,7 +183,7 @@ def _get_cast_for_show(db, show_id: str) -> list[dict[str, Any]]:
         people_resp = (
             db.schema("core")
             .table("people")
-            .select("id,full_name,external_ids")
+            .select("id,full_name,external_ids,birthday,gender,biography,place_of_birth,homepage,profile_image_url")
             .in_("id", chunk)
             .execute()
         )
@@ -209,6 +210,122 @@ def _canonical_url(url: str) -> str:
 def _url_hash(url: str) -> str:
     """Generate a short hash of a URL for source_image_id."""
     return hashlib.sha256(_canonical_url(url).encode()).hexdigest()[:16]
+
+
+TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/original"
+
+
+def _tmdb_profile_image_url(profile_path: str | None) -> str | None:
+    if not isinstance(profile_path, str):
+        return None
+    cleaned = profile_path.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("http://") or cleaned.startswith("https://"):
+        return cleaned
+    if not cleaned.startswith("/"):
+        cleaned = "/" + cleaned
+    return f"{TMDB_IMAGE_BASE_URL}{cleaned}"
+
+
+def _merge_source_map(existing: Any, *, source: str, value: Any) -> dict[str, Any] | None:
+    if value in (None, ""):
+        return None
+    base = existing if isinstance(existing, Mapping) else {}
+    merged: dict[str, Any] = dict(base)
+    if merged.get(source) == value:
+        return None
+    merged[source] = value
+    return merged
+
+
+def _build_people_multisource_patch(
+    person: Mapping[str, Any],
+    *,
+    tmdb_row: Mapping[str, Any] | None,
+    fandom_row: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build a core.people patch for multi-source canonical fields (Phase 6e).
+
+    Each field stores values keyed by source, e.g. {"tmdb": "...", "fandom": "..."}.
+    """
+    sources: list[tuple[str, Mapping[str, Any]]] = []
+    if isinstance(tmdb_row, Mapping):
+        sources.append(("tmdb", tmdb_row))
+    if isinstance(fandom_row, Mapping):
+        sources.append(("fandom", fandom_row))
+
+    if not sources:
+        return {}
+
+    # Start from the current DB values so we don't clobber other sources.
+    current: dict[str, Any] = {
+        "birthday": person.get("birthday"),
+        "gender": person.get("gender"),
+        "biography": person.get("biography"),
+        "place_of_birth": person.get("place_of_birth"),
+        "homepage": person.get("homepage"),
+        "profile_image_url": person.get("profile_image_url"),
+    }
+
+    patch: dict[str, Any] = {}
+
+    for source, row in sources:
+        birthday_value: Any = None
+        gender_value: Any = None
+        biography_value: Any = None
+        pob_value: Any = None
+        homepage_value: Any = None
+        profile_value: Any = None
+
+        if source == "tmdb":
+            birthday_value = row.get("birthday")
+            gender_value = row.get("gender")
+            biography_value = row.get("biography")
+            pob_value = row.get("place_of_birth")
+            homepage_value = row.get("homepage")
+            profile_value = _tmdb_profile_image_url(row.get("profile_path"))
+        elif source == "fandom":
+            # cast_fandom uses both typed date and a display string; prefer ISO date if present.
+            birthdate = row.get("birthdate")
+            if isinstance(birthdate, str) and birthdate.strip():
+                birthday_value = birthdate.strip()
+            else:
+                birthday_value = row.get("birthdate_display")
+            gender_value = row.get("gender")
+            biography_value = row.get("summary")
+
+        merged = _merge_source_map(current["birthday"], source=source, value=birthday_value)
+        if merged is not None:
+            current["birthday"] = merged
+            patch["birthday"] = merged
+
+        merged = _merge_source_map(current["gender"], source=source, value=gender_value)
+        if merged is not None:
+            current["gender"] = merged
+            patch["gender"] = merged
+
+        merged = _merge_source_map(current["biography"], source=source, value=biography_value)
+        if merged is not None:
+            current["biography"] = merged
+            patch["biography"] = merged
+
+        merged = _merge_source_map(current["place_of_birth"], source=source, value=pob_value)
+        if merged is not None:
+            current["place_of_birth"] = merged
+            patch["place_of_birth"] = merged
+
+        merged = _merge_source_map(current["homepage"], source=source, value=homepage_value)
+        if merged is not None:
+            current["homepage"] = merged
+            patch["homepage"] = merged
+
+        merged = _merge_source_map(current["profile_image_url"], source=source, value=profile_value)
+        if merged is not None:
+            current["profile_image_url"] = merged
+            patch["profile_image_url"] = merged
+
+    return patch
 
 
 def _normalize_name_for_match(value: str | None) -> str:
@@ -656,6 +773,9 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"\n[{idx + 1}/{len(cast)}] {full_name}")
 
+        fandom_row: Mapping[str, Any] | None = None
+        tmdb_row: Mapping[str, Any] | None = None
+
         # 1. Enrich Fandom profile
         if not args.skip_fandom_profile:
             result = _enrich_fandom_profile(
@@ -666,6 +786,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             if result:
                 total_fandom_profiles += 1
+                if isinstance(result, Mapping):
+                    candidate = result.get("fandom")
+                    if isinstance(candidate, Mapping):
+                        fandom_row = candidate
 
         # 2. Enrich TMDb profile
         if not args.skip_tmdb:
@@ -677,6 +801,25 @@ def main(argv: list[str] | None = None) -> int:
             )
             if result:
                 total_tmdb_profiles += 1
+                if isinstance(result, Mapping):
+                    tmdb_row = result
+
+        # Phase 6e: Merge multi-source canonical fields into core.people JSONB columns.
+        try:
+            if not person_id:
+                raise ValueError("Missing person_id")
+            people_patch = _build_people_multisource_patch(person, tmdb_row=tmdb_row, fandom_row=fandom_row)
+            if people_patch:
+                if args.dry_run:
+                    keys = ", ".join(sorted(people_patch.keys()))
+                    print(f"    DRY RUN: Would update core.people canonical fields: {keys}")
+                else:
+                    db.schema("core").table("people").update(people_patch).eq("id", person_id).execute()
+                    if args.verbose:
+                        keys = ", ".join(sorted(people_patch.keys()))
+                        print(f"    Updated core.people canonical fields: {keys}")
+        except Exception as e:
+            print(f"    Error updating core.people canonical fields: {e}")
 
         # 3. Import gallery photos
         if not args.skip_gallery:

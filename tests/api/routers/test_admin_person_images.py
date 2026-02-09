@@ -44,9 +44,7 @@ def _mock_media_link_lookup(mock_db: MagicMock, row: dict | None, *, error: obje
     mock_response = MagicMock()
     mock_response.data = [row] if row is not None else []
     mock_response.error = error
-    query = (
-        mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
-    )
+    query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
     query.execute.return_value = mock_response
 
 
@@ -79,9 +77,7 @@ class TestRefreshPersonImages:
         mock_response = MagicMock()
         mock_response.data = []
         mock_response.error = None
-        query = (
-            mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
-        )
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
         query.execute.return_value = mock_response
 
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -110,9 +106,7 @@ class TestRefreshPersonImages:
         mock_response = MagicMock()
         mock_response.data = [person_data]
         mock_response.error = None
-        query = (
-            mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
-        )
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
         query.execute.return_value = mock_response
 
         # Mock the module-level functions
@@ -168,9 +162,7 @@ class TestRefreshPersonImages:
         mock_response = MagicMock()
         mock_response.data = [person_data]
         mock_response.error = None
-        query = (
-            mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
-        )
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
         query.execute.return_value = mock_response
 
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):

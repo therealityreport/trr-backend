@@ -105,12 +105,7 @@ def get_season_and_show_identifiers(
     imdb_id = None
     if resolved_show_id:
         show_result = (
-            db.schema("core")
-            .table("shows")
-            .select("external_ids")
-            .eq("id", resolved_show_id)
-            .limit(1)
-            .execute()
+            db.schema("core").table("shows").select("external_ids").eq("id", resolved_show_id).limit(1).execute()
         )
         if getattr(show_result, "error", None):
             logger.error("Failed to lookup show external_ids: %s", show_result.error)

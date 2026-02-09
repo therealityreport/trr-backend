@@ -18,11 +18,19 @@ class ShowRepositoryError(RuntimeError):
 _MISSING_COLUMN_RE = re.compile(r"could not find the '([^']+)' column", re.IGNORECASE)
 
 # Array columns that need PostgreSQL literal format for updates
-_ARRAY_COLUMNS = frozenset({
-    "genres", "keywords", "tags", "networks", "streaming_providers",
-    "listed_on", "tmdb_network_ids", "tmdb_production_company_ids",
-    "alternative_names",
-})
+_ARRAY_COLUMNS = frozenset(
+    {
+        "genres",
+        "keywords",
+        "tags",
+        "networks",
+        "streaming_providers",
+        "listed_on",
+        "tmdb_network_ids",
+        "tmdb_production_company_ids",
+        "alternative_names",
+    }
+)
 
 
 def _to_pg_array(value: list[Any]) -> str:
@@ -48,6 +56,7 @@ def _prepare_payload_arrays(payload: dict[str, Any]) -> dict[str, Any]:
         if col in result and isinstance(result[col], list):
             result[col] = _to_pg_array(result[col])
     return result
+
 
 # PGRST204 retry configuration
 _PGRST204_MAX_RETRIES = 1
@@ -193,20 +202,6 @@ def insert_show(db: DbSession, show: ShowUpsert) -> dict[str, Any]:
         payload["tmdb_id"] = int(show.tmdb_id)
     if show.most_recent_episode is not None:
         payload["most_recent_episode"] = show.most_recent_episode
-    if show.most_recent_episode_season is not None:
-        payload["most_recent_episode_season"] = int(show.most_recent_episode_season)
-    if show.most_recent_episode_number is not None:
-        payload["most_recent_episode_number"] = int(show.most_recent_episode_number)
-    if show.most_recent_episode_title is not None:
-        payload["most_recent_episode_title"] = show.most_recent_episode_title
-    if show.most_recent_episode_air_date is not None:
-        payload["most_recent_episode_air_date"] = show.most_recent_episode_air_date
-    if show.most_recent_episode_imdb_id is not None:
-        payload["most_recent_episode_imdb_id"] = show.most_recent_episode_imdb_id
-    if show.needs_imdb_resolution is not None:
-        payload["needs_imdb_resolution"] = bool(show.needs_imdb_resolution)
-    if show.needs_tmdb_resolution is not None:
-        payload["needs_tmdb_resolution"] = bool(show.needs_tmdb_resolution)
 
     # Array columns (only include if not None/empty to avoid overwriting)
     if show.genres:
@@ -229,12 +224,6 @@ def insert_show(db: DbSession, show: ShowUpsert) -> dict[str, Any]:
         payload["tvrage_id"] = int(show.tvrage_id)
     if show.wikidata_id is not None:
         payload["wikidata_id"] = show.wikidata_id
-    if show.facebook_id is not None:
-        payload["facebook_id"] = show.facebook_id
-    if show.instagram_id is not None:
-        payload["instagram_id"] = show.instagram_id
-    if show.twitter_id is not None:
-        payload["twitter_id"] = show.twitter_id
 
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:

@@ -12,5 +12,8 @@ erDiagram
         TEXT notes
         TIMESTAMP_WITH_TIME_ZONE created_at
         TIMESTAMP_WITH_TIME_ZONE updated_at
+        TEXT tiktok_handle
+        TEXT twitter_handle
+        TEXT youtube_handle
     }
 ```

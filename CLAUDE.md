@@ -1,42 +1,23 @@
-# Claude Code - TRR Backend Vibe Coding Guide
+# TRR Backend Coding Guide (Codex/Claude)
 
-## Vibe Coding Rules (Non-Negotiable)
-- Spec-first: write acceptance criteria before editing code
-- Commit early, push often. No invisible work.
-- Before asking for next instructions: must have commit SHA + pushed branch
-
-## Worktrunk Quickstart (Recommended)
-```bash
-# Create isolated branch + worktree
-wt new feature/my-feature
-cd ../trr-backend-my-feature
-
-# Work, commit, push...
-git add . && git commit -m "feat: description"
-git push -u origin feature/my-feature
-
-# Create PR
-/trr-pr
-
-# Clean up when done
-wt delete feature/my-feature
-```
-
-### Fallback: Git worktrees (if wt not available)
-```bash
-git worktree add ../trr-backend-my-feature feature/my-feature
-cd ../trr-backend-my-feature
-# Work, then cleanup:
-git worktree remove ../trr-backend-my-feature
-```
+## Default Git Workflow
+- Default is work on `main`; only create/use a branch or worktree if explicitly asked.
+- If asked to create a branch or worktree, do it exactly as requested (no extra conventions).
+- Never force-push to `main`.
 
 ## Essential Commands
 
 ### Environment Setup
 ```bash
+python3.11 -m venv .venv              # If needed
 pip install -r requirements.txt       # Install deps (in venv!)
 cp .env.example .env                  # First-time setup
 source .venv/bin/activate             # Activate venv
+```
+
+### Run The API (Dev)
+```bash
+./start-api.sh                        # Uvicorn on :8000 with --reload (override with TRR_BACKEND_PORT)
 ```
 
 ### Testing & Validation (Fast - Pre-Commit)
@@ -86,7 +67,6 @@ PYTHONPATH=. python scripts/sync_shows_all.py --all --verbose
 - `/trr-impl` - Execute implementation
 - `/trr-validate` - Run validation suite (auto-detects what to run)
 - `/trr-pr` - Create pull request
-- `/trr-wt-new` - Create new Worktrunk branch
 
 ## Safety Rules
 - NEVER commit .env or keys/ (use .env.example as template)
@@ -94,7 +74,7 @@ PYTHONPATH=. python scripts/sync_shows_all.py --all --verbose
 - ALWAYS activate venv before pip install
 - ALWAYS run fast checks (ruff + pytest) before committing
 - Check git status before destructive operations
-- Branch protection requires `test` + `gitleaks` on all PRs (see docs/SECURITY.md#branch-protection)
+- Branch protection (CI checks like `test` + `gitleaks`) may be enforced on PRs (see docs/SECURITY.md#branch-protection)
 
 ## Documentation
 - **Workflow Guide:** [docs/workflows/VIBE_CODING.md](docs/workflows/VIBE_CODING.md) (analogies, end-to-end loop)
@@ -102,19 +82,18 @@ PYTHONPATH=. python scripts/sync_shows_all.py --all --verbose
 - **DB Schema:** [docs/db/schema.md](docs/db/schema.md)
 - **Git Workflow:** [docs/Repository/diagrams/git_workflow.md](docs/Repository/diagrams/git_workflow.md)
 
-## Cross-Repo Collaboration — Task 1 (Facebank Seed Flagging)
+## Cross-Repo Collaboration (TRR Workspace)
 
-Canonical task folder
-- /Users/thomashulihan/Projects/TRR-Backend/docs/cross-collab/TASK1
+Workspace canonical rules:
+- `/Users/thomashulihan/Projects/TRR/AGENTS.md`
+- `/Users/thomashulihan/Projects/TRR/CLAUDE.md`
 
-Related task folders
-- /Users/thomashulihan/Projects/TRR-APP/docs/cross-collab/TASK1
-- /Users/thomashulihan/Downloads/SCREENALYTICS/docs/cross-collab/TASK1
+Implementation order:
+1. TRR-Backend schema + endpoints
+2. screenalytics (if impacted)
+3. TRR-APP consumers/UI
 
-Coordination rules
-- Update cross-collab docs before implementing code changes
-- Keep plan docs aligned across all three repos
-- Implementation order: backend schema + endpoints, then app UI, then Screenalytics consumption
-
-Auth rule
-- New admin sync/flag endpoints must be allowlist-only (email in `ADMIN_EMAIL_ALLOWLIST`)
+Notes:
+- This repo owns port `:8000` in workspace mode (`make dev`).
+- Service-to-service and admin endpoints must be allowlist-only (`ADMIN_EMAIL_ALLOWLIST`).
+- Update `docs/ai/HANDOFF.md` before ending a session if you touched this repo.

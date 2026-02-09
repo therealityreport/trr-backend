@@ -9,6 +9,10 @@
 | appearance_type | text | NO | 'appears'::text | NO | NEVER |
 | created_at | timestamp with time zone | NO | now() | NO | NEVER |
 | updated_at | timestamp with time zone | NO | now() | NO | NEVER |
+| air_year | integer | YES |  | NO | NEVER |
+| credit_text | text | YES |  | NO | NEVER |
+| attributes | jsonb | NO | '[]'::jsonb | NO | NEVER |
+| is_archive_footage | boolean | NO | false | NO | NEVER |
 
 ## Primary Key
 
@@ -41,6 +45,10 @@ true
   "episode_id": "00000000-0000-0000-0000-000000000000",
   "appearance_type": "example",
   "created_at": "1970-01-01T00:00:00Z",
-  "updated_at": "1970-01-01T00:00:00Z"
+  "updated_at": "1970-01-01T00:00:00Z",
+  "air_year": 0,
+  "credit_text": "example",
+  "attributes": {},
+  "is_archive_footage": false
 }
 ```

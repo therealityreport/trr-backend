@@ -13,7 +13,7 @@ from trr_backend.repositories.shows import update_show
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sync_seasons_episodes",
-        description="Sync seasons + episodes, then recompute show totals and most recent episode fields.",
+        description="Sync seasons + episodes, then recompute show totals and most recent episode jsonb.",
     )
     add_show_filter_args(parser)
     return parser.parse_args(argv)
@@ -52,29 +52,6 @@ def _as_int(value: Any) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return None
-
-
-def _build_most_recent_episode_string(ep: dict[str, Any]) -> str | None:
-    season = _as_int(ep.get("season_number"))
-    episode = _as_int(ep.get("episode_number"))
-    title = str(ep.get("title") or "").strip() or None
-    air_date = str(ep.get("air_date") or "").strip() or None
-    imdb_episode_id = str(ep.get("imdb_episode_id") or "").strip() or None
-
-    parts: list[str] = []
-    if season is not None and episode is not None:
-        parts.append(f"S{season}.E{episode}")
-    if title:
-        parts.append(f"- {title}" if parts else title)
-    if air_date:
-        parts.append(f"({air_date})")
-
-    summary = " ".join(parts).strip()
-    if not summary:
-        return None
-    if imdb_episode_id:
-        return f"{summary} [imdbEpisodeId={imdb_episode_id}]"
-    return summary
 
 
 def _fetch_season_numbers(db, show_id: str) -> list[int]:
@@ -163,12 +140,19 @@ def main(argv: list[str] | None = None) -> int:
 
         most_recent = _pick_most_recent_episode(episodes)
         if most_recent:
-            patch["most_recent_episode"] = _build_most_recent_episode_string(most_recent)
-            patch["most_recent_episode_season"] = _as_int(most_recent.get("season_number"))
-            patch["most_recent_episode_number"] = _as_int(most_recent.get("episode_number"))
-            patch["most_recent_episode_title"] = str(most_recent.get("title") or "").strip() or None
-            patch["most_recent_episode_air_date"] = str(most_recent.get("air_date") or "").strip() or None
-            patch["most_recent_episode_imdb_id"] = str(most_recent.get("imdb_episode_id") or "").strip() or None
+            episode_obj: dict[str, Any] = {
+                "season": _as_int(most_recent.get("season_number")),
+                "episode": _as_int(most_recent.get("episode_number")),
+                "title": str(most_recent.get("title") or "").strip() or None,
+                "air_date": str(most_recent.get("air_date") or "").strip() or None,
+                "imdb_id": str(most_recent.get("imdb_episode_id") or "").strip() or None,
+            }
+            episode_obj = {k: v for k, v in episode_obj.items() if v not in (None, "")}
+            if episode_obj:
+                existing = show.get("most_recent_episode")
+                merged = dict(existing) if isinstance(existing, dict) else {}
+                merged["imdb"] = episode_obj
+                patch["most_recent_episode"] = merged
 
         patch = {k: v for k, v in patch.items() if v is not None}
         if not patch:

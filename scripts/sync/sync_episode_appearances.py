@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
+"""Sync per-episode cast presence into the credits v2 model.
+
+Legacy tables (`core.episode_appearances`, `core.show_cast`) were replaced by:
+- `core.credits` (show-level membership)
+- `core.credit_occurrences` (per-episode presence)
+
+This script uses IMDb episodic credits to populate `core.credit_occurrences`.
+"""
+
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 import requests
 
@@ -32,22 +41,15 @@ from trr_backend.integrations.imdb.fullcredits_cast_parser import (
 )
 from trr_backend.integrations.tmdb.client import TmdbClientError, find_by_imdb_id, resolve_api_key
 from trr_backend.repositories.credits import (
-    fetch_credits_by_show,
+    assert_core_credit_occurrences_table_exists,
+    assert_core_credits_table_exists,
     insert_credit_occurrences_ignore_conflicts,
     insert_credits_ignore_conflicts,
-)
-from trr_backend.repositories.episode_appearances import (
-    assert_core_episode_appearances_table_exists,
-    upsert_episode_appearances,
 )
 from trr_backend.repositories.people import (
     assert_core_people_table_exists,
     fetch_people_by_imdb_ids,
     insert_people,
-)
-from trr_backend.repositories.show_cast import (
-    assert_core_show_cast_table_exists,
-    upsert_show_cast,
 )
 from trr_backend.repositories.shows import assert_core_shows_table_exists
 from trr_backend.repositories.sync_state import (
@@ -56,11 +58,6 @@ from trr_backend.repositories.sync_state import (
     mark_sync_state_in_progress,
     mark_sync_state_success,
 )
-
-
-def _is_credits_v2_enabled() -> bool:
-    """Check if credits v2 dual-write is enabled via environment variable."""
-    return os.environ.get("ENABLE_CREDITS_V2_WRITE", "").lower() in ("1", "true", "yes")
 
 
 @dataclass(frozen=True)
@@ -72,17 +69,14 @@ class EpisodicCreditsResult:
 
 @dataclass(frozen=True)
 class EpisodeMeta:
-    id: str | None  # episode UUID for credit_occurrences dual-write
-    season_number: int | None
-    episode_number: int | None
+    id: str | None
     air_date: str | None
-    tmdb_episode_id: int | None
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sync_episode_appearances",
-        description="Sync core.episode_appearances (aggregated per person/show).",
+        description="Sync core.credit_occurrences from IMDb episodic credits (Self only).",
     )
     add_show_filter_args(parser)
     parser.add_argument("--limit-cast", type=int, default=None, help="Optional cap on cast per show.")
@@ -172,13 +166,21 @@ def _air_date_from_year(year: int | None) -> str | None:
         return None
 
 
+def _air_year_from_air_date(value: str | None) -> int | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if len(cleaned) < 4:
+        return None
+    year = cleaned[:4]
+    if not year.isdigit():
+        return None
+    return int(year)
+
+
 def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
     response = (
-        db.schema("core")
-        .table("episodes")
-        .select("id,imdb_episode_id,season_number,episode_number,air_date,tmdb_episode_id")
-        .eq("show_id", show_id)
-        .execute()
+        db.schema("core").table("episodes").select("id,imdb_episode_id,air_date").eq("show_id", show_id).execute()
     )
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error listing episodes for show_id={show_id}: {response.error}")
@@ -193,111 +195,9 @@ def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
             continue
         index[imdb_id] = EpisodeMeta(
             id=str(row.get("id") or "").strip() or None,
-            season_number=_coerce_int(row.get("season_number")),
-            episode_number=_coerce_int(row.get("episode_number")),
             air_date=_coerce_air_date(row.get("air_date")),
-            tmdb_episode_id=_coerce_int(row.get("tmdb_episode_id")),
         )
     return index
-
-
-def _fetch_season_tmdb_ids(db, *, show_id: str) -> dict[int, int]:
-    response = (
-        db.schema("core").table("seasons").select("season_number,tmdb_season_id").eq("show_id", show_id).execute()
-    )
-    if hasattr(response, "error") and response.error:
-        raise RuntimeError(f"Supabase error listing seasons for show_id={show_id}: {response.error}")
-    data = response.data or []
-    if not isinstance(data, list):
-        return {}
-
-    season_map: dict[int, int] = {}
-    for row in data:
-        season_number = _coerce_int(row.get("season_number"))
-        tmdb_season_id = _coerce_int(row.get("tmdb_season_id"))
-        if season_number is None or tmdb_season_id is None:
-            continue
-        season_map[season_number] = tmdb_season_id
-    return season_map
-
-
-def _episode_sort_key(imdb_id: str, meta: EpisodeMeta | None, credit: ImdbEpisodeCredit) -> tuple:
-    season_number = meta.season_number if meta and meta.season_number is not None else credit.episode.season_number
-    episode_number = meta.episode_number if meta and meta.episode_number is not None else credit.episode.episode_number
-    air_date = meta.air_date if meta and meta.air_date is not None else _air_date_from_year(credit.episode.year)
-
-    season_sort = season_number if season_number is not None else 9_999
-    episode_sort = episode_number if episode_number is not None else 9_999
-    air_sort = air_date or "9999-12-31"
-    return (season_number is None, season_sort, episode_number is None, episode_sort, air_sort, imdb_id)
-
-
-def _build_rollup_row(
-    *,
-    show_id: str,
-    show_name: str | None,
-    tmdb_show_id: int | None,
-    imdb_show_id: str | None,
-    person_id: str,
-    cast_member_name: str | None,
-    credits: Sequence[ImdbEpisodeCredit],
-    episode_index: dict[str, EpisodeMeta],
-    season_tmdb_ids: dict[int, int],
-) -> dict[str, object] | None:
-    episode_map: dict[str, tuple[EpisodeMeta | None, ImdbEpisodeCredit]] = {}
-    for credit in credits:
-        if credit.is_archive_footage:
-            continue
-        imdb_id = str(credit.episode.title_id or "").strip()
-        if not imdb_id:
-            continue
-        if imdb_id not in episode_map:
-            episode_map[imdb_id] = (episode_index.get(imdb_id), credit)
-
-    if not episode_map:
-        return None
-
-    ordered = sorted(
-        episode_map.items(),
-        key=lambda item: _episode_sort_key(item[0], item[1][0], item[1][1]),
-    )
-
-    imdb_episode_ids: list[str] = []
-    tmdb_episode_ids: list[int] = []
-    tmdb_seen: set[int] = set()
-    season_numbers: set[int] = set()
-
-    for imdb_id, (meta, credit) in ordered:
-        imdb_episode_ids.append(imdb_id)
-
-        season_number = meta.season_number if meta and meta.season_number is not None else credit.episode.season_number
-        if isinstance(season_number, int):
-            season_numbers.add(season_number)
-
-        tmdb_episode_id = meta.tmdb_episode_id if meta and meta.tmdb_episode_id is not None else None
-        if tmdb_episode_id is not None and tmdb_episode_id not in tmdb_seen:
-            tmdb_seen.add(tmdb_episode_id)
-            tmdb_episode_ids.append(tmdb_episode_id)
-
-    seasons_sorted = sorted(season_numbers)
-    tmdb_seasons_sorted: list[int] = []
-    for season_number in seasons_sorted:
-        tmdb_season_id = season_tmdb_ids.get(season_number)
-        if tmdb_season_id is not None:
-            tmdb_seasons_sorted.append(tmdb_season_id)
-
-    return {
-        "show_id": show_id,
-        "person_id": person_id,
-        "show_name": show_name,
-        "cast_member_name": cast_member_name,
-        "tmdb_show_id": tmdb_show_id,
-        "imdb_show_id": imdb_show_id,
-        "seasons": seasons_sorted,
-        "tmdb_season_ids": tmdb_seasons_sorted,
-        "imdb_episode_title_ids": imdb_episode_ids,
-        "tmdb_episode_ids": tmdb_episode_ids,
-    }
 
 
 def _fetch_episodic_credits(
@@ -322,16 +222,45 @@ def _fetch_episodic_credits(
     return EpisodicCreditsResult(cast_row=cast_row, credits=credits, error=None)
 
 
+def _chunk(values: list[str], *, size: int) -> Sequence[list[str]]:
+    step = max(1, int(size))
+    return [values[i : i + step] for i in range(0, len(values), step)]
+
+
+def _pick_credit_id(
+    credits_by_person: Mapping[str, list[dict[str, Any]]],
+    *,
+    person_id: str,
+    role: str | None,
+) -> str | None:
+    rows = credits_by_person.get(person_id) or []
+    if not rows:
+        return None
+
+    role_norm = (role or "").strip()
+    if role_norm:
+        for row in rows:
+            if str(row.get("role") or "").strip() == role_norm:
+                return str(row.get("id") or "") or None
+
+    for row in rows:
+        if not str(row.get("role") or "").strip():
+            return str(row.get("id") or "") or None
+
+    return str(rows[0].get("id") or "") or None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
     if args.skip_db:
         print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
         return 2
+
     db = load_env_and_db(skip_db=args.skip_db)
     assert_core_shows_table_exists(db)
     assert_core_people_table_exists(db)
-    assert_core_show_cast_table_exists(db)
-    assert_core_episode_appearances_table_exists(db)
+    assert_core_credits_table_exists(db)
+    assert_core_credit_occurrences_table_exists(db)
     if not args.dry_run and not args.skip_db:
         assert_core_sync_state_table_exists(db)
 
@@ -343,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
     filter_result = filter_show_rows_for_sync(
         db,
         show_rows,
-        table_name="episode_appearances",
+        table_name="credit_occurrences",
         incremental=bool(args.incremental),
         resume=bool(args.resume),
         force=bool(args.force),
@@ -353,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     show_rows = filter_result.selected
     if not show_rows:
-        print("No shows need episode_appearances sync.")
+        print("No shows need credit_occurrences sync.")
         return 0
 
     extra_headers = parse_imdb_headers_json_env()
@@ -365,12 +294,10 @@ def main(argv: list[str] | None = None) -> int:
     cast_rows_total = 0
     cast_rows_self = 0
     people_inserted = 0
-    rollups_inserted = 0
-    rollups_skipped = 0
+    credits_inserted = 0
+    occurrences_inserted = 0
+    occurrences_skipped_missing_episode = 0
     failures: list[str] = []
-    credits_v2_inserted = 0
-    occurrences_v2_inserted = 0
-    credits_v2_enabled = _is_credits_v2_enabled()
 
     people_cache: dict[str, str] = {}
 
@@ -382,29 +309,16 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"SKIP show id={show_id or show.get('id')} (missing imdb_series_id)")
             continue
         if not args.dry_run:
-            mark_sync_state_in_progress(db, table_name="episode_appearances", show_id=show_id)
+            mark_sync_state_in_progress(db, table_name="credit_occurrences", show_id=show_id)
 
         try:
-            show_name = str(show.get("name") or "").strip() or None
-            tmdb_show_id = _coerce_int(show.get("tmdb_series_id"))
-            if tmdb_show_id is None:
-                tmdb_show_id = _coerce_int((show.get("external_ids") or {}).get("tmdb"))
-            imdb_show_id = str(show.get("imdb_series_id") or "").strip() or None
-            if imdb_show_id is None:
-                imdb_show_id = str((show.get("external_ids") or {}).get("imdb") or "").strip() or None
-
             try:
                 episode_index = _fetch_episode_index(db, show_id=show_id)
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: Unable to load episodes for show_id={show_id}: {exc}", file=sys.stderr)
                 episode_index = {}
-            try:
-                season_tmdb_ids = _fetch_season_tmdb_ids(db, show_id=show_id)
-            except Exception as exc:  # noqa: BLE001
-                print(f"WARNING: Unable to load seasons for show_id={show_id}: {exc}", file=sys.stderr)
-                season_tmdb_ids = {}
 
-            cast_rows, _source_type, _person_images = fetch_fullcredits_cast_with_fallback(
+            cast_rows, source_type, _person_images = fetch_fullcredits_cast_with_fallback(
                 imdb_series_id,
                 extra_headers=extra_headers,
                 verbose=bool(args.verbose),
@@ -417,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.limit_cast is not None:
                 self_rows = self_rows[: max(0, int(args.limit_cast))]
 
+            # Ensure people exist.
             name_ids = [row.name_id.strip().lower() for row in self_rows if row.name_id]
             missing_ids = [name_id for name_id in name_ids if name_id not in people_cache]
             if missing_ids:
@@ -491,25 +406,76 @@ def main(argv: list[str] | None = None) -> int:
                         if imdb_id:
                             people_cache[imdb_id] = f"dry-run-{imdb_id}"
 
-            show_cast_rows = []
+            # Replace scraped credits (Self only) for this show.
+            credit_rows: list[dict[str, object]] = []
             for row in self_rows:
                 person_id = people_cache.get(row.name_id.strip().lower())
                 if not person_id:
                     continue
-                show_cast_rows.append(
+                credit_rows.append(
                     {
                         "show_id": show_id,
                         "person_id": person_id,
-                        "billing_order": row.billing_order,
-                        "role": row.raw_role_text,
                         "credit_category": "Self",
+                        "role": row.raw_role_text,
+                        "billing_order": row.billing_order,
+                        "source_type": source_type,
+                        "metadata": {},
                     }
                 )
 
-            if show_cast_rows and not args.dry_run:
-                upsert_show_cast(db, show_cast_rows)
+            if credit_rows and not args.dry_run:
+                delete_resp = (
+                    db.schema("core")
+                    .table("credits")
+                    .delete()
+                    .eq("show_id", show_id)
+                    .eq("credit_category", "Self")
+                    .neq("source_type", "manual")
+                    .execute()
+                )
+                if hasattr(delete_resp, "error") and delete_resp.error:
+                    raise RuntimeError(f"Supabase error deleting existing credits: {delete_resp.error}")
 
-            rollup_rows: list[dict[str, object]] = []
+                inserted_credits = insert_credits_ignore_conflicts(db, credit_rows)
+                credits_inserted += len(inserted_credits)
+            elif credit_rows:
+                credits_inserted += len(credit_rows)
+
+            # Fetch credit ids for mapping to occurrences (limit to this source_type).
+            credits_resp = (
+                db.schema("core")
+                .table("credits")
+                .select("id,person_id,role")
+                .eq("show_id", show_id)
+                .eq("credit_category", "Self")
+                .eq("source_type", source_type)
+                .execute()
+            )
+            if hasattr(credits_resp, "error") and credits_resp.error:
+                raise RuntimeError(f"Supabase error fetching credits: {credits_resp.error}")
+            credits_rows = credits_resp.data or []
+            if not isinstance(credits_rows, list):
+                credits_rows = []
+
+            credits_by_person: dict[str, list[dict[str, Any]]] = {}
+            for row in credits_rows:
+                pid = str(row.get("person_id") or "")
+                if not pid:
+                    continue
+                credits_by_person.setdefault(pid, []).append(row)
+
+            # Delete existing occurrences for these credits so the episodic scrape is authoritative.
+            credit_ids = [str(r.get("id") or "") for r in credits_rows if r.get("id")]
+            credit_ids = [cid for cid in credit_ids if cid]
+            if credit_ids and not args.dry_run:
+                for batch in _chunk(credit_ids, size=200):
+                    del_resp = db.schema("core").table("credit_occurrences").delete().in_("credit_id", batch).execute()
+                    if hasattr(del_resp, "error") and del_resp.error:
+                        raise RuntimeError(f"Supabase error deleting credit_occurrences: {del_resp.error}")
+
+            occurrence_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 futures = {
                     pool.submit(
@@ -531,104 +497,80 @@ def main(argv: list[str] | None = None) -> int:
                         failures.append(f"{result.cast_row.name_id}: missing person_id")
                         continue
 
-                    rollup_row = _build_rollup_row(
-                        show_id=show_id,
-                        show_name=show_name,
-                        tmdb_show_id=tmdb_show_id,
-                        imdb_show_id=imdb_show_id,
+                    credit_id = _pick_credit_id(
+                        credits_by_person,
                         person_id=person_id,
-                        cast_member_name=result.cast_row.name,
-                        credits=result.credits,
-                        episode_index=episode_index,
-                        season_tmdb_ids=season_tmdb_ids,
+                        role=result.cast_row.raw_role_text,
                     )
-                    if rollup_row is None:
-                        rollups_skipped += 1
-                        continue
-                    rollup_rows.append(rollup_row)
-
-            if rollup_rows:
-                if args.dry_run:
-                    rollups_inserted += len(rollup_rows)
-                else:
-                    upsert_episode_appearances(db, rollup_rows)
-                    rollups_inserted += len(rollup_rows)
-
-            # Dual-write to core.credits + core.credit_occurrences if enabled
-            if credits_v2_enabled and show_cast_rows and not args.dry_run:
-                # First insert credits (similar to sync_show_cast)
-                credit_rows = [
-                    {
-                        "show_id": row["show_id"],
-                        "person_id": row["person_id"],
-                        "credit_category": row.get("credit_category") or "Self",
-                        "role": row.get("role"),
-                        "billing_order": row.get("billing_order"),
-                        "source_type": "fullcredits_html",
-                        "metadata": {},
-                    }
-                    for row in show_cast_rows
-                ]
-                inserted_credits = insert_credits_ignore_conflicts(db, credit_rows)
-                credits_v2_inserted += len(inserted_credits)
-
-                # Now build credit_occurrences from the rollup data
-                # Build a lookup: person_id → credit_id
-                credits_for_show = fetch_credits_by_show(db, show_id)
-                person_to_credit: dict[str, str] = {}
-                for credit in credits_for_show:
-                    pid = str(credit.get("person_id") or "")
-                    cid = str(credit.get("id") or "")
-                    role = str(credit.get("role") or "")
-                    # Prefer credits with no role (typical for Self category)
-                    if pid and cid:
-                        if pid not in person_to_credit or not role:
-                            person_to_credit[pid] = cid
-
-                # Build occurrence rows
-                occurrence_rows: list[dict[str, object]] = []
-                for rollup_row in rollup_rows:
-                    person_id = str(rollup_row.get("person_id") or "")
-                    credit_id = person_to_credit.get(person_id)
                     if not credit_id:
+                        failures.append(f"{result.cast_row.name_id}: missing credit_id")
                         continue
 
-                    imdb_episode_ids = rollup_row.get("imdb_episode_title_ids") or []
-                    for imdb_ep_id in imdb_episode_ids:
-                        meta = episode_index.get(imdb_ep_id)
-                        if meta and meta.id:
-                            occurrence_rows.append(
-                                {
-                                    "credit_id": credit_id,
-                                    "episode_id": meta.id,
-                                    "appearance_type": "appears",
-                                }
-                            )
+                    for credit in result.credits:
+                        imdb_episode_id = str(getattr(credit.episode, "title_id", "") or "").strip()
+                        if not imdb_episode_id:
+                            continue
+                        meta = episode_index.get(imdb_episode_id)
+                        if not meta or not meta.id:
+                            occurrences_skipped_missing_episode += 1
+                            continue
 
-                if occurrence_rows:
-                    inserted_occs = insert_credit_occurrences_ignore_conflicts(db, occurrence_rows)
-                    occurrences_v2_inserted += len(inserted_occs)
-            elif credits_v2_enabled and show_cast_rows and args.dry_run:
-                # Dry-run: just count what would be inserted
-                credits_v2_inserted += len(show_cast_rows)
-                for rollup_row in rollup_rows:
-                    imdb_episode_ids = rollup_row.get("imdb_episode_title_ids") or []
-                    for imdb_ep_id in imdb_episode_ids:
-                        meta = episode_index.get(imdb_ep_id)
-                        if meta and meta.id:
-                            occurrences_v2_inserted += 1
+                        key = (credit_id, meta.id)
+                        row = occurrence_by_key.get(key)
+                        if row is None:
+                            row = {
+                                "credit_id": credit_id,
+                                "episode_id": meta.id,
+                                "appearance_type": "appears",
+                                "attributes": [],
+                                "is_archive_footage": False,
+                            }
+
+                        air_year = (
+                            credit.episode.year
+                            if credit.episode.year is not None
+                            else _air_year_from_air_date(meta.air_date)
+                        )
+                        if row.get("air_year") is None and air_year is not None:
+                            row["air_year"] = int(air_year)
+
+                        credit_text = (credit.job or "").strip() or None
+                        if not row.get("credit_text") and credit_text:
+                            row["credit_text"] = credit_text
+
+                        attrs = [a.strip() for a in (credit.attributes or ()) if isinstance(a, str) and a.strip()]
+                        if attrs:
+                            existing_attrs = row.get("attributes")
+                            existing_list = existing_attrs if isinstance(existing_attrs, list) else []
+                            merged = list(dict.fromkeys([*existing_list, *attrs]))
+                            row["attributes"] = merged
+
+                        is_archive = bool(credit.is_archive_footage)
+                        row["is_archive_footage"] = bool(row.get("is_archive_footage")) or is_archive
+                        if row["is_archive_footage"]:
+                            row["appearance_type"] = "archive_footage"
+
+                        occurrence_by_key[key] = row
+
+            occurrence_rows = list(occurrence_by_key.values())
+            if occurrence_rows:
+                if args.dry_run:
+                    occurrences_inserted += len(occurrence_rows)
+                else:
+                    inserted = insert_credit_occurrences_ignore_conflicts(db, occurrence_rows)
+                    occurrences_inserted += len(inserted)
 
             if not args.dry_run:
                 mark_sync_state_success(
                     db,
-                    table_name="episode_appearances",
+                    table_name="credit_occurrences",
                     show_id=show_id,
                     last_seen_most_recent_episode=extract_most_recent_episode(show),
                 )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{imdb_series_id}: {exc}")
             if not args.dry_run:
-                mark_sync_state_failed(db, table_name="episode_appearances", show_id=show_id, error=exc)
+                mark_sync_state_failed(db, table_name="credit_occurrences", show_id=show_id, error=exc)
             continue
 
     print("Summary")
@@ -636,11 +578,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"cast_rows_total={cast_rows_total}")
     print(f"cast_rows_self={cast_rows_self}")
     print(f"people_inserted={people_inserted}")
-    print(f"rollups_inserted={rollups_inserted}")
-    print(f"rollups_skipped={rollups_skipped}")
-    if credits_v2_enabled:
-        print(f"credits_v2_inserted={credits_v2_inserted}")
-        print(f"occurrences_v2_inserted={occurrences_v2_inserted}")
+    print(f"credits_inserted={credits_inserted}")
+    print(f"occurrences_inserted={occurrences_inserted}")
+    print(f"occurrences_skipped_missing_episode={occurrences_skipped_missing_episode}")
     print(f"failures={len(failures)}")
 
     if failures:

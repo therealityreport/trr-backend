@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncGenerator
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -184,9 +184,7 @@ def _mirror_person_photos(
 
     cdn_base_url = None if force else get_cdn_base_url()
     # When force=True, include photos that already have hosted_url so they get re-uploaded
-    rows = fetch_cast_photos_missing_hosted(
-        db, person_ids=[person_id], cdn_base_url=cdn_base_url, include_hosted=force
-    )
+    rows = fetch_cast_photos_missing_hosted(db, person_ids=[person_id], cdn_base_url=cdn_base_url, include_hosted=force)
     if not rows:
         return 0, 0
 
@@ -339,9 +337,7 @@ def _enrich_cast_photos_with_episode_metadata(
         response = (
             db.schema("core")
             .table("episodes")
-            .select(
-                "id,imdb_episode_id,title,episode_number,season_number,air_date,show_id,show_name"
-            )
+            .select("id,imdb_episode_id,title,episode_number,season_number,air_date,show_id,show_name")
             .in_("imdb_episode_id", chunk)
             .execute()
         )

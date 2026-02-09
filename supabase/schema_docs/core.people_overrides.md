@@ -12,6 +12,9 @@
 | notes | text | YES |  | NO | NEVER |
 | created_at | timestamp with time zone | NO | now() | NO | NEVER |
 | updated_at | timestamp with time zone | NO | now() | NO | NEVER |
+| tiktok_handle | text | YES |  | NO | NEVER |
+| twitter_handle | text | YES |  | NO | NEVER |
+| youtube_handle | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -46,6 +49,9 @@ false
   "external_ids_override": {},
   "notes": "example",
   "created_at": "1970-01-01T00:00:00Z",
-  "updated_at": "1970-01-01T00:00:00Z"
+  "updated_at": "1970-01-01T00:00:00Z",
+  "tiktok_handle": "example",
+  "twitter_handle": "example",
+  "youtube_handle": "example"
 }
 ```

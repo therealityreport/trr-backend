@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from api.auth import AdminUser
@@ -16,6 +16,9 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 class PeopleOverridePatch(BaseModel):
     full_name_override: str | None = None
     instagram_handle: str | None = None
+    tiktok_handle: str | None = None
+    twitter_handle: str | None = None
+    youtube_handle: str | None = None
     external_ids_override: dict[str, Any] | None = None
     notes: str | None = None
 
@@ -59,13 +62,16 @@ def list_admin_cast(
             sc.credit_category,
             sc.role AS role_source,
             sc.billing_order AS billing_order_source,
-            sc.notes AS notes_source,
+            NULL::text AS notes_source,
 
             p.full_name,
             p.external_ids,
 
             po.full_name_override,
             po.instagram_handle AS instagram_override,
+            po.tiktok_handle AS tiktok_override,
+            po.twitter_handle AS twitter_override,
+            po.youtube_handle AS youtube_override,
             po.external_ids_override,
             po.notes AS person_notes,
 
@@ -79,7 +85,7 @@ def list_admin_cast(
 
             COALESCE(sco.role_override, sc.role) AS role_effective,
             COALESCE(sco.billing_order_override, sc.billing_order) AS billing_order_effective,
-            COALESCE(sco.notes_override, sc.notes) AS notes_effective,
+            COALESCE(sco.notes_override, NULL::text) AS notes_effective,
             COALESCE(sco.friend_of, false) AS friend_of,
             sco.tags_override,
 
@@ -93,7 +99,7 @@ def list_admin_cast(
 
             {season_select}
 
-        FROM core.show_cast sc
+        FROM core.v_show_cast sc
         JOIN core.people p ON p.id = sc.person_id
         LEFT JOIN core.people_overrides po ON po.person_id = sc.person_id
         LEFT JOIN core.show_cast_overrides sco

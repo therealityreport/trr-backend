@@ -105,6 +105,7 @@ def upsert_cast_fandom(db: DbSession, row: Mapping[str, Any]) -> dict[str, Any]:
 
     romances = payload.get("romances")
     if isinstance(romances, (list, tuple)):
+
         def _escape(val: Any) -> str:
             text = str(val)
             text = text.replace("\\", "\\\\").replace('"', '\\"')
