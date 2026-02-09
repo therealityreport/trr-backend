@@ -22,5 +22,9 @@ erDiagram
         TIMESTAMP_WITH_TIME_ZONE tmdb_fetched_at
         JSONB imdb_meta
         TIMESTAMP_WITH_TIME_ZONE imdb_fetched_at
+        TEXT facebook_id
+        TEXT instagram_id
+        TEXT twitter_id
+        TEXT tiktok_id
     }
 ```

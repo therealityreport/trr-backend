@@ -22,6 +22,10 @@
 | tmdb_fetched_at | timestamp with time zone | YES |  | NO | NEVER |
 | imdb_meta | jsonb | YES |  | NO | NEVER |
 | imdb_fetched_at | timestamp with time zone | YES |  | NO | NEVER |
+| facebook_id | text | YES |  | NO | NEVER |
+| instagram_id | text | YES |  | NO | NEVER |
+| twitter_id | text | YES |  | NO | NEVER |
+| tiktok_id | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -65,6 +69,10 @@ true
   "tmdb_meta": {},
   "tmdb_fetched_at": "1970-01-01T00:00:00Z",
   "imdb_meta": {},
-  "imdb_fetched_at": "1970-01-01T00:00:00Z"
+  "imdb_fetched_at": "1970-01-01T00:00:00Z",
+  "facebook_id": "example",
+  "instagram_id": "example",
+  "twitter_id": "example",
+  "tiktok_id": "example"
 }
 ```

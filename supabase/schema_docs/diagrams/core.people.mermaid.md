@@ -10,5 +10,11 @@ erDiagram
         UUID id
         TIMESTAMP_WITH_TIME_ZONE created_at
         TIMESTAMP_WITH_TIME_ZONE updated_at
+        JSONB birthday
+        JSONB gender
+        JSONB biography
+        JSONB place_of_birth
+        JSONB homepage
+        JSONB profile_image_url
     }
 ```

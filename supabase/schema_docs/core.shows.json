@@ -43,14 +43,6 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "most_recent_episode",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
       "name": "id",
       "data_type": "uuid",
       "is_nullable": "NO",
@@ -91,46 +83,6 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "most_recent_episode_season",
-      "data_type": "integer",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "most_recent_episode_number",
-      "data_type": "integer",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "most_recent_episode_title",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "most_recent_episode_air_date",
-      "data_type": "date",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "most_recent_episode_imdb_id",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
       "name": "primary_poster_image_id",
       "data_type": "uuid",
       "is_nullable": "YES",
@@ -151,14 +103,6 @@
       "data_type": "uuid",
       "is_nullable": "YES",
       "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "needs_imdb_resolution",
-      "data_type": "boolean",
-      "is_nullable": "NO",
-      "default": "false",
       "is_identity": "NO",
       "is_generated": "NEVER"
     },
@@ -231,38 +175,6 @@
       "data_type": "text",
       "is_nullable": "YES",
       "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "facebook_id",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "instagram_id",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "twitter_id",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "needs_tmdb_resolution",
-      "data_type": "boolean",
-      "is_nullable": "NO",
-      "default": "false",
       "is_identity": "NO",
       "is_generated": "NEVER"
     },
@@ -433,6 +345,14 @@
       "default": "'{}'::text[]",
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "most_recent_episode",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -561,21 +481,14 @@
     "show_total_episodes": 0,
     "imdb_id": "example",
     "tmdb_id": 0,
-    "most_recent_episode": "example",
     "id": "00000000-0000-0000-0000-000000000000",
     "description": "example",
     "premiere_date": "1970-01-01",
     "created_at": "1970-01-01T00:00:00Z",
     "updated_at": "1970-01-01T00:00:00Z",
-    "most_recent_episode_season": 0,
-    "most_recent_episode_number": 0,
-    "most_recent_episode_title": "example",
-    "most_recent_episode_air_date": "1970-01-01",
-    "most_recent_episode_imdb_id": "example",
     "primary_poster_image_id": "00000000-0000-0000-0000-000000000000",
     "primary_backdrop_image_id": "00000000-0000-0000-0000-000000000000",
     "primary_logo_image_id": "00000000-0000-0000-0000-000000000000",
-    "needs_imdb_resolution": false,
     "genres": [],
     "keywords": [],
     "tags": [],
@@ -585,10 +498,6 @@
     "tvdb_id": 0,
     "tvrage_id": 0,
     "wikidata_id": "example",
-    "facebook_id": "example",
-    "instagram_id": "example",
-    "twitter_id": "example",
-    "needs_tmdb_resolution": false,
     "tmdb_name": "example",
     "tmdb_status": "example",
     "tmdb_type": "example",
@@ -609,6 +518,7 @@
     "imdb_meta": {},
     "tmdb_network_ids": [],
     "tmdb_production_company_ids": [],
-    "alternative_names": []
+    "alternative_names": [],
+    "most_recent_episode": {}
   }
 }

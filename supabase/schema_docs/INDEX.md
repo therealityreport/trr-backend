@@ -1,13 +1,10 @@
 # Schema Docs Index
 
 - [core.cast_fandom](core.cast_fandom.md) ([diagram](diagrams/core.cast_fandom.mermaid.md))
-- [core.cast_memberships](core.cast_memberships.md) ([diagram](diagrams/core.cast_memberships.mermaid.md))
 - [core.cast_photos](core.cast_photos.md) ([diagram](diagrams/core.cast_photos.mermaid.md))
 - [core.cast_tmdb](core.cast_tmdb.md) ([diagram](diagrams/core.cast_tmdb.mermaid.md))
 - [core.credit_occurrences](core.credit_occurrences.md) ([diagram](diagrams/core.credit_occurrences.mermaid.md))
 - [core.credits](core.credits.md) ([diagram](diagrams/core.credits.mermaid.md))
-- [core.episode_appearances](core.episode_appearances.md) ([diagram](diagrams/core.episode_appearances.mermaid.md))
-- [core.episode_cast](core.episode_cast.md) ([diagram](diagrams/core.episode_cast.mermaid.md))
 - [core.episode_external_ids](core.episode_external_ids.md) ([diagram](diagrams/core.episode_external_ids.mermaid.md))
 - [core.episode_images](core.episode_images.md) ([diagram](diagrams/core.episode_images.mermaid.md))
 - [core.episode_source_history](core.episode_source_history.md) ([diagram](diagrams/core.episode_source_history.mermaid.md))
@@ -31,7 +28,6 @@
 - [core.season_source_latest](core.season_source_latest.md) ([diagram](diagrams/core.season_source_latest.mermaid.md))
 - [core.seasons](core.seasons.md) ([diagram](diagrams/core.seasons.mermaid.md))
 - [core.show_alternative_names](core.show_alternative_names.md) ([diagram](diagrams/core.show_alternative_names.mermaid.md))
-- [core.show_cast](core.show_cast.md) ([diagram](diagrams/core.show_cast.mermaid.md))
 - [core.show_cast_overrides](core.show_cast_overrides.md) ([diagram](diagrams/core.show_cast_overrides.mermaid.md))
 - [core.show_external_ids](core.show_external_ids.md) ([diagram](diagrams/core.show_external_ids.mermaid.md))
 - [core.show_images](core.show_images.md) ([diagram](diagrams/core.show_images.mermaid.md))

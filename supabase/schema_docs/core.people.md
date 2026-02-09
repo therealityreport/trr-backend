@@ -10,6 +10,12 @@
 | id | uuid | NO | gen_random_uuid() | NO | NEVER |
 | created_at | timestamp with time zone | NO | now() | NO | NEVER |
 | updated_at | timestamp with time zone | NO | now() | NO | NEVER |
+| birthday | jsonb | NO | '{}'::jsonb | NO | NEVER |
+| gender | jsonb | NO | '{}'::jsonb | NO | NEVER |
+| biography | jsonb | NO | '{}'::jsonb | NO | NEVER |
+| place_of_birth | jsonb | NO | '{}'::jsonb | NO | NEVER |
+| homepage | jsonb | NO | '{}'::jsonb | NO | NEVER |
+| profile_image_url | jsonb | NO | '{}'::jsonb | NO | NEVER |
 
 ## Primary Key
 
@@ -42,6 +48,12 @@ true
   "external_ids": {},
   "id": "00000000-0000-0000-0000-000000000000",
   "created_at": "1970-01-01T00:00:00Z",
-  "updated_at": "1970-01-01T00:00:00Z"
+  "updated_at": "1970-01-01T00:00:00Z",
+  "birthday": {},
+  "gender": {},
+  "biography": {},
+  "place_of_birth": {},
+  "homepage": {},
+  "profile_image_url": {}
 }
 ```

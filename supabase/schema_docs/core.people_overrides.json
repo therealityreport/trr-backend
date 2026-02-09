@@ -65,6 +65,30 @@
       "default": "now()",
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "tiktok_handle",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "twitter_handle",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "youtube_handle",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -117,6 +141,9 @@
     "external_ids_override": {},
     "notes": "example",
     "created_at": "1970-01-01T00:00:00Z",
-    "updated_at": "1970-01-01T00:00:00Z"
+    "updated_at": "1970-01-01T00:00:00Z",
+    "tiktok_handle": "example",
+    "twitter_handle": "example",
+    "youtube_handle": "example"
   }
 }

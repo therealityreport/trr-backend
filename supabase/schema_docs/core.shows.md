@@ -9,21 +9,14 @@
 | show_total_episodes | integer | YES |  | NO | NEVER |
 | imdb_id | text | YES |  | NO | NEVER |
 | tmdb_id | integer | YES |  | NO | NEVER |
-| most_recent_episode | text | YES |  | NO | NEVER |
 | id | uuid | NO | gen_random_uuid() | NO | NEVER |
 | description | text | YES |  | NO | NEVER |
 | premiere_date | date | YES |  | NO | NEVER |
 | created_at | timestamp with time zone | NO | now() | NO | NEVER |
 | updated_at | timestamp with time zone | NO | now() | NO | NEVER |
-| most_recent_episode_season | integer | YES |  | NO | NEVER |
-| most_recent_episode_number | integer | YES |  | NO | NEVER |
-| most_recent_episode_title | text | YES |  | NO | NEVER |
-| most_recent_episode_air_date | date | YES |  | NO | NEVER |
-| most_recent_episode_imdb_id | text | YES |  | NO | NEVER |
 | primary_poster_image_id | uuid | YES |  | NO | NEVER |
 | primary_backdrop_image_id | uuid | YES |  | NO | NEVER |
 | primary_logo_image_id | uuid | YES |  | NO | NEVER |
-| needs_imdb_resolution | boolean | NO | false | NO | NEVER |
 | genres | ARRAY | YES |  | NO | NEVER |
 | keywords | ARRAY | YES |  | NO | NEVER |
 | tags | ARRAY | YES |  | NO | NEVER |
@@ -33,10 +26,6 @@
 | tvdb_id | integer | YES |  | NO | NEVER |
 | tvrage_id | integer | YES |  | NO | NEVER |
 | wikidata_id | text | YES |  | NO | NEVER |
-| facebook_id | text | YES |  | NO | NEVER |
-| instagram_id | text | YES |  | NO | NEVER |
-| twitter_id | text | YES |  | NO | NEVER |
-| needs_tmdb_resolution | boolean | NO | false | NO | NEVER |
 | tmdb_name | text | YES |  | NO | NEVER |
 | tmdb_status | text | YES |  | NO | NEVER |
 | tmdb_type | text | YES |  | NO | NEVER |
@@ -58,6 +47,7 @@
 | tmdb_network_ids | ARRAY | YES |  | NO | NEVER |
 | tmdb_production_company_ids | ARRAY | YES |  | NO | NEVER |
 | alternative_names | ARRAY | NO | '{}'::text[] | NO | NEVER |
+| most_recent_episode | jsonb | NO | '{}'::jsonb | NO | NEVER |
 
 ## Primary Key
 
@@ -101,21 +91,14 @@ true
   "show_total_episodes": 0,
   "imdb_id": "example",
   "tmdb_id": 0,
-  "most_recent_episode": "example",
   "id": "00000000-0000-0000-0000-000000000000",
   "description": "example",
   "premiere_date": "1970-01-01",
   "created_at": "1970-01-01T00:00:00Z",
   "updated_at": "1970-01-01T00:00:00Z",
-  "most_recent_episode_season": 0,
-  "most_recent_episode_number": 0,
-  "most_recent_episode_title": "example",
-  "most_recent_episode_air_date": "1970-01-01",
-  "most_recent_episode_imdb_id": "example",
   "primary_poster_image_id": "00000000-0000-0000-0000-000000000000",
   "primary_backdrop_image_id": "00000000-0000-0000-0000-000000000000",
   "primary_logo_image_id": "00000000-0000-0000-0000-000000000000",
-  "needs_imdb_resolution": false,
   "genres": [],
   "keywords": [],
   "tags": [],
@@ -125,10 +108,6 @@ true
   "tvdb_id": 0,
   "tvrage_id": 0,
   "wikidata_id": "example",
-  "facebook_id": "example",
-  "instagram_id": "example",
-  "twitter_id": "example",
-  "needs_tmdb_resolution": false,
   "tmdb_name": "example",
   "tmdb_status": "example",
   "tmdb_type": "example",
@@ -149,6 +128,7 @@ true
   "imdb_meta": {},
   "tmdb_network_ids": [],
   "tmdb_production_company_ids": [],
-  "alternative_names": []
+  "alternative_names": [],
+  "most_recent_episode": {}
 }
 ```

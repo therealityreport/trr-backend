@@ -41,6 +41,38 @@
       "default": "now()",
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "air_year",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "credit_text",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "attributes",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'[]'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "is_archive_footage",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "false",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -94,6 +126,10 @@
     "episode_id": "00000000-0000-0000-0000-000000000000",
     "appearance_type": "example",
     "created_at": "1970-01-01T00:00:00Z",
-    "updated_at": "1970-01-01T00:00:00Z"
+    "updated_at": "1970-01-01T00:00:00Z",
+    "air_year": 0,
+    "credit_text": "example",
+    "attributes": {},
+    "is_archive_footage": false
   }
 }
