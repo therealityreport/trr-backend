@@ -1,12 +1,12 @@
 # Other Projects — Task 4 (Supabase Schema Cleanup)
 
 Repo: TRR-Backend
-Last updated: February 8, 2026
+Last updated: February 9, 2026
 
 ## Cross-Repo Snapshot
 
 - TRR-Backend: Not yet started. Owns all migrations (0106-0113), data migration scripts, replacement views, and its own code changes.
-- TRR-APP: Not yet started. Owns code changes for Phase 6c (cast query updates) and Phase 6e (people enrichment display). See TRR-APP TASK3.
+- TRR-APP: Not yet started. Owns code changes for Phase 6c (cast query updates) and Phase 6e (people enrichment display). See TRR-APP TASK4.
 - screenalytics: Not yet started. Owns Phase 6c code change only (replace `core.show_cast` reads). See screenalytics TASK5.
 
 ## Responsibility Alignment
@@ -29,7 +29,7 @@ Last updated: February 8, 2026
 ### Phase 6c (Cast Model Migration) — Sequential, Cross-Repo
 
 1. TRR-Backend writes replacement view `core.v_show_cast` (credits-based) and deploys.
-2. TRR-APP updates cast query sites to use `credits` + `credit_occurrences` (TASK3).
+2. TRR-APP updates cast query sites to use `credits` + `credit_occurrences` (TASK4).
 3. screenalytics updates `trr_metadata_db.py` to read from `core.v_show_cast` (TASK5).
 4. After ALL consumers are switched, TRR-Backend runs cast data migration (6b) on staging.
 5. After verification, TRR-Backend applies DROP migration (0107).

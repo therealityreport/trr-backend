@@ -11,12 +11,12 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
 - Implemented TRR-Backend migrations `0102`-`0114` (screenalytics missing tables + schema cleanup, excluding deferred phases 6j/6k).
 - Updated TRR-Backend ingestion/admin routes and pipeline scripts to align with credits model + enriched people fields + new cast views.
 - Cross-collab task docs updated:
-  - `docs/cross-collab/TASK3/*` (screenalytics data layer unification: backend-owned pieces)
+  - `docs/cross-collab/TASK5/*` (screenalytics data layer unification: backend-owned pieces)
   - `docs/cross-collab/TASK4/*` (schema cleanup: backend-owned pieces)
 - Fast checks: `ruff check . && ruff format --check . && pytest -q` (413 passed, 18 skipped).
 
 Pending / not executed:
-- Supabase migrations were validated locally via `supabase db reset`, but not applied to staging/prod Supabase in this session.
+- Supabase migrations were validated locally via `supabase db reset` and applied to staging Supabase via `supabase db push --linked` (linked project: `trr-core`) in this session; prod not updated.
 - Credits backfill (Phase 6b) needs to be run/verified on staging before applying 0107 drop (Phase 6c) in any environment that still relies on legacy cast tables.
 
 ## Notes / Constraints
@@ -29,7 +29,7 @@ Pending / not executed:
 
 ## Next Steps
 
-1. Apply migrations on staging Supabase, in order; reload PostgREST schema cache if needed after function/view changes.
+1. (Prod) Apply migrations in order; reload PostgREST schema cache if needed after function/view changes.
 2. Run/verify the credits backfill (Phase 6b) and parity checks before applying 0107 in any environment with existing data.
 3. Ensure TRR-APP + screenalytics deploy alongside the backend migrations (consumers now rely on `core.v_show_cast` / `core.v_episode_cast` and people multi-source fields).
 

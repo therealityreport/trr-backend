@@ -93,9 +93,9 @@ Aggregation view over `credits` + `credit_occurrences` for cast summary data. De
 
 ## Out of Scope
 
-- TRR-APP code changes for cast query updates (owned by TRR-APP TASK3)
+- TRR-APP code changes for cast query updates (owned by TRR-APP TASK4)
 - screenalytics `trr_metadata_db.py` updates (owned by screenalytics TASK5)
-- Screenalytics data layer unification (separate task: TRR-Backend TASK3)
+- Screenalytics data layer unification (separate task: TRR-Backend TASK5)
 
 ## Locked Contracts
 
