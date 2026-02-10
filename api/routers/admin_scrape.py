@@ -93,6 +93,11 @@ class ImportImageItem(BaseModel):
     caption: str | None = None
     kind: ImageKind = "other"
     person_ids: list[UUID] | None = None
+    # Optional per-image metadata for richer gallery organization.
+    context_section: str | None = None
+    context_type: str | None = None
+    source_logo: str | None = None
+    asset_name: str | None = None
 
 
 EntityType = Literal["season", "person"]
@@ -445,11 +450,10 @@ def import_images(
             cast_members = _get_season_cast(db, resolved_show_id, resolved_season_number)
             logger.info(f"Loaded {len(cast_members)} cast members for matching")
 
-    # Best-effort: fetch page metadata for CAST imports (publish date, title).
+    # Best-effort: fetch page metadata (publish date, title).
     page_title: str | None = None
     page_published_at: str | None = None
-    wants_cast_meta = request.entity_type == "season" and any(i.kind == "cast" for i in request.images)
-    if wants_cast_meta:
+    if request.entity_type == "season":
         try:
             from trr_backend.scraping.url_image_scraper import (
                 extract_page_published_at,
@@ -554,8 +558,16 @@ def import_images(
 
                 link_kind = img.kind if request.entity_type == "season" else "gallery"
                 season_link_ctx = {**link_context, **tags_ctx}
-                if img.kind == "cast" and page_published_at:
+                if page_published_at:
                     season_link_ctx["source_created_at"] = page_published_at
+                if img.context_section:
+                    season_link_ctx["context_section"] = img.context_section
+                if img.context_type:
+                    season_link_ctx["context_type"] = img.context_type
+                if img.source_logo:
+                    season_link_ctx["source_logo"] = img.source_logo
+                if img.asset_name:
+                    season_link_ctx["asset_name"] = img.asset_name
                 create_media_link_for_entity(
                     db,
                     entity_type=request.entity_type,
@@ -575,8 +587,16 @@ def import_images(
                         "match_confidence": match_confidence,
                         "source_url": str(request.source_url),
                     }
-                    if img.kind == "cast" and page_published_at:
+                    if page_published_at:
                         person_link_ctx["source_created_at"] = page_published_at
+                    if img.context_section:
+                        person_link_ctx["context_section"] = img.context_section
+                    if img.context_type:
+                        person_link_ctx["context_type"] = img.context_type
+                    if img.source_logo:
+                        person_link_ctx["source_logo"] = img.source_logo
+                    if img.asset_name:
+                        person_link_ctx["asset_name"] = img.asset_name
                     create_media_link_for_entity(
                         db,
                         entity_type="person",
@@ -600,8 +620,16 @@ def import_images(
                             "show_id": resolved_show_id,
                             "season_number": resolved_season_number,
                         }
-                        if img.kind == "cast" and page_published_at:
+                        if page_published_at:
                             person_link_ctx["source_created_at"] = page_published_at
+                        if img.context_section:
+                            person_link_ctx["context_section"] = img.context_section
+                        if img.context_type:
+                            person_link_ctx["context_type"] = img.context_type
+                        if img.source_logo:
+                            person_link_ctx["source_logo"] = img.source_logo
+                        if img.asset_name:
+                            person_link_ctx["asset_name"] = img.asset_name
                         create_media_link_for_entity(
                             db,
                             entity_type="person",
@@ -663,8 +691,10 @@ def import_images(
                     "source_page_url": str(request.source_url),
                     "source_page_title": page_title,
                     "page_title": page_title,
-                    "source_created_at": page_published_at if img.kind == "cast" else None,
+                    "source_created_at": page_published_at,
                     "candidate_id": img.candidate_id,
+                    "source_logo": img.source_logo,
+                    "asset_name": img.asset_name,
                 },
             )
 
@@ -678,8 +708,16 @@ def import_images(
 
             link_kind = img.kind if request.entity_type == "season" else "gallery"
             season_link_ctx = {**link_context, **tags_ctx}
-            if img.kind == "cast" and page_published_at:
+            if page_published_at:
                 season_link_ctx["source_created_at"] = page_published_at
+            if img.context_section:
+                season_link_ctx["context_section"] = img.context_section
+            if img.context_type:
+                season_link_ctx["context_type"] = img.context_type
+            if img.source_logo:
+                season_link_ctx["source_logo"] = img.source_logo
+            if img.asset_name:
+                season_link_ctx["asset_name"] = img.asset_name
             create_media_link_for_entity(
                 db,
                 entity_type=request.entity_type,
@@ -699,8 +737,16 @@ def import_images(
                     "match_confidence": match_confidence,
                     "source_url": str(request.source_url),
                 }
-                if img.kind == "cast" and page_published_at:
+                if page_published_at:
                     person_link_ctx["source_created_at"] = page_published_at
+                if img.context_section:
+                    person_link_ctx["context_section"] = img.context_section
+                if img.context_type:
+                    person_link_ctx["context_type"] = img.context_type
+                if img.source_logo:
+                    person_link_ctx["source_logo"] = img.source_logo
+                if img.asset_name:
+                    person_link_ctx["asset_name"] = img.asset_name
                 create_media_link_for_entity(
                     db,
                     entity_type="person",
@@ -724,8 +770,16 @@ def import_images(
                         "show_id": resolved_show_id,
                         "season_number": resolved_season_number,
                     }
-                    if img.kind == "cast" and page_published_at:
+                    if page_published_at:
                         person_link_ctx["source_created_at"] = page_published_at
+                    if img.context_section:
+                        person_link_ctx["context_section"] = img.context_section
+                    if img.context_type:
+                        person_link_ctx["context_type"] = img.context_type
+                    if img.source_logo:
+                        person_link_ctx["source_logo"] = img.source_logo
+                    if img.asset_name:
+                        person_link_ctx["asset_name"] = img.asset_name
                     create_media_link_for_entity(
                         db,
                         entity_type="person",

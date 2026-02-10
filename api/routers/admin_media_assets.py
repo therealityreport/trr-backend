@@ -137,6 +137,12 @@ def mirror_media_asset(
             content_type=content_type,
         )
         hosted_url = build_hosted_url(hosted_key)
+        # Preserve original metadata, but always record when we created/updated the S3 mirror.
+        now_iso = datetime.now(UTC).isoformat()
+        metadata_out = metadata if isinstance(metadata, dict) else {}
+        metadata_out = dict(metadata_out)
+        metadata_out["mirrored_at"] = now_iso
+        metadata_out.setdefault("mirrored_from", source_url)
         update_asset_with_mirror_result(
             db,
             asset_id=asset_id_str,
@@ -147,7 +153,8 @@ def mirror_media_asset(
             hosted_bytes=file_size,
             hosted_content_type=content_type,
             hosted_etag=etag,
-            completed_at=datetime.now(UTC).isoformat(),
+            completed_at=now_iso,
+            metadata=metadata_out,
         )
     except Exception as exc:
         update_ingest_status(

@@ -133,6 +133,7 @@ def fetch_episode_images_missing_hosted(
                 "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
                 "hosted_bytes,hosted_etag,hosted_at"
             )
+            .is_("archived_at", "null")
         )
 
     def _apply_filters(query):

@@ -81,7 +81,9 @@ def _extract_posters(
     if not isinstance(posters, list):
         return poster_rows
 
-    shared_metadata = {"image_roles": ["poster", "backdrop"], "season_backdrop": True}
+    # Season image sync currently only fetches posters from TMDb's season images endpoint.
+    # Do not mark posters as backdrops; the UI uses this metadata to group "Backdrops".
+    shared_metadata = {"image_roles": ["poster"], "season_backdrop": False}
 
     for poster in posters:
         if not isinstance(poster, Mapping):

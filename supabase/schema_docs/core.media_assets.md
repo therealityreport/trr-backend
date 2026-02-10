@@ -34,6 +34,9 @@
 | ingest_failed_at | timestamp with time zone | YES |  | NO | NEVER |
 | ingest_completed_at | timestamp with time zone | YES |  | NO | NEVER |
 | ingest_next_retry_at | timestamp with time zone | YES |  | NO | NEVER |
+| archived_at | timestamp with time zone | YES |  | NO | NEVER |
+| archived_by_firebase_uid | text | YES |  | NO | NEVER |
+| archived_reason | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -49,6 +52,7 @@ id
 
 ## Indexes
 
+- idx_media_assets_archived (non-unique): archived_at) WHERE (archived_at IS NOT NULL
 - media_assets_hosted_url_idx (non-unique): hosted_url) WHERE (hosted_url IS NOT NULL
 - media_assets_ingest_next_retry_idx (non-unique): ingest_next_retry_at) WHERE ((ingest_status = 'failed'::text) AND (ingest_next_retry_at IS NOT NULL)
 - media_assets_ingest_pending_failed_idx (non-unique): source, ingest_status) WHERE (ingest_status = ANY (ARRAY['pending'::text, 'failed'::text])
@@ -98,6 +102,9 @@ false
   "ingest_last_error": "example",
   "ingest_failed_at": "1970-01-01T00:00:00Z",
   "ingest_completed_at": "1970-01-01T00:00:00Z",
-  "ingest_next_retry_at": "1970-01-01T00:00:00Z"
+  "ingest_next_retry_at": "1970-01-01T00:00:00Z",
+  "archived_at": "1970-01-01T00:00:00Z",
+  "archived_by_firebase_uid": "example",
+  "archived_reason": "example"
 }
 ```

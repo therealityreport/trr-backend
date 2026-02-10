@@ -369,6 +369,7 @@ def update_asset_with_mirror_result(
     hosted_content_type: str | None = None,
     hosted_etag: str | None = None,
     completed_at: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Update a media asset after successful S3 mirroring.
@@ -409,6 +410,8 @@ def update_asset_with_mirror_result(
         payload["hosted_content_type"] = hosted_content_type
     if hosted_etag:
         payload["hosted_etag"] = hosted_etag
+    if metadata is not None:
+        payload["metadata"] = dict(metadata)
 
     response = db.schema("core").table("media_assets").update(payload).eq("id", asset_id).execute()
 

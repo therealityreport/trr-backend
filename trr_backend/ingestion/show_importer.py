@@ -1991,9 +1991,10 @@ def upsert_candidates_into_supabase(
                                     posters = images_map.get("posters")
                                     poster_rows: list[dict[str, Any]] = []
                                     if isinstance(posters, list):
+                                        # TMDb season images payload here is "posters". Do not label as backdrop.
                                         shared_metadata = {
-                                            "image_roles": ["poster", "backdrop"],
-                                            "season_backdrop": True,
+                                            "image_roles": ["poster"],
+                                            "season_backdrop": False,
                                         }
                                         for poster in posters:
                                             if not isinstance(poster, Mapping):
