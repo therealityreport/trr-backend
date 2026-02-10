@@ -22,6 +22,7 @@ Pending / not executed:
 ## Notes / Constraints
 
 - Local dev API runs on `http://127.0.0.1:8000` by default (`TRR_BACKEND_PORT` override supported).
+- `start-api.sh` now fails fast if `.venv/` is missing and uses `exec uvicorn ...` so stop scripts can reliably terminate the server process.
 - Workspace runner (`/Users/thomashulihan/Projects/TRR/make dev`) wires:
   - `SCREENALYTICS_API_URL` (default `http://127.0.0.1:8001`)
   - `CORS_ALLOW_ORIGINS` for TRR-APP (`:3000`)
