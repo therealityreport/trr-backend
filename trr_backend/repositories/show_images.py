@@ -239,6 +239,7 @@ def fetch_show_images_missing_hosted(
                 "width,height,caption,position,image_type,tmdb_id,"
                 "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type"
             )
+            .is_("archived_at", "null")
         )
 
     def _apply_filters(query):

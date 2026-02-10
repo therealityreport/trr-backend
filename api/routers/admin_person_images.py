@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, Literal
 from uuid import UUID
 
@@ -57,6 +57,14 @@ class RefreshImagesRequest(BaseModel):
         default=False,
         description="Force re-mirror even if already hosted",
     )
+    show_id: UUID | None = Field(
+        default=None,
+        description="Optional show context to tag all fetched photos with show_id/show_name for filtering.",
+    )
+    show_name: str | None = Field(
+        default=None,
+        description="Optional show name to tag all fetched photos with show_id/show_name for filtering.",
+    )
 
 
 class RefreshImagesResponse(BaseModel):
@@ -75,7 +83,10 @@ class RefreshImagesResponse(BaseModel):
     auto_counts_attempted: int = 0
     auto_counts_succeeded: int = 0
     auto_counts_failed: int = 0
-    errors: list[str]
+    text_overlay_attempted: int = 0
+    text_overlay_succeeded: int = 0
+    text_overlay_failed: int = 0
+    errors: list[str] = Field(default_factory=list)
 
 
 class FacebankSeedRequest(BaseModel):
@@ -227,7 +238,7 @@ def _auto_count_cast_photos(
     auto_counts_succeeded = 0
     auto_counts_failed = 0
 
-    candidate_sources = [s for s in sources if s in ("tmdb", "fandom", "fandom-gallery")]
+    candidate_sources = [s for s in sources if s in ALL_SOURCES]
     if not candidate_sources:
         return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
     if photo_ids is not None and not photo_ids:
@@ -385,6 +396,163 @@ def _enrich_cast_photos_with_episode_metadata(
             row["season"] = episode.get("season_number")
 
 
+def _apply_show_context_to_photos(
+    db: SupabaseAdminClient,
+    photos: list[dict[str, Any]],
+    *,
+    show_id: UUID | None,
+    show_name: str | None,
+) -> None:
+    if not photos:
+        return
+    if show_id is None and not (isinstance(show_name, str) and show_name.strip()):
+        return
+
+    show_id_str = str(show_id) if show_id is not None else None
+    show_name_val = show_name.strip() if isinstance(show_name, str) and show_name.strip() else None
+
+    if show_id_str and not show_name_val:
+        resp = db.schema("core").table("shows").select("id,name").eq("id", show_id_str).limit(1).execute()
+        if not (hasattr(resp, "error") and resp.error) and resp.data:
+            show_name_val = str(resp.data[0].get("name") or "").strip() or None
+
+    for row in photos:
+        metadata = dict(row.get("metadata") or {})
+        if show_id_str:
+            metadata.setdefault("show_id", show_id_str)
+        if show_name_val:
+            metadata.setdefault("show_name", show_name_val)
+        row["metadata"] = metadata
+
+
+def _refresh_tmdb_profile(
+    db: SupabaseAdminClient,
+    person_id: str,
+    *,
+    tmdb_person_id: int | None,
+) -> None:
+    if not tmdb_person_id:
+        return
+    from trr_backend.integrations.tmdb_person import fetch_tmdb_person_full
+    from trr_backend.repositories.cast_tmdb import upsert_cast_tmdb
+
+    person_full = fetch_tmdb_person_full(int(tmdb_person_id))
+    if not person_full:
+        return
+    upsert_cast_tmdb(db, person_full.to_cast_tmdb_row(person_id))
+
+
+def _refresh_fandom_profile(
+    db: SupabaseAdminClient,
+    person_id: str,
+    *,
+    person_name: str | None,
+) -> None:
+    if not (isinstance(person_name, str) and person_name.strip()):
+        return
+    from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
+    from trr_backend.integrations.fandom import build_real_housewives_wiki_url_from_name, search_real_housewives_wiki
+    from trr_backend.repositories.cast_fandom import upsert_cast_fandom
+
+    candidates: list[str] = []
+    search_url = search_real_housewives_wiki(person_name)
+    if search_url:
+        candidates.append(search_url)
+    fallback_url = build_real_housewives_wiki_url_from_name(person_name)
+    if fallback_url and fallback_url not in candidates:
+        candidates.append(fallback_url)
+
+    for url in candidates:
+        html, final_url = fetch_fandom_person_html(url)
+        if not html:
+            continue
+        cast_fandom, _photos = parse_fandom_person_html(html, source_url=final_url)
+        if not isinstance(cast_fandom, dict) or not cast_fandom:
+            continue
+        cast_fandom = dict(cast_fandom)
+        cast_fandom["person_id"] = person_id
+        upsert_cast_fandom(db, cast_fandom)
+        return
+
+
+def _detect_text_overlay_cast_photos(
+    db: SupabaseAdminClient,
+    person_id: str,
+    sources: list[SourceType],
+    *,
+    photo_ids: list[str] | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> tuple[int, int, int]:
+    """
+    Best-effort "word id" detection for cast_photos rows.
+
+    Returns (attempted, succeeded, failed).
+    """
+    attempted = 0
+    succeeded = 0
+    failed = 0
+
+    candidate_sources = [s for s in sources if s in ALL_SOURCES]
+    if not candidate_sources:
+        return attempted, succeeded, failed
+    if photo_ids is not None and not photo_ids:
+        photo_ids = None
+
+    try:
+        from trr_backend.vision.text_overlay import (
+            TextOverlayDetectionError,
+            detect_and_update_cast_photo_text_overlay,
+            is_text_overlay_detection_configured,
+        )
+
+        if not is_text_overlay_detection_configured():
+            return attempted, succeeded, failed
+
+        query = (
+            db.schema("core")
+            .table("cast_photos")
+            .select("id, metadata, source")
+            .eq("person_id", person_id)
+            .in_("source", candidate_sources)
+        )
+        if photo_ids:
+            query = query.in_("id", photo_ids)
+        response = query.execute()
+        if hasattr(response, "error") and response.error:
+            logger.warning("Word detection query failed for %s: %s", person_id, response.error)
+            return attempted, succeeded, failed
+
+        rows = response.data or []
+        to_process: list[str] = []
+        for row in rows:
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if "has_text_overlay" in (meta or {}):
+                continue
+            rid = row.get("id")
+            if rid:
+                to_process.append(str(rid))
+
+        total = len(to_process)
+        for idx, photo_id in enumerate(to_process, start=1):
+            attempted += 1
+            try:
+                detect_and_update_cast_photo_text_overlay(db, photo_id, force=False)
+                succeeded += 1
+            except TextOverlayDetectionError as exc:
+                failed += 1
+                logger.warning("Word detection failed photo_id=%s error=%s", photo_id, exc)
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                logger.warning("Word detection failed photo_id=%s error=%s", photo_id, exc)
+
+            if progress_cb:
+                progress_cb(idx, total)
+    except Exception as exc:
+        logger.exception("Word detection setup failed for %s: %s", person_id, exc)
+
+    return attempted, succeeded, failed
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -420,6 +588,18 @@ def refresh_person_images(
     sources = request.sources or ALL_SOURCES
     errors: list[str] = []
 
+    # 1.5 Refresh person profiles (best-effort)
+    try:
+        _refresh_tmdb_profile(db, person_id_str, tmdb_person_id=tmdb_person_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TMDb profile refresh failed for %s: %s", person_id, exc)
+        errors.append(f"TMDb profile: {exc}")
+    try:
+        _refresh_fandom_profile(db, person_id_str, person_name=person_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Fandom profile refresh failed for %s: %s", person_id, exc)
+        errors.append(f"Fandom profile: {exc}")
+
     # 2. Fetch photos
     try:
         photos = fetch_all_cast_photos(
@@ -439,6 +619,15 @@ def refresh_person_images(
             _enrich_cast_photos_with_episode_metadata(db, photos)
         except Exception as exc:
             logger.warning("Episode metadata enrichment failed for %s: %s", person_id, exc)
+        try:
+            _apply_show_context_to_photos(
+                db,
+                photos,
+                show_id=request.show_id,
+                show_name=request.show_name,
+            )
+        except Exception as exc:
+            logger.warning("Show context tagging failed for %s: %s", person_id, exc)
 
     # 3. Upsert to database
     photos_upserted = 0
@@ -478,6 +667,14 @@ def refresh_person_images(
         photo_ids=upserted_photo_ids,
     )
 
+    # 4.6 Word ID / text overlay detection (best-effort)
+    text_overlay_attempted, text_overlay_succeeded, text_overlay_failed = _detect_text_overlay_cast_photos(
+        db,
+        person_id_str,
+        sources,
+        photo_ids=upserted_photo_ids,
+    )
+
     # 5. Prune orphaned S3 objects
     photos_pruned = 0
     if not request.skip_mirror and not request.skip_prune:
@@ -498,6 +695,9 @@ def refresh_person_images(
         auto_counts_attempted=auto_counts_attempted,
         auto_counts_succeeded=auto_counts_succeeded,
         auto_counts_failed=auto_counts_failed,
+        text_overlay_attempted=text_overlay_attempted,
+        text_overlay_succeeded=text_overlay_succeeded,
+        text_overlay_failed=text_overlay_failed,
         errors=errors,
     )
 
@@ -510,7 +710,12 @@ async def refresh_person_images_stream(
     _: AdminUser = None,
 ) -> StreamingResponse:
     """Refresh images with SSE streaming progress."""
-    from trr_backend.ingestion.cast_photo_sources import fetch_all_cast_photos
+    from trr_backend.ingestion.cast_photo_sources import (
+        fetch_fandom_gallery_cast_photos,
+        fetch_fandom_person_cast_photos,
+        fetch_imdb_cast_photos,
+        fetch_tmdb_cast_photos,
+    )
     from trr_backend.media.s3_mirror import mirror_cast_photo_row
     from trr_backend.repositories.cast_photos import (
         fetch_cast_photos_missing_hosted,
@@ -525,6 +730,9 @@ async def refresh_person_images_stream(
         errors: list[str] = []
         upserted_photo_ids: list[str] = []
 
+        def progress(payload: dict[str, Any]) -> str:
+            return f"event: progress\ndata: {json.dumps(payload)}\n\n"
+
         # 1. Get person
         person = _get_person_details(db, person_id_str)
         if not person:
@@ -537,27 +745,126 @@ async def refresh_person_images_stream(
         person_name = person.get("full_name")
         sources = request.sources or ALL_SOURCES
 
-        # 2. Fetch
-        yield f"event: progress\ndata: {json.dumps({'stage': 'fetching', 'message': 'Fetching from sources...'})}\n\n"
+        # 1.5 Refresh person profiles (best-effort)
+        yield progress({"stage": "tmdb_profile", "message": "Syncing TMDb profile..."})
         try:
-            photos = fetch_all_cast_photos(
-                person_id_str,
-                imdb_person_id=imdb_person_id,
-                tmdb_person_id=tmdb_person_id,
-                person_name=person_name,
-                sources=list(sources),
-                limit_per_source=request.limit_per_source,
+            _refresh_tmdb_profile(db, person_id_str, tmdb_person_id=tmdb_person_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"TMDb profile: {exc}")
+
+        yield progress({"stage": "fandom_profile", "message": "Syncing Fandom profile..."})
+        try:
+            _refresh_fandom_profile(db, person_id_str, person_name=person_name)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Fandom profile: {exc}")
+
+        # 2. Fetch per-source so the UI can show live stage updates.
+        enabled = set(sources)
+        fetch_steps: list[tuple[str, str]] = []
+        if "imdb" in enabled and imdb_person_id:
+            fetch_steps.append(("sync_imdb", "IMDb"))
+        if "tmdb" in enabled and tmdb_person_id:
+            fetch_steps.append(("sync_tmdb", "TMDb"))
+        if "fandom" in enabled and person_name:
+            fetch_steps.append(("sync_fandom", "Fandom"))
+        if "fandom-gallery" in enabled and person_name:
+            fetch_steps.append(("sync_fandom_gallery", "Fandom Gallery"))
+
+        total_sources = len(fetch_steps)
+        processed_sources = 0
+        photos: list[dict[str, Any]] = []
+
+        for stage, label in fetch_steps:
+            yield progress(
+                {
+                    "stage": stage,
+                    "message": f"Syncing {label}...",
+                    "current": processed_sources,
+                    "total": total_sources,
+                }
+            )
+            rows: list[dict[str, Any]] = []
+            try:
+                if stage == "sync_imdb":
+                    rows = fetch_imdb_cast_photos(
+                        imdb_person_id,
+                        person_id_str,
+                        limit=request.limit_per_source,
+                        session=None,
+                        verbose=False,
+                    )
+                elif stage == "sync_tmdb":
+                    rows = fetch_tmdb_cast_photos(
+                        int(tmdb_person_id),
+                        person_id_str,
+                        imdb_person_id=imdb_person_id,
+                        limit=request.limit_per_source,
+                        verbose=False,
+                    )
+                elif stage == "sync_fandom":
+                    rows = fetch_fandom_person_cast_photos(
+                        str(person_name),
+                        person_id_str,
+                        imdb_person_id=imdb_person_id,
+                        limit=request.limit_per_source,
+                        verbose=False,
+                    )
+                else:
+                    rows = fetch_fandom_gallery_cast_photos(
+                        str(person_name),
+                        person_id_str,
+                        imdb_person_id=imdb_person_id,
+                        limit=request.limit_per_source,
+                        verbose=False,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{label}: {exc}")
+                rows = []
+            photos.extend(rows)
+            processed_sources += 1
+            yield progress(
+                {
+                    "stage": stage,
+                    "message": f"Synced {label} ({len(rows)} photos).",
+                    "current": processed_sources,
+                    "total": total_sources,
+                }
+            )
+
+        try:
+            _enrich_cast_photos_with_episode_metadata(db, photos)
+        except Exception as exc:
+            errors.append(str(exc))
+        try:
+            _apply_show_context_to_photos(
+                db,
+                photos,
+                show_id=request.show_id,
+                show_name=request.show_name,
             )
         except Exception as exc:
             errors.append(str(exc))
-            photos = []
-        data = {"stage": "fetching", "current": len(photos), "total": len(photos)}
-        yield f"event: progress\ndata: {json.dumps(data)}\n\n"
+
+        yield progress(
+            {
+                "stage": "fetching",
+                "message": f"Fetched {len(photos)} photos.",
+                "current": len(photos),
+                "total": max(1, len(photos)),
+            }
+        )
 
         # 3. Upsert
         photos_upserted = 0
         if photos:
-            yield f"event: progress\ndata: {json.dumps({'stage': 'upserting'})}\n\n"
+            yield progress(
+                {
+                    "stage": "upserting",
+                    "message": "Upserting photos...",
+                    "current": 0,
+                    "total": len(photos),
+                }
+            )
             imdb_photos = [p for p in photos if p.get("source") == "imdb"]
             other_photos = [p for p in photos if p.get("source") != "imdb"]
             try:
@@ -571,12 +878,20 @@ async def refresh_person_images_stream(
                     upserted_photo_ids.extend([str(row["id"]) for row in upserted if row.get("id")])
             except Exception as exc:
                 errors.append(str(exc))
-            yield f"event: progress\ndata: {json.dumps({'stage': 'upserting', 'current': photos_upserted})}\n\n"
+            yield progress(
+                {
+                    "stage": "upserting",
+                    "message": "Upsert complete.",
+                    "current": photos_upserted,
+                    "total": len(photos),
+                }
+            )
+        else:
+            yield progress({"stage": "upserting", "message": "No photos to upsert.", "current": 0, "total": 0})
 
         # 4. Mirror
         photos_mirrored, photos_failed = 0, 0
         if not request.skip_mirror:
-            yield f"event: progress\ndata: {json.dumps({'stage': 'mirroring'})}\n\n"
             from trr_backend.media.s3_mirror import get_cdn_base_url
 
             cdn_url = None if request.force_mirror else get_cdn_base_url()
@@ -584,7 +899,16 @@ async def refresh_person_images_stream(
             rows = fetch_cast_photos_missing_hosted(
                 db, person_ids=[person_id_str], cdn_base_url=cdn_url, include_hosted=request.force_mirror
             )
-            for idx, row in enumerate(rows):
+            total_rows = len(rows)
+            yield progress(
+                {
+                    "stage": "mirroring",
+                    "message": "Mirroring to S3...",
+                    "current": 0,
+                    "total": total_rows,
+                }
+            )
+            for idx, row in enumerate(rows, start=1):
                 if not row.get("imdb_person_id") and imdb_person_id:
                     row["imdb_person_id"] = imdb_person_id
                 try:
@@ -594,23 +918,194 @@ async def refresh_person_images_stream(
                         photos_mirrored += 1
                 except Exception:
                     photos_failed += 1
-                if (idx + 1) % 5 == 0:
-                    data = {"stage": "mirroring", "current": idx + 1, "total": len(rows)}
-                    yield f"event: progress\ndata: {json.dumps(data)}\n\n"
+                if idx <= 20 or idx % 5 == 0 or idx == total_rows:
+                    data = {
+                        "stage": "mirroring",
+                        "message": "Mirroring to S3...",
+                        "current": idx,
+                        "total": total_rows,
+                    }
+                    yield progress(data)
+        else:
+            yield progress({"stage": "mirroring", "message": "Skipping S3 mirroring.", "current": 0, "total": 0})
 
         # 5. Prune
         photos_pruned = 0
         if not request.skip_mirror and not request.skip_prune:
-            yield f"event: progress\ndata: {json.dumps({'stage': 'pruning'})}\n\n"
+            yield progress({"stage": "pruning", "message": "Pruning orphaned S3 objects..."})
             photos_pruned = _prune_person_s3_objects(db, imdb_person_id or person_id_str)
+            yield progress(
+                {
+                    "stage": "pruning",
+                    "message": f"Pruned {photos_pruned} objects.",
+                    "current": 1,
+                    "total": 1,
+                }
+            )
 
-        # 5.5 Auto-count people for newly upserted TMDb/Fandom photos (only when no manual tags)
-        auto_counts_attempted, auto_counts_succeeded, auto_counts_failed = _auto_count_cast_photos(
-            db,
-            person_id_str,
-            sources,
-            photo_ids=upserted_photo_ids,
-        )
+        # 5.5 Auto-count people (best-effort; skips manual tags)
+        auto_counts_attempted = 0
+        auto_counts_succeeded = 0
+        auto_counts_failed = 0
+        try:
+            from trr_backend.clients.screenalytics import (
+                ScreenalyticsClientError,
+                count_people,
+                is_screenalytics_configured,
+            )
+            from trr_backend.repositories.cast_photo_tags import (
+                get_tags_by_photo_ids,
+                has_manual_tags,
+                upsert_cast_photo_tags,
+            )
+
+            if is_screenalytics_configured():
+                candidate_sources = [s for s in sources if s in ALL_SOURCES]
+                query = (
+                    db.schema("core")
+                    .table("cast_photos")
+                    .select("id, hosted_url, hosted_content_type, url, image_url, thumb_url, people_names, source")
+                    .eq("person_id", person_id_str)
+                    .in_("source", candidate_sources)
+                )
+                if upserted_photo_ids:
+                    query = query.in_("id", upserted_photo_ids)
+                response = query.execute()
+                rows = response.data or []
+                tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in rows if row.get("id")])
+
+                to_process = []
+                for row in rows:
+                    if row.get("people_names"):
+                        continue
+                    tag_row = tag_rows.get(str(row["id"]))
+                    if has_manual_tags(tag_row):
+                        continue
+                    if tag_row and tag_row.get("people_count") is not None:
+                        continue
+                    url = _pick_autocount_url(row)
+                    if not url:
+                        continue
+                    to_process.append((str(row["id"]), url))
+
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": "Auto-counting people in images...",
+                        "current": 0,
+                        "total": len(to_process),
+                    }
+                )
+                for idx, (photo_id, url) in enumerate(to_process, start=1):
+                    auto_counts_attempted += 1
+                    try:
+                        result = count_people(url)
+                        upsert_cast_photo_tags(
+                            db,
+                            cast_photo_id=photo_id,
+                            people_names=None,
+                            people_ids=None,
+                            people_count=result.people_count,
+                            people_count_source="auto",
+                            detector=result.detector,
+                            updated_by_firebase_uid="system:auto",
+                        )
+                        auto_counts_succeeded += 1
+                    except ScreenalyticsClientError as exc:
+                        auto_counts_failed += 1
+                        errors.append(f"Auto-count {photo_id}: {exc}")
+                    if idx <= 20 or idx % 5 == 0 or idx == len(to_process):
+                        yield progress(
+                            {
+                                "stage": "auto_count",
+                                "message": "Auto-counting people in images...",
+                                "current": idx,
+                                "total": len(to_process),
+                            }
+                        )
+            else:
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": "Skipping auto-count (not configured).",
+                        "current": 0,
+                        "total": 0,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Auto-count: {exc}")
+
+        # 5.6 Word ID / text overlay detection (best-effort)
+        text_overlay_attempted = 0
+        text_overlay_succeeded = 0
+        text_overlay_failed = 0
+        try:
+            from trr_backend.vision.text_overlay import (
+                TextOverlayDetectionError,
+                detect_and_update_cast_photo_text_overlay,
+                is_text_overlay_detection_configured,
+            )
+
+            if is_text_overlay_detection_configured():
+                query = (
+                    db.schema("core")
+                    .table("cast_photos")
+                    .select("id, metadata, source")
+                    .eq("person_id", person_id_str)
+                    .in_("source", [s for s in sources if s in ALL_SOURCES])
+                )
+                if upserted_photo_ids:
+                    query = query.in_("id", upserted_photo_ids)
+                response = query.execute()
+                rows = response.data or []
+                to_process = []
+                for row in rows:
+                    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    if "has_text_overlay" in (meta or {}):
+                        continue
+                    rid = row.get("id")
+                    if rid:
+                        to_process.append(str(rid))
+
+                yield progress(
+                    {
+                        "stage": "word_id",
+                        "message": "Detecting words/text overlays...",
+                        "current": 0,
+                        "total": len(to_process),
+                    }
+                )
+                for idx, photo_id in enumerate(to_process, start=1):
+                    text_overlay_attempted += 1
+                    try:
+                        detect_and_update_cast_photo_text_overlay(db, photo_id, force=False)
+                        text_overlay_succeeded += 1
+                    except TextOverlayDetectionError as exc:
+                        text_overlay_failed += 1
+                        errors.append(f"Word ID {photo_id}: {exc}")
+                    except Exception as exc:  # noqa: BLE001
+                        text_overlay_failed += 1
+                        errors.append(f"Word ID {photo_id}: {exc}")
+                    if idx <= 20 or idx % 5 == 0 or idx == len(to_process):
+                        yield progress(
+                            {
+                                "stage": "word_id",
+                                "message": "Detecting words/text overlays...",
+                                "current": idx,
+                                "total": len(to_process),
+                            }
+                        )
+            else:
+                yield progress(
+                    {
+                        "stage": "word_id",
+                        "message": "Skipping word detection (not configured).",
+                        "current": 0,
+                        "total": 0,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Word ID: {exc}")
 
         # 6. Complete
         complete_data = {
@@ -623,6 +1118,9 @@ async def refresh_person_images_stream(
             "auto_counts_attempted": auto_counts_attempted,
             "auto_counts_succeeded": auto_counts_succeeded,
             "auto_counts_failed": auto_counts_failed,
+            "text_overlay_attempted": text_overlay_attempted,
+            "text_overlay_succeeded": text_overlay_succeeded,
+            "text_overlay_failed": text_overlay_failed,
             "errors": errors,
         }
         yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"

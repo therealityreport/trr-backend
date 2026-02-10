@@ -222,6 +222,7 @@ def fetch_cast_photos_missing_hosted(
                 "id,person_id,imdb_person_id,source,source_page_url,image_url,url,thumb_url,"
                 "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type"
             )
+            .is_("archived_at", "null")
         )
 
     def _apply_filters(query):
