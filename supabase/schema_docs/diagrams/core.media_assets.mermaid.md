@@ -34,5 +34,8 @@ erDiagram
         TIMESTAMP_WITH_TIME_ZONE ingest_failed_at
         TIMESTAMP_WITH_TIME_ZONE ingest_completed_at
         TIMESTAMP_WITH_TIME_ZONE ingest_next_retry_at
+        TIMESTAMP_WITH_TIME_ZONE archived_at
+        TEXT archived_by_firebase_uid
+        TEXT archived_reason
     }
 ```

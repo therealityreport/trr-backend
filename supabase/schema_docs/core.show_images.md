@@ -35,6 +35,9 @@
 | hosted_bytes | bigint | YES |  | NO | NEVER |
 | hosted_etag | text | YES |  | NO | NEVER |
 | hosted_at | timestamp with time zone | YES |  | NO | NEVER |
+| archived_at | timestamp with time zone | YES |  | NO | NEVER |
+| archived_by_firebase_uid | text | YES |  | NO | NEVER |
+| archived_reason | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -57,6 +60,7 @@ id
 - core_show_images_source_show_idx (non-unique): source, show_id
 - core_show_images_tmdb_kind_idx (non-unique): tmdb_id, kind
 - core_show_images_tmdb_kind_lang_idx (non-unique): tmdb_id, kind, iso_639_1) WHERE (tmdb_id IS NOT NULL
+- idx_show_images_archived (non-unique): archived_at) WHERE (archived_at IS NOT NULL
 - idx_show_images_hosted_at (non-unique): hosted_at) WHERE (hosted_at IS NOT NULL
 - idx_show_images_hosted_sha256 (non-unique): hosted_sha256) WHERE (hosted_sha256 IS NOT NULL
 - idx_show_images_missing_hosted (non-unique): source, show_id) WHERE (hosted_url IS NULL
@@ -103,6 +107,9 @@ true
   "hosted_content_type": "example",
   "hosted_bytes": 0,
   "hosted_etag": "example",
-  "hosted_at": "1970-01-01T00:00:00Z"
+  "hosted_at": "1970-01-01T00:00:00Z",
+  "archived_at": "1970-01-01T00:00:00Z",
+  "archived_by_firebase_uid": "example",
+  "archived_reason": "example"
 }
 ```

@@ -241,6 +241,30 @@
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_by_firebase_uid",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_reason",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -249,6 +273,14 @@
   "foreign_keys": [],
   "unique_constraints": [],
   "indexes": [
+    {
+      "name": "idx_media_assets_archived",
+      "columns": [
+        "archived_at) WHERE (archived_at IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_media_assets_archived ON core.media_assets USING btree (archived_at) WHERE (archived_at IS NOT NULL)"
+    },
     {
       "name": "media_assets_hosted_url_idx",
       "columns": [
@@ -374,6 +406,9 @@
     "ingest_last_error": "example",
     "ingest_failed_at": "1970-01-01T00:00:00Z",
     "ingest_completed_at": "1970-01-01T00:00:00Z",
-    "ingest_next_retry_at": "1970-01-01T00:00:00Z"
+    "ingest_next_retry_at": "1970-01-01T00:00:00Z",
+    "archived_at": "1970-01-01T00:00:00Z",
+    "archived_by_firebase_uid": "example",
+    "archived_reason": "example"
   }
 }
