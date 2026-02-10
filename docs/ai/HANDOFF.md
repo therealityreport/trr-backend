@@ -22,6 +22,7 @@ Pending / not executed:
 ## Notes / Constraints
 
 - Local dev API runs on `http://127.0.0.1:8000` by default (`TRR_BACKEND_PORT` override supported).
+- In the multi-repo workspace, `make dev/stop/logs` from this repo delegates to the workspace root (`../Makefile`).
 - `start-api.sh` now fails fast if `.venv/` is missing and uses `exec uvicorn ...` so stop scripts can reliably terminate the server process.
 - Workspace runner (`/Users/thomashulihan/Projects/TRR/make dev`) wires:
   - `SCREENALYTICS_API_URL` (default `http://127.0.0.1:8001`)
@@ -49,5 +50,5 @@ make schema-docs-check
 
 ---
 
-Last updated: 2026-02-09
+Last updated: 2026-02-10
 Updated by: Codex
