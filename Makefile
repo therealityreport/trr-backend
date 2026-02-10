@@ -1,7 +1,17 @@
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+WORKSPACE_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 
-.PHONY: doctor schema-docs schema-docs-check schema-docs-reset-check ci-local repo-map repo-map-check \
+.PHONY: dev stop logs doctor schema-docs schema-docs-check schema-docs-reset-check ci-local repo-map repo-map-check \
        pipeline-run pipeline-run-all pipeline-status pipeline-list
+
+dev:
+	@$(MAKE) -C $(WORKSPACE_ROOT) dev
+
+stop:
+	@$(MAKE) -C $(WORKSPACE_ROOT) stop
+
+logs:
+	@$(MAKE) -C $(WORKSPACE_ROOT) logs
 
 # Environment diagnostic - run before pytest to verify setup
 doctor:
