@@ -1,10 +1,16 @@
 # Other Projects — Task 1 (Media Workflow Enhancements)
 
 Repo: TRR-Backend  
-Last updated: February 9, 2026
+Last updated: February 10, 2026
+
+Status Snapshot (As of February 10, 2026)
+Complete.
 
 ## Cross-Repo Dependency Snapshot
-- TRR-Backend provides the text-overlay detector endpoint and persists `has_text_overlay` into `core.media_assets.metadata`.
+- TRR-Backend: text overlay detector endpoints shipped:
+  - `POST /api/v1/admin/media-assets/{asset_id}/detect-text-overlay?force={bool}`
+  - `POST /api/v1/admin/cast-photos/{photo_id}/detect-text-overlay?force={bool}`
+  - Detector source is tracked in `trr_backend/vision/text_overlay.py` (Gemini-based; gated by env; returns `503` if not configured).
 - TRR-Backend persists manual People tags during scrape import when `person_ids` are provided.
 - TRR-Backend URL scrape preview (`/admin/scrape/preview`) may include `bytes` per candidate for UI display (best-effort).
 - TRR-Backend scrape import kind allowlist includes `promo`, `intro`, `reunion` in addition to existing kinds.
@@ -17,6 +23,7 @@ Last updated: February 9, 2026
 ## TRR-APP (Consumes Backend Contracts)
 - Proxies detection via:
   - `POST /api/admin/trr-api/media-assets/[assetId]/detect-text-overlay`
+  - `POST /api/admin/trr-api/cast-photos/[photoId]/detect-text-overlay`
 - Uses `core.media_links.context.people_*` fields (written on import) to drive SOLO/GROUP filtering.
 - Expects show/season galleries to render assets linked through `core.media_links` + `core.media_assets`.
 

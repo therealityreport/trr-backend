@@ -1,11 +1,14 @@
 # Other Projects — TASK3 (Multi-Person Tagged Image Dedup)
 
 Repo: TRR-Backend  
-Last updated: February 8, 2026
+Last updated: February 10, 2026
+
+Status Snapshot (As of February 10, 2026)
+Complete (TRR-Backend + TRR-APP shipped).
 
 ## Cross-Repo Snapshot
-- TRR-Backend: writes shared cast-photo hosted keys under `media/{sha256[:2]}/{sha256}{ext}`.
-- TRR-APP: dedupes People gallery by canonical image identity (source+source_image_id, fallback hosted_sha256), and prefers media_links rows on collision.
+- TRR-Backend: shipped — cast-photo mirroring uses shared hosted keys (`media/{sha256[:2]}/{sha256}{ext}`) in `trr_backend/media/s3_mirror.py#mirror_cast_photo_row`.
+- TRR-APP: shipped — People gallery dedupes by canonical identity (not just `hosted_url`) and prefers `media_links` rows on collisions (`apps/web/src/lib/server/trr-api/person-photo-utils.ts` + `apps/web/src/lib/server/trr-api/trr-shows-repository.ts#getPhotosByPersonId`).
 - SCREENALYTICS: no code changes required.
 
 ## Dependency Order

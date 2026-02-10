@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from api.auth import AdminUser
@@ -46,6 +46,17 @@ class DeleteMediaAssetResponse(BaseModel):
     deleted_asset: bool
     s3_deleted: bool
     s3_error: str | None = None
+
+
+class DetectTextOverlayResponse(BaseModel):
+    asset_id: str
+    status: str
+    has_text_overlay: bool | None = None
+    text_overlay_confidence: float | None = None
+    text_overlay_detector: str | None = None
+    text_overlay_model: str | None = None
+    text_overlay_detected_at: str | None = None
+    text_overlay_prompt_version: str | None = None
 
 
 def _build_media_asset_s3_key(sha256: str, ext: str) -> str:
@@ -224,4 +235,57 @@ def delete_media_asset(
         deleted_asset=deleted_asset,
         s3_deleted=s3_deleted,
         s3_error=s3_error,
+    )
+
+
+@router.post("/media-assets/{asset_id}/detect-text-overlay", response_model=DetectTextOverlayResponse)
+def detect_text_overlay_media_asset(
+    asset_id: UUID,
+    force: bool = Query(default=False),
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> DetectTextOverlayResponse:
+    """
+    Detect whether a media asset contains overlaid text and persist results to core.media_assets.metadata.
+
+    Query param:
+    - force: boolean (default false). If false and metadata already has has_text_overlay, returns existing values.
+    """
+    asset_id_str = str(asset_id)
+
+    try:
+        from trr_backend.vision.text_overlay import (
+            TextOverlayDatabaseError,
+            TextOverlayDetectionNotConfiguredError,
+            TextOverlayTargetFetchError,
+            TextOverlayTargetInvalidError,
+            TextOverlayTargetNotFoundError,
+            detect_and_update_media_asset_text_overlay,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Text overlay detection module not available: {exc}") from exc
+
+    try:
+        result = detect_and_update_media_asset_text_overlay(db, asset_id_str, force=force)
+    except TextOverlayDetectionNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except TextOverlayTargetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TextOverlayTargetInvalidError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (TextOverlayTargetFetchError, TextOverlayDatabaseError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Text overlay detection failed: {exc}") from exc
+
+    status = "detected" if force else "ok"
+    return DetectTextOverlayResponse(
+        asset_id=asset_id_str,
+        status=status,
+        has_text_overlay=result.has_text_overlay,
+        text_overlay_confidence=result.confidence,
+        text_overlay_detector=result.detector,
+        text_overlay_model=result.model,
+        text_overlay_detected_at=result.detected_at,
+        text_overlay_prompt_version=result.prompt_version,
     )
