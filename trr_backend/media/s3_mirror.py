@@ -228,6 +228,20 @@ def build_cast_photo_s3_key(
     return "/".join(segments)
 
 
+def build_shared_media_s3_key(sha256: str, ext: str) -> str:
+    """
+    Build a shared, content-addressed S3 key for identical bytes across entities.
+
+    Path: media/{sha256[:2]}/{sha256}{ext}
+
+    This is used by the unified media_assets model (and by cast photo mirroring as of TASK3)
+    so that identical images converge to a single hosted object regardless of which person
+    (or source) they were ingested under.
+    """
+    prefix = sha256[:2]
+    return f"media/{prefix}/{sha256}{ext}"
+
+
 def build_show_image_s3_key(
     show_identifier: str,
     kind: str,
@@ -433,20 +447,6 @@ def mirror_cast_photo_row(
     if not candidate_url:
         return None
 
-    # Get person identifier for S3 path: prefer IMDb ID, fallback to person_id UUID
-    person_identifier = row.get("imdb_person_id")
-    if not person_identifier:
-        # Try to get from joined people table
-        people_data = row.get("people")
-        if isinstance(people_data, dict):
-            external_ids = people_data.get("external_ids") or {}
-            person_identifier = external_ids.get("imdb")
-    if not person_identifier:
-        # Fallback to person_id UUID if no IMDb ID available
-        person_identifier = row.get("person_id")
-    if not person_identifier:
-        return None  # Can't build S3 path without any identifier
-
     referer = row.get("source_page_url")
     normalized_url = candidate_url
     if source in {"fandom", "fandom-gallery"} and isinstance(candidate_url, str):
@@ -467,12 +467,7 @@ def mirror_cast_photo_row(
         return None
 
     ext = guess_ext_from_content_type(content_type)
-    key = build_cast_photo_s3_key(
-        person_identifier=person_identifier,
-        source=source,
-        sha256=sha256,
-        ext=ext,
-    )
+    key = build_shared_media_s3_key(sha256, ext)
     bucket = get_s3_bucket()
     s3_client = s3_client or get_s3_client()
 

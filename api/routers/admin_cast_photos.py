@@ -23,6 +23,17 @@ class MirrorCastPhotoResponse(BaseModel):
     status: str
 
 
+class DetectTextOverlayResponse(BaseModel):
+    photo_id: str
+    status: str
+    has_text_overlay: bool | None = None
+    text_overlay_confidence: float | None = None
+    text_overlay_detector: str | None = None
+    text_overlay_model: str | None = None
+    text_overlay_detected_at: str | None = None
+    text_overlay_prompt_version: str | None = None
+
+
 @router.post("/cast-photos/{photo_id}/mirror", response_model=MirrorCastPhotoResponse)
 def mirror_cast_photo(
     photo_id: UUID,
@@ -64,4 +75,57 @@ def mirror_cast_photo(
         hosted_url=updated.get("hosted_url"),
         hosted_key=updated.get("hosted_key"),
         status="hosted",
+    )
+
+
+@router.post("/cast-photos/{photo_id}/detect-text-overlay", response_model=DetectTextOverlayResponse)
+def detect_text_overlay_cast_photo(
+    photo_id: UUID,
+    force: bool = Query(default=False),
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> DetectTextOverlayResponse:
+    """
+    Detect whether a cast photo contains overlaid text and persist results to core.cast_photos.metadata.
+
+    Query param:
+    - force: boolean (default false). If false and metadata already has has_text_overlay, returns existing values.
+    """
+    photo_id_str = str(photo_id)
+
+    try:
+        from trr_backend.vision.text_overlay import (
+            TextOverlayDatabaseError,
+            TextOverlayDetectionNotConfiguredError,
+            TextOverlayTargetFetchError,
+            TextOverlayTargetInvalidError,
+            TextOverlayTargetNotFoundError,
+            detect_and_update_cast_photo_text_overlay,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Text overlay detection module not available: {exc}") from exc
+
+    try:
+        result = detect_and_update_cast_photo_text_overlay(db, photo_id_str, force=force)
+    except TextOverlayDetectionNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except TextOverlayTargetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TextOverlayTargetInvalidError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (TextOverlayTargetFetchError, TextOverlayDatabaseError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Text overlay detection failed: {exc}") from exc
+
+    status = "detected" if force else "ok"
+    return DetectTextOverlayResponse(
+        photo_id=photo_id_str,
+        status=status,
+        has_text_overlay=result.has_text_overlay,
+        text_overlay_confidence=result.confidence,
+        text_overlay_detector=result.detector,
+        text_overlay_model=result.model,
+        text_overlay_detected_at=result.detected_at,
+        text_overlay_prompt_version=result.prompt_version,
     )

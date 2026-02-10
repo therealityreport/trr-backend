@@ -1,11 +1,19 @@
 # Other Projects — Task 2
 
 Repo: TRR-Backend  
-Last updated: February 9, 2026
+Last updated: February 10, 2026
+
+Status Snapshot (As of February 10, 2026)
+Complete.
+
+Execution Evidence
+- SCREENALYTICS endpoint: `POST /shows/{show_id}/sync_facebank_seeds` (`screenalytics/apps/api/routers/cast.py`)
+- Tests: `screenalytics/tests/api/test_sync_show_facebank_seeds.py`
+- Streamlit UI: `screenalytics/apps/workspace-ui/pages/0_Shows.py`
 
 Scope Clarification (Task 1 vs Task 2)
 - Task 1: seed flagging + `seed_only` contract + strict fallback + episode-level import side effects (completed).
-- Task 2: show-level SYNC endpoint + UI + orchestration (tracked here).
+- Task 2: show-level SYNC endpoint + UI + orchestration (completed).
 
 Cross-Repo Responsibilities (Day 1)
 - TRR-Backend

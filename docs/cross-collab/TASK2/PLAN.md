@@ -1,14 +1,22 @@
 # Show-Level SYNC Facebank Seeds — Task 2 Plan
 
 Repo: TRR-Backend  
-Last updated: February 9, 2026
+Last updated: February 10, 2026
 
 Goal
 Add a show-level SYNC flow that imports TRR cast face images into SCREENALYTICS `person` + `face_bank_images`.
 
-Status Snapshot (As of February 9, 2026)
-- Not yet implemented. (Task 2 tracks the show-level SYNC work after Task 1 contract closeout.)
-- Prereq: schema cleanup must be applied in the target environment; cast reads should use credits-backed compatibility views (e.g. `core.v_show_cast`), not legacy tables.
+Status Snapshot (As of February 10, 2026)
+Complete.
+
+Execution Evidence
+- SCREENALYTICS shipped `POST /shows/{show_id}/sync_facebank_seeds` in `screenalytics/apps/api/routers/cast.py`.
+- Tests: `screenalytics/tests/api/test_sync_show_facebank_seeds.py`.
+- Streamlit UI: `screenalytics/apps/workspace-ui/pages/0_Shows.py`.
+
+TRR-Backend Scope
+- No Task 2 API/UI code lives in TRR-Backend.
+- Ensure TRR metadata DB remains readable for SCREENALYTICS (e.g. `core.v_show_cast`, `core.people.external_ids->>'imdb'`).
 
 Locked Day-1 Scope (Import-Only)
 - Day 1 is **import-only into `person` + `face_bank_images`**.

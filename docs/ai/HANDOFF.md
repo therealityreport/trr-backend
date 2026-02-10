@@ -13,6 +13,13 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
 - Cross-collab task docs updated:
   - `docs/cross-collab/TASK5/*` (screenalytics data layer unification: backend-owned pieces)
   - `docs/cross-collab/TASK4/*` (schema cleanup: backend-owned pieces)
+  - `docs/cross-collab/TASK1/*`, `docs/cross-collab/TASK2/*`, `docs/cross-collab/TASK3/*` (status corrections for Dev Dashboard task scanning; Task 2 marked complete via screenalytics implementation; Task 1 complete; Task 3 complete)
+- Admin media workflow enhancements shipped (Task 1):
+  - `POST /api/v1/admin/media-assets/{asset_id}/detect-text-overlay?force={bool}` (`api/routers/admin_media_assets.py`)
+  - `POST /api/v1/admin/cast-photos/{photo_id}/detect-text-overlay?force={bool}` (`api/routers/admin_cast_photos.py`)
+  - Detector implementation tracked in `trr_backend/vision/text_overlay.py` (Gemini; gated by env; returns `503` if not configured)
+- Multi-person dedup backend piece shipped (Task 3):
+  - `trr_backend/media/s3_mirror.py#mirror_cast_photo_row` mirrors cast photos to shared content-addressed keys (`media/{sha256[:2]}/{sha256}{ext}`)
 - Fast checks: `ruff check . && ruff format --check . && pytest -q` (413 passed, 18 skipped).
 
 Pending / not executed:

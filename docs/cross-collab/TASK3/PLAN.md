@@ -1,7 +1,7 @@
 # TASK3 — Multi-Person Tagged Image Dedup (Shared File + Shared Gallery)
 
 Repo: TRR-Backend  
-Last updated: February 8, 2026
+Last updated: February 10, 2026
 
 ## Goal
 Fix multi-person tagged images so:
@@ -17,9 +17,17 @@ TRR-APP then merges:
 
 Because `mirror_cast_photo_row` previously used person-scoped S3 keys, the same image produced different `hosted_url`s, so UI dedupe-by-URL failed and the image appeared multiple times in one gallery.
 
+## Status Snapshot (As of February 10, 2026)
+Complete.
+
+- Shared deterministic `hosted_key` for cast photo mirroring shipped:
+  - `trr_backend/media/s3_mirror.py#build_shared_media_s3_key` produces `media/{sha256[:2]}/{sha256}{ext}`.
+  - `trr_backend/media/s3_mirror.py#mirror_cast_photo_row` now mirrors cast photos to the shared `media/…` namespace (no per-person hosted keys).
+- Identical bytes mirrored for multiple people now converge to the same `hosted_key`/`hosted_url`, enabling canonical UI dedupe and eliminating duplicates in a single person gallery.
+
 ## Backend Scope (This Repo)
 ### 1) Shared deterministic hosted_key for cast photo mirroring
-Update `trr_backend/media/s3_mirror.py#mirror_cast_photo_row`:
+Implemented in `trr_backend/media/s3_mirror.py#mirror_cast_photo_row`:
 - Hosted key format: `media/{sha256[:2]}/{sha256}{ext}`
 - Behavior:
   - Identical bytes converge to the same `hosted_key` and `hosted_url`.
@@ -37,9 +45,10 @@ Additionally, per-person prune only considers legacy cast-photo subfolders (e.g.
 3. Optional: run person prune to remove leftover per-person objects.
 
 ## Validation
-- Pick a known multi-person IMDb image (e.g. `rm4170403585`).
-- After refresh+force_mirror for each tagged person:
-  - All related cast_photos rows should share the same `hosted_key` and `hosted_url`.
+ - Pick a known multi-person IMDb image (e.g. `rm4170403585`).
+ - After refresh+force_mirror for each tagged person:
+   - All related cast_photos rows should share the same `hosted_key` and `hosted_url`.
+- Repo fast checks: `ruff check . && ruff format --check . && python -m pytest -q` passing.
 
 ## Follow-up (Not In Scope)
 Face-level tagging UX: detect faces per image, then allow admins to assign which face is which person.

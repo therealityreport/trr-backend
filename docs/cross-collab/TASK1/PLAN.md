@@ -1,16 +1,29 @@
 # Task 1 — Media Workflow Enhancements (Backdrops, People Tags, Text Overlay, Advanced Filters)
 
 Repo: TRR-Backend  
-Last updated: February 8, 2026
+Last updated: February 10, 2026
 
 ## Summary
 This task adds backend support needed by TRR-APP’s upgraded admin media workflows:
 - Persist manual People tagging during scrape imports (so SOLO/GROUP filtering works deterministically).
-- Add a text-overlay detector and persist results to `core.media_assets.metadata`.
+- Add a text-overlay detector and persist results to `core.media_assets.metadata` (and `core.cast_photos.metadata` for legacy cast photos).
 - Run “agent-like” text-overlay detection opportunistically during import and refresh flows (capped) to reduce unknowns.
 - Improve gallery scrape context extraction for cast-photo style pages (e.g. E! Online) so per-image context includes the person name + caption/bio.
 - For cast-photo imports (kind=`cast`), persist article publish date into `core.media_assets.metadata.source_created_at` (and per-link context) so UI can show **Created**.
 - Support admin cleanup via `DELETE /api/v1/admin/media-assets/{asset_id}` (delete unified `media_assets` + `media_links`, best-effort S3 delete).
+
+## Status Snapshot (As of February 10, 2026)
+Complete.
+- Shipped (code present in this repo):
+  - Scrape preview `bytes` field (best-effort).
+  - Scrape import kind allowlist includes `promo`, `intro`, `reunion`.
+  - Manual People tagging context persisted on import (`core.media_links.context.people_*`).
+  - Cast-photo imports persist `metadata.source_created_at` and per-link `context.source_created_at`.
+  - Admin cleanup endpoint: `DELETE /api/v1/admin/media-assets/{asset_id}`.
+- Text overlay detection shipped (backend-owned):
+  - Media assets: `POST /api/v1/admin/media-assets/{asset_id}/detect-text-overlay?force={bool}`
+  - Cast photos: `POST /api/v1/admin/cast-photos/{photo_id}/detect-text-overlay?force={bool}`
+  - Tracked detector module: `trr_backend/vision/text_overlay.py` (Gemini-based, gated by env; returns `503` if not configured).
 
 ## Locked Contracts / Interfaces
 
@@ -38,11 +51,13 @@ This task adds backend support needed by TRR-APP’s upgraded admin media workfl
   - Best-effort deletes the S3 object (`hosted_key`) when present.
 
 ### Text overlay detection endpoint (admin)
-- `POST /api/v1/admin/media-assets/{asset_id}/detect-text-overlay`
-  - Body: `{ "force": boolean }` (optional, default false)
-  - Behavior:
-    - If `metadata.has_text_overlay` already exists and `force=false`, returns existing values.
-    - Otherwise downloads the image (`hosted_url` preferred, fallback `source_url`), classifies with Gemini Vision, persists into `core.media_assets.metadata`, and returns the persisted fields.
+- Media assets:
+  - `POST /api/v1/admin/media-assets/{asset_id}/detect-text-overlay?force={bool}`
+- Cast photos (legacy):
+  - `POST /api/v1/admin/cast-photos/{photo_id}/detect-text-overlay?force={bool}`
+- Behavior (both):
+  - If `metadata.has_text_overlay` already exists and `force=false`, returns existing values.
+  - Otherwise downloads the image (`hosted_url` preferred, fallback `source_url`/`url`), classifies with Gemini Vision, persists into the row `metadata`, and returns the persisted fields.
 
 ### Import/refresh hooks (agent-like behavior)
 - Scrape import and person refresh should attempt text-overlay detection for assets missing `has_text_overlay` (capped per request).
@@ -50,7 +65,7 @@ This task adds backend support needed by TRR-APP’s upgraded admin media workfl
   - `text_overlay_attempted`, `text_overlay_succeeded`, `text_overlay_failed`
 
 ## Storage Contract (Single Source of Truth)
-Text overlay results are stored on `core.media_assets.metadata`:
+Text overlay results are stored on `core.media_assets.metadata` (and `core.cast_photos.metadata` for legacy cast photos):
 - `has_text_overlay: boolean`
 - `text_overlay_confidence: number (0..1)`
 - `text_overlay_detector: string`
@@ -71,6 +86,8 @@ When scrape import payload includes `person_ids`, the created `core.media_links.
 3. SCREENALYTICS: no code changes required for this task set.
 
 ## Validation Evidence (Local)
-- `env REDIS_URL= pytest -q tests/test_api_smoke.py` passing.
+- `ruff check .` passing.
+- `ruff format --check .` passing.
+- `python -m pytest -q` passing (413 passed, 18 skipped).
 
 Note: `google-generativeai` is lazy-imported inside the detector function to avoid import-time hangs in test environments; the endpoint only requires the dependency when invoked.
