@@ -9,6 +9,7 @@ Supports:
 """
 
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -19,6 +20,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
+
+ADVANCED_QUERY_HINT_RE = re.compile(
+    r'(^|\s)(from:|to:|since:|until:|filter:|-filter:)|\bOR\b|\bAND\b|[()"]',
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -42,12 +48,16 @@ class TwitterScrapeConfig:
         """Build Twitter advanced search query string."""
         parts = []
 
-        # Add the main query (support both hashtag and phrase)
-        if self.query.startswith("#"):
-            parts.append(self.query)
+        normalized_query = self.query.strip()
+
+        # Add the main query (supports raw advanced query passthrough).
+        if ADVANCED_QUERY_HINT_RE.search(normalized_query):
+            parts.append(normalized_query)
+        elif normalized_query.startswith("#"):
+            parts.append(normalized_query)
         else:
             # Search for exact phrase or hashtag
-            parts.append(f'"{self.query}" OR #{self.query}')
+            parts.append(f'"{normalized_query}" OR #{normalized_query}')
 
         # Add date filters
         parts.append(f"since:{self.date_start.strftime('%Y-%m-%d')}")

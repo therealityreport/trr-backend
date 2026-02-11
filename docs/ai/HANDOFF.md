@@ -2,6 +2,42 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-11)
+
+- Fixed Bravo snapshot persistence failure (`Failed to persist show bravo snapshot`) for environments missing `core.sources.id='bravo'`:
+  - Applied migration `supabase/migrations/0117_add_bravo_source.sql` to active DB.
+  - Added `_ensure_bravo_source(...)` guard in `api/routers/admin_show_bravo.py` so commit paths verify/create the Bravo source row before writing show/person snapshots.
+  - Improved error detail in snapshot persistence failures to surface underlying DB messages in logs/API detail.
+  - Validation: `pytest -q tests/api/routers/test_admin_show_bravo.py` and `ruff check api/routers/admin_show_bravo.py`.
+- Fixed silent-failure behavior in episodic cast sync (`scripts/sync/sync_episode_appearances.py`):
+  - Root issue observed: IMDb episodic GraphQL call now returns `PersistedQueryNotFound` for operation `TitleEpisodeBottomSheetCredits`, causing zero `core.credit_occurrences` inserts.
+  - Script now treats "all cast episodic fetches failed" as a fatal show failure (`exit code 1`) so admin refresh surfaces a failed step instead of a false success.
+  - Script no longer deletes `core.credit_occurrences` for credits that did not refresh successfully, preventing accidental wipeout of prior episode evidence during IMDb upstream failures.
+  - Added summary metric: `fatal_show_failures`.
+  - Validation: `ruff check scripts/sync/sync_episode_appearances.py` and `python -m py_compile scripts/sync/sync_episode_appearances.py`.
+- Added resilient episodic GraphQL fallback in `trr_backend/integrations/imdb/episodic_client.py`:
+  - When persisted query hashes rotate (`PERSISTED_QUERY_NOT_FOUND`), client now falls back to a direct POST GraphQL query against IMDb to fetch episode credits.
+  - Direct response is reshaped to the existing parser contract, so downstream sync code remains unchanged.
+  - Validation: `ruff check trr_backend/integrations/imdb/episodic_client.py` and `python -m py_compile trr_backend/integrations/imdb/episodic_client.py`.
+  - Live verification on show `940ca82c-e4a9-45b4-9d85-946a654925ce`: `sync_episode_appearances` now succeeds (`occurrences_inserted=51`, `failures=0`).
+
+- Pipeline performance controls added for show photo refresh:
+  - `api/routers/admin_show_sync.py` now accepts fast-mode fields on `refresh-photos/stream`:
+    - `skip_auto_count`, `skip_word_detection`, `imdb_mediaindex_max_pages`, `imdb_mediaindex_max_images`
+  - This allows the app to run a reduced-cost refresh path for everyday syncs and avoid long AI post-processing delays.
+- Added Bravo sync-readiness enforcement before preview/commit:
+  - `POST /api/v1/admin/shows/{show_id}/import-bravo/preview`
+  - `POST /api/v1/admin/shows/{show_id}/import-bravo/commit`
+  - Both now require existing synced seasons, episodes, and cast; otherwise return `409` with missing sections.
+  - File: `api/routers/admin_show_bravo.py`
+- Added Fandom policy guard:
+  - Show refresh cast-photo stage skips Fandom sources for non-`Real Housewives` shows.
+  - Person refresh (sync + stream) also skips Fandom profile/source fetches for non-`Real Housewives` when show context is provided.
+  - Files: `api/routers/admin_show_sync.py`, `api/routers/admin_person_images.py`
+- Test/lint validation for this update:
+  - `ruff check api/routers/admin_show_sync.py api/routers/admin_person_images.py api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py`
+  - `pytest -q tests/api/routers/test_admin_show_bravo.py tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_person_images.py` (`31 passed`)
+
 ## Goal
 
 - Implement Supabase unification and schema cleanup work for screenalytics + TRR (migrations + API/ingestion updates), coordinated across TRR-Backend → screenalytics → TRR-APP.
@@ -314,3 +350,303 @@ New/updated test coverage:
   - hosted-key S3 fallback when URL download fails
 - `tests/api/routers/test_admin_person_images.py`
   - refresh success payload now asserts presence of new counters/fields.
+
+People-count semantics for source/library tags (this session):
+- Updated source import tag context generation in `api/routers/admin_scrape.py` (`_build_people_tags_context`).
+  - Source/library-matched person tags now persist only `people_ids` / `people_names`.
+  - Removed automatic `people_count` + `people_count_source="manual"` writes from source-tag context.
+- Updated manual-detection helpers so manual protection applies to explicit manual count source only:
+  - `trr_backend/repositories/cast_photo_tags.py` (`has_manual_tags`)
+  - `trr_backend/repositories/media_links.py` (`has_manual_people_tags`)
+- Result:
+  - Known-person tagging no longer implies authoritative people count.
+  - Auto-count flows are no longer blocked merely because person tags exist.
+  - Explicit manual counts (where `people_count_source="manual"`) are still protected unless force override is used.
+
+Verification:
+- `ruff check api/routers/admin_scrape.py trr_backend/repositories/cast_photo_tags.py trr_backend/repositories/media_links.py` (pass)
+- `ruff format api/routers/admin_scrape.py` + `ruff format --check ...` (pass)
+- `pytest tests/api/routers/test_admin_image_counts_fallback.py -q` (pass; 4 passed)
+
+Fandom profile mis-attachment guard (this session):
+- Root cause discovered: `search_real_housewives_wiki("Reza Farahan")` can return `Sutton_Stracke`, and `admin_person_images._refresh_fandom_profile(...)` previously upserted the parsed profile without person-name validation.
+- Added strict name-match safeguards in `api/routers/admin_person_images.py`:
+  - `_normalize_name_for_match`, `_names_match`, `_name_from_fandom_url`, `_fandom_profile_matches_person_name`
+  - `_refresh_fandom_profile` now skips candidate URLs and parsed payloads when names do not match target person.
+- Result: Fandom refresh no longer attaches unrelated pages to a person when search returns an incorrect top result.
+- Applied one-time local data correction for Reza (`person_id=d3e56687-6d11-43fb-9f99-b8f45c9b5ff1`):
+  - deleted mismatched `core.cast_fandom` row pointing to Sutton page (`id=fed4a4f6-43f5-4c51-b5bf-5d7bcf9dc5f3`).
+
+Verification:
+- `ruff check api/routers/admin_person_images.py` (pass)
+- `ruff format --check api/routers/admin_person_images.py` (pass)
+- `pytest tests/api/routers/test_admin_person_images.py -q` (pass; 16 passed)
+- Runtime check: parsed Sutton profile no longer matches expected `Reza Farahan` via new matcher.
+
+Bravo import + cast eligibility support (this session, 2026-02-11):
+- Added Bravo source migration:
+  - `supabase/migrations/0117_add_bravo_source.sql`
+- Added Bravo parser module:
+  - `trr_backend/scraping/bravo_parser.py`
+- Added admin Bravo endpoints and persistence/commit logic:
+  - `api/routers/admin_show_bravo.py`
+  - wired in `api/main.py`
+- Implemented persisted snapshot read model for videos/news (no live scrape on read), plus person snapshot merge behavior.
+- Commit logic includes:
+  - show description update
+  - person `biography/homepage/profile_image_url` source updates under `bravo`
+  - social merge policy fill-missing-only
+  - selected show image import via existing scrape pipeline
+- Updated videos endpoint default to `merge_person_sources=true` to match task defaults.
+- Added tests:
+  - `tests/scraping/test_bravo_parser.py`
+  - `tests/api/routers/test_admin_show_bravo.py`
+
+Validation (this session):
+- `ruff check api/routers/admin_show_bravo.py trr_backend/scraping/bravo_parser.py tests/api/routers/test_admin_show_bravo.py tests/scraping/test_bravo_parser.py` (pass)
+- `pytest -q tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (pass, 6 passed)
+
+Bravo parser refinement (this session, 2026-02-11):
+- Updated `trr_backend/scraping/bravo_parser.py` to improve show import preview quality:
+  - airs extraction now recognizes day/time strings like `Tuesdays at 8/7c`
+  - show image candidate extraction now excludes video/news thumbnails, cast headshots, and global social/site icon assets
+- Added regression tests in `tests/scraping/test_bravo_parser.py` for:
+  - day/time airs extraction
+  - video/news image candidate exclusion on show page parsing
+- Validation:
+  - `ruff check trr_backend/scraping/bravo_parser.py tests/scraping/test_bravo_parser.py` (pass)
+  - `pytest -q tests/scraping/test_bravo_parser.py` (pass, 5 passed)
+  - live parse check for `https://www.bravotv.com/summer-house` now returns `airs_text = "Tuesdays at 8/7c"` and 3 show image candidates.
+
+Bravo preview metadata/date improvements (this session, 2026-02-11):
+- `trr_backend/scraping/bravo_parser.py`
+  - Added `published_at` extraction for videos/news.
+  - Video list scraping now prefers `/watch/videos` so season feed aligns with Bravo filter defaults (e.g. Summer House Season 10).
+  - Hydrates missing `published_at` by reading clip/article pages when needed.
+- `api/routers/admin_show_bravo.py`
+  - Normalized show/person video/news payloads now carry `published_at` through persisted snapshots + read endpoints.
+- Tests updated:
+  - `tests/scraping/test_bravo_parser.py` now covers video/news `published_at` extraction.
+- Validation:
+  - `ruff check trr_backend/scraping/bravo_parser.py api/routers/admin_show_bravo.py tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (pass)
+  - `pytest -q tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (pass, 8 passed)
+
+Season Social Analytics V2 (this session, 2026-02-11):
+- Added season social analytics schema migration:
+  - `supabase/migrations/0118_social_season_analytics.sql`
+  - Adds `social.season_targets` and season/job/source lineage columns across `social.*` tables.
+- Added backend social analytics + ingest repository:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - Supports:
+    - season target defaults/updates (`bravo` scope)
+    - ingest job creation/status updates
+    - normalized + `raw_data` persistence for posts/comments across Instagram, TikTok, YouTube, Twitter
+    - sentiment scoring + weekly/platform aggregations
+    - CSV and PDF export builders
+- Extended admin socials router with season endpoints:
+  - `GET /api/v1/admin/socials/seasons/{season_id}/targets`
+  - `PUT /api/v1/admin/socials/seasons/{season_id}/targets`
+  - `POST /api/v1/admin/socials/seasons/{season_id}/ingest`
+  - `GET /api/v1/admin/socials/seasons/{season_id}/ingest/jobs`
+  - `GET /api/v1/admin/socials/seasons/{season_id}/analytics`
+  - `GET /api/v1/admin/socials/seasons/{season_id}/analytics/export.csv`
+  - `GET /api/v1/admin/socials/seasons/{season_id}/analytics/export.pdf`
+- Added PDF dependency:
+  - `requirements.txt` now includes `reportlab>=4.2.0`
+- Added tests:
+  - `tests/api/routers/test_socials_season_analytics.py`
+  - `tests/repositories/test_social_season_analytics.py`
+
+Validation (this session):
+- `ruff check api/routers/socials.py trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+- `python -m py_compile api/routers/socials.py trr_backend/repositories/social_season_analytics.py` (pass)
+- `pytest -q tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass, 5 passed)
+
+Bravo show-image media-type selection support (this session, 2026-02-11):
+- File: `api/routers/admin_show_bravo.py`
+- Added new commit request field:
+  - `selected_show_images: [{url, kind}]` (optional)
+  - `kind` enum: `poster|backdrop|logo|episode_still|cast|promo|intro|reunion|other`
+- Backward-compatible behavior:
+  - if `selected_show_images` is omitted, legacy `selected_show_image_urls[]` is still accepted and imported as `promo`.
+- Commit import behavior:
+  - selected image `kind` now flows into `ImportImageItem.kind` (previously always `promo`).
+- Tests:
+  - `tests/api/routers/test_admin_show_bravo.py` adds assertion that selected kinds (`logo`, `poster`) are passed to import request.
+- Validation:
+  - `uv run ruff check api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py`
+  - `uv run pytest tests/api/routers/test_admin_show_bravo.py -q`
+
+Bravo cast hero-image ingest + tag merge + season filter (this session, 2026-02-11):
+- File: `api/routers/admin_show_bravo.py`
+- Cast image ingest:
+  - Added `_import_bravo_person_image(...)` and invoke it during commit for each resolved person with `hero_image_url`.
+  - Uses existing `admin_scrape.import_images` with `entity_type=person`, so media assets are mirrored to S3 and linked to person media.
+  - Commit response now includes `counts.imported_person_images`, `counts.skipped_person_images`, and `person_image_import_errors`.
+- Person/article/video tagging:
+  - Enhanced dedupe flow to merge `person_tags` across duplicate URLs instead of keeping only first tag set.
+  - Affects show/person merged video/news normalization and read extraction.
+- Season filter support:
+  - Added optional `season_number` to Bravo preview/commit request models.
+  - Applies to show/person videos before preview and persistence (`_filter_bundle_by_season`).
+- Tests updated in `tests/api/routers/test_admin_show_bravo.py`:
+  - selected show image kind passthrough remains covered.
+  - preview season filter behavior covered.
+  - dedupe person-tag merge covered.
+- Validation:
+  - `uv run ruff check api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py`
+  - `uv run pytest tests/api/routers/test_admin_show_bravo.py -q` (6 passed)
+
+Bravo show-news relevance filter hardening (this session, 2026-02-11):
+- File: `trr_backend/scraping/bravo_parser.py`
+- Changes:
+  - Added show-news relevance filters to drop unrelated "Latest Bravo News" sidebar cards.
+  - Relevance checks now use show slug/title and discovered cast-person slug phrases.
+  - `parse_show_news(...)` now accepts optional `show_title` and `person_urls` and applies relevance filtering before return.
+  - `parse_bravo_show_bundle(...)` now calls `parse_show_news(...)` with show title + discovered person URLs.
+- Tests:
+  - Added `test_parse_show_news_ignores_unrelated_latest_sidebar_items` in `tests/scraping/test_bravo_parser.py`.
+- Validation:
+  - `uv run ruff check trr_backend/scraping/bravo_parser.py tests/scraping/test_bravo_parser.py api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py`
+  - `uv run pytest tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py -q` (12 passed)
+
+Season social week-model update (this session, 2026-02-11):
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `api/routers/socials.py`
+  - `tests/repositories/test_social_season_analytics.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Implemented episode-anchored week windows with explicit `Week 0` support.
+  - `Week 0` is now variable length: trailer/first-look/sneak-peek drop -> premiere (episode 1 air datetime).
+  - Week windows now follow episode boundaries (`Week 1 = Ep1->Ep2`, etc.) instead of fixed 7-day bins from anchor date.
+  - Added `window.week_zero_start` to analytics response.
+  - Added `week=0` support to analytics/export endpoints (router validation now `ge=0`).
+  - Added Bravo-first platform scoping in analytics row queries so `source_scope=bravo` filters to Bravo-owned accounts/channels.
+  - Tightened trailer start fallback to pre-premiere lookback (180d) and season-specific marker preference (`season N` / `sN`).
+- Tests:
+  - Expanded repository unit tests for trailer-marker parsing and season matching.
+  - Added API route test confirming `week=0` is accepted and forwarded.
+- Validation:
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass, 8 passed)
+  - Live RHOSLC check now returns:
+    - `window.week_zero_start = 2025-09-14T21:31:09+00:00`
+    - non-zero weeks at 0, 13, 16 under Bravo scope.
+
+Weekly run controls + platform weekly table support (this session, 2026-02-11):
+- File: `trr_backend/repositories/social_season_analytics.py`
+- Changes:
+  - Added `weekly_platform_posts` to analytics response:
+    - per-week post counts split by `instagram/youtube/tiktok/twitter` plus `total_posts`.
+  - Added Bravo-scope account/channel filtering in analytics row queries (`source_scope='bravo'`):
+    - Instagram/TikTok/Twitter restricted to Bravo accounts (`bravotv`/`bravo`).
+    - YouTube restricted to Bravo channel title/source account (`bravo`/`bravotv`).
+  - Maintains Week 0 variable window and episode-bounded weekly windows from prior update.
+- Validation:
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - Live run: week-scoped + platform-scoped ingest confirmed with explicit date_start/date_end in saved scrape_job config.
+
+Pre-Season + 8pm episode boundary update (this session, 2026-02-11):
+- File: `trr_backend/repositories/social_season_analytics.py`
+- Changes:
+  - Week 0 is now labeled `Pre-Season` in analytics output.
+  - Episode week boundaries now switch at `20:00 America/New_York` on episode air dates (instead of midnight).
+  - Added optional season-target config overrides for Week 0 start:
+    - `config.preseason_start`
+    - `config.preseason_start_at`
+    - `config.week_zero_start`
+  - Week 0 start resolution order:
+    1. season target config override,
+    2. Bravo show snapshot season videos,
+    3. season social rows trailer markers,
+    4. fallback.
+- Operational data update:
+  - Persisted RHOSLC S6 Bravo season targets and set `config.preseason_start = 2025-08-14T00:00:00-04:00` for all four platforms.
+- Validation:
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - Live RHOSLC check now returns:
+    - Week 0 (`Pre-Season`) ET window: `2025-08-14 00:00` -> `2025-09-16 19:59:59.999999`
+    - Week 1 start ET: `2025-09-16 20:00`.
+
+RHOSLC term-match ingest criteria update (this session, 2026-02-11):
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `trr_backend/socials/twitter/scraper.py`
+  - `tests/repositories/test_social_season_analytics.py`
+- Changes:
+  - Added canonical Bravo term matching helpers so ingest can match caption/text on any of:
+    - `Salt Lake City`
+    - `RHOSLC`
+    - `#RHOSLC`
+  - Updated default Bravo season targets to include RHOSLC aliases in target keywords/hashtags (instead of only full show-name slug).
+  - Instagram/TikTok ingest now filters posts with OR semantics across keywords + hashtags via caption/description text matching.
+  - YouTube ingest now enforces the same term matching before persistence (title/description text).
+  - Twitter ingest now:
+    - builds advanced query as `from:{account}` + OR-term clause,
+    - supports advanced query passthrough in scraper query builder,
+    - applies final text-based term guard before persistence.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py trr_backend/socials/twitter/scraper.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass, 10 passed)
+- Note:
+  - Ingest now merges season-target terms with show-derived fallback aliases at runtime, so previously saved targets still get RHOSLC/Salt Lake City matching without a manual target reset.
+
+Bravo profile import semantics for season promos (this session, 2026-02-11):
+- File: `api/routers/admin_show_bravo.py`
+- Changes:
+  - Added `_resolve_season_id(show_id, season_number)` guard to validate/resolve season before commit import.
+  - `commit_bravo_import` now resolves requested `season_number` and returns `404` if season is missing for the show.
+  - `_import_bravo_person_image` now supports season-scoped import and maps Bravo profile hero images to:
+    - `kind="promo"`,
+    - `context_section="bravo_profile"`,
+    - `context_type="profile"`,
+    - `asset_name="Bravo profile image"`.
+  - For season-scoped imports, hero images are imported as `entity_type="season"` with `person_ids` attached so person-gallery links are also created by existing import logic.
+- Validation:
+  - `pytest -q tests/api/routers/test_admin_show_bravo.py -q` (pass).
+
+Bravo profile social links -> people external_ids normalization (this session, 2026-02-11):
+- File: `api/routers/admin_show_bravo.py`
+- Changes:
+  - Expanded social-link merge logic so Bravo profile socials are normalized into canonical person external ID keys.
+  - Incoming social values now hydrate both legacy and canonical keys for compatibility:
+    - `instagram` + `instagram_id` (+ `instagram_url`)
+    - `twitter` + `twitter_id` (+ `twitter_url`)
+    - `facebook` + `facebook_id` (+ `facebook_url`)
+    - `tiktok` + `tiktok_id` (+ `tiktok_url`)
+    - `youtube` + `youtube_id` (+ `youtube_url`)
+  - Added URL/handle normalization and non-overwrite behavior that respects existing values.
+- Tests:
+  - Updated `tests/api/routers/test_admin_show_bravo.py` to assert canonical social key hydration and URL normalization.
+- Validation:
+  - `pytest -q tests/api/routers/test_admin_show_bravo.py -q` (pass)
+  - `python -m py_compile api/routers/admin_show_bravo.py` (pass)
+
+RHOSLC S6 Bravo re-sync execution + social external ID backfill (this session, 2026-02-11):
+- Runtime action executed against backend admin endpoint:
+  - `POST /api/v1/admin/shows/7782652f-783a-488b-8860-41b97de32e75/import-bravo/commit` with `season_number=6`.
+- Commit result summary:
+  - `people_updated=8`
+  - `unmatched_people=0`
+  - `person_snapshots=8`
+  - `imported_person_images=0`, `skipped_person_images=8`
+- Social external IDs outcome after sync:
+  - RHOSLC S6 cast with social IDs on `core.people.external_ids`: 5 members
+  - Handles now visible for Instagram/Twitter where present.
+
+YouTube generic placeholder guard (this session, 2026-02-11):
+- Files:
+  - `api/routers/admin_show_bravo.py`
+  - `tests/api/routers/test_admin_show_bravo.py`
+- Changes:
+  - Prevented generic YouTube placeholders (`user`, `channel`, `c`) from being written as person external IDs.
+  - Added regression test for skipping generic YouTube placeholder URLs.
+- One-time data cleanup executed:
+  - Removed `youtube`/`youtube_id`/`youtube_url` keys for RHOSLC S6 cast rows where value was generic placeholder.
+  - Rows cleaned: 8.
+- Validation:
+  - `pytest -q tests/api/routers/test_admin_show_bravo.py -q` (pass)
+  - `python -m py_compile api/routers/admin_show_bravo.py` (pass)

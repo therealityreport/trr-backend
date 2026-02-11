@@ -17,10 +17,12 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.auth import AdminUser
+from api.deps import SupabaseAdminClient
 
 logger = logging.getLogger(__name__)
 
@@ -729,3 +731,231 @@ async def scrape_youtube(
             filters_applied={},
             error=str(e),
         )
+
+
+# ---------------------------------------------------------------------------
+# Season social analytics (Bravo-first)
+# ---------------------------------------------------------------------------
+
+
+class SeasonSocialTargetInput(BaseModel):
+    platform: Literal["instagram", "tiktok", "twitter", "youtube", "reddit"]
+    accounts: list[str] = Field(default_factory=list)
+    hashtags: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    timezone: str = Field(default="America/New_York")
+    is_active: bool = Field(default=True)
+    config: dict = Field(default_factory=dict)
+
+
+class SeasonSocialTargetsPutRequest(BaseModel):
+    source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
+    targets: list[SeasonSocialTargetInput]
+
+
+class SeasonSocialIngestRequest(BaseModel):
+    source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
+    platforms: list[Literal["instagram", "tiktok", "twitter", "youtube"]] | None = Field(default=None)
+    max_posts_per_target: int = Field(default=25, ge=1, le=250)
+    max_comments_per_post: int = Field(default=100, ge=1, le=2000)
+    fetch_replies: bool = Field(default=True)
+    date_start: datetime | None = None
+    date_end: datetime | None = None
+
+
+@router.get("/seasons/{season_id}/targets")
+async def get_season_targets(
+    season_id: UUID,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import get_targets
+
+    try:
+        return get_targets(str(season_id), source_scope=source_scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read season social targets: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/seasons/{season_id}/targets")
+async def put_season_targets(
+    season_id: UUID,
+    payload: SeasonSocialTargetsPutRequest,
+    user: AdminUser,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import put_targets
+
+    try:
+        rows = [target.model_dump() for target in payload.targets]
+        return put_targets(
+            str(season_id),
+            source_scope=payload.source_scope,
+            targets=rows,
+            updated_by=user.get("email"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to write season social targets: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/seasons/{season_id}/ingest")
+async def ingest_season_social(
+    season_id: UUID,
+    payload: SeasonSocialIngestRequest,
+    db: SupabaseAdminClient = None,
+    user: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import ingest_season
+
+    try:
+        return ingest_season(
+            db,
+            str(season_id),
+            platforms=payload.platforms,
+            source_scope=payload.source_scope,
+            max_posts_per_target=payload.max_posts_per_target,
+            max_comments_per_post=payload.max_comments_per_post,
+            fetch_replies=payload.fetch_replies,
+            date_start=payload.date_start,
+            date_end=payload.date_end,
+            initiated_by=user.get("email"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Social ingest failed: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/seasons/{season_id}/ingest/jobs")
+async def get_season_ingest_jobs(
+    season_id: UUID,
+    limit: int = Query(default=50, ge=1, le=250),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import list_jobs
+
+    try:
+        jobs = list_jobs(str(season_id), limit=limit)
+        return {"season_id": str(season_id), "jobs": jobs}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to list social jobs: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/seasons/{season_id}/analytics")
+async def get_season_analytics(
+    season_id: UUID,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    timezone: str = Query(default="America/New_York"),
+    week: int | None = Query(default=None, ge=0, le=200),
+    platforms: str | None = Query(default=None, description="Comma-separated platform list"),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import get_analytics
+
+    parsed_platforms = None
+    if platforms and platforms.strip():
+        parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
+
+    try:
+        return get_analytics(
+            str(season_id),
+            platforms=parsed_platforms,
+            timezone=timezone,
+            week=week,
+            source_scope=source_scope,
+            include_rows=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to compute social analytics: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/seasons/{season_id}/analytics/export.csv")
+async def export_season_analytics_csv(
+    season_id: UUID,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    timezone: str = Query(default="America/New_York"),
+    week: int | None = Query(default=None, ge=0, le=200),
+    platforms: str | None = Query(default=None),
+    _: AdminUser = None,
+) -> Response:
+    from trr_backend.repositories.social_season_analytics import build_csv, get_analytics
+
+    parsed_platforms = None
+    if platforms and platforms.strip():
+        parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
+    try:
+        snapshot = get_analytics(
+            str(season_id),
+            platforms=parsed_platforms,
+            timezone=timezone,
+            week=week,
+            source_scope=source_scope,
+            include_rows=True,
+        )
+        csv_text = build_csv(snapshot)
+        filename = f"social_report_{season_id}_{datetime.now().strftime('%Y%m%d')}.csv"
+        return Response(
+            content=csv_text,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to export social CSV: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/seasons/{season_id}/analytics/export.pdf")
+async def export_season_analytics_pdf(
+    season_id: UUID,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    timezone: str = Query(default="America/New_York"),
+    week: int | None = Query(default=None, ge=0, le=200),
+    platforms: str | None = Query(default=None),
+    _: AdminUser = None,
+) -> Response:
+    from trr_backend.repositories.social_season_analytics import (
+        build_pdf,
+        get_analytics,
+        pdf_filename,
+    )
+
+    parsed_platforms = None
+    if platforms and platforms.strip():
+        parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
+    try:
+        snapshot = get_analytics(
+            str(season_id),
+            platforms=parsed_platforms,
+            timezone=timezone,
+            week=week,
+            source_scope=source_scope,
+            include_rows=False,
+        )
+        pdf_bytes = build_pdf(snapshot)
+        summary = snapshot.get("summary") or {}
+        filename = pdf_filename(
+            str(summary.get("show_id") or "show"),
+            int(summary.get("season_number") or 0),
+        )
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to export social PDF: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

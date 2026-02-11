@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
+from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -129,6 +132,47 @@ def _get_person_details(db: SupabaseAdminClient, person_id: str) -> dict | None:
     if hasattr(response, "error") and response.error:
         raise HTTPException(status_code=502, detail="Database error")
     return response.data[0] if response.data else None
+
+
+def _get_show_name(db: SupabaseAdminClient, show_id: UUID | None) -> str | None:
+    if show_id is None:
+        return None
+    response = (
+        db.schema("core")
+        .table("shows")
+        .select("name")
+        .eq("id", str(show_id))
+        .limit(1)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        return None
+    if not response.data:
+        return None
+    name = response.data[0].get("name")
+    return str(name).strip() if isinstance(name, str) and name.strip() else None
+
+
+def _is_real_housewives_show(show_name: str | None) -> bool:
+    if not isinstance(show_name, str):
+        return False
+    normalized = show_name.strip().lower()
+    return bool(normalized) and "real housewives" in normalized
+
+
+def _apply_show_source_policy(
+    db: SupabaseAdminClient,
+    show_id: UUID | None,
+    sources: list[SourceType],
+) -> tuple[list[SourceType], bool]:
+    show_name = _get_show_name(db, show_id)
+    if show_name is None or _is_real_housewives_show(show_name):
+        return sources, False
+
+    blocked = {"fandom", "fandom-gallery"}
+    filtered_sources = [source for source in sources if source not in blocked]
+    fandom_skipped = len(filtered_sources) != len(sources)
+    return filtered_sources, fandom_skipped
 
 
 def _extract_imdb_id(external_ids: dict | None) -> str | None:
@@ -369,9 +413,7 @@ def _recenter_person_gallery_images(
         cast_query = (
             db.schema("core")
             .table("cast_photos")
-            .select(
-                "id, hosted_url, url, image_url, thumb_url, source_page_url, source, metadata"
-            )
+            .select("id, hosted_url, url, image_url, thumb_url, source_page_url, source, metadata")
             .eq("person_id", person_id)
             .in_("source", candidate_sources)
         )
@@ -442,9 +484,9 @@ def _recenter_person_gallery_images(
                 if entry["origin"] == "cast_photos":
                     metadata = dict(entry["metadata"] or {})
                     metadata["thumbnail_crop"] = crop_payload
-                    db.schema("core").table("cast_photos").update(
-                        {"metadata": metadata}
-                    ).eq("id", entry["id"]).execute()
+                    db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
+                        "id", entry["id"]
+                    ).execute()
                 else:
                     context = dict(entry["context"] or {})
                     context["thumbnail_crop"] = crop_payload
@@ -638,13 +680,14 @@ def _auto_count_cast_photos(
                     if not (isinstance(existing_crop, dict) and existing_crop.get("mode") == "manual"):
                         existing_meta["thumbnail_crop"] = crop_payload
                         try:
-                            db.schema("core").table("cast_photos").update(
-                                {"metadata": existing_meta}
-                            ).eq("id", str(row["id"])).execute()
+                            db.schema("core").table("cast_photos").update({"metadata": existing_meta}).eq(
+                                "id", str(row["id"])
+                            ).execute()
                         except Exception as crop_exc:
                             logger.warning(
                                 "Failed to store face centroid for %s: %s",
-                                row.get("id"), crop_exc,
+                                row.get("id"),
+                                crop_exc,
                             )
                 auto_counts_succeeded += 1
             except ScreenalyticsClientError as exc:
@@ -869,6 +912,65 @@ def _refresh_tmdb_profile(
     upsert_cast_tmdb(db, person_full.to_cast_tmdb_row(person_id))
 
 
+def _normalize_name_for_match(value: str | None) -> str:
+    if not value:
+        return ""
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"\(.*?\)", " ", text)
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-zA-Z0-9]+", " ", text)
+    return " ".join(text.split()).strip().lower()
+
+
+def _names_match(expected: str | None, candidate: str | None) -> bool:
+    expected_norm = _normalize_name_for_match(expected)
+    candidate_norm = _normalize_name_for_match(candidate)
+    if not expected_norm or not candidate_norm:
+        return False
+    if expected_norm == candidate_norm:
+        return True
+    if expected_norm in candidate_norm or candidate_norm in expected_norm:
+        return True
+    expected_tokens = expected_norm.split()
+    candidate_tokens = candidate_norm.split()
+    if not expected_tokens or not candidate_tokens:
+        return False
+    if expected_tokens[-1] == candidate_tokens[-1]:
+        return True
+    return bool(set(expected_tokens) & set(candidate_tokens))
+
+
+def _name_from_fandom_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    path = parsed.path or ""
+    if "/wiki/" not in path:
+        return None
+    slug = path.split("/wiki/", 1)[1]
+    slug = slug.split("/", 1)[0]
+    slug = unquote(slug)
+    slug = slug.replace("_", " ")
+    if slug.lower().endswith(" gallery"):
+        slug = slug[: -len(" gallery")]
+    return slug.strip() or None
+
+
+def _fandom_profile_matches_person_name(
+    expected_name: str,
+    cast_fandom: dict[str, Any],
+    *,
+    page_url: str | None = None,
+) -> bool:
+    candidates = [
+        cast_fandom.get("full_name"),
+        cast_fandom.get("page_title"),
+        _name_from_fandom_url(page_url),
+    ]
+    return any(_names_match(expected_name, cand if isinstance(cand, str) else None) for cand in candidates)
+
+
 def _refresh_fandom_profile(
     db: SupabaseAdminClient,
     person_id: str,
@@ -890,11 +992,15 @@ def _refresh_fandom_profile(
         candidates.append(fallback_url)
 
     for url in candidates:
+        if not _names_match(person_name, _name_from_fandom_url(url)):
+            continue
         html, final_url = fetch_fandom_person_html(url)
         if not html:
             continue
         cast_fandom, _photos = parse_fandom_person_html(html, source_url=final_url)
         if not isinstance(cast_fandom, dict) or not cast_fandom:
+            continue
+        if not _fandom_profile_matches_person_name(person_name, cast_fandom, page_url=final_url):
             continue
         cast_fandom = dict(cast_fandom)
         cast_fandom["person_id"] = person_id
@@ -1093,8 +1199,11 @@ def refresh_person_images(
     imdb_person_id = _extract_imdb_id(external_ids)
     tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
     person_name = person.get("full_name")
-    sources = request.sources or ALL_SOURCES
+    requested_sources = request.sources or ALL_SOURCES
+    sources, fandom_skipped = _apply_show_source_policy(db, request.show_id, list(requested_sources))
     errors: list[str] = []
+    if fandom_skipped:
+        errors.append("Fandom sources skipped for non-Real Housewives show context.")
 
     # 1.5 Refresh person profiles (best-effort)
     try:
@@ -1102,11 +1211,12 @@ def refresh_person_images(
     except Exception as exc:  # noqa: BLE001
         logger.warning("TMDb profile refresh failed for %s: %s", person_id, exc)
         errors.append(f"TMDb profile: {exc}")
-    try:
-        _refresh_fandom_profile(db, person_id_str, person_name=person_name)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Fandom profile refresh failed for %s: %s", person_id, exc)
-        errors.append(f"Fandom profile: {exc}")
+    if "fandom" in sources or "fandom-gallery" in sources:
+        try:
+            _refresh_fandom_profile(db, person_id_str, person_name=person_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Fandom profile refresh failed for %s: %s", person_id, exc)
+            errors.append(f"Fandom profile: {exc}")
 
     # 2. Fetch photos
     try:
@@ -1325,7 +1435,12 @@ async def refresh_person_images_stream(
             imdb_person_id = _extract_imdb_id(external_ids)
             tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
             person_name = person.get("full_name")
-            sources = request.sources or ALL_SOURCES
+            requested_sources = request.sources or ALL_SOURCES
+            sources, fandom_skipped = _apply_show_source_policy(
+                db, request.show_id, list(requested_sources)
+            )
+            if fandom_skipped:
+                errors.append("Fandom sources skipped for non-Real Housewives show context.")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Refresh stream setup failed for %s: %s", person_id_str, exc)
             yield error_event(stage="setup", error="Failed to initialize refresh", detail=str(exc))
@@ -1338,11 +1453,19 @@ async def refresh_person_images_stream(
         except Exception as exc:  # noqa: BLE001
             errors.append(f"TMDb profile: {exc}")
 
-        yield progress({"stage": "fandom_profile", "message": "Syncing Fandom profile..."})
-        try:
-            _refresh_fandom_profile(db, person_id_str, person_name=person_name)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"Fandom profile: {exc}")
+        if "fandom" in sources or "fandom-gallery" in sources:
+            yield progress({"stage": "fandom_profile", "message": "Syncing Fandom profile..."})
+            try:
+                _refresh_fandom_profile(db, person_id_str, person_name=person_name)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Fandom profile: {exc}")
+        else:
+            yield progress(
+                {
+                    "stage": "fandom_profile",
+                    "message": "Skipping Fandom profile (non-Real Housewives show context).",
+                }
+            )
 
         # 2. Fetch per-source so the UI can show live stage updates.
         enabled = set(sources)
@@ -1685,9 +1808,9 @@ async def refresh_person_images_stream(
                                 metadata = dict(entry["row"].get("metadata") or {})
                                 if not _is_manual_thumbnail_crop(metadata.get("thumbnail_crop")):
                                     metadata["thumbnail_crop"] = crop_payload
-                                    db.schema("core").table("cast_photos").update(
-                                        {"metadata": metadata}
-                                    ).eq("id", entry["id"]).execute()
+                                    db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
+                                        "id", entry["id"]
+                                    ).execute()
                         else:
                             context = dict(entry.get("context") or {})
                             context["people_count"] = result.people_count
@@ -1924,9 +2047,9 @@ async def refresh_person_images_stream(
                         if entry["origin"] == "cast_photos":
                             metadata = dict(entry["metadata"] or {})
                             metadata["thumbnail_crop"] = crop_payload
-                            db.schema("core").table("cast_photos").update(
-                                {"metadata": metadata}
-                            ).eq("id", entry["id"]).execute()
+                            db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
+                                "id", entry["id"]
+                            ).execute()
                         else:
                             context = dict(entry["context"] or {})
                             context["thumbnail_crop"] = crop_payload
@@ -2057,12 +2180,14 @@ async def reprocess_person_images_stream(
         auto_counts_succeeded = sc_cast + sc_media
         auto_counts_failed = fc_cast + fc_media
 
-        yield progress({
-            "stage": "auto_count",
-            "message": f"Counted {auto_counts_succeeded} images ({auto_counts_failed} failed).",
-            "current": auto_counts_attempted,
-            "total": auto_counts_attempted,
-        })
+        yield progress(
+            {
+                "stage": "auto_count",
+                "message": f"Counted {auto_counts_succeeded} images ({auto_counts_failed} failed).",
+                "current": auto_counts_attempted,
+                "total": auto_counts_attempted,
+            }
+        )
 
         # ---------- Word ID / text overlay (cast_photos + media_links) ----------
         yield progress(
@@ -2090,15 +2215,18 @@ async def reprocess_person_images_stream(
         text_overlay_unknown = tu_cast + tu_media
         text_overlay_failed = tf_cast + tf_media
 
-        yield progress({
-            "stage": "word_id",
-            "message": (
-                "Text detection done "
-                f"({text_overlay_succeeded} succeeded, {text_overlay_unknown} unknown, {text_overlay_failed} failed)."
-            ),
-            "current": text_overlay_attempted,
-            "total": text_overlay_attempted,
-        })
+        yield progress(
+            {
+                "stage": "word_id",
+                "message": (
+                    "Text detection done "
+                    f"({text_overlay_succeeded} succeeded, {text_overlay_unknown} "
+                    f"unknown, {text_overlay_failed} failed)."
+                ),
+                "current": text_overlay_attempted,
+                "total": text_overlay_attempted,
+            }
+        )
 
         # ---------- Centering / cropping ----------
         yield progress(
@@ -2111,15 +2239,20 @@ async def reprocess_person_images_stream(
         )
 
         c_attempted, c_succeeded, c_failed, c_skipped = _recenter_person_gallery_images(
-            db, person_id_str, sources, force=True,
+            db,
+            person_id_str,
+            sources,
+            force=True,
         )
 
-        yield progress({
-            "stage": "centering_cropping",
-            "message": f"Centered {c_succeeded} thumbnails ({c_failed} failed, {c_skipped} manual skipped).",
-            "current": c_attempted,
-            "total": c_attempted,
-        })
+        yield progress(
+            {
+                "stage": "centering_cropping",
+                "message": f"Centered {c_succeeded} thumbnails ({c_failed} failed, {c_skipped} manual skipped).",
+                "current": c_attempted,
+                "total": c_attempted,
+            }
+        )
 
         # ---------- Complete ----------
         complete_data = {
