@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import requests
 
-from trr_backend.media.s3_mirror import normalize_fandom_file_url
+from trr_backend.media.s3_mirror import get_s3_bucket, get_s3_client, normalize_fandom_file_url
 
 
 class TextOverlayDetectionNotConfiguredError(RuntimeError):
@@ -37,6 +37,11 @@ class TextOverlayDatabaseError(TextOverlayDetectionError):
 
 
 TEXT_OVERLAY_PROMPT_VERSION = "v1"
+TEXT_OVERLAY_REASON_DOWNLOAD_FAILED = "download_failed"
+TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED = "gemini_request_failed"
+TEXT_OVERLAY_REASON_GEMINI_NO_TEXT = "gemini_no_text"
+TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED = "gemini_json_parse_failed"
+TEXT_OVERLAY_REASON_DB_UPDATE_FAILED = "db_update_failed"
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,7 @@ class TextOverlayResult:
     status: Literal["detected", "unknown"] = "detected"
     error: str | None = None
     finish_reason: str | None = None
+    reason_code: str | None = None
 
     def to_metadata_patch(self) -> dict[str, Any]:
         return {
@@ -62,6 +68,7 @@ class TextOverlayResult:
             "text_overlay_status": self.status,
             "text_overlay_error": self.error,
             "text_overlay_finish_reason": self.finish_reason,
+            "text_overlay_error_code": self.reason_code,
         }
 
 
@@ -71,6 +78,7 @@ def _build_unknown_text_overlay_result(
     model: str | None,
     error: str,
     finish_reason: str | None = None,
+    reason_code: str | None = None,
 ) -> TextOverlayResult:
     return TextOverlayResult(
         has_text_overlay=None,
@@ -82,6 +90,7 @@ def _build_unknown_text_overlay_result(
         status="unknown",
         error=error,
         finish_reason=finish_reason,
+        reason_code=reason_code,
     )
 
 
@@ -334,6 +343,53 @@ def _download_image_bytes(url: str, *, referer: str | None) -> tuple[bytes, str 
         raise TextOverlayTargetFetchError(f"Failed to download image: {exc}") from exc
 
 
+def _download_image_bytes_from_hosted_key(hosted_key: str) -> tuple[bytes, str | None]:
+    key = str(hosted_key or "").strip().lstrip("/")
+    if not key:
+        raise TextOverlayTargetFetchError("Hosted key is missing")
+    try:
+        client = get_s3_client()
+        bucket = get_s3_bucket()
+        response = client.get_object(Bucket=bucket, Key=key)
+        body = response.get("Body")
+        if body is None:
+            raise TextOverlayTargetFetchError("S3 response body missing")
+        data = body.read()
+        content_type = (response.get("ContentType") or "").split(";", 1)[0].strip().lower() or None
+        return data, content_type
+    except Exception as exc:  # noqa: BLE001
+        raise TextOverlayTargetFetchError(f"Failed to download hosted S3 object: {exc}") from exc
+
+
+def _download_detection_target_bytes(
+    *,
+    urls: list[str],
+    referer: str | None,
+    hosted_key: str | None,
+) -> tuple[bytes, str | None]:
+    image_bytes: bytes | None = None
+    content_type: str | None = None
+    last_error: TextOverlayTargetFetchError | None = None
+
+    for url in urls:
+        try:
+            image_bytes, content_type = _download_image_bytes(str(url), referer=referer)
+            break
+        except TextOverlayTargetFetchError as exc:
+            last_error = exc
+
+    if image_bytes is None and hosted_key:
+        try:
+            image_bytes, content_type = _download_image_bytes_from_hosted_key(hosted_key)
+        except TextOverlayTargetFetchError as exc:
+            last_error = exc
+
+    if image_bytes is None:
+        raise last_error or TextOverlayTargetFetchError("Failed to download image")
+
+    return image_bytes, content_type
+
+
 def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | None) -> TextOverlayResult:
     api_key = _get_gemini_api_key()
     if not api_key:
@@ -383,7 +439,12 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
     try:
         text, finish_reason = _request_model_text(structured_json=False)
     except Exception as exc:  # noqa: BLE001
-        raise TextOverlayDetectionError(f"Gemini request failed: {exc}") from exc
+        return _build_unknown_text_overlay_result(
+            detector="gemini",
+            model=model_name,
+            error=f"Gemini request failed: {exc}",
+            reason_code=TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED,
+        )
 
     used_structured_retry = False
     if not text:
@@ -393,7 +454,13 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
             text, retry_finish_reason = _request_model_text(structured_json=True)
             used_structured_retry = True
         except Exception as exc:  # noqa: BLE001
-            raise TextOverlayDetectionError(f"Gemini retry request failed: {exc}") from exc
+            return _build_unknown_text_overlay_result(
+                detector="gemini",
+                model=model_name,
+                error=f"Gemini retry request failed: {exc}",
+                finish_reason=finish_reason,
+                reason_code=TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED,
+            )
 
         finish_reason = retry_finish_reason or finish_reason
 
@@ -404,19 +471,33 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
             model=model_name,
             error=f"Gemini returned no candidate text content{suffix}",
             finish_reason=finish_reason,
+            reason_code=TEXT_OVERLAY_REASON_GEMINI_NO_TEXT,
         )
 
     try:
         parsed = _extract_first_json_object(text)
     except TextOverlayDetectionError as parse_exc:
         if used_structured_retry:
-            raise
+            return _build_unknown_text_overlay_result(
+                detector="gemini",
+                model=model_name,
+                error=f"Failed to parse Gemini response as JSON after retry: {parse_exc}",
+                finish_reason=finish_reason,
+                reason_code=TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED,
+            )
         try:
             retry_text, retry_finish_reason = _request_model_text(structured_json=True)
         except Exception as exc:  # noqa: BLE001
-            raise TextOverlayDetectionError(
-                f"Failed to parse Gemini response as JSON and retry request failed: {parse_exc}"
-            ) from exc
+            return _build_unknown_text_overlay_result(
+                detector="gemini",
+                model=model_name,
+                error=(
+                    "Failed to parse Gemini response as JSON and retry request failed: "
+                    f"initial={parse_exc}; retry={exc}"
+                ),
+                finish_reason=finish_reason,
+                reason_code=TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED,
+            )
         finish_reason = retry_finish_reason or finish_reason
         if not retry_text:
             return _build_unknown_text_overlay_result(
@@ -424,6 +505,7 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
                 model=model_name,
                 error=f"Failed to parse Gemini response as JSON and retry returned no text: {parse_exc}",
                 finish_reason=finish_reason,
+                reason_code=TEXT_OVERLAY_REASON_GEMINI_NO_TEXT,
             )
         try:
             parsed = _extract_first_json_object(retry_text)
@@ -436,6 +518,7 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
                     f"initial={parse_exc}; retry={retry_parse_exc}"
                 ),
                 finish_reason=finish_reason,
+                reason_code=TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED,
             )
 
     has_text_overlay = _as_bool(parsed.get("has_text_overlay"))
@@ -445,6 +528,7 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
             model=model_name,
             error="Gemini response missing has_text_overlay boolean",
             finish_reason=finish_reason,
+            reason_code=TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED,
         )
 
     confidence = _as_float_0_1(parsed.get("confidence"))
@@ -486,6 +570,8 @@ def _extract_existing_fields(metadata: dict[str, Any]) -> TextOverlayResult | No
     )
     stored_error = metadata.get("text_overlay_error")
     stored_error_str = stored_error.strip() if isinstance(stored_error, str) and stored_error.strip() else None
+    reason_code = metadata.get("text_overlay_error_code")
+    reason_code_str = reason_code.strip() if isinstance(reason_code, str) and reason_code.strip() else None
     finish_reason = metadata.get("text_overlay_finish_reason")
     finish_reason_str = (
         finish_reason.strip()
@@ -504,7 +590,23 @@ def _extract_existing_fields(metadata: dict[str, Any]) -> TextOverlayResult | No
         status=normalized_status,
         error=stored_error_str,
         finish_reason=finish_reason_str,
+        reason_code=reason_code_str,
     )
+
+
+def classify_text_overlay_failure_reason(error: Exception) -> str:
+    if isinstance(error, TextOverlayDatabaseError):
+        return TEXT_OVERLAY_REASON_DB_UPDATE_FAILED
+    if isinstance(error, TextOverlayTargetFetchError):
+        return TEXT_OVERLAY_REASON_DOWNLOAD_FAILED
+    message = str(error).lower()
+    if "no candidate text content" in message:
+        return TEXT_OVERLAY_REASON_GEMINI_NO_TEXT
+    if "parse gemini response as json" in message or "json" in message:
+        return TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED
+    if "gemini request failed" in message or "gemini retry request failed" in message:
+        return TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED
+    return TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED
 
 
 def detect_and_update_media_asset_text_overlay(db: Any, asset_id: str, *, force: bool = False) -> TextOverlayResult:
@@ -517,7 +619,7 @@ def detect_and_update_media_asset_text_overlay(db: Any, asset_id: str, *, force:
     resp = (
         db.schema("core")
         .table("media_assets")
-        .select("id, hosted_url, source_url, metadata")
+        .select("id, hosted_url, hosted_key, source_url, metadata")
         .eq("id", asset_id)
         .limit(1)
         .execute()
@@ -543,17 +645,11 @@ def detect_and_update_media_asset_text_overlay(db: Any, asset_id: str, *, force:
             metadata.get("source_page_url") if isinstance(metadata.get("source_page_url"), str) else None
         )
 
-    image_bytes: bytes | None = None
-    content_type: str | None = None
-    last_error: TextOverlayTargetFetchError | None = None
-    for url in urls:
-        try:
-            image_bytes, content_type = _download_image_bytes(str(url), referer=referer)
-            break
-        except TextOverlayTargetFetchError as exc:
-            last_error = exc
-    if image_bytes is None:
-        raise last_error or TextOverlayTargetFetchError("Failed to download image")
+    image_bytes, content_type = _download_detection_target_bytes(
+        urls=urls,
+        referer=referer,
+        hosted_key=row.get("hosted_key") if isinstance(row.get("hosted_key"), str) else None,
+    )
 
     result = _detect_text_overlay_with_gemini(image_bytes, content_type=content_type)
 
@@ -577,7 +673,7 @@ def detect_and_update_cast_photo_text_overlay(db: Any, photo_id: str, *, force: 
     resp = (
         db.schema("core")
         .table("cast_photos")
-        .select("id, hosted_url, url, image_url, thumb_url, source, source_page_url, metadata")
+        .select("id, hosted_url, hosted_key, url, image_url, thumb_url, source, source_page_url, metadata")
         .eq("id", photo_id)
         .limit(1)
         .execute()
@@ -598,17 +694,11 @@ def detect_and_update_cast_photo_text_overlay(db: Any, photo_id: str, *, force: 
         raise TextOverlayTargetInvalidError("Cast photo has no valid image URL to analyze")
 
     referer = row.get("source_page_url") if isinstance(row.get("source_page_url"), str) else None
-    image_bytes: bytes | None = None
-    content_type: str | None = None
-    last_error: TextOverlayTargetFetchError | None = None
-    for url in urls:
-        try:
-            image_bytes, content_type = _download_image_bytes(str(url), referer=referer)
-            break
-        except TextOverlayTargetFetchError as exc:
-            last_error = exc
-    if image_bytes is None:
-        raise last_error or TextOverlayTargetFetchError("Failed to download image")
+    image_bytes, content_type = _download_detection_target_bytes(
+        urls=urls,
+        referer=referer,
+        hosted_key=row.get("hosted_key") if isinstance(row.get("hosted_key"), str) else None,
+    )
 
     result = _detect_text_overlay_with_gemini(image_bytes, content_type=content_type)
 

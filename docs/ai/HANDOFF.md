@@ -281,3 +281,36 @@ Verification (this session):
 - `ruff check trr_backend/vision/text_overlay.py api/routers/admin_cast_photos.py api/routers/admin_media_assets.py tests/vision/test_text_overlay_fallback.py` (pass)
 - `pytest -q tests/vision/test_text_overlay_fallback.py tests/api/routers/test_admin_image_counts_fallback.py` (pass; 13 passed)
 - `python -m py_compile trr_backend/vision/text_overlay.py api/routers/admin_cast_photos.py api/routers/admin_media_assets.py` (pass)
+
+Refresh stream stability + text-overlay reasoned fallback (this session):
+- Extended refresh/reprocess summaries in `api/routers/admin_person_images.py`:
+  - Added `text_overlay_unknown`, `text_overlay_failure_reasons`
+  - Added metadata enrichment counters: `episode_metadata_tagged`, `show_context_tagged`, `metadata_enrichment_failed`
+  - Stream `complete` payload now includes `run_id` and new counters.
+- Added explicit metadata enrichment stage progress in refresh stream (`stage=metadata_enrichment`).
+- Standardized SSE error payload shape for person/reprocess stream setup errors:
+  - `{ run_id, stage, error, detail? }`.
+- Updated text-overlay batch helpers in `api/routers/admin_person_images.py`:
+  - `_detect_text_overlay_cast_photos` and `_detect_text_overlay_media_links` now return `(attempted, succeeded, unknown, failed)`
+  - Capture reason-bucket counts via `reason_counts` map.
+- Hardened Gemini text overlay pipeline in `trr_backend/vision/text_overlay.py`:
+  - Unknown outcomes now include `reason_code` persisted to metadata (`text_overlay_error_code`).
+  - Gemini request/no-text/JSON parse issues now persist `unknown` result instead of hard-failing after bytes are downloaded.
+  - Added hosted-key fallback download path: if URL fetch fails, attempt S3 object bytes via `hosted_key`.
+  - Added helper `classify_text_overlay_failure_reason(...)` for backend reason buckets.
+- Added response field passthrough for per-photo detection endpoints:
+  - `api/routers/admin_cast_photos.py`: `text_overlay_error_code`
+  - `api/routers/admin_media_assets.py`: `text_overlay_error_code`
+
+Tests and checks:
+- `ruff check api/routers/admin_person_images.py trr_backend/vision/text_overlay.py api/routers/admin_cast_photos.py api/routers/admin_media_assets.py tests/vision/test_text_overlay_fallback.py tests/api/routers/test_admin_person_images.py` (pass)
+- `pytest -q tests/vision/test_text_overlay_fallback.py tests/api/routers/test_admin_person_images.py` (pass; 26 passed)
+- `python -m py_compile api/routers/admin_person_images.py trr_backend/vision/text_overlay.py api/routers/admin_cast_photos.py api/routers/admin_media_assets.py` (pass)
+
+New/updated test coverage:
+- `tests/vision/test_text_overlay_fallback.py`
+  - reason code persisted for unknown results
+  - existing metadata reads persisted `text_overlay_error_code`
+  - hosted-key S3 fallback when URL download fails
+- `tests/api/routers/test_admin_person_images.py`
+  - refresh success payload now asserts presence of new counters/fields.

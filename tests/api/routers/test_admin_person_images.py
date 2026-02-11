@@ -149,6 +149,11 @@ class TestRefreshPersonImages:
         assert data["photos_fetched"] == 1
         assert data["photos_upserted"] == 1
         assert data["photos_mirrored"] == 1
+        assert data["text_overlay_unknown"] == 0
+        assert "text_overlay_failure_reasons" in data
+        assert "episode_metadata_tagged" in data
+        assert "show_context_tagged" in data
+        assert "metadata_enrichment_failed" in data
 
     def test_skip_mirror_option(self, client, monkeypatch):
         """skip_mirror=True should skip S3 mirroring."""
