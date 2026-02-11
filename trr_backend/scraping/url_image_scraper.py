@@ -33,6 +33,10 @@ _HEIGHT_PARAM_RE = re.compile(r"[?&]h=(\d+)", re.IGNORECASE)
 _RESIZE_RE = re.compile(r"/(\d+)x(\d+)/", re.IGNORECASE)
 _WP_RESIZE_RE = re.compile(r"-(\d+)x(\d+)\.", re.IGNORECASE)
 _EONLINE_RESIZE_RE = re.compile(r"/rs_(\d+)x(\d+)-", re.IGNORECASE)
+_MSN_ARTICLE_ID_RE = re.compile(r"/ar-([A-Za-z0-9]+)(?:[/?#]|$)")
+_MSN_LOCALE_RE = re.compile(r"^[a-z]{2}-[a-z]{2}$", re.IGNORECASE)
+_OFFICIAL_BIO_SUFFIX_RE = re.compile(r"[’']s\s+official\s+bio\b.*$", re.IGNORECASE)
+_OFFICIAL_BIO_PHRASE_RE = re.compile(r"\bofficial\s+bio\b.*$", re.IGNORECASE)
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -546,28 +550,355 @@ def _get_nearby_text(element) -> str | None:
     # Check for figcaption in parent figure
     parent = element.find_parent("figure")
     if parent:
+        sibling_context = _extract_sibling_context(parent)
         title_text = None
         title_tag = parent.find(["h1", "h2", "h3"])
         if title_tag:
-            title_text = title_tag.get_text(separator=" ", strip=True)
+            title_text = _normalize_heading_for_name(title_tag.get_text(separator=" ", strip=True))
 
         figcaption = parent.find("figcaption")
         if figcaption:
-            caption_text = figcaption.get_text(separator="\n", strip=True)
+            caption_text = _normalize_text(figcaption.get_text(separator="\n", strip=True))
             parts = [p for p in (title_text, caption_text) if p]
             combined = "\n".join(parts).strip()
+            if sibling_context and len(sibling_context) > len(combined) + 20:
+                return sibling_context[:max_len]
             return combined[:max_len] if combined else None
         if title_text:
+            if sibling_context and len(sibling_context) > len(title_text) + 20:
+                return sibling_context[:max_len]
             return title_text[:max_len]
+        if sibling_context:
+            return sibling_context[:max_len]
 
     # Check for nearby paragraph or span
     next_sibling = element.find_next_sibling()
     if next_sibling and next_sibling.name in ("p", "span", "div"):
-        text = next_sibling.get_text(separator="\n", strip=True)
-        if text and len(text) <= max_len:
-            return text
+        text = _normalize_text(next_sibling.get_text(separator="\n", strip=True))
+        if text:
+            # Prefer richer heading+bio context when available.
+            probe = element
+            for _ in range(8):
+                richer = _extract_sibling_context(probe)
+                if richer and len(richer) > len(text) + 20:
+                    return richer[:max_len]
+                probe = getattr(probe, "parent", None)
+                if probe is None or not getattr(probe, "name", None):
+                    break
+            if len(text) <= max_len:
+                return text
+
+    # Article body pattern: heading + image + 1-2 bio paragraphs (e.g. Bravo cast bios).
+    best_context: str | None = None
+    best_score = -1
+    probe = element
+    for _ in range(8):
+        context = _extract_sibling_context(probe)
+        if context:
+            score = len(context) + (200 if "\n" in context else 0)
+            if score > best_score:
+                best_score = score
+                best_context = context
+        probe = getattr(probe, "parent", None)
+        if probe is None or not getattr(probe, "name", None):
+            break
+
+    if best_context:
+        return best_context[:max_len]
 
     return None
+
+
+def _normalize_text(value: str | None) -> str:
+    """Collapse whitespace for stable context text."""
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _strip_html_text(value: str | None) -> str:
+    """Convert a tiny HTML snippet into plain text."""
+    return _normalize_text(BeautifulSoup(value or "", "html.parser").get_text(" ", strip=True))
+
+
+def _normalize_heading_for_name(value: str | None) -> str | None:
+    """Trim boilerplate from heading strings used as cast names."""
+    text = _normalize_text(value)
+    if not text:
+        return None
+
+    text = _OFFICIAL_BIO_SUFFIX_RE.sub("", text).strip(" \t\r\n-:")
+    text = _OFFICIAL_BIO_PHRASE_RE.sub("", text).strip(" \t\r\n-:")
+    return text[:200] if text else None
+
+
+def _extract_sibling_context(block) -> str | None:
+    """
+    Extract context from nearby siblings:
+    - nearest previous heading (name line)
+    - next 1-2 paragraphs (bio/caption lines)
+    """
+    heading_text: str | None = None
+
+    sibling = getattr(block, "previous_sibling", None)
+    scan_count = 0
+    while sibling is not None and scan_count < 12:
+        name = getattr(sibling, "name", None)
+        if name in ("h1", "h2", "h3"):
+            heading_text = _normalize_heading_for_name(sibling.get_text(separator=" ", strip=True))
+            break
+        if name in ("img", "picture", "figure"):
+            break
+
+        if name in ("div", "section", "article"):
+            nested_heading = sibling.find(["h1", "h2", "h3"])
+            if nested_heading:
+                heading_text = _normalize_heading_for_name(nested_heading.get_text(separator=" ", strip=True))
+                break
+
+        sibling = getattr(sibling, "previous_sibling", None)
+        scan_count += 1
+
+    paragraphs: list[str] = []
+    sibling = getattr(block, "next_sibling", None)
+    scan_count = 0
+    while sibling is not None and scan_count < 16:
+        name = getattr(sibling, "name", None)
+        if name in ("h1", "h2", "h3", "img", "picture", "figure"):
+            break
+
+        candidate_text = None
+        if name == "p":
+            candidate_text = sibling.get_text(separator=" ", strip=True)
+        elif name in ("div", "section", "article"):
+            nested_p = sibling.find("p")
+            if nested_p:
+                candidate_text = nested_p.get_text(separator=" ", strip=True)
+
+        text = _normalize_text(candidate_text)
+        if text and not text.lower().startswith("related:"):
+            paragraphs.append(text)
+            if len(paragraphs) >= 2:
+                break
+
+        sibling = getattr(sibling, "next_sibling", None)
+        scan_count += 1
+
+    if not heading_text and not paragraphs:
+        return None
+
+    parts = [heading_text] if heading_text else []
+    parts.extend(paragraphs)
+    return "\n".join([part for part in parts if part]).strip() or None
+
+
+def _is_domain(hostname: str, root: str) -> bool:
+    """True when hostname is exactly root or any subdomain of root."""
+    host = (hostname or "").split(":", 1)[0].lower()
+    root = root.lower()
+    return host == root or host.endswith(f".{root}")
+
+
+def _extract_msn_article_id(url: str) -> str | None:
+    """Extract MSN article id from paths like `/.../ar-AA1TfjXH`."""
+    parsed = urlparse(url)
+    path = parsed.path or ""
+    match = _MSN_ARTICLE_ID_RE.search(path)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _extract_msn_locale(url: str) -> str:
+    """Extract locale from MSN URL path, defaulting to en-us."""
+    parsed = urlparse(url)
+    parts = [p for p in (parsed.path or "").split("/") if p]
+    if parts and _MSN_LOCALE_RE.match(parts[0]):
+        return parts[0].lower()
+    return "en-us"
+
+
+def _safe_int(value: Any) -> int | None:
+    """Best-effort integer parsing."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+
+def _fetch_msn_detail_payload(url: str, *, timeout: float = 30.0) -> dict[str, Any] | None:
+    """
+    Fetch MSN article detail payload from assets API.
+
+    Returns None when URL doesn't contain a recognized article id.
+    Raises RequestException for network/http issues.
+    """
+    article_id = _extract_msn_article_id(url)
+    if not article_id:
+        return None
+
+    locale = _extract_msn_locale(url)
+    api_url = f"https://assets.msn.com/content/view/v2/Detail/{locale}/{article_id}"
+
+    headers = {
+        **_DEFAULT_HEADERS,
+        "accept": "application/json,text/plain,*/*",
+    }
+    response = requests.get(api_url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+
+    payload = response.json()
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _extract_msn_context_by_cms_id(body_html: str) -> dict[str, str]:
+    """Map MSN `cmsId` values to `Name\\nBio` context snippets."""
+    if not body_html:
+        return {}
+
+    soup = BeautifulSoup(body_html, "html.parser")
+    contexts: dict[str, str] = {}
+
+    for img in soup.find_all("img"):
+        cms_id = _normalize_text(img.get("data-document-id"))
+        if not cms_id:
+            continue
+
+        name: str | None = None
+        heading = img.find_previous(["h1", "h2", "h3"])
+        if heading:
+            name = _normalize_heading_for_name(heading.get_text(separator=" ", strip=True))
+
+        bio_lines: list[str] = []
+        sibling = img.next_sibling
+        scan_count = 0
+        while sibling is not None and scan_count < 20:
+            tag_name = getattr(sibling, "name", None)
+            if tag_name in ("h1", "h2", "h3", "img"):
+                break
+            if tag_name == "p":
+                text = _normalize_text(sibling.get_text(separator=" ", strip=True))
+                if text and not text.lower().startswith("related:"):
+                    bio_lines.append(text)
+                    if len(bio_lines) >= 2:
+                        break
+            sibling = sibling.next_sibling
+            scan_count += 1
+
+        parts: list[str] = []
+        if name:
+            parts.append(name)
+        parts.extend(bio_lines)
+        if parts:
+            contexts[cms_id] = "\n".join(parts)[:2000]
+
+    return contexts
+
+
+def _extract_msn_images_from_payload(
+    payload: dict[str, Any],
+    source_url: str,
+    *,
+    min_width: int,
+    limit: int,
+) -> list[ImageCandidate]:
+    """Build image candidates from MSN detail payload."""
+    resources_raw = payload.get("imageResources")
+    if not isinstance(resources_raw, list):
+        resources_raw = []
+
+    resources: list[dict[str, Any]] = [item for item in resources_raw if isinstance(item, dict)]
+    if not resources:
+        return []
+
+    body_html = payload.get("body")
+    context_by_cms = _extract_msn_context_by_cms_id(body_html if isinstance(body_html, str) else "")
+    fallback_context = "\n".join(
+        [text for text in (_strip_html_text(payload.get("title")), _strip_html_text(payload.get("abstract"))) if text]
+    )
+
+    # Keep best resource (largest width) per cmsId.
+    best_by_cms: dict[str, dict[str, Any]] = {}
+    for resource in resources:
+        cms_id = _normalize_text(str(resource.get("cmsId") or ""))
+        if not cms_id:
+            continue
+        width = _safe_int(resource.get("width")) or 0
+        existing = best_by_cms.get(cms_id)
+        existing_width = _safe_int(existing.get("width")) if isinstance(existing, dict) else 0
+        if not existing or width >= (existing_width or 0):
+            best_by_cms[cms_id] = resource
+
+    candidates: list[ImageCandidate] = []
+    seen_urls: set[str] = set()
+    used_cms_ids: set[str] = set()
+
+    def add_candidate(resource: dict[str, Any], cms_id: str | None) -> None:
+        if len(candidates) >= limit:
+            return
+
+        raw_url = resource.get("url")
+        best_url = _normalize_url(str(raw_url), source_url) if raw_url else None
+        if not best_url or _should_skip_url(best_url) or best_url in seen_urls:
+            return
+
+        width = _safe_int(resource.get("width"))
+        if width and width < min_width:
+            return
+
+        seen_urls.add(best_url)
+        if cms_id:
+            used_cms_ids.add(cms_id)
+
+        caption_text = _strip_html_text(resource.get("caption"))
+        title_text = _strip_html_text(resource.get("title"))
+        alt_text = (title_text or caption_text)[:200] if (title_text or caption_text) else None
+        context = context_by_cms.get(cms_id or "", None) or (fallback_context or None)
+
+        candidates.append(
+            ImageCandidate(
+                id=str(uuid.uuid4()),
+                original_url=best_url,
+                best_url=best_url,
+                width=width,
+                height=_safe_int(resource.get("height")),
+                alt_text=alt_text,
+                context=context,
+                thumbnail_url=best_url,
+                source_element="msn-api",
+            )
+        )
+
+    # Preserve in-article order first (matches cast order in announcement pages).
+    if isinstance(body_html, str) and body_html.strip():
+        body_soup = BeautifulSoup(body_html, "html.parser")
+        for img in body_soup.find_all("img"):
+            cms_id = _normalize_text(img.get("data-document-id"))
+            if not cms_id:
+                continue
+            resource = best_by_cms.get(cms_id)
+            if resource:
+                add_candidate(resource, cms_id)
+            if len(candidates) >= limit:
+                return candidates
+
+    # Add any additional resources not referenced in body order.
+    for resource in resources:
+        cms_id = _normalize_text(str(resource.get("cmsId") or "")) or None
+        if cms_id and cms_id in used_cms_ids:
+            continue
+        add_candidate(resource, cms_id)
+        if len(candidates) >= limit:
+            break
+
+    return candidates
 
 
 def _try_upgrade_wordpress_url(url: str) -> str:
@@ -868,6 +1199,32 @@ def scrape_url_for_images(
         html, page_title = fetch_page_html(url)
         page_published_at = extract_page_published_at(html)
         images = extract_images_from_html(html, url, min_width=min_width, limit=limit)
+
+        # MSN article pages render content client-side; use their detail API payload
+        # to recover cast photos + bios in preview/import flows.
+        if _is_domain(domain, "msn.com"):
+            try:
+                payload = _fetch_msn_detail_payload(url, timeout=20.0)
+            except requests.RequestException:
+                payload = None
+
+            if payload:
+                msn_images = _extract_msn_images_from_payload(
+                    payload,
+                    url,
+                    min_width=min_width,
+                    limit=limit,
+                )
+                if msn_images:
+                    images = msn_images
+
+                payload_title = _strip_html_text(payload.get("title"))
+                if payload_title:
+                    page_title = payload_title
+
+                published = payload.get("publishedDateTime")
+                if isinstance(published, str) and published.strip():
+                    page_published_at = published.strip()
 
         # Best-effort: fetch Content-Length for preview display (do not fail scrape if blocked).
         try:

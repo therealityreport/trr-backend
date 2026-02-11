@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import requests
@@ -19,11 +19,163 @@ class ScreenalyticsClientError(RuntimeError):
 
 
 @dataclass
+class FaceBbox:
+    """A single detection bounding box (normalized 0-1)."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    confidence: float
+    kind: str = "face"
+
+
+@dataclass
 class PeopleCountResult:
     people_count: int
     face_count: int
     detector: str
     model: str | None = None
+    detections: list[FaceBbox] = field(default_factory=list)
+
+
+def _clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
+def _center_xy(det: FaceBbox) -> tuple[float, float]:
+    return ((det.x1 + det.x2) / 2.0, (det.y1 + det.y2) / 2.0)
+
+
+def _size_wh(det: FaceBbox) -> tuple[float, float]:
+    return (max(0.0, det.x2 - det.x1), max(0.0, det.y2 - det.y1))
+
+
+def _intersects(a: FaceBbox, b: FaceBbox) -> bool:
+    return not (a.x2 <= b.x1 or b.x2 <= a.x1 or a.y2 <= b.y1 or b.y2 <= a.y1)
+
+
+def _contains(container: FaceBbox, inner: FaceBbox) -> bool:
+    return (
+        container.x1 <= inner.x1
+        and container.y1 <= inner.y1
+        and container.x2 >= inner.x2
+        and container.y2 >= inner.y2
+    )
+
+
+def _pick_best_person_for_face(face: FaceBbox, people: list[FaceBbox]) -> FaceBbox | None:
+    if not people:
+        return None
+
+    matching = [p for p in people if _contains(p, face) or _intersects(p, face)]
+    if matching:
+        return max(
+            matching,
+            key=lambda p: (
+                p.confidence,
+                (p.x2 - p.x1) * (p.y2 - p.y1),
+            ),
+        )
+    return max(
+        people,
+        key=lambda p: (
+            p.confidence,
+            (p.x2 - p.x1) * (p.y2 - p.y1),
+        ),
+    )
+
+
+def _face_torso_focus(
+    *,
+    face: FaceBbox | None,
+    person: FaceBbox | None,
+) -> tuple[float, float, float]:
+    """Return (focus_x, focus_y, target_visible_vertical_span) in normalized 0-1 space."""
+    if face and person:
+        face_cx, face_cy = _center_xy(face)
+        person_cx, _ = _center_xy(person)
+        _, face_h = _size_wh(face)
+        _, person_h = _size_wh(person)
+        person_anchor_y = person.y1 + (0.38 * person_h)
+        x = (0.75 * face_cx) + (0.25 * person_cx)
+        y = (0.65 * face_cy) + (0.35 * person_anchor_y)
+        target_span = _clamp(max(face_h * 3.2, person_h * 0.78), 0.45, 0.86)
+        return (x, y, target_span)
+
+    if face:
+        face_cx, face_cy = _center_xy(face)
+        _, face_h = _size_wh(face)
+        x = face_cx
+        y = face_cy + (0.18 * face_h)
+        target_span = _clamp(face_h * 3.5, 0.45, 0.84)
+        return (x, y, target_span)
+
+    if person:
+        person_cx, _ = _center_xy(person)
+        _, person_h = _size_wh(person)
+        x = person_cx
+        y = person.y1 + (0.35 * person_h)
+        target_span = _clamp(person_h * 0.8, 0.50, 0.88)
+        return (x, y, target_span)
+
+    return (0.5, 0.32, 0.80)
+
+
+def auto_thumbnail_crop(
+    result: PeopleCountResult,
+    *,
+    strategy: str = "face_torso_v2",
+) -> dict[str, float | str] | None:
+    """Compute deterministic auto crop from available face/person detections."""
+    detections = getattr(result, "detections", None) or []
+    if not detections:
+        return None
+
+    faces = [det for det in detections if str(getattr(det, "kind", "face")).lower() == "face"]
+    people = [det for det in detections if str(getattr(det, "kind", "")).lower() == "person"]
+
+    best_face = max(faces, key=lambda d: d.confidence) if faces else None
+    best_person = _pick_best_person_for_face(best_face, people) if best_face else None
+    if not best_person and people:
+        best_person = max(
+            people,
+            key=lambda d: (
+                d.confidence,
+                (d.x2 - d.x1) * (d.y2 - d.y1),
+            ),
+        )
+
+    focus_x, focus_y, target_span = _face_torso_focus(face=best_face, person=best_person)
+    # At zoom=1, a 4:5 thumbnail typically shows ~80% of source image height.
+    base_visible_vertical_span = 0.8
+    zoom = base_visible_vertical_span / max(target_span, 0.01)
+    zoom = _clamp(zoom, 1.0, 1.6)
+
+    return {
+        "x": round(_clamp(focus_x, 0.0, 1.0) * 100.0, 1),
+        "y": round(_clamp(focus_y, 0.0, 1.0) * 100.0, 1),
+        "zoom": round(zoom, 2),
+        "mode": "auto",
+        "strategy": strategy,
+    }
+
+
+def face_centroid(result: PeopleCountResult) -> tuple[float, float] | None:
+    """Return (x%, y%) centroid of the primary (highest-confidence) face, or None.
+
+    Values are in the 0-100 range suitable for CSS object-position percentages.
+    """
+    detections = getattr(result, "detections", None)
+    if not detections:
+        return None
+    face_detections = [d for d in detections if str(getattr(d, "kind", "face")).lower() == "face"]
+    if not face_detections:
+        return None
+    best = max(face_detections, key=lambda d: d.confidence)
+    cx = ((best.x1 + best.x2) / 2) * 100
+    cy = ((best.y1 + best.y2) / 2) * 100
+    return (round(cx, 1), round(cy, 1))
 
 
 def _base_url() -> str:
@@ -105,9 +257,33 @@ def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> P
     if not isinstance(detector, str):
         detector = "unknown"
 
+    # Parse detections (face/person) if present.
+    detections: list[FaceBbox] = []
+    raw_detections = data.get("detections")
+    if isinstance(raw_detections, list):
+        for det in raw_detections:
+            if not isinstance(det, dict):
+                continue
+            bbox = det.get("bbox")
+            conf = det.get("confidence", 0.0)
+            kind = det.get("kind")
+            if isinstance(bbox, list) and len(bbox) >= 4:
+                try:
+                    detections.append(FaceBbox(
+                        x1=float(bbox[0]),
+                        y1=float(bbox[1]),
+                        x2=float(bbox[2]),
+                        y2=float(bbox[3]),
+                        confidence=float(conf) if isinstance(conf, (int, float)) else 0.0,
+                        kind=str(kind).lower() if isinstance(kind, str) else "face",
+                    ))
+                except (ValueError, TypeError):
+                    continue
+
     return PeopleCountResult(
         people_count=people_count,
         face_count=face_count,
         detector=detector,
         model=model if isinstance(model, str) else None,
+        detections=detections,
     )

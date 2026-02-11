@@ -10,6 +10,11 @@ class EpisodeImageRepositoryError(RuntimeError):
     pass
 
 
+def _is_missing_archived_column_error(error: object) -> bool:
+    raw = str(error or "").lower()
+    return "archived_at" in raw and "does not exist" in raw
+
+
 def assert_core_episode_images_table_exists(db: DbSession) -> None:
     """
     Fail fast with a clear error if `core.episode_images` is missing in Supabase.
@@ -124,8 +129,8 @@ def fetch_episode_images_missing_hosted(
     Fetch episode images missing hosted URLs (for S3 mirroring).
     """
 
-    def _base_query():
-        return (
+    def _base_query(*, include_archived_filter: bool):
+        query = (
             db.schema("core")
             .table("episode_images")
             .select(
@@ -133,8 +138,10 @@ def fetch_episode_images_missing_hosted(
                 "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,"
                 "hosted_bytes,hosted_etag,hosted_at"
             )
-            .is_("archived_at", "null")
         )
+        if include_archived_filter:
+            query = query.is_("archived_at", "null")
+        return query
 
     def _apply_filters(query):
         if show_id:
@@ -151,34 +158,46 @@ def fetch_episode_images_missing_hosted(
             query = query.limit(max(0, int(limit)))
         return query
 
-    queries = []
-    base = (cdn_base_url or "").strip().rstrip("/")
-    if include_hosted:
-        if base:
-            missing_query = _apply_filters(_base_query()).is_("hosted_url", "null")
-            mismatch_query = (
-                _apply_filters(_base_query())
-                .not_.is_("hosted_url", "null")
-                .not_.ilike(
-                    "hosted_url",
-                    f"{base}/%",
+    def _execute_queries(*, include_archived_filter: bool) -> list[dict[str, Any]]:
+        queries = []
+        base = (cdn_base_url or "").strip().rstrip("/")
+        if include_hosted:
+            if base:
+                missing_query = _apply_filters(_base_query(include_archived_filter=include_archived_filter)).is_(
+                    "hosted_url", "null"
                 )
-            )
-            queries.extend([missing_query, mismatch_query])
+                mismatch_query = (
+                    _apply_filters(_base_query(include_archived_filter=include_archived_filter))
+                    .not_.is_("hosted_url", "null")
+                    .not_.ilike(
+                        "hosted_url",
+                        f"{base}/%",
+                    )
+                )
+                queries.extend([missing_query, mismatch_query])
+            else:
+                queries.append(_apply_filters(_base_query(include_archived_filter=include_archived_filter)))
         else:
-            queries.append(_apply_filters(_base_query()))
-    else:
-        queries.append(_apply_filters(_base_query()).is_("hosted_url", "null"))
+            queries.append(
+                _apply_filters(_base_query(include_archived_filter=include_archived_filter)).is_("hosted_url", "null")
+            )
 
-    rows: list[dict[str, Any]] = []
-    for query in queries:
-        response = query.execute()
-        if hasattr(response, "error") and response.error:
-            raise EpisodeImageRepositoryError(f"Supabase error fetching episode images: {response.error}")
-        data = response.data or []
-        if isinstance(data, list):
-            rows.extend(data)
-    return rows
+        rows: list[dict[str, Any]] = []
+        for query in queries:
+            response = query.execute()
+            if hasattr(response, "error") and response.error:
+                raise EpisodeImageRepositoryError(f"Supabase error fetching episode images: {response.error}")
+            data = response.data or []
+            if isinstance(data, list):
+                rows.extend(data)
+        return rows
+
+    try:
+        return _execute_queries(include_archived_filter=True)
+    except EpisodeImageRepositoryError as exc:
+        if not _is_missing_archived_column_error(exc):
+            raise
+        return _execute_queries(include_archived_filter=False)
 
 
 def update_episode_image_hosted_fields(

@@ -42,7 +42,14 @@ def _sniff_image_content_type(data: bytes) -> str | None:
     return None
 
 
-def _normalize_fandom_file_url(url: str, *, referer: str | None) -> str:
+def _is_http_url(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    trimmed = value.strip().lower()
+    return trimmed.startswith("http://") or trimmed.startswith("https://")
+
+
+def normalize_fandom_file_url(url: str, *, referer: str | None) -> str:
     cleaned = (url or "").strip()
     if not cleaned:
         return cleaned
@@ -72,7 +79,48 @@ def _normalize_fandom_file_url(url: str, *, referer: str | None) -> str:
                     else "https://real-housewives.fandom.com"
                 )
                 cleaned = f"{base}/wiki/Special:FilePath/{file_part}"
+    parsed = urlparse(cleaned)
+    if parsed.netloc.lower().endswith("static.wikia.nocookie.net") and "/revision/latest" in parsed.path.lower():
+        base_path = re.split(r"/revision/latest.*", parsed.path, maxsplit=1, flags=re.IGNORECASE)[0]
+        cleaned = parsed._replace(path=base_path, query="", fragment="").geturl()
     return cleaned
+
+
+# Backward compatibility for older call sites/tests.
+def _normalize_fandom_file_url(url: str, *, referer: str | None) -> str:
+    return normalize_fandom_file_url(url, referer=referer)
+
+
+def _iter_unique_http_urls(candidates: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for value in candidates:
+        if not _is_http_url(value):
+            continue
+        normalized = str(value).strip()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(normalized)
+    return urls
+
+
+def _build_cast_photo_download_urls(
+    row: Mapping[str, Any],
+    *,
+    source: str,
+    referer: str | None,
+) -> list[str]:
+    image_url = row.get("image_url")
+    url = row.get("url")
+    thumb_url = row.get("thumb_url")
+    if source in {"fandom", "fandom-gallery"}:
+        normalized = [
+            normalize_fandom_file_url(str(value), referer=referer) if isinstance(value, str) else None
+            for value in (image_url, url, thumb_url)
+        ]
+        return _iter_unique_http_urls([*normalized, image_url, url, thumb_url])
+    return _iter_unique_http_urls([image_url, url, thumb_url])
 
 
 @dataclass(frozen=True)
@@ -442,24 +490,24 @@ def mirror_cast_photo_row(
             return None
 
     source = str(row.get("source") or "").strip() or "fandom"
-    candidate_url = row.get("image_url") or row.get("url") or row.get("thumb_url")
-    thumb_url = row.get("thumb_url")
-    if not candidate_url:
+    candidate_urls = _build_cast_photo_download_urls(row, source=source, referer=row.get("source_page_url"))
+    if not candidate_urls:
         return None
 
     referer = row.get("source_page_url")
-    normalized_url = candidate_url
-    if source in {"fandom", "fandom-gallery"} and isinstance(candidate_url, str):
-        normalized_url = _normalize_fandom_file_url(candidate_url, referer=referer)
-    used_url = normalized_url
-    try:
-        data, content_type = download_image(used_url, source=source, referer=referer)
-    except Exception as exc:
-        if source in {"fandom", "fandom-gallery"} and thumb_url and thumb_url != used_url:
-            data, content_type = download_image(thumb_url, source=source, referer=referer)
-            used_url = thumb_url
-        else:
-            raise exc
+    used_url = candidate_urls[0]
+    last_error: Exception | None = None
+    for candidate_url in candidate_urls:
+        used_url = candidate_url
+        try:
+            data, content_type = download_image(used_url, source=source, referer=referer)
+            break
+        except Exception as exc:
+            last_error = exc
+    else:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Unable to download source image")
     sha256 = _sha256_bytes(data)
     current_sha = row.get("hosted_sha256")
 
