@@ -118,7 +118,7 @@ def detect_text_overlay_cast_photo(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Text overlay detection failed: {exc}") from exc
 
-    status = "detected" if force else "ok"
+    status = "unknown" if result.status == "unknown" else ("detected" if force else "ok")
     return DetectTextOverlayResponse(
         photo_id=photo_id_str,
         status=status,

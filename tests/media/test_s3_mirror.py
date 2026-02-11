@@ -132,6 +132,12 @@ def test_download_image_sniffs_image_type_when_missing_content_type(monkeypatch:
     assert content_type == "image/png"
 
 
+def test_normalize_fandom_file_url_strips_revision_latest_suffix() -> None:
+    url = "https://static.wikia.nocookie.net/real-housewives/images/0/08/angie_k_s3.jpeg/revision/latest"
+    normalized = s3_mirror.normalize_fandom_file_url(url, referer="https://real-housewives.fandom.com/wiki/Test")
+    assert normalized == "https://static.wikia.nocookie.net/real-housewives/images/0/08/angie_k_s3.jpeg"
+
+
 def test_mirror_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("AWS_S3_BUCKET", "bucket")

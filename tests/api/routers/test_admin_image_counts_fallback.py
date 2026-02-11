@@ -72,6 +72,47 @@ def test_auto_count_cast_photo_falls_back_to_original_url(monkeypatch) -> None:
     assert out.detector == "simulated"
 
 
+def test_auto_count_cast_photo_retries_next_url_when_first_fails(monkeypatch) -> None:
+    photo_id = uuid4()
+    db = _FakeDb(
+        {
+            "cast_photos": {
+                "id": str(photo_id),
+                "source": "fandom",
+                "hosted_url": None,
+                "url": "https://real-housewives.fandom.com/wiki/Special:FilePath/good.jpeg",
+                "image_url": "https://real-housewives.fandom.com/wiki/Special:FilePath/bad.jpeg",
+                "thumb_url": None,
+                "source_page_url": "https://real-housewives.fandom.com/wiki/Test",
+            }
+        }
+    )
+
+    calls: list[str] = []
+
+    def fake_count_people(image_url, mode="faces_then_yolo"):  # noqa: ANN001
+        calls.append(image_url)
+        if "bad.jpeg" in image_url:
+            raise counts.ScreenalyticsClientError("Failed to download source_url: 404")
+        return SimpleNamespace(
+            people_count=1,
+            face_count=1,
+            detector="simulated",
+            model=None,
+        )
+
+    monkeypatch.setattr(counts, "count_people", fake_count_people)
+    monkeypatch.setattr(counts, "get_tags_by_photo_ids", lambda _db, _ids: {})
+    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
+    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
+
+    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    assert out.people_count == 1
+    assert out.detector == "simulated"
+    assert len(calls) >= 2
+    assert any("Special:FilePath/good.jpeg" in url for url in calls)
+
+
 def test_auto_count_media_asset_falls_back_to_source_url(monkeypatch) -> None:
     asset_id = uuid4()
     db = _FakeDb(

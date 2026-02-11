@@ -76,6 +76,7 @@ class ScrapePreviewResponse(BaseModel):
 ImageKind = Literal[
     "poster",
     "backdrop",
+    "logo",
     "episode_still",
     "cast",
     "promo",
@@ -100,7 +101,7 @@ class ImportImageItem(BaseModel):
     asset_name: str | None = None
 
 
-EntityType = Literal["season", "person"]
+EntityType = Literal["season", "show", "person"]
 
 
 class ImportRequest(BaseModel):
@@ -131,6 +132,9 @@ class ImportRequest(BaseModel):
                     raise ValueError("show_id required for season")
                 if self.season_number is None:
                     raise ValueError("season_number required for season")
+        elif self.entity_type == "show":
+            if not self.show_id:
+                raise ValueError("show_id required for show")
         elif self.entity_type == "person":
             if not self.person_id:
                 raise ValueError("person_id required for person")
@@ -303,6 +307,32 @@ def _get_season_cast(db, show_id: str, season_number: int) -> list[dict]:
     return pg.fetch_all(sql, [show_id, season_number])
 
 
+def _get_show_identifier(db: SupabaseAdminClient, show_id: str) -> dict[str, str] | None:
+    """Resolve show identifier for S3 key construction (IMDb ID preferred, UUID fallback)."""
+    response = (
+        db.schema("core")
+        .table("shows")
+        .select("id, external_ids")
+        .eq("id", show_id)
+        .limit(1)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        logger.error("Failed to lookup show identifier for show_id=%s: %s", show_id, response.error)
+        return None
+    if not response.data:
+        return None
+
+    row = response.data[0]
+    external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
+    imdb_id = external_ids.get("imdb_id") or external_ids.get("imdb")
+    identifier = str(imdb_id or show_id)
+    return {
+        "show_id": str(row.get("id") or show_id),
+        "show_identifier": identifier,
+    }
+
+
 # Endpoints
 
 
@@ -370,6 +400,7 @@ def import_images(
         build_cast_photo_s3_key,
         build_hosted_url,
         build_season_image_s3_key,
+        build_show_image_s3_key,
         get_s3_bucket,
         get_s3_client,
         guess_ext_from_content_type,
@@ -421,6 +452,28 @@ def import_images(
             "source_url": str(request.source_url),
         }
 
+    elif request.entity_type == "show":
+        show_info = _get_show_identifier(db, str(request.show_id))
+        if not show_info:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Show {request.show_id} not found",
+            )
+        entity_id = show_info["show_id"]
+        resolved_show_id = show_info["show_id"]
+        resolved_season_number = request.season_number
+        path_identifier = show_info["show_identifier"]
+        link_context = {
+            "entity_type": "show",
+            "entity_id": entity_id,
+            "show_id": resolved_show_id,
+            "source_url": str(request.source_url),
+        }
+        if request.season_number is not None:
+            link_context["season_number"] = int(request.season_number)
+        if request.season_id is not None:
+            link_context["season_id"] = str(request.season_id)
+
     elif request.entity_type == "person":
         person_info = get_person_identifier(db, str(request.person_id))
         if not person_info:
@@ -453,7 +506,7 @@ def import_images(
     # Best-effort: fetch page metadata (publish date, title).
     page_title: str | None = None
     page_published_at: str | None = None
-    if request.entity_type == "season":
+    if request.entity_type in ("season", "show"):
         try:
             from trr_backend.scraping.url_image_scraper import (
                 extract_page_published_at,
@@ -499,9 +552,20 @@ def import_images(
             # Build S3 key based on entity type (used for mirror updates too)
             ext = guess_ext_from_content_type(content_type)
             if request.entity_type == "season":
+                season_number_for_key = resolved_season_number or request.season_number
+                if season_number_for_key is None:
+                    raise RuntimeError("season_number is required for season image key generation")
                 s3_key = build_season_image_s3_key(
                     show_identifier=path_identifier,
-                    season_number=request.season_number,
+                    season_number=season_number_for_key,
+                    source="web_scrape",
+                    sha256=sha256,
+                    ext=ext,
+                )
+            elif request.entity_type == "show":
+                s3_key = build_show_image_s3_key(
+                    show_identifier=path_identifier,
+                    kind=img.kind,
                     source="web_scrape",
                     sha256=sha256,
                     ext=ext,
@@ -556,7 +620,7 @@ def import_images(
                     tag_person_ids.add(str(matched_person["person_id"]))
                 tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
-                link_kind = img.kind if request.entity_type == "season" else "gallery"
+                link_kind = img.kind if request.entity_type in ("season", "show") else "gallery"
                 season_link_ctx = {**link_context, **tags_ctx}
                 if page_published_at:
                     season_link_ctx["source_created_at"] = page_published_at
@@ -706,7 +770,7 @@ def import_images(
                 tag_person_ids.add(str(matched_person["person_id"]))
             tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
-            link_kind = img.kind if request.entity_type == "season" else "gallery"
+            link_kind = img.kind if request.entity_type in ("season", "show") else "gallery"
             season_link_ctx = {**link_context, **tags_ctx}
             if page_published_at:
                 season_link_ctx["source_created_at"] = page_published_at
@@ -912,6 +976,7 @@ async def import_images_stream(
         build_cast_photo_s3_key,
         build_hosted_url,
         build_season_image_s3_key,
+        build_show_image_s3_key,
         get_s3_bucket,
         get_s3_client,
         guess_ext_from_content_type,
@@ -961,6 +1026,26 @@ async def import_images_stream(
                 "season_number": resolved_season_number,
                 "source_url": str(request.source_url),
             }
+        elif request.entity_type == "show":
+            show_info = _get_show_identifier(db, str(request.show_id))
+            if not show_info:
+                err_data = {"error": f"Show {request.show_id} not found"}
+                yield f"event: error\ndata: {json.dumps(err_data)}\n\n"
+                return
+            entity_id = show_info["show_id"]
+            resolved_show_id = show_info["show_id"]
+            resolved_season_number = request.season_number
+            path_identifier = show_info["show_identifier"]
+            link_context = {
+                "entity_type": "show",
+                "entity_id": entity_id,
+                "show_id": resolved_show_id,
+                "source_url": str(request.source_url),
+            }
+            if request.season_number is not None:
+                link_context["season_number"] = int(request.season_number)
+            if request.season_id is not None:
+                link_context["season_id"] = str(request.season_id)
         elif request.entity_type == "person":
             person_info = get_person_identifier(db, str(request.person_id))
             if not person_info:
@@ -992,7 +1077,7 @@ async def import_images_stream(
         # Best-effort: fetch page metadata for CAST imports (publish date, title).
         page_title: str | None = None
         page_published_at: str | None = None
-        wants_cast_meta = request.entity_type == "season" and any(i.kind == "cast" for i in request.images)
+        wants_cast_meta = request.entity_type in ("season", "show")
         if wants_cast_meta:
             try:
                 from trr_backend.scraping.url_image_scraper import (
@@ -1049,9 +1134,20 @@ async def import_images_stream(
                 # Build S3 key based on entity type (used for mirror updates too)
                 ext = guess_ext_from_content_type(content_type)
                 if request.entity_type == "season":
+                    season_number_for_key = resolved_season_number or request.season_number
+                    if season_number_for_key is None:
+                        raise RuntimeError("season_number is required for season image key generation")
                     s3_key = build_season_image_s3_key(
                         show_identifier=path_identifier,
-                        season_number=request.season_number,
+                        season_number=season_number_for_key,
+                        source="web_scrape",
+                        sha256=sha256,
+                        ext=ext,
+                    )
+                elif request.entity_type == "show":
+                    s3_key = build_show_image_s3_key(
+                        show_identifier=path_identifier,
+                        kind=img.kind,
                         source="web_scrape",
                         sha256=sha256,
                         ext=ext,
@@ -1107,21 +1203,29 @@ async def import_images_stream(
                         tag_person_ids.update({str(person_id) for person_id in img.person_ids})
                     if matched_person:
                         tag_person_ids.add(str(matched_person["person_id"]))
-                        tags_ctx = _build_people_tags_context(db, tag_person_ids)
+                    tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
-                        link_kind = img.kind if request.entity_type == "season" else "gallery"
-                        season_link_ctx = {**link_context, **tags_ctx}
-                        if img.kind == "cast" and page_published_at:
-                            season_link_ctx["source_created_at"] = page_published_at
-                        create_media_link_for_entity(
-                            db,
-                            entity_type=request.entity_type,
-                            entity_id=entity_id,
-                            media_asset_id=existing["id"],
-                            kind=link_kind,
-                            position=idx,
-                            context=season_link_ctx,
-                        )
+                    link_kind = img.kind if request.entity_type in ("season", "show") else "gallery"
+                    season_link_ctx = {**link_context, **tags_ctx}
+                    if page_published_at:
+                        season_link_ctx["source_created_at"] = page_published_at
+                    if img.context_section:
+                        season_link_ctx["context_section"] = img.context_section
+                    if img.context_type:
+                        season_link_ctx["context_type"] = img.context_type
+                    if img.source_logo:
+                        season_link_ctx["source_logo"] = img.source_logo
+                    if img.asset_name:
+                        season_link_ctx["asset_name"] = img.asset_name
+                    create_media_link_for_entity(
+                        db,
+                        entity_type=request.entity_type,
+                        entity_id=entity_id,
+                        media_asset_id=existing["id"],
+                        kind=link_kind,
+                        position=idx,
+                        context=season_link_ctx,
+                    )
 
                     # Also link to person if matched
                     if matched_person:
@@ -1132,8 +1236,16 @@ async def import_images_stream(
                             "match_confidence": match_confidence,
                             "source_url": str(request.source_url),
                         }
-                        if img.kind == "cast" and page_published_at:
+                        if page_published_at:
                             person_link_ctx["source_created_at"] = page_published_at
+                        if img.context_section:
+                            person_link_ctx["context_section"] = img.context_section
+                        if img.context_type:
+                            person_link_ctx["context_type"] = img.context_type
+                        if img.source_logo:
+                            person_link_ctx["source_logo"] = img.source_logo
+                        if img.asset_name:
+                            person_link_ctx["asset_name"] = img.asset_name
                         create_media_link_for_entity(
                             db,
                             entity_type="person",
@@ -1157,8 +1269,16 @@ async def import_images_stream(
                                 "show_id": resolved_show_id,
                                 "season_number": resolved_season_number,
                             }
-                            if img.kind == "cast" and page_published_at:
+                            if page_published_at:
                                 person_link_ctx["source_created_at"] = page_published_at
+                            if img.context_section:
+                                person_link_ctx["context_section"] = img.context_section
+                            if img.context_type:
+                                person_link_ctx["context_type"] = img.context_type
+                            if img.source_logo:
+                                person_link_ctx["source_logo"] = img.source_logo
+                            if img.asset_name:
+                                person_link_ctx["asset_name"] = img.asset_name
                             create_media_link_for_entity(
                                 db,
                                 entity_type="person",
@@ -1230,8 +1350,10 @@ async def import_images_stream(
                         "source_page_url": str(request.source_url),
                         "source_page_title": page_title,
                         "page_title": page_title,
-                        "source_created_at": (page_published_at if img.kind == "cast" else None),
+                        "source_created_at": page_published_at,
                         "candidate_id": img.candidate_id,
+                        "source_logo": img.source_logo,
+                        "asset_name": img.asset_name,
                     },
                 )
 
@@ -1241,21 +1363,29 @@ async def import_images_stream(
                     tag_person_ids.update({str(person_id) for person_id in img.person_ids})
                 if matched_person:
                     tag_person_ids.add(str(matched_person["person_id"]))
-                    tags_ctx = _build_people_tags_context(db, tag_person_ids)
+                tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
-                    link_kind = img.kind if request.entity_type == "season" else "gallery"
-                    season_link_ctx = {**link_context, **tags_ctx}
-                    if img.kind == "cast" and page_published_at:
-                        season_link_ctx["source_created_at"] = page_published_at
-                    create_media_link_for_entity(
-                        db,
-                        entity_type=request.entity_type,
-                        entity_id=entity_id,
-                        media_asset_id=asset["id"],
-                        kind=link_kind,
-                        position=idx,
-                        context=season_link_ctx,
-                    )
+                link_kind = img.kind if request.entity_type in ("season", "show") else "gallery"
+                season_link_ctx = {**link_context, **tags_ctx}
+                if page_published_at:
+                    season_link_ctx["source_created_at"] = page_published_at
+                if img.context_section:
+                    season_link_ctx["context_section"] = img.context_section
+                if img.context_type:
+                    season_link_ctx["context_type"] = img.context_type
+                if img.source_logo:
+                    season_link_ctx["source_logo"] = img.source_logo
+                if img.asset_name:
+                    season_link_ctx["asset_name"] = img.asset_name
+                create_media_link_for_entity(
+                    db,
+                    entity_type=request.entity_type,
+                    entity_id=entity_id,
+                    media_asset_id=asset["id"],
+                    kind=link_kind,
+                    position=idx,
+                    context=season_link_ctx,
+                )
 
                 # Also link to person if matched
                 if matched_person:
@@ -1266,8 +1396,16 @@ async def import_images_stream(
                         "match_confidence": match_confidence,
                         "source_url": str(request.source_url),
                     }
-                    if img.kind == "cast" and page_published_at:
+                    if page_published_at:
                         person_link_ctx["source_created_at"] = page_published_at
+                    if img.context_section:
+                        person_link_ctx["context_section"] = img.context_section
+                    if img.context_type:
+                        person_link_ctx["context_type"] = img.context_type
+                    if img.source_logo:
+                        person_link_ctx["source_logo"] = img.source_logo
+                    if img.asset_name:
+                        person_link_ctx["asset_name"] = img.asset_name
                     create_media_link_for_entity(
                         db,
                         entity_type="person",
@@ -1282,26 +1420,34 @@ async def import_images_stream(
                     assigned_ids = {str(person_id) for person_id in img.person_ids}
                     if matched_person:
                         assigned_ids.discard(matched_person["person_id"])
-                        for person_id in assigned_ids:
-                            person_link_ctx = {
-                                "entity_type": "person",
-                                "entity_id": person_id,
-                                "assigned_from_season": True,
-                                "source_url": str(request.source_url),
-                                "show_id": resolved_show_id,
-                                "season_number": resolved_season_number,
-                            }
-                            if img.kind == "cast" and page_published_at:
-                                person_link_ctx["source_created_at"] = page_published_at
-                            create_media_link_for_entity(
-                                db,
-                                entity_type="person",
-                                entity_id=person_id,
-                                media_asset_id=asset["id"],
-                                kind="gallery",
-                                position=idx,
-                                context={**person_link_ctx, **tags_ctx},
-                            )
+                    for person_id in assigned_ids:
+                        person_link_ctx = {
+                            "entity_type": "person",
+                            "entity_id": person_id,
+                            "assigned_from_season": True,
+                            "source_url": str(request.source_url),
+                            "show_id": resolved_show_id,
+                            "season_number": resolved_season_number,
+                        }
+                        if page_published_at:
+                            person_link_ctx["source_created_at"] = page_published_at
+                        if img.context_section:
+                            person_link_ctx["context_section"] = img.context_section
+                        if img.context_type:
+                            person_link_ctx["context_type"] = img.context_type
+                        if img.source_logo:
+                            person_link_ctx["source_logo"] = img.source_logo
+                        if img.asset_name:
+                            person_link_ctx["asset_name"] = img.asset_name
+                        create_media_link_for_entity(
+                            db,
+                            entity_type="person",
+                            entity_id=person_id,
+                            media_asset_id=asset["id"],
+                            kind="gallery",
+                            position=idx,
+                            context={**person_link_ctx, **tags_ctx},
+                        )
 
                 if hosted_url:
                     text_overlay_asset_ids.add(asset["id"])

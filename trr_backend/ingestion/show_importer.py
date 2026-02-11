@@ -390,7 +390,7 @@ def _ingest_imdb_cast(
                     .delete()
                     .eq("show_id", show_id)
                     .eq("credit_category", "Self")
-                    .neq("source_type", "manual")
+                    .not_.eq("source_type", "manual")
                     .execute()
                 )
                 if hasattr(delete_resp, "error") and delete_resp.error:

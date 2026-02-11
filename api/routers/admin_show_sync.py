@@ -578,11 +578,13 @@ def refresh_show_photos_stream(
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
     show_row = show_resp.data[0] or {}
     show_name = str(show_row.get("name") or "").strip() or None
-    show_imdb_id = str(show_row.get("imdb_id") or "").strip() or None
+    external_ids = show_row.get("external_ids") if isinstance(show_row.get("external_ids"), dict) else {}
+    show_imdb_id = (
+        str(show_row.get("imdb_id") or external_ids.get("imdb_id") or external_ids.get("imdb") or "").strip() or None
+    )
     show_tmdb_id = show_row.get("tmdb_id")
     if not isinstance(show_tmdb_id, int):
         # Some schemas store TMDb ID in external_ids.
-        external_ids = show_row.get("external_ids") if isinstance(show_row.get("external_ids"), dict) else {}
         try:
             show_tmdb_id = int(external_ids.get("tmdb_id") or external_ids.get("tmdb") or 0) or None
         except Exception:

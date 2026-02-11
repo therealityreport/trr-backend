@@ -13,7 +13,8 @@ from trr_backend.repositories.sync_state import assert_core_sync_state_table_exi
 from trr_backend.utils.env import load_env
 
 SHOW_SELECT_FIELDS = (
-    "id,name,description,premiere_date,imdb_id,tmdb_id,show_total_seasons,show_total_episodes,most_recent_episode"
+    "id,name,description,premiere_date,imdb_id,tmdb_id,external_ids,"
+    "show_total_seasons,show_total_episodes,most_recent_episode"
 )
 
 
@@ -494,6 +495,13 @@ def extract_imdb_series_id(show: dict[str, Any]) -> str | None:
         imdb_id = show.get(key)
         if isinstance(imdb_id, str) and imdb_id.strip():
             return imdb_id.strip()
+
+    external_ids = show.get("external_ids")
+    if isinstance(external_ids, Mapping):
+        for key in ("imdb_id", "imdb"):
+            imdb_id = external_ids.get(key)
+            if isinstance(imdb_id, str) and imdb_id.strip():
+                return imdb_id.strip()
     return None
 
 
@@ -503,6 +511,17 @@ def extract_tmdb_series_id(show: dict[str, Any]) -> int | None:
         tmdb_id = show.get(key)
         if isinstance(tmdb_id, int):
             return tmdb_id
+        if isinstance(tmdb_id, str) and tmdb_id.strip().isdigit():
+            return int(tmdb_id.strip())
+
+    external_ids = show.get("external_ids")
+    if isinstance(external_ids, Mapping):
+        for key in ("tmdb_id", "tmdb"):
+            tmdb_id = external_ids.get(key)
+            if isinstance(tmdb_id, int):
+                return tmdb_id
+            if isinstance(tmdb_id, str) and tmdb_id.strip().isdigit():
+                return int(tmdb_id.strip())
     return None
 
 

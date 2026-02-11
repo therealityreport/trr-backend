@@ -423,14 +423,23 @@ class TestUpdateFacebankSeed:
         assert "Database error updating facebank_seed" in response.json()["detail"]
 
 
-def test_pick_autocount_url_prefers_fandom_thumb() -> None:
+def test_pick_autocount_url_prefers_hosted_when_available() -> None:
     row = {
         "source": "fandom",
         "image_url": "https://real-housewives.fandom.com/wiki/Special:FilePath/Bad.png",
         "thumb_url": "https://static.wikia.nocookie.net/real-housewives/images/1/1a/Good.png",
         "hosted_url": "https://cdn.example.com/x.png",
     }
-    assert admin_person_images._pick_autocount_url(row) == row["thumb_url"]
+    assert admin_person_images._pick_autocount_url(row) == row["hosted_url"]
+
+
+def test_pick_autocount_urls_normalizes_stale_wikia_revision_path() -> None:
+    row = {
+        "source": "fandom",
+        "thumb_url": "https://static.wikia.nocookie.net/real-housewives/images/0/08/angie_k_s3.jpeg/revision/latest",
+    }
+    urls = admin_person_images._pick_autocount_urls(row)
+    assert urls[0] == "https://static.wikia.nocookie.net/real-housewives/images/0/08/angie_k_s3.jpeg"
 
 
 def test_pick_autocount_url_prefers_tmdb_image() -> None:

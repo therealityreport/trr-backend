@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -10,7 +11,13 @@ from pydantic import BaseModel
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
-from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
+from trr_backend.clients.screenalytics import (
+    ScreenalyticsClientError,
+    auto_thumbnail_crop,
+    count_people,
+    face_centroid,
+)
+from trr_backend.media.s3_mirror import normalize_fandom_file_url
 from trr_backend.repositories.cast_photo_tags import (
     get_tags_by_photo_ids,
     has_manual_tags,
@@ -24,6 +31,61 @@ from trr_backend.repositories.media_links import (
 )
 
 router = APIRouter(prefix="/admin", tags=["admin-images"])
+
+
+def _is_http_url(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    trimmed = value.strip().lower()
+    return trimmed.startswith("http://") or trimmed.startswith("https://")
+
+
+def _iter_unique_urls(candidates: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for value in candidates:
+        if not _is_http_url(value):
+            continue
+        normalized = str(value).strip()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(normalized)
+    return urls
+
+
+def _build_cast_photo_count_urls(row: dict[str, Any]) -> list[str]:
+    source = str(row.get("source") or "").lower()
+    hosted_url = row.get("hosted_url")
+    image_url = row.get("image_url")
+    url = row.get("url")
+    thumb_url = row.get("thumb_url")
+    referer = row.get("source_page_url") if isinstance(row.get("source_page_url"), str) else None
+    if source in {"fandom", "fandom-gallery"}:
+        normalized = [
+            normalize_fandom_file_url(str(value), referer=referer) if isinstance(value, str) else None
+            for value in (image_url, url, thumb_url)
+        ]
+        return _iter_unique_urls([hosted_url, *normalized, image_url, url, thumb_url])
+    return _iter_unique_urls([hosted_url, image_url, url, thumb_url])
+
+
+def _build_media_asset_count_urls(row: dict[str, Any]) -> list[str]:
+    hosted_url = row.get("hosted_url")
+    source_url = row.get("source_url")
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source_url_lower = source_url.lower() if isinstance(source_url, str) else ""
+    referer = None
+    if isinstance(metadata, dict):
+        referer = (metadata.get("page_url") if isinstance(metadata.get("page_url"), str) else None) or (
+            metadata.get("source_page_url") if isinstance(metadata.get("source_page_url"), str) else None
+        )
+    if isinstance(source_url, str) and (
+        "fandom" in source_url_lower or "static.wikia.nocookie.net" in source_url_lower
+    ):
+        normalized = normalize_fandom_file_url(source_url, referer=referer)
+        return _iter_unique_urls([hosted_url, normalized, source_url])
+    return _iter_unique_urls([hosted_url, source_url])
 
 
 class AutoCountResponse(BaseModel):
@@ -54,7 +116,12 @@ def auto_count_cast_photo(
     _: AdminUser = None,
 ) -> AutoCountResponse:
     response = (
-        db.schema("core").table("cast_photos").select("id, hosted_url, url").eq("id", str(photo_id)).limit(1).execute()
+        db.schema("core")
+        .table("cast_photos")
+        .select("id, hosted_url, url, image_url, thumb_url, source, source_page_url, metadata")
+        .eq("id", str(photo_id))
+        .limit(1)
+        .execute()
     )
     if hasattr(response, "error") and response.error:
         raise HTTPException(status_code=502, detail="Database error fetching cast photo")
@@ -62,11 +129,11 @@ def auto_count_cast_photo(
         raise HTTPException(status_code=404, detail="Cast photo not found")
 
     row = response.data[0]
-    image_url = row.get("hosted_url") or row.get("url")
-    if not image_url:
+    image_urls = _build_cast_photo_count_urls(row)
+    if not image_urls:
         raise HTTPException(
             status_code=409,
-            detail="Cast photo has no hosted_url or url to analyze",
+            detail="Cast photo has no valid image URL to analyze",
         )
 
     tag_rows = get_tags_by_photo_ids(db, [str(photo_id)])
@@ -74,10 +141,16 @@ def auto_count_cast_photo(
     if has_manual_tags(tag_row) and not force:
         raise HTTPException(status_code=409, detail="Manual tags/count exist; use force to overwrite")
 
-    try:
-        result = count_people(image_url)
-    except ScreenalyticsClientError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    result = None
+    last_error: ScreenalyticsClientError | None = None
+    for image_url in image_urls:
+        try:
+            result = count_people(image_url)
+            break
+        except ScreenalyticsClientError as exc:
+            last_error = exc
+    if result is None:
+        raise HTTPException(status_code=502, detail=str(last_error or "Failed to auto-count cast photo"))
 
     upsert_cast_photo_tags(
         db,
@@ -89,6 +162,34 @@ def auto_count_cast_photo(
         detector=result.detector,
         updated_by_firebase_uid="system:auto",
     )
+    generated_crop = auto_thumbnail_crop(result)
+    centroid = face_centroid(result)
+    if generated_crop is not None or centroid is not None:
+        metadata = dict(row.get("metadata") or {})
+        existing_crop = metadata.get("thumbnail_crop")
+        if not (isinstance(existing_crop, dict) and existing_crop.get("mode") == "manual"):
+            if generated_crop is not None:
+                metadata["thumbnail_crop"] = {
+                    **generated_crop,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+            elif centroid is not None:
+                cx, cy = centroid
+                metadata["thumbnail_crop"] = {
+                    "x": cx,
+                    "y": cy,
+                    "zoom": 1,
+                    "mode": "auto",
+                    "strategy": "face_centroid_v1",
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+            try:
+                db.schema("core").table("cast_photos").update(
+                    {"metadata": metadata}
+                ).eq("id", str(photo_id)).execute()
+            except Exception:
+                # Best effort: count should still succeed if crop write fails.
+                pass
 
     return AutoCountResponse(
         people_count=result.people_count,
@@ -108,7 +209,7 @@ def auto_count_media_asset(
     response = (
         db.schema("core")
         .table("media_assets")
-        .select("id, hosted_url, source_url")
+        .select("id, hosted_url, source_url, metadata")
         .eq("id", str(asset_id))
         .limit(1)
         .execute()
@@ -119,11 +220,11 @@ def auto_count_media_asset(
         raise HTTPException(status_code=404, detail="Media asset not found")
 
     row = response.data[0]
-    image_url = row.get("hosted_url") or row.get("source_url")
-    if not image_url:
+    image_urls = _build_media_asset_count_urls(row)
+    if not image_urls:
         raise HTTPException(
             status_code=409,
-            detail="Media asset has no hosted_url or source_url to analyze",
+            detail="Media asset has no valid image URL to analyze",
         )
 
     links = list_person_links_by_asset_id(db, str(asset_id))
@@ -132,10 +233,16 @@ def auto_count_media_asset(
     if any(has_manual_people_tags(link.get("context")) for link in links) and not force:
         raise HTTPException(status_code=409, detail="Manual tags/count exist; use force to overwrite")
 
-    try:
-        result = count_people(image_url)
-    except ScreenalyticsClientError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    result = None
+    last_error: ScreenalyticsClientError | None = None
+    for image_url in image_urls:
+        try:
+            result = count_people(image_url)
+            break
+        except ScreenalyticsClientError as exc:
+            last_error = exc
+    if result is None:
+        raise HTTPException(status_code=502, detail=str(last_error or "Failed to auto-count media asset"))
 
     update_person_links_context(
         db,
@@ -146,6 +253,37 @@ def auto_count_media_asset(
             "people_count_detector": result.detector,
         },
     )
+    generated_crop = auto_thumbnail_crop(result)
+    centroid = face_centroid(result)
+    if generated_crop is not None or centroid is not None:
+        now = datetime.now(UTC).isoformat()
+        for link in links:
+            context = dict(link.get("context") or {})
+            existing_crop = context.get("thumbnail_crop")
+            if isinstance(existing_crop, dict) and existing_crop.get("mode") == "manual":
+                continue
+            if generated_crop is not None:
+                context["thumbnail_crop"] = {
+                    **generated_crop,
+                    "generated_at": now,
+                }
+            elif centroid is not None:
+                cx, cy = centroid
+                context["thumbnail_crop"] = {
+                    "x": cx,
+                    "y": cy,
+                    "zoom": 1,
+                    "mode": "auto",
+                    "strategy": "face_centroid_v1",
+                    "generated_at": now,
+                }
+            try:
+                db.schema("core").table("media_links").update(
+                    {"context": context, "updated_at": now}
+                ).eq("id", link["id"]).execute()
+            except Exception:
+                # Best effort: count should still succeed if crop write fails.
+                continue
 
     return AutoCountResponse(
         people_count=result.people_count,
