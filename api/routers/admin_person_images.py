@@ -31,6 +31,13 @@ router = APIRouter(prefix="/admin/person", tags=["admin-person"])
 # Valid sources for person images
 SourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery"]
 ALL_SOURCES: list[SourceType] = ["imdb", "tmdb", "fandom", "fandom-gallery"]
+TEXT_OVERLAY_FAILURE_REASONS = (
+    "download_failed",
+    "gemini_request_failed",
+    "gemini_no_text",
+    "gemini_json_parse_failed",
+    "db_update_failed",
+)
 
 
 class RefreshImagesRequest(BaseModel):
@@ -86,7 +93,12 @@ class RefreshImagesResponse(BaseModel):
     auto_counts_failed: int = 0
     text_overlay_attempted: int = 0
     text_overlay_succeeded: int = 0
+    text_overlay_unknown: int = 0
     text_overlay_failed: int = 0
+    text_overlay_failure_reasons: dict[str, int] = Field(default_factory=dict)
+    episode_metadata_tagged: int = 0
+    show_context_tagged: int = 0
+    metadata_enrichment_failed: int = 0
     centering_attempted: int = 0
     centering_succeeded: int = 0
     centering_failed: int = 0
@@ -728,7 +740,9 @@ def _chunked(values: list[str], size: int = 100) -> list[list[str]]:
 def _enrich_cast_photos_with_episode_metadata(
     db: SupabaseAdminClient,
     photos: list[dict[str, Any]],
-) -> None:
+) -> tuple[int, int]:
+    tagged = 0
+    failed = 0
     imdb_ids: list[str] = []
     for row in photos:
         if row.get("source") != "imdb":
@@ -742,7 +756,7 @@ def _enrich_cast_photos_with_episode_metadata(
 
     imdb_ids = list(dict.fromkeys(imdb_ids))
     if not imdb_ids:
-        return
+        return tagged, failed
 
     episodes_by_imdb: dict[str, dict[str, Any]] = {}
     for chunk in _chunked(imdb_ids, 100):
@@ -755,6 +769,7 @@ def _enrich_cast_photos_with_episode_metadata(
         )
         if hasattr(response, "error") and response.error:
             logger.warning("Episode lookup failed: %s", response.error)
+            failed += 1
             continue
         for row in response.data or []:
             imdb_episode_id = row.get("imdb_episode_id")
@@ -762,7 +777,7 @@ def _enrich_cast_photos_with_episode_metadata(
                 episodes_by_imdb[str(imdb_episode_id)] = row
 
     if not episodes_by_imdb:
-        return
+        return tagged, failed
 
     for row in photos:
         if row.get("source") != "imdb":
@@ -795,6 +810,8 @@ def _enrich_cast_photos_with_episode_metadata(
         row["metadata"] = metadata
         if not row.get("season") and episode.get("season_number"):
             row["season"] = episode.get("season_number")
+        tagged += 1
+    return tagged, failed
 
 
 def _apply_show_context_to_photos(
@@ -803,27 +820,36 @@ def _apply_show_context_to_photos(
     *,
     show_id: UUID | None,
     show_name: str | None,
-) -> None:
+) -> tuple[int, int]:
+    tagged = 0
+    failed = 0
     if not photos:
-        return
+        return tagged, failed
     if show_id is None and not (isinstance(show_name, str) and show_name.strip()):
-        return
+        return tagged, failed
 
     show_id_str = str(show_id) if show_id is not None else None
     show_name_val = show_name.strip() if isinstance(show_name, str) and show_name.strip() else None
 
     if show_id_str and not show_name_val:
         resp = db.schema("core").table("shows").select("id,name").eq("id", show_id_str).limit(1).execute()
-        if not (hasattr(resp, "error") and resp.error) and resp.data:
+        if hasattr(resp, "error") and resp.error:
+            failed += 1
+        elif resp.data:
             show_name_val = str(resp.data[0].get("name") or "").strip() or None
 
     for row in photos:
         metadata = dict(row.get("metadata") or {})
+        before_show_id = metadata.get("show_id")
+        before_show_name = metadata.get("show_name")
         if show_id_str:
             metadata.setdefault("show_id", show_id_str)
         if show_name_val:
             metadata.setdefault("show_name", show_name_val)
         row["metadata"] = metadata
+        if metadata.get("show_id") != before_show_id or metadata.get("show_name") != before_show_name:
+            tagged += 1
+    return tagged, failed
 
 
 def _refresh_tmdb_profile(
@@ -883,31 +909,34 @@ def _detect_text_overlay_cast_photos(
     *,
     photo_ids: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
-) -> tuple[int, int, int]:
+    reason_counts: dict[str, int] | None = None,
+) -> tuple[int, int, int, int]:
     """
     Best-effort "word id" detection for cast_photos rows.
 
-    Returns (attempted, succeeded, failed).
+    Returns (attempted, succeeded, unknown, failed).
     """
     attempted = 0
     succeeded = 0
+    unknown = 0
     failed = 0
 
     candidate_sources = [s for s in sources if s in ALL_SOURCES]
     if not candidate_sources:
-        return attempted, succeeded, failed
+        return attempted, succeeded, unknown, failed
     if photo_ids is not None and not photo_ids:
         photo_ids = None
 
     try:
         from trr_backend.vision.text_overlay import (
             TextOverlayDetectionError,
+            classify_text_overlay_failure_reason,
             detect_and_update_cast_photo_text_overlay,
             is_text_overlay_detection_configured,
         )
 
         if not is_text_overlay_detection_configured():
-            return attempted, succeeded, failed
+            return attempted, succeeded, unknown, failed
 
         query = (
             db.schema("core")
@@ -921,7 +950,7 @@ def _detect_text_overlay_cast_photos(
         response = query.execute()
         if hasattr(response, "error") and response.error:
             logger.warning("Word detection query failed for %s: %s", person_id, response.error)
-            return attempted, succeeded, failed
+            return attempted, succeeded, unknown, failed
 
         rows = response.data or []
         to_process: list[str] = []
@@ -937,13 +966,24 @@ def _detect_text_overlay_cast_photos(
         for idx, photo_id in enumerate(to_process, start=1):
             attempted += 1
             try:
-                detect_and_update_cast_photo_text_overlay(db, photo_id, force=False)
-                succeeded += 1
+                result = detect_and_update_cast_photo_text_overlay(db, photo_id, force=False)
+                if result.status == "unknown":
+                    unknown += 1
+                    reason = result.reason_code
+                    if reason_counts is not None and isinstance(reason, str) and reason:
+                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                else:
+                    succeeded += 1
             except TextOverlayDetectionError as exc:
                 failed += 1
+                if reason_counts is not None:
+                    reason = classify_text_overlay_failure_reason(exc)
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 logger.warning("Word detection failed photo_id=%s error=%s", photo_id, exc)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                if reason_counts is not None:
+                    reason_counts["gemini_request_failed"] = reason_counts.get("gemini_request_failed", 0) + 1
                 logger.warning("Word detection failed photo_id=%s error=%s", photo_id, exc)
 
             if progress_cb:
@@ -951,7 +991,7 @@ def _detect_text_overlay_cast_photos(
     except Exception as exc:
         logger.exception("Word detection setup failed for %s: %s", person_id, exc)
 
-    return attempted, succeeded, failed
+    return attempted, succeeded, unknown, failed
 
 
 def _detect_text_overlay_media_links(
@@ -959,20 +999,23 @@ def _detect_text_overlay_media_links(
     person_id: str,
     *,
     progress_cb: Callable[[int, int], None] | None = None,
-) -> tuple[int, int, int]:
+    reason_counts: dict[str, int] | None = None,
+) -> tuple[int, int, int, int]:
     attempted = 0
     succeeded = 0
+    unknown = 0
     failed = 0
 
     try:
         from trr_backend.vision.text_overlay import (
             TextOverlayDetectionError,
+            classify_text_overlay_failure_reason,
             detect_and_update_media_asset_text_overlay,
             is_text_overlay_detection_configured,
         )
 
         if not is_text_overlay_detection_configured():
-            return attempted, succeeded, failed
+            return attempted, succeeded, unknown, failed
 
         rows = _fetch_person_media_link_rows(db, person_id)
         to_process: list[str] = []
@@ -991,20 +1034,31 @@ def _detect_text_overlay_media_links(
         for idx, asset_id in enumerate(to_process, start=1):
             attempted += 1
             try:
-                detect_and_update_media_asset_text_overlay(db, asset_id, force=False)
-                succeeded += 1
+                result = detect_and_update_media_asset_text_overlay(db, asset_id, force=False)
+                if result.status == "unknown":
+                    unknown += 1
+                    reason = result.reason_code
+                    if reason_counts is not None and isinstance(reason, str) and reason:
+                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                else:
+                    succeeded += 1
             except TextOverlayDetectionError as exc:
                 failed += 1
+                if reason_counts is not None:
+                    reason = classify_text_overlay_failure_reason(exc)
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 logger.warning("Word detection failed media_asset_id=%s error=%s", asset_id, exc)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                if reason_counts is not None:
+                    reason_counts["gemini_request_failed"] = reason_counts.get("gemini_request_failed", 0) + 1
                 logger.warning("Word detection failed media_asset_id=%s error=%s", asset_id, exc)
             if progress_cb:
                 progress_cb(idx, total)
     except Exception as exc:
         logger.exception("Word detection media links setup failed for %s: %s", person_id, exc)
 
-    return attempted, succeeded, failed
+    return attempted, succeeded, unknown, failed
 
 
 # ---------------------------------------------------------------------------
@@ -1068,20 +1122,30 @@ def refresh_person_images(
         logger.exception(f"Fetch error for {person_id}")
         errors.append(f"Fetch: {exc}")
         photos = []
+        episode_metadata_tagged = 0
+        show_context_tagged = 0
+        metadata_enrichment_failed = 1
     else:
+        episode_metadata_tagged = 0
+        show_context_tagged = 0
+        metadata_enrichment_failed = 0
         try:
-            _enrich_cast_photos_with_episode_metadata(db, photos)
+            episode_metadata_tagged, episode_metadata_failed = _enrich_cast_photos_with_episode_metadata(db, photos)
+            metadata_enrichment_failed += episode_metadata_failed
         except Exception as exc:
             logger.warning("Episode metadata enrichment failed for %s: %s", person_id, exc)
+            metadata_enrichment_failed += 1
         try:
-            _apply_show_context_to_photos(
+            show_context_tagged, show_context_failed = _apply_show_context_to_photos(
                 db,
                 photos,
                 show_id=request.show_id,
                 show_name=request.show_name,
             )
+            metadata_enrichment_failed += show_context_failed
         except Exception as exc:
             logger.warning("Show context tagging failed for %s: %s", person_id, exc)
+            metadata_enrichment_failed += 1
 
     # 3. Upsert to database
     photos_upserted = 0
@@ -1130,27 +1194,36 @@ def refresh_person_images(
     auto_counts_failed = auto_counts_failed_cast + auto_counts_failed_media
 
     # 4.6 Word ID / text overlay detection (best-effort)
+    text_overlay_reason_counts: dict[str, int] = {}
     (
         text_overlay_attempted_cast,
         text_overlay_succeeded_cast,
+        text_overlay_unknown_cast,
         text_overlay_failed_cast,
     ) = _detect_text_overlay_cast_photos(
         db,
         person_id_str,
         sources,
         photo_ids=None,
+        reason_counts=text_overlay_reason_counts,
     )
     (
         text_overlay_attempted_media,
         text_overlay_succeeded_media,
+        text_overlay_unknown_media,
         text_overlay_failed_media,
     ) = _detect_text_overlay_media_links(
         db,
         person_id_str,
+        reason_counts=text_overlay_reason_counts,
     )
     text_overlay_attempted = text_overlay_attempted_cast + text_overlay_attempted_media
     text_overlay_succeeded = text_overlay_succeeded_cast + text_overlay_succeeded_media
+    text_overlay_unknown = text_overlay_unknown_cast + text_overlay_unknown_media
     text_overlay_failed = text_overlay_failed_cast + text_overlay_failed_media
+    text_overlay_failure_reasons = {
+        reason: int(text_overlay_reason_counts.get(reason, 0)) for reason in TEXT_OVERLAY_FAILURE_REASONS
+    }
 
     # 4.7 Center/crop thumbnails for non-manual rows (best-effort)
     centering_attempted, centering_succeeded, centering_failed, centering_skipped_manual = (
@@ -1185,7 +1258,12 @@ def refresh_person_images(
         auto_counts_failed=auto_counts_failed,
         text_overlay_attempted=text_overlay_attempted,
         text_overlay_succeeded=text_overlay_succeeded,
+        text_overlay_unknown=text_overlay_unknown,
         text_overlay_failed=text_overlay_failed,
+        text_overlay_failure_reasons=text_overlay_failure_reasons,
+        episode_metadata_tagged=episode_metadata_tagged,
+        show_context_tagged=show_context_tagged,
+        metadata_enrichment_failed=metadata_enrichment_failed,
         centering_attempted=centering_attempted,
         centering_succeeded=centering_succeeded,
         centering_failed=centering_failed,
@@ -1217,25 +1295,41 @@ async def refresh_person_images_stream(
 
     request = request or RefreshImagesRequest()
     person_id_str = str(person_id)
+    run_id = f"refresh-{person_id_str}-{int(datetime.now(UTC).timestamp())}"
 
     async def event_generator() -> AsyncGenerator[str, None]:
         errors: list[str] = []
         upserted_photo_ids: list[str] = []
+        text_overlay_reason_counts: dict[str, int] = dict.fromkeys(TEXT_OVERLAY_FAILURE_REASONS, 0)
+        episode_metadata_tagged = 0
+        show_context_tagged = 0
+        metadata_enrichment_failed = 0
 
         def progress(payload: dict[str, Any]) -> str:
-            return f"event: progress\ndata: {json.dumps(payload)}\n\n"
+            return f"event: progress\ndata: {json.dumps({'run_id': run_id, **payload})}\n\n"
+
+        def error_event(*, stage: str, error: str, detail: str | None = None) -> str:
+            payload: dict[str, Any] = {"run_id": run_id, "stage": stage, "error": error}
+            if detail:
+                payload["detail"] = detail
+            return f"event: error\ndata: {json.dumps(payload)}\n\n"
 
         # 1. Get person
-        person = _get_person_details(db, person_id_str)
-        if not person:
-            yield f"event: error\ndata: {json.dumps({'error': 'Person not found'})}\n\n"
-            return
+        try:
+            person = _get_person_details(db, person_id_str)
+            if not person:
+                yield error_event(stage="setup", error="Person not found")
+                return
 
-        external_ids = person.get("external_ids") or {}
-        imdb_person_id = _extract_imdb_id(external_ids)
-        tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
-        person_name = person.get("full_name")
-        sources = request.sources or ALL_SOURCES
+            external_ids = person.get("external_ids") or {}
+            imdb_person_id = _extract_imdb_id(external_ids)
+            tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
+            person_name = person.get("full_name")
+            sources = request.sources or ALL_SOURCES
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Refresh stream setup failed for %s: %s", person_id_str, exc)
+            yield error_event(stage="setup", error="Failed to initialize refresh", detail=str(exc))
+            return
 
         # 1.5 Refresh person profiles (best-effort)
         yield progress({"stage": "tmdb_profile", "message": "Syncing TMDb profile..."})
@@ -1323,19 +1417,49 @@ async def refresh_person_images_stream(
                 }
             )
 
+        yield progress(
+            {
+                "stage": "metadata_enrichment",
+                "message": "Tagging episode metadata...",
+                "current": 0,
+                "total": 2,
+            }
+        )
         try:
-            _enrich_cast_photos_with_episode_metadata(db, photos)
+            episode_metadata_tagged, episode_failed = _enrich_cast_photos_with_episode_metadata(db, photos)
+            metadata_enrichment_failed += episode_failed
         except Exception as exc:
-            errors.append(str(exc))
+            metadata_enrichment_failed += 1
+            errors.append(f"Metadata enrichment (episode): {exc}")
+
+        yield progress(
+            {
+                "stage": "metadata_enrichment",
+                "message": "Applying show context...",
+                "current": 1,
+                "total": 2,
+            }
+        )
         try:
-            _apply_show_context_to_photos(
+            show_context_tagged, show_failed = _apply_show_context_to_photos(
                 db,
                 photos,
                 show_id=request.show_id,
                 show_name=request.show_name,
             )
+            metadata_enrichment_failed += show_failed
         except Exception as exc:
-            errors.append(str(exc))
+            metadata_enrichment_failed += 1
+            errors.append(f"Metadata enrichment (show context): {exc}")
+
+        yield progress(
+            {
+                "stage": "metadata_enrichment",
+                "message": "Metadata enrichment complete.",
+                "current": 2,
+                "total": 2,
+            }
+        )
 
         yield progress(
             {
@@ -1384,40 +1508,51 @@ async def refresh_person_images_stream(
         # 4. Mirror
         photos_mirrored, photos_failed = 0, 0
         if not request.skip_mirror:
-            from trr_backend.media.s3_mirror import get_cdn_base_url
+            try:
+                from trr_backend.media.s3_mirror import get_cdn_base_url
 
-            cdn_url = None if request.force_mirror else get_cdn_base_url()
-            # When force_mirror=True, include photos that already have hosted_url so they get re-uploaded
-            rows = fetch_cast_photos_missing_hosted(
-                db, person_ids=[person_id_str], cdn_base_url=cdn_url, include_hosted=request.force_mirror
-            )
-            total_rows = len(rows)
-            yield progress(
-                {
-                    "stage": "mirroring",
-                    "message": "Mirroring to S3...",
-                    "current": 0,
-                    "total": total_rows,
-                }
-            )
-            for idx, row in enumerate(rows, start=1):
-                if not row.get("imdb_person_id") and imdb_person_id:
-                    row["imdb_person_id"] = imdb_person_id
-                try:
-                    patch = mirror_cast_photo_row(row, force=request.force_mirror)
-                    if patch:
-                        update_cast_photo_hosted_fields(db, str(row["id"]), patch)
-                        photos_mirrored += 1
-                except Exception:
-                    photos_failed += 1
-                if idx <= 20 or idx % 5 == 0 or idx == total_rows:
-                    data = {
+                cdn_url = None if request.force_mirror else get_cdn_base_url()
+                # When force_mirror=True, include photos that already have hosted_url so they get re-uploaded
+                rows = fetch_cast_photos_missing_hosted(
+                    db, person_ids=[person_id_str], cdn_base_url=cdn_url, include_hosted=request.force_mirror
+                )
+                total_rows = len(rows)
+                yield progress(
+                    {
                         "stage": "mirroring",
                         "message": "Mirroring to S3...",
-                        "current": idx,
+                        "current": 0,
                         "total": total_rows,
                     }
-                    yield progress(data)
+                )
+                for idx, row in enumerate(rows, start=1):
+                    if not row.get("imdb_person_id") and imdb_person_id:
+                        row["imdb_person_id"] = imdb_person_id
+                    try:
+                        patch = mirror_cast_photo_row(row, force=request.force_mirror)
+                        if patch:
+                            update_cast_photo_hosted_fields(db, str(row["id"]), patch)
+                            photos_mirrored += 1
+                    except Exception:
+                        photos_failed += 1
+                    if idx <= 20 or idx % 5 == 0 or idx == total_rows:
+                        data = {
+                            "stage": "mirroring",
+                            "message": "Mirroring to S3...",
+                            "current": idx,
+                            "total": total_rows,
+                        }
+                        yield progress(data)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Mirror: {exc}")
+                yield progress(
+                    {
+                        "stage": "mirroring",
+                        "message": f"Mirroring failed: {exc}",
+                        "current": 0,
+                        "total": 0,
+                    }
+                )
         else:
             yield progress({"stage": "mirroring", "message": "Skipping S3 mirroring.", "current": 0, "total": 0})
 
@@ -1595,10 +1730,12 @@ async def refresh_person_images_stream(
         # 5.6 Word ID / text overlay detection (best-effort)
         text_overlay_attempted = 0
         text_overlay_succeeded = 0
+        text_overlay_unknown = 0
         text_overlay_failed = 0
         try:
             from trr_backend.vision.text_overlay import (
                 TextOverlayDetectionError,
+                classify_text_overlay_failure_reason,
                 detect_and_update_cast_photo_text_overlay,
                 detect_and_update_media_asset_text_overlay,
                 is_text_overlay_detection_configured,
@@ -1650,15 +1787,25 @@ async def refresh_person_images_stream(
                     text_overlay_attempted += 1
                     try:
                         if item["origin"] == "cast_photos":
-                            detect_and_update_cast_photo_text_overlay(db, item["id"], force=False)
+                            result = detect_and_update_cast_photo_text_overlay(db, item["id"], force=False)
                         else:
-                            detect_and_update_media_asset_text_overlay(db, item["id"], force=False)
-                        text_overlay_succeeded += 1
+                            result = detect_and_update_media_asset_text_overlay(db, item["id"], force=False)
+                        if result.status == "unknown":
+                            text_overlay_unknown += 1
+                            reason = result.reason_code or "gemini_request_failed"
+                            text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
+                        else:
+                            text_overlay_succeeded += 1
                     except TextOverlayDetectionError as exc:
                         text_overlay_failed += 1
+                        reason = classify_text_overlay_failure_reason(exc)
+                        text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
                         errors.append(f"Word ID {item['id']}: {exc}")
                     except Exception as exc:  # noqa: BLE001
                         text_overlay_failed += 1
+                        text_overlay_reason_counts["gemini_request_failed"] = (
+                            text_overlay_reason_counts.get("gemini_request_failed", 0) + 1
+                        )
                         errors.append(f"Word ID {item['id']}: {exc}")
 
                     if idx <= 20 or idx % 5 == 0 or idx == total_text:
@@ -1817,18 +1964,24 @@ async def refresh_person_images_stream(
 
         # 6. Complete
         complete_data = {
+            "run_id": run_id,
             "person_id": person_id_str,
             "photos_fetched": len(photos),
             "photos_upserted": photos_upserted,
             "photos_mirrored": photos_mirrored,
             "photos_failed": photos_failed,
             "photos_pruned": photos_pruned,
+            "episode_metadata_tagged": episode_metadata_tagged,
+            "show_context_tagged": show_context_tagged,
+            "metadata_enrichment_failed": metadata_enrichment_failed,
             "auto_counts_attempted": auto_counts_attempted,
             "auto_counts_succeeded": auto_counts_succeeded,
             "auto_counts_failed": auto_counts_failed,
             "text_overlay_attempted": text_overlay_attempted,
             "text_overlay_succeeded": text_overlay_succeeded,
+            "text_overlay_unknown": text_overlay_unknown,
             "text_overlay_failed": text_overlay_failed,
+            "text_overlay_failure_reasons": text_overlay_reason_counts,
             "centering_attempted": centering_attempted,
             "centering_succeeded": centering_succeeded,
             "centering_failed": centering_failed,
@@ -1856,17 +2009,25 @@ async def reprocess_person_images_stream(
 ) -> StreamingResponse:
     """Re-run counting, text-ID, and face-crop on existing photos (no sync/mirror)."""
     person_id_str = str(person_id)
+    run_id = f"reprocess-{person_id_str}-{int(datetime.now(UTC).timestamp())}"
 
     async def event_generator() -> AsyncGenerator[str, None]:
         errors: list[str] = []
+        text_overlay_reason_counts: dict[str, int] = dict.fromkeys(TEXT_OVERLAY_FAILURE_REASONS, 0)
 
         def progress(payload: dict[str, Any]) -> str:
-            return f"event: progress\ndata: {json.dumps(payload)}\n\n"
+            return f"event: progress\ndata: {json.dumps({'run_id': run_id, **payload})}\n\n"
+
+        def error_event(*, stage: str, error: str, detail: str | None = None) -> str:
+            payload: dict[str, Any] = {"run_id": run_id, "stage": stage, "error": error}
+            if detail:
+                payload["detail"] = detail
+            return f"event: error\ndata: {json.dumps(payload)}\n\n"
 
         # Verify person exists
         person = _get_person_details(db, person_id_str)
         if not person:
-            yield f"event: error\ndata: {json.dumps({'error': 'Person not found'})}\n\n"
+            yield error_event(stage="setup", error="Person not found")
             return
 
         sources: list[SourceType] = list(ALL_SOURCES)
@@ -1913,15 +2074,28 @@ async def reprocess_person_images_stream(
             }
         )
 
-        to_cast, ts_cast, tf_cast = _detect_text_overlay_cast_photos(db, person_id_str, sources)
-        to_media, ts_media, tf_media = _detect_text_overlay_media_links(db, person_id_str)
+        to_cast, ts_cast, tu_cast, tf_cast = _detect_text_overlay_cast_photos(
+            db,
+            person_id_str,
+            sources,
+            reason_counts=text_overlay_reason_counts,
+        )
+        to_media, ts_media, tu_media, tf_media = _detect_text_overlay_media_links(
+            db,
+            person_id_str,
+            reason_counts=text_overlay_reason_counts,
+        )
         text_overlay_attempted = to_cast + to_media
         text_overlay_succeeded = ts_cast + ts_media
+        text_overlay_unknown = tu_cast + tu_media
         text_overlay_failed = tf_cast + tf_media
 
         yield progress({
             "stage": "word_id",
-            "message": f"Text detection done ({text_overlay_succeeded} succeeded, {text_overlay_failed} failed).",
+            "message": (
+                "Text detection done "
+                f"({text_overlay_succeeded} succeeded, {text_overlay_unknown} unknown, {text_overlay_failed} failed)."
+            ),
             "current": text_overlay_attempted,
             "total": text_overlay_attempted,
         })
@@ -1950,12 +2124,15 @@ async def reprocess_person_images_stream(
         # ---------- Complete ----------
         complete_data = {
             "person_id": person_id_str,
+            "run_id": run_id,
             "auto_counts_attempted": auto_counts_attempted,
             "auto_counts_succeeded": auto_counts_succeeded,
             "auto_counts_failed": auto_counts_failed,
             "text_overlay_attempted": text_overlay_attempted,
             "text_overlay_succeeded": text_overlay_succeeded,
+            "text_overlay_unknown": text_overlay_unknown,
             "text_overlay_failed": text_overlay_failed,
+            "text_overlay_failure_reasons": text_overlay_reason_counts,
             "centering_attempted": c_attempted,
             "centering_succeeded": c_succeeded,
             "centering_failed": c_failed,

@@ -57,6 +57,7 @@ class DetectTextOverlayResponse(BaseModel):
     text_overlay_model: str | None = None
     text_overlay_detected_at: str | None = None
     text_overlay_prompt_version: str | None = None
+    text_overlay_error_code: str | None = None
 
 
 def _build_media_asset_s3_key(sha256: str, ext: str) -> str:
@@ -295,4 +296,5 @@ def detect_text_overlay_media_asset(
         text_overlay_model=result.model,
         text_overlay_detected_at=result.detected_at,
         text_overlay_prompt_version=result.prompt_version,
+        text_overlay_error_code=result.reason_code,
     )

@@ -32,6 +32,7 @@ class DetectTextOverlayResponse(BaseModel):
     text_overlay_model: str | None = None
     text_overlay_detected_at: str | None = None
     text_overlay_prompt_version: str | None = None
+    text_overlay_error_code: str | None = None
 
 
 @router.post("/cast-photos/{photo_id}/mirror", response_model=MirrorCastPhotoResponse)
@@ -128,4 +129,5 @@ def detect_text_overlay_cast_photo(
         text_overlay_model=result.model,
         text_overlay_detected_at=result.detected_at,
         text_overlay_prompt_version=result.prompt_version,
+        text_overlay_error_code=result.reason_code,
     )

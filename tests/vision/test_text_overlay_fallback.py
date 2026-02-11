@@ -120,11 +120,13 @@ def test_build_unknown_text_overlay_result_sets_unknown_status() -> None:
         model="gemini-2.5-flash",
         error="no candidate",
         finish_reason="2",
+        reason_code=text_overlay.TEXT_OVERLAY_REASON_GEMINI_NO_TEXT,
     )
     assert result.status == "unknown"
     assert result.has_text_overlay is None
     assert result.error == "no candidate"
     assert result.finish_reason == "2"
+    assert result.reason_code == text_overlay.TEXT_OVERLAY_REASON_GEMINI_NO_TEXT
 
 
 def test_extract_existing_fields_accepts_persisted_unknown_status() -> None:
@@ -138,6 +140,7 @@ def test_extract_existing_fields_accepts_persisted_unknown_status() -> None:
             "text_overlay_prompt_version": "v1",
             "text_overlay_error": "no candidate",
             "text_overlay_finish_reason": "2",
+            "text_overlay_error_code": "gemini_no_text",
         }
     )
     assert existing is not None
@@ -145,6 +148,7 @@ def test_extract_existing_fields_accepts_persisted_unknown_status() -> None:
     assert existing.has_text_overlay is None
     assert existing.error == "no candidate"
     assert existing.finish_reason == "2"
+    assert existing.reason_code == "gemini_no_text"
 
 
 def test_detect_cast_photo_text_overlay_retries_download_candidates(monkeypatch) -> None:
@@ -159,6 +163,7 @@ def test_detect_cast_photo_text_overlay_retries_download_candidates(monkeypatch)
                 "thumb_url": None,
                 "source_page_url": "https://real-housewives.fandom.com/wiki/Test",
                 "metadata": {},
+                "hosted_key": None,
             }
         }
     )
@@ -201,6 +206,7 @@ def test_detect_media_asset_text_overlay_uses_normalized_fandom_url(monkeypatch)
                 "hosted_url": None,
                 "source_url": "https://static.wikia.nocookie.net/real-housewives/images/0/08/angie_k_s3.jpeg/revision/latest",
                 "metadata": {},
+                "hosted_key": None,
             }
         }
     )
@@ -231,3 +237,50 @@ def test_detect_media_asset_text_overlay_uses_normalized_fandom_url(monkeypatch)
     assert result.has_text_overlay is False
     assert called_urls
     assert called_urls[0] == "https://static.wikia.nocookie.net/real-housewives/images/0/08/angie_k_s3.jpeg"
+
+
+def test_detect_media_asset_text_overlay_falls_back_to_hosted_key_when_url_download_fails(monkeypatch) -> None:
+    db = _FakeDb(
+        {
+            "media_assets": {
+                "id": "asset-1",
+                "hosted_url": "https://cdn.example.com/missing.webp",
+                "hosted_key": "images/people/example.webp",
+                "source_url": "https://static.wikia.nocookie.net/real-housewives/images/missing.webp",
+                "metadata": {},
+            }
+        }
+    )
+
+    url_calls: list[str] = []
+    hosted_key_calls: list[str] = []
+
+    def fake_download(url: str, *, referer: str | None):
+        url_calls.append(url)
+        raise text_overlay.TextOverlayTargetFetchError("403")
+
+    def fake_download_hosted_key(hosted_key: str):
+        hosted_key_calls.append(hosted_key)
+        return b"img", "image/webp"
+
+    monkeypatch.setattr(text_overlay, "is_text_overlay_detection_configured", lambda: True)
+    monkeypatch.setattr(text_overlay, "_download_image_bytes", fake_download)
+    monkeypatch.setattr(text_overlay, "_download_image_bytes_from_hosted_key", fake_download_hosted_key)
+    monkeypatch.setattr(
+        text_overlay,
+        "_detect_text_overlay_with_gemini",
+        lambda *_args, **_kwargs: text_overlay.TextOverlayResult(
+            has_text_overlay=False,
+            confidence=0.88,
+            detector="gemini",
+            model="gemini-2.5-flash",
+            detected_at="2026-02-11T00:00:00+00:00",
+            prompt_version="v1",
+        ),
+    )
+
+    result = text_overlay.detect_and_update_media_asset_text_overlay(db, "asset-1", force=True)
+
+    assert result.has_text_overlay is False
+    assert url_calls
+    assert hosted_key_calls == ["images/people/example.webp"]
