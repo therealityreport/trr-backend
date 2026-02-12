@@ -650,3 +650,14 @@ YouTube generic placeholder guard (this session, 2026-02-11):
 - Validation:
   - `pytest -q tests/api/routers/test_admin_show_bravo.py -q` (pass)
   - `python -m py_compile api/routers/admin_show_bravo.py` (pass)
+
+PR merge/readiness pass (this session, 2026-02-12):
+- Merged `origin/main` into `feat/admin-media-pipeline-enhancements`.
+- Resolved merge conflicts in:
+  - `api/routers/admin_person_images.py`
+  - `docs/ai/HANDOFF.md`
+- Validation:
+  - `python -m py_compile api/routers/admin_person_images.py`
+  - `ruff check api/routers/admin_person_images.py`
+  - `pytest -q tests/api/routers/test_admin_person_images.py` (16 passed)
+- Branch pushed and PR #56 is merge-clean with passing checks.
