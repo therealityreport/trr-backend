@@ -1967,6 +1967,7 @@ def _run_platform_stage(
                 keywords=keywords,
                 opts=stage_opts,
                 job_id=job_id,
+                stage=stage,
             )
         if platform == "tiktok":
             return _ingest_tiktok(
@@ -1976,6 +1977,7 @@ def _run_platform_stage(
                 keywords=keywords,
                 opts=stage_opts,
                 job_id=job_id,
+                stage=stage,
             )
         if platform == "youtube":
             return _ingest_youtube(
@@ -1985,6 +1987,7 @@ def _run_platform_stage(
                 keywords=keywords,
                 opts=stage_opts,
                 job_id=job_id,
+                stage=stage,
             )
         if platform == "twitter":
             return _ingest_twitter(
@@ -1996,23 +1999,24 @@ def _run_platform_stage(
                 job_id=job_id,
                 include_reply_records=False,
                 hydrate_audience_replies=False,
+                stage=stage,
             )
     else:
         if opts.max_comments_per_post <= 0:
             return 0, 0, {}
         if platform == "instagram":
             _, comments, meta = _ingest_instagram(
-                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id
+                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id, stage=stage
             )
             return 0, comments, meta
         if platform == "tiktok":
             _, comments, meta = _ingest_tiktok(
-                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id
+                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id, stage=stage
             )
             return 0, comments, meta
         if platform == "youtube":
             _, comments, meta = _ingest_youtube(
-                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id
+                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id, stage=stage
             )
             return 0, comments, meta
         if platform == "twitter":
@@ -2025,6 +2029,7 @@ def _run_platform_stage(
                 job_id=job_id,
                 include_reply_records=False,
                 hydrate_audience_replies=True,
+                stage=stage,
             )
             return 0, comments, meta
 
@@ -2106,6 +2111,39 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             opts=opts,
             job_id=job_id,
         )
+        run_is_cancelled = False
+        if run_id:
+            run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
+            run_is_cancelled = str(run_state.get("status") or "") == "cancelled"
+        if run_is_cancelled:
+            _finish_job(
+                job_id,
+                status="cancelled",
+                items_found=posts_count + comments_count,
+                metadata={
+                    "stage": stage,
+                    "stage_counters": {"posts": posts_count, "comments": comments_count},
+                    "platform": platform,
+                    "account": account,
+                    "retrieval_meta": retrieval_meta,
+                },
+            )
+            return pg.fetch_one(
+                """
+                select
+                  id::text,
+                  run_id::text as run_id,
+                  platform,
+                  job_type,
+                  status,
+                  items_found,
+                  error_message,
+                  metadata
+                from social.scrape_jobs
+                where id = %s
+                """,
+                [job_id],
+            ) or {}
         _finish_job(
             job_id,
             status="completed",
@@ -2119,6 +2157,40 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             },
         )
     except Exception as exc:  # noqa: BLE001
+        run_is_cancelled = False
+        if run_id:
+            run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
+            run_is_cancelled = str(run_state.get("status") or "") == "cancelled"
+        if run_is_cancelled:
+            _finish_job(
+                job_id,
+                status="cancelled",
+                items_found=0,
+                error_message="Cancelled by user request",
+                metadata={
+                    "stage": stage,
+                    "platform": platform,
+                    "account": account,
+                },
+            )
+            if run_id:
+                _finalize_run_status(run_id)
+            return pg.fetch_one(
+                """
+                select
+                  id::text,
+                  run_id::text as run_id,
+                  platform,
+                  job_type,
+                  status,
+                  items_found,
+                  error_message,
+                  metadata
+                from social.scrape_jobs
+                where id = %s
+                """,
+                [job_id],
+            ) or {}
         error_code, error_class, transient = _classify_job_error(exc)
         attempt_count = int(job.get("attempt_count") or 1)
         max_attempts = int(job.get("max_attempts") or 1)
