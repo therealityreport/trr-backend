@@ -76,6 +76,7 @@ from api.routers import (  # noqa: E402
     admin_image_counts,
     admin_media_assets,
     admin_person_images,
+    admin_show_bravo,
     admin_scrape,
     admin_show_bravo,
     admin_show_links,

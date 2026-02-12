@@ -923,6 +923,7 @@ async def cancel_season_ingest_run(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+
 @router.get("/seasons/{season_id}/analytics")
 async def get_season_analytics(
     season_id: UUID,
