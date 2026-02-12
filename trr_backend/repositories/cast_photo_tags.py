@@ -35,13 +35,7 @@ def get_tags_by_photo_ids(db: Any, photo_ids: list[str]) -> dict[str, dict[str, 
 def has_manual_tags(tag_row: dict[str, Any] | None) -> bool:
     if not tag_row:
         return False
-    if (tag_row.get("people_count_source") or "").lower() == "manual":
-        return True
-    if tag_row.get("people_names"):
-        return True
-    if tag_row.get("people_ids"):
-        return True
-    return False
+    return (tag_row.get("people_count_source") or "").lower() == "manual"
 
 
 def upsert_cast_photo_tags(

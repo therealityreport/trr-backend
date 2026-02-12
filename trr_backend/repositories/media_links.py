@@ -34,13 +34,7 @@ def list_person_links_by_asset_id(db: Any, media_asset_id: str) -> list[dict[str
 def has_manual_people_tags(context: dict[str, Any] | None) -> bool:
     if not context:
         return False
-    if str(context.get("people_count_source", "")).lower() == "manual":
-        return True
-    if context.get("people_names"):
-        return True
-    if context.get("people_ids"):
-        return True
-    return False
+    return str(context.get("people_count_source", "")).lower() == "manual"
 
 
 def has_people_count(context: dict[str, Any] | None) -> bool:

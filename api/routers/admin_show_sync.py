@@ -57,6 +57,13 @@ def _split_env_list(var_name: str) -> list[str]:
     return parts
 
 
+def _is_real_housewives_show(show_name: str | None) -> bool:
+    if not isinstance(show_name, str):
+        return False
+    normalized = show_name.strip().lower()
+    return bool(normalized) and "real housewives" in normalized
+
+
 class SyncFromListsRequest(BaseModel):
     imdb_lists: list[str] | None = Field(default=None, description="IMDb list URLs.")
     tmdb_lists: list[str] | None = Field(default=None, description="TMDb list ids or URLs.")
@@ -184,8 +191,12 @@ class RefreshShowPhotosRequest(BaseModel):
     """High-fidelity gallery refresh with live progress updates."""
 
     limit_per_source: int = Field(default=50, ge=1, le=200)
+    imdb_mediaindex_max_pages: int = Field(default=25, ge=1, le=100)
+    imdb_mediaindex_max_images: int | None = Field(default=None, ge=1, le=5000)
     skip_s3: bool = False
     skip_prune: bool = False
+    skip_auto_count: bool = False
+    skip_word_detection: bool = False
     force_mirror: bool = False
     verbose: bool = False
 
@@ -730,8 +741,12 @@ def refresh_show_photos_stream(
                 rows = fetch_imdb_show_mediaindex_rows(
                     show_imdb_id,
                     show_id=show_id_str,
-                    max_pages=25,
-                    max_images=None,
+                    max_pages=int(payload.imdb_mediaindex_max_pages or 25),
+                    max_images=(
+                        int(payload.imdb_mediaindex_max_images)
+                        if isinstance(payload.imdb_mediaindex_max_images, int)
+                        else None
+                    ),
                     sleep_ms=0,
                     include_tags=True,
                 )
@@ -1086,13 +1101,14 @@ def refresh_show_photos_stream(
             episode_images_mirrored = 0
 
         # ------------------------------------------------------------------
-        # Stage 4: Cast photos (IMDb + TMDb + Fandom)
+        # Stage 4: Cast photos (IMDb + TMDb, and Fandom only for Real Housewives)
         # ------------------------------------------------------------------
         cast_photos_fetched = 0
         cast_photos_upserted = 0
         cast_photos_mirrored = 0
         cast_photos_failed = 0
         cast_photos_pruned = 0
+        allow_fandom_sources = _is_real_housewives_show(show_name)
 
         # Determine cast people ids for show.
         def _fetch_person_ids_for_show() -> list[str]:
@@ -1170,15 +1186,24 @@ def refresh_show_photos_stream(
                     fetch_units += 1  # IMDb
                 if t.get("tmdb_person_id"):
                     fetch_units += 1  # TMDb
-                if t.get("person_name"):
+                if allow_fandom_sources and t.get("person_name"):
                     fetch_units += 2  # Fandom person + Fandom gallery
 
             bump_total(fetch_units)
             yield progress(
                 stage="sync_cast_photos",
-                message="Syncing cast photos (IMDb/TMDb/Fandom)...",
+                message=(
+                    "Syncing cast photos (IMDb/TMDb/Fandom)..."
+                    if allow_fandom_sources
+                    else "Syncing cast photos (IMDb/TMDb)..."
+                ),
                 stage_total=fetch_units,
             )
+            if not allow_fandom_sources:
+                yield progress(
+                    stage="sync_fandom",
+                    message="Skipping Fandom cast photos for non-Real Housewives shows.",
+                )
 
             stage_done = 0
             for t in targets:
@@ -1237,8 +1262,8 @@ def refresh_show_photos_stream(
                         errors.append(f"TMDb cast photos {pid}: {exc}")
                     bump_current(1)
 
-                # Fandom person + gallery
-                if isinstance(pname, str) and pname.strip():
+                # Fandom person + gallery (Real Housewives only)
+                if allow_fandom_sources and isinstance(pname, str) and pname.strip():
                     stage_done += 1
                     yield progress(
                         stage="sync_fandom",
@@ -1359,7 +1384,9 @@ def refresh_show_photos_stream(
         auto_counts_attempted = 0
         auto_counts_succeeded = 0
         auto_counts_failed = 0
-        if is_screenalytics_configured() and person_ids and not payload.skip_s3:
+        if payload.skip_auto_count:
+            yield progress(stage="auto_count", message="Skipping auto-count (fast mode).")
+        elif is_screenalytics_configured() and person_ids and not payload.skip_s3:
             try:
                 resp = (
                     db.schema("core")
@@ -1429,62 +1456,65 @@ def refresh_show_photos_stream(
         text_overlay_attempted = 0
         text_overlay_succeeded = 0
         text_overlay_failed = 0
-        try:
-            from trr_backend.vision.text_overlay import (
-                TextOverlayDetectionNotConfiguredError,
-                detect_and_update_cast_photo_text_overlay,
-                is_text_overlay_detection_configured,
-            )
-
-            if is_text_overlay_detection_configured() and person_ids:
-                resp = (
-                    db.schema("core")
-                    .table("cast_photos")
-                    .select("id,metadata")
-                    .in_("person_id", person_ids)
-                    .limit(500)
-                    .execute()
+        if payload.skip_word_detection:
+            yield progress(stage="word_id", message="Skipping word detection (fast mode).")
+        else:
+            try:
+                from trr_backend.vision.text_overlay import (
+                    TextOverlayDetectionNotConfiguredError,
+                    detect_and_update_cast_photo_text_overlay,
+                    is_text_overlay_detection_configured,
                 )
-                rows = resp.data or []
-                if not isinstance(rows, list):
-                    rows = []
-                candidates: list[str] = []
-                for row in rows:
-                    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-                    if "has_text_overlay" in (meta or {}):
-                        continue
-                    pid = row.get("id")
-                    if pid:
-                        candidates.append(str(pid))
 
-                bump_total(len(candidates))
-                yield progress(
-                    stage="word_id",
-                    message="Detecting words/text overlays...",
-                    stage_total=len(candidates),
-                )
-                for idx, photo_id in enumerate(candidates):
-                    try:
-                        detect_and_update_cast_photo_text_overlay(db, photo_id, force=False)
-                        text_overlay_succeeded += 1
-                    except TextOverlayDetectionNotConfiguredError:
-                        break
-                    except Exception as exc:  # noqa: BLE001
-                        text_overlay_failed += 1
-                        errors.append(f"Word ID {photo_id}: {exc}")
-                    text_overlay_attempted += 1
-                    bump_current(1)
-                    if (idx + 1) % 10 == 0:
-                        yield progress(
-                            stage="word_id",
-                            message="Detecting words/text overlays...",
-                            stage_current=idx + 1,
-                            stage_total=len(candidates),
-                        )
-            else:
-                yield progress(stage="word_id", message="Skipping word detection (not configured).")
-        except Exception:
-            yield progress(stage="word_id", message="Skipping word detection (module not available).")
+                if is_text_overlay_detection_configured() and person_ids:
+                    resp = (
+                        db.schema("core")
+                        .table("cast_photos")
+                        .select("id,metadata")
+                        .in_("person_id", person_ids)
+                        .limit(500)
+                        .execute()
+                    )
+                    rows = resp.data or []
+                    if not isinstance(rows, list):
+                        rows = []
+                    candidates: list[str] = []
+                    for row in rows:
+                        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                        if "has_text_overlay" in (meta or {}):
+                            continue
+                        pid = row.get("id")
+                        if pid:
+                            candidates.append(str(pid))
+
+                    bump_total(len(candidates))
+                    yield progress(
+                        stage="word_id",
+                        message="Detecting words/text overlays...",
+                        stage_total=len(candidates),
+                    )
+                    for idx, photo_id in enumerate(candidates):
+                        try:
+                            detect_and_update_cast_photo_text_overlay(db, photo_id, force=False)
+                            text_overlay_succeeded += 1
+                        except TextOverlayDetectionNotConfiguredError:
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            text_overlay_failed += 1
+                            errors.append(f"Word ID {photo_id}: {exc}")
+                        text_overlay_attempted += 1
+                        bump_current(1)
+                        if (idx + 1) % 10 == 0:
+                            yield progress(
+                                stage="word_id",
+                                message="Detecting words/text overlays...",
+                                stage_current=idx + 1,
+                                stage_total=len(candidates),
+                            )
+                else:
+                    yield progress(stage="word_id", message="Skipping word detection (not configured).")
+            except Exception:
+                yield progress(stage="word_id", message="Skipping word detection (module not available).")
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         complete = RefreshShowPhotosResponse(

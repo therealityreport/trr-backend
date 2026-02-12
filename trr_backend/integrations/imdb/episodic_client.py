@@ -454,21 +454,207 @@ class HttpImdbEpisodicClient(ImdbEpisodicClient):
 
         errors = payload.get("errors")
         if errors:
+            error_codes: list[str] = []
             if isinstance(errors, list):
                 messages: list[str] = []
                 for err in errors:
                     if isinstance(err, Mapping):
                         msg = err.get("message")
+                        extensions = err.get("extensions")
+                        if isinstance(extensions, Mapping):
+                            code = extensions.get("code")
+                            if isinstance(code, str) and code.strip():
+                                error_codes.append(code.strip())
                         messages.append(str(msg) if msg is not None else str(err))
                     else:
                         messages.append(str(err))
                 summary = "; ".join(messages[:5])
             else:
                 summary = str(errors)
+
+            normalized_codes = {code.strip().upper() for code in error_codes if code.strip()}
+            if "PERSISTED_QUERY_NOT_FOUND" in normalized_codes or "PERSISTED_QUERY_NOT_SUPPORTED" in normalized_codes:
+                # IMDb rotates persisted-query hashes. Fall back to a direct query so episodic sync keeps working.
+                return self._request_episode_credits_direct_query(
+                    title_id=title_id,
+                    name_id=name_id,
+                    season=season,
+                    after=after,
+                    locale=locale,
+                    extra_headers=extra_headers,
+                )
+
             raise ImdbClientError(f"IMDb GraphQL error(s): {summary}")
 
         _extract_credits_v2_node(payload)
         return dict(payload)
+
+    def _request_episode_credits_direct_query(
+        self,
+        *,
+        title_id: ImdbTitleId,
+        name_id: ImdbNameId,
+        season: int,
+        after: str,
+        locale: str,
+        extra_headers: Mapping[str, str] | None,
+    ) -> dict[str, Any]:
+        """
+        Direct GraphQL fallback used when IMDb persisted-query hashes rotate.
+
+        The response is transformed into the same shape expected by
+        _extract_credits_v2_node/_parse_* helpers:
+          data.title.creditsV2.edges[0].node.{nav,episodeCredits}
+        """
+        query = """
+        query TitleEpisodeBottomSheetCreditsFallback(
+          $titleId: ID!
+          $nameId: ID!
+          $season: String!
+          $after: ID
+        ) {
+          title(id: $titleId) {
+            episodeCredits(
+              first: 250
+              after: $after
+              nameId: $nameId
+              filter: { episodes: { includeSeasons: [$season] } }
+              useEntitlement: false
+            ) {
+              edges {
+                node {
+                  title {
+                    id
+                    releaseYear { year }
+                    titleText { text }
+                    series {
+                      displayableEpisodeNumber {
+                        displayableSeason { text }
+                        episodeNumber { text }
+                      }
+                    }
+                  }
+                  creditedRoles(first: 25) {
+                    edges {
+                      node {
+                        text
+                        category { text }
+                        attributes { text }
+                        characters(first: 25) {
+                          edges { node { name } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              pageInfo { hasNextPage endCursor }
+              displayableSeasons(first: 200) {
+                edges { node { season } }
+              }
+            }
+          }
+        }
+        """
+        variables = {
+            "titleId": title_id,
+            "nameId": name_id,
+            "season": str(int(season)),
+            "after": after,
+        }
+        headers = self._build_headers(extra_headers)
+        endpoints = []
+        # The non-caching endpoint reliably supports direct POST GraphQL queries.
+        if "api.graphql.imdb.com" not in self._base_url:
+            endpoints.append("https://api.graphql.imdb.com/")
+        endpoints.append(self._base_url)
+
+        resp: requests.Response | None = None
+        last_exc: Exception | None = None
+        for endpoint in endpoints:
+            try:
+                candidate = self._session.post(
+                    endpoint,
+                    json={"query": query, "variables": variables},
+                    headers=headers,
+                    timeout=self._timeout_seconds,
+                )
+            except requests.RequestException as exc:
+                last_exc = exc
+                continue
+            if candidate.status_code == 200:
+                resp = candidate
+                break
+            resp = candidate
+
+        if resp is None:
+            raise ImdbClientError(
+                f"IMDb direct GraphQL fallback request failed: {last_exc}" if last_exc else "No response"
+            )
+        if resp.status_code != 200:
+            snippet = (resp.text or "")[:400]
+            raise ImdbClientError(
+                f"IMDb direct GraphQL fallback failed with HTTP {resp.status_code}.",
+                status_code=resp.status_code,
+                body_snippet=snippet,
+            )
+
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            snippet = (resp.text or "")[:400]
+            raise ImdbClientError(
+                "IMDb direct GraphQL fallback returned non-JSON response.",
+                status_code=resp.status_code,
+                body_snippet=snippet,
+            ) from exc
+
+        if not isinstance(payload, Mapping):
+            raise ImdbClientError("IMDb direct GraphQL fallback returned unexpected JSON shape (not an object).")
+
+        errors = payload.get("errors")
+        if errors:
+            if isinstance(errors, list):
+                messages = []
+                for err in errors[:5]:
+                    if isinstance(err, Mapping):
+                        messages.append(str(err.get("message") or err))
+                    else:
+                        messages.append(str(err))
+                summary = "; ".join(messages)
+            else:
+                summary = str(errors)
+            raise ImdbClientError(f"IMDb direct GraphQL fallback error(s): {summary}")
+
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise ImdbClientError("IMDb direct GraphQL fallback missing `data`.")
+        title = data.get("title")
+        if not isinstance(title, Mapping):
+            raise ImdbClientError("IMDb direct GraphQL fallback missing `data.title`.")
+        episode_credits = title.get("episodeCredits")
+        if not isinstance(episode_credits, Mapping):
+            raise ImdbClientError("IMDb direct GraphQL fallback missing `data.title.episodeCredits`.")
+
+        # Re-shape to persisted-query-compatible structure.
+        return {
+            "data": {
+                "title": {
+                    "creditsV2": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "nav": {
+                                        "displayableSeasons": episode_credits.get("displayableSeasons", {"edges": []}),
+                                    },
+                                    "episodeCredits": episode_credits,
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }
 
     def fetch_available_seasons(
         self,

@@ -146,7 +146,7 @@ def _build_people_tags_context(db: SupabaseAdminClient, person_ids: set[str]) ->
     Build a deterministic people tags payload for media_links.context.
 
     Used to persist PEOPLE tags during URL import (so SOLO/GROUP filtering works),
-    and to prevent later auto-count steps from overwriting manual intent.
+    without asserting a manual people-count value.
     """
     if not person_ids:
         return {}
@@ -161,8 +161,6 @@ def _build_people_tags_context(db: SupabaseAdminClient, person_ids: set[str]) ->
         return {
             "people_ids": ids_sorted,
             "people_names": ids_sorted,
-            "people_count": len(ids_sorted),
-            "people_count_source": "manual",
         }
 
     if hasattr(response, "error") and response.error:
@@ -171,8 +169,6 @@ def _build_people_tags_context(db: SupabaseAdminClient, person_ids: set[str]) ->
         return {
             "people_ids": ids_sorted,
             "people_names": ids_sorted,
-            "people_count": len(ids_sorted),
-            "people_count_source": "manual",
         }
 
     rows = response.data or []
@@ -192,15 +188,11 @@ def _build_people_tags_context(db: SupabaseAdminClient, person_ids: set[str]) ->
         return {
             "people_ids": ids_sorted,
             "people_names": ids_sorted,
-            "people_count": len(ids_sorted),
-            "people_count_source": "manual",
         }
 
     return {
         "people_ids": people_ids,
         "people_names": people_names,
-        "people_count": len(people_ids),
-        "people_count_source": "manual",
     }
 
 
@@ -309,14 +301,7 @@ def _get_season_cast(db, show_id: str, season_number: int) -> list[dict]:
 
 def _get_show_identifier(db: SupabaseAdminClient, show_id: str) -> dict[str, str] | None:
     """Resolve show identifier for S3 key construction (IMDb ID preferred, UUID fallback)."""
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("id, external_ids")
-        .eq("id", show_id)
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("id, external_ids").eq("id", show_id).limit(1).execute()
     if hasattr(response, "error") and response.error:
         logger.error("Failed to lookup show identifier for show_id=%s: %s", show_id, response.error)
         return None

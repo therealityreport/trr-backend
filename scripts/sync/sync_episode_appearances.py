@@ -298,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     occurrences_inserted = 0
     occurrences_skipped_missing_episode = 0
     failures: list[str] = []
+    fatal_show_failures = 0
 
     people_cache: dict[str, str] = {}
 
@@ -465,16 +466,10 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 credits_by_person.setdefault(pid, []).append(row)
 
-            # Delete existing occurrences for these credits so the episodic scrape is authoritative.
-            credit_ids = [str(r.get("id") or "") for r in credits_rows if r.get("id")]
-            credit_ids = [cid for cid in credit_ids if cid]
-            if credit_ids and not args.dry_run:
-                for batch in _chunk(credit_ids, size=200):
-                    del_resp = db.schema("core").table("credit_occurrences").delete().in_("credit_id", batch).execute()
-                    if hasattr(del_resp, "error") and del_resp.error:
-                        raise RuntimeError(f"Supabase error deleting credit_occurrences: {del_resp.error}")
-
             occurrence_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+            resolved_credit_ids: set[str] = set()
+            failed_cast_fetches = 0
+            successful_cast_fetches = 0
 
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 futures = {
@@ -490,11 +485,13 @@ def main(argv: list[str] | None = None) -> int:
                     result = future.result()
                     if result.error:
                         failures.append(f"{result.cast_row.name_id}: {result.error}")
+                        failed_cast_fetches += 1
                         continue
 
                     person_id = people_cache.get(result.cast_row.name_id.strip().lower())
                     if not person_id:
                         failures.append(f"{result.cast_row.name_id}: missing person_id")
+                        failed_cast_fetches += 1
                         continue
 
                     credit_id = _pick_credit_id(
@@ -504,8 +501,11 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     if not credit_id:
                         failures.append(f"{result.cast_row.name_id}: missing credit_id")
+                        failed_cast_fetches += 1
                         continue
 
+                    successful_cast_fetches += 1
+                    resolved_credit_ids.add(credit_id)
                     for credit in result.credits:
                         imdb_episode_id = str(getattr(credit.episode, "title_id", "") or "").strip()
                         if not imdb_episode_id:
@@ -552,6 +552,28 @@ def main(argv: list[str] | None = None) -> int:
 
                         occurrence_by_key[key] = row
 
+            if failed_cast_fetches > 0 and successful_cast_fetches == 0:
+                fatal_show_failures += 1
+                if not args.dry_run:
+                    mark_sync_state_failed(
+                        db,
+                        table_name="credit_occurrences",
+                        show_id=show_id,
+                        error=RuntimeError(
+                            "All episodic cast fetches failed; refusing to replace existing credit_occurrences."
+                        ),
+                    )
+                continue
+
+            # Delete occurrences only for credits that were successfully refreshed.
+            # This prevents wiping historical data when IMDb episodic queries fail.
+            if resolved_credit_ids and not args.dry_run:
+                credit_ids = sorted(resolved_credit_ids)
+                for batch in _chunk(credit_ids, size=200):
+                    del_resp = db.schema("core").table("credit_occurrences").delete().in_("credit_id", batch).execute()
+                    if hasattr(del_resp, "error") and del_resp.error:
+                        raise RuntimeError(f"Supabase error deleting credit_occurrences: {del_resp.error}")
+
             occurrence_rows = list(occurrence_by_key.values())
             if occurrence_rows:
                 if args.dry_run:
@@ -582,12 +604,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"occurrences_inserted={occurrences_inserted}")
     print(f"occurrences_skipped_missing_episode={occurrences_skipped_missing_episode}")
     print(f"failures={len(failures)}")
+    print(f"fatal_show_failures={fatal_show_failures}")
 
     if failures:
         for failure in failures[:10]:
             print(f"- {failure}")
 
-    return 0
+    return 1 if fatal_show_failures > 0 else 0
 
 
 if __name__ == "__main__":
