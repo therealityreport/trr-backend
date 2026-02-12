@@ -123,17 +123,99 @@ def test_commit_bravo_import_returns_snapshot_metadata(client: TestClient, monke
                                             "api.routers.admin_show_bravo._import_bravo_person_image",
                                             return_value={"imported": 1, "skipped": 0, "errors": []},
                                         ):
-                                            response = client.post(
-                                                f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
-                                                headers={"Authorization": f"Bearer {token}"},
-                                                json={"show_url": "https://www.bravotv.com/the-valley"},
-                                            )
+                                            with patch("api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync", return_value=0):
+                                                with patch("api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync", return_value={"role_suggestions": 0, "role_assignments": 0, "announcement_people": 0}):
+                                                    response = client.post(
+                                                        f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
+                                                        headers={"Authorization": f"Bearer {token}"},
+                                                        json={"show_url": "https://www.bravotv.com/the-valley"},
+                                                    )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["show_snapshot"]["source_id"] == "bravo"
     assert len(payload["person_snapshots"]) == 1
     assert payload["counts"]["people_updated"] == 1
+
+
+def test_commit_bravo_import_persists_season_overview_for_season_scoped_sync(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    person_id = str(uuid4())
+    mock_db = MagicMock()
+
+    bundle = {
+        "show": {
+            "canonical_url": "https://www.bravotv.com/the-valley",
+            "title": "The Valley",
+            "description": "Season-specific Bravo copy",
+            "airs_text": "Tuesdays 9/8c",
+        },
+        "videos": [],
+        "news": [],
+        "people": [
+            {
+                "canonical_url": "https://www.bravotv.com/people/janet-caperna",
+                "name": "Janet Caperna",
+                "bio": "Bio",
+                "hero_image_url": None,
+                "social_links": {},
+                "videos": [],
+                "news": [],
+            }
+        ],
+        "image_candidates": [],
+        "discovered_person_urls": ["https://www.bravotv.com/people/janet-caperna"],
+        "raw": {},
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch("api.routers.admin_show_bravo.parse_bravo_show_bundle", return_value=bundle):
+                    with patch(
+                        "api.routers.admin_show_bravo._build_show_cast_index",
+                        return_value=[{"person_id": person_id, "person_name": "Janet Caperna"}],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_bravo._resolve_season_id",
+                            return_value=season_id,
+                        ):
+                            with patch(
+                                "api.routers.admin_show_bravo._upsert_show_snapshot",
+                                return_value={"show_id": show_id, "source_id": "bravo", "variant": "default"},
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_bravo._upsert_person_snapshot",
+                                    return_value={"person_id": person_id, "source_id": "bravo", "variant": "default"},
+                                ):
+                                    with patch("api.routers.admin_show_bravo._persist_person_profile"):
+                                        with patch(
+                                            "api.routers.admin_show_bravo._persist_show_description"
+                                        ) as persist_show_description_mock:
+                                            with patch(
+                                                "api.routers.admin_show_bravo._persist_season_overview"
+                                            ) as persist_season_overview_mock:
+                                                with patch("api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync", return_value=0):
+                                                    with patch("api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync", return_value={"role_suggestions": 0, "role_assignments": 0, "announcement_people": 0}):
+                                                        response = client.post(
+                                                            f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
+                                                            headers={"Authorization": f"Bearer {token}"},
+                                                            json={
+                                                                "show_url": "https://www.bravotv.com/the-valley",
+                                                                "season_number": 1,
+                                                            },
+                                                        )
+
+    assert response.status_code == 200
+    persist_season_overview_mock.assert_called_once()
+    persist_show_description_mock.assert_not_called()
 
 
 def test_commit_bravo_import_uses_selected_show_image_kinds(
@@ -202,23 +284,25 @@ def test_commit_bravo_import_uses_selected_show_image_kinds(
                                                     errors=[],
                                                 ),
                                             ) as import_images_mock:
-                                                response = client.post(
-                                                    f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
-                                                    headers={"Authorization": f"Bearer {token}"},
-                                                    json={
-                                                        "show_url": "https://www.bravotv.com/the-valley",
-                                                        "selected_show_images": [
-                                                            {
-                                                                "url": "https://www.bravotv.com/i/logo.png",
-                                                                "kind": "logo",
+                                                with patch("api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync", return_value=0):
+                                                    with patch("api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync", return_value={"role_suggestions": 0, "role_assignments": 0, "announcement_people": 0}):
+                                                        response = client.post(
+                                                            f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
+                                                            headers={"Authorization": f"Bearer {token}"},
+                                                            json={
+                                                                "show_url": "https://www.bravotv.com/the-valley",
+                                                                "selected_show_images": [
+                                                                    {
+                                                                        "url": "https://www.bravotv.com/i/logo.png",
+                                                                        "kind": "logo",
+                                                                    },
+                                                                    {
+                                                                        "url": "https://www.bravotv.com/i/poster.jpg",
+                                                                        "kind": "poster",
+                                                                    },
+                                                                ],
                                                             },
-                                                            {
-                                                                "url": "https://www.bravotv.com/i/poster.jpg",
-                                                                "kind": "poster",
-                                                            },
-                                                        ],
-                                                    },
-                                                )
+                                                        )
 
     assert response.status_code == 200
     assert import_images_mock.called

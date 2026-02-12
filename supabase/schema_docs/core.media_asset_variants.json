@@ -1,0 +1,218 @@
+{
+  "schema": "core",
+  "table": "media_asset_variants",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "media_asset_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "variant_key",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "format",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "width",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "height",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bucket",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_key",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_url",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "crop_mode",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "crop_x",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "crop_y",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "crop_zoom",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "crop_signature",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'base'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "media_asset_variants_media_asset_id_fkey",
+      "column": "media_asset_id",
+      "references": "core.media_assets.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "media_asset_variants_asset_idx",
+      "columns": [
+        "media_asset_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_asset_variants_asset_idx ON core.media_asset_variants USING btree (media_asset_id)"
+    },
+    {
+      "name": "media_asset_variants_asset_variant_format_crop_uq",
+      "columns": [
+        "media_asset_id",
+        "variant_key",
+        "format",
+        "crop_signature"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_asset_variants_asset_variant_format_crop_uq ON core.media_asset_variants USING btree (media_asset_id, variant_key, format, crop_signature)"
+    },
+    {
+      "name": "media_asset_variants_crop_signature_idx",
+      "columns": [
+        "crop_signature"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_asset_variants_crop_signature_idx ON core.media_asset_variants USING btree (crop_signature)"
+    },
+    {
+      "name": "media_asset_variants_hosted_key_uq",
+      "columns": [
+        "hosted_key"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_asset_variants_hosted_key_uq ON core.media_asset_variants USING btree (hosted_key)"
+    },
+    {
+      "name": "media_asset_variants_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_asset_variants_pkey ON core.media_asset_variants USING btree (id)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "media_asset_id": "00000000-0000-0000-0000-000000000000",
+    "variant_key": "example",
+    "format": "example",
+    "width": 0,
+    "height": 0,
+    "bytes": 0,
+    "hosted_bucket": "example",
+    "hosted_key": "example",
+    "hosted_url": "example",
+    "crop_mode": "example",
+    "crop_x": 0,
+    "crop_y": 0,
+    "crop_zoom": 0,
+    "crop_signature": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

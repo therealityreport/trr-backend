@@ -17,6 +17,7 @@ from trr_backend.clients.screenalytics import (
     count_people,
     face_centroid,
 )
+from trr_backend.media.image_variants import generate_media_asset_variants
 from trr_backend.media.s3_mirror import normalize_fandom_file_url
 from trr_backend.repositories.cast_photo_tags import (
     get_tags_by_photo_ids,
@@ -255,6 +256,7 @@ def auto_count_media_asset(
     )
     generated_crop = auto_thumbnail_crop(result)
     centroid = face_centroid(result)
+    latest_crop_payload: dict[str, Any] | None = None
     if generated_crop is not None or centroid is not None:
         now = datetime.now(UTC).isoformat()
         for link in links:
@@ -267,6 +269,7 @@ def auto_count_media_asset(
                     **generated_crop,
                     "generated_at": now,
                 }
+                latest_crop_payload = context["thumbnail_crop"]
             elif centroid is not None:
                 cx, cy = centroid
                 context["thumbnail_crop"] = {
@@ -277,6 +280,7 @@ def auto_count_media_asset(
                     "strategy": "face_centroid_v1",
                     "generated_at": now,
                 }
+                latest_crop_payload = context["thumbnail_crop"]
             try:
                 db.schema("core").table("media_links").update(
                     {"context": context, "updated_at": now}
@@ -284,6 +288,18 @@ def auto_count_media_asset(
             except Exception:
                 # Best effort: count should still succeed if crop write fails.
                 continue
+
+    if latest_crop_payload is not None:
+        try:
+            generate_media_asset_variants(
+                db,
+                asset_id=str(asset_id),
+                crop=latest_crop_payload,
+                force=False,
+            )
+        except Exception:
+            # Best effort: auto-count should still succeed if variant generation fails.
+            pass
 
     return AutoCountResponse(
         people_count=result.people_count,

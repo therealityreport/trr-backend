@@ -22,7 +22,6 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.auth import AdminUser
-from api.deps import SupabaseAdminClient
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +119,10 @@ async def scrape_instagram(
     )
 
     try:
-        # Note: In production, cookies would come from secure storage (env vars or secrets manager)
-        # For now, running without auth (limited results)
-        scraper = InstagramScraper(cookies={})
+        from trr_backend.repositories.social_season_analytics import _load_instagram_cookies
+
+        cookies = _load_instagram_cookies()
+        scraper = InstagramScraper(cookies=cookies)
         posts = scraper.scrape(config)
 
         return InstagramScrapeResponse(
@@ -320,7 +320,10 @@ async def scrape_tiktok(
     )
 
     try:
-        scraper = TikTokScraper()
+        from trr_backend.repositories.social_season_analytics import _load_tiktok_cookies
+
+        tiktok_cookies = _load_tiktok_cookies()
+        scraper = TikTokScraper(cookies=tiktok_cookies)
         posts = scraper.scrape(config)
 
         return TikTokScrapeResponse(
@@ -511,8 +514,11 @@ async def search_twitter(
     )
 
     try:
-        # Note: In production, cookies/bearer token would come from secure storage
-        scraper = TwitterScraper()
+        from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
+
+        twitter_cookies, twitter_bearer = _load_twitter_auth()
+        twikit_creds = _load_twikit_credentials()
+        scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
         tweets = scraper.scrape(config)
 
         return TwitterSearchResponse(
@@ -579,7 +585,11 @@ async def fetch_tweet_replies(
     logger.info(f"Twitter replies requested by {user.get('email')} for tweet: {request.tweet_id}")
 
     try:
-        scraper = TwitterScraper()
+        from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
+
+        twitter_cookies, twitter_bearer = _load_twitter_auth()
+        twikit_creds = _load_twikit_credentials()
+        scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
         replies = scraper.fetch_tweet_replies(request.tweet_id, request.delay_seconds)
 
         return {
@@ -756,9 +766,12 @@ class SeasonSocialTargetsPutRequest(BaseModel):
 class SeasonSocialIngestRequest(BaseModel):
     source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
     platforms: list[Literal["instagram", "tiktok", "twitter", "youtube"]] | None = Field(default=None)
-    max_posts_per_target: int = Field(default=25, ge=1, le=250)
-    max_comments_per_post: int = Field(default=100, ge=1, le=2000)
+    max_posts_per_target: int = Field(default=100000, ge=1, le=1000000)
+    max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
+    max_replies_per_post: int = Field(default=100000, ge=0, le=1000000)
     fetch_replies: bool = Field(default=True)
+    ingest_mode: Literal["posts_only", "posts_and_comments"] = Field(default="posts_and_comments")
+    depth_preset: Literal["quick", "balanced", "deep"] = Field(default="deep")
     date_start: datetime | None = None
     date_end: datetime | None = None
 
@@ -807,28 +820,58 @@ async def put_season_targets(
 async def ingest_season_social(
     season_id: UUID,
     payload: SeasonSocialIngestRequest,
-    db: SupabaseAdminClient = None,
+    background_tasks: BackgroundTasks,
     user: AdminUser = None,
 ) -> dict:
-    from trr_backend.repositories.social_season_analytics import ingest_season
+    from trr_backend.repositories.social_season_analytics import (
+        execute_run,
+        ingest_season,
+        is_queue_enabled,
+    )
+
+    sid = str(season_id)
+    email = user.get("email") if user else None
 
     try:
-        return ingest_season(
-            db,
-            str(season_id),
+        run_payload = ingest_season(
+            sid,
             platforms=payload.platforms,
             source_scope=payload.source_scope,
             max_posts_per_target=payload.max_posts_per_target,
             max_comments_per_post=payload.max_comments_per_post,
+            max_replies_per_post=payload.max_replies_per_post,
             fetch_replies=payload.fetch_replies,
+            ingest_mode=payload.ingest_mode,
+            depth_preset=payload.depth_preset,
             date_start=payload.date_start,
             date_end=payload.date_end,
-            initiated_by=user.get("email"),
+            initiated_by=email,
         )
+
+        run_id = str(run_payload.get("run_id") or "")
+        queue_enabled = is_queue_enabled()
+        if run_id and not queue_enabled:
+            def _run_sync() -> None:
+                try:
+                    execute_run(run_id, worker_id="api-background")
+                except Exception:  # noqa: BLE001
+                    logger.exception("Background social ingest run failed: season=%s run_id=%s", sid, run_id)
+
+            background_tasks.add_task(_run_sync)
+
+        return {
+            "status": run_payload.get("status") or ("queued" if queue_enabled else "started"),
+            "season_id": sid,
+            "run_id": run_payload.get("run_id"),
+            "stages": run_payload.get("stages") or [],
+            "queued_or_started_jobs": run_payload.get("queued_or_started_jobs") or 0,
+            "summary": run_payload.get("summary") or {},
+            "message": "Ingest run enqueued. Poll /ingest/jobs with run_id for stage progress.",
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Social ingest failed: season=%s", season_id)
+        logger.exception("Failed to enqueue social ingest: season=%s", sid)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -836,16 +879,49 @@ async def ingest_season_social(
 async def get_season_ingest_jobs(
     season_id: UUID,
     limit: int = Query(default=50, ge=1, le=250),
+    run_id: UUID | None = Query(default=None),
+    status: str | None = Query(default=None),
+    platform: Literal["instagram", "tiktok", "twitter", "youtube"] | None = Query(default=None),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_jobs
 
     try:
-        jobs = list_jobs(str(season_id), limit=limit)
-        return {"season_id": str(season_id), "jobs": jobs}
+        jobs = list_jobs(
+            str(season_id),
+            limit=limit,
+            run_id=(str(run_id) if run_id else None),
+            status=status,
+            platform=platform,
+        )
+        return {
+            "season_id": str(season_id),
+            "run_id": str(run_id) if run_id else None,
+            "filters": {"status": status, "platform": platform},
+            "jobs": jobs,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to list social jobs: season=%s", season_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/seasons/{season_id}/ingest/runs/{run_id}/cancel")
+async def cancel_season_ingest_run(
+    season_id: UUID,
+    run_id: UUID,
+    user: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import cancel_run
+
+    try:
+        payload = cancel_run(str(season_id), str(run_id), cancelled_by=(user or {}).get("email"))
+        return payload
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to cancel social ingest run: season=%s run_id=%s", season_id, run_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 
 @router.get("/seasons/{season_id}/analytics")

@@ -63,11 +63,9 @@ class TwitterScrapeConfig:
         parts.append(f"since:{self.date_start.strftime('%Y-%m-%d')}")
         parts.append(f"until:{self.date_end.strftime('%Y-%m-%d')}")
 
-        # Add filters
-        if not self.include_replies:
-            parts.append("-filter:replies")
-        if not self.include_links:
-            parts.append("-filter:links")
+        # Note: -filter:replies and -filter:links operators cause 404 errors
+        # from Twitter's current API. Skip them; replies/links are filtered
+        # client-side when needed.
 
         return " ".join(parts)
 
@@ -110,9 +108,20 @@ class Tweet:
 class TwitterScraper:
     """Twitter/X scraper for searching tweets."""
 
-    # Twitter GraphQL endpoints
-    SEARCH_TIMELINE_URL = "https://x.com/i/api/graphql/UN1i3zUiCWa-6r-Uaho4fw/SearchTimeline"
-    TWEET_DETAIL_URL = "https://x.com/i/api/graphql/VWFGPVAGkZMGRKGe3GFFnA/TweetDetail"
+    # Base URL for GraphQL endpoints (hash is discovered dynamically)
+    GRAPHQL_BASE_URL = "https://x.com/i/api/graphql"
+    GUEST_ACTIVATE_URL = "https://api.twitter.com/1.1/guest/activate.json"
+    MAIN_PAGE_URL = "https://x.com"
+
+    # Fallback hashes (updated periodically, auto-discovered at runtime)
+    _FALLBACK_SEARCH_HASH = "cGK-Qeg1XJc2sZ6kgQw_Iw"
+    _FALLBACK_DETAIL_HASH = "VWFGPVAGkZMGRKGe3GFFnA"
+
+    # Public bearer token used by Twitter's web app (not a secret).
+    PUBLIC_BEARER_TOKEN = (
+        "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
+        "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+    )
 
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
@@ -144,12 +153,23 @@ class TwitterScraper:
         "responsive_web_enhance_cards_enabled": False,
     }
 
-    def __init__(self, cookies: dict | None = None, bearer_token: str | None = None):
+    def __init__(
+        self,
+        cookies: dict | None = None,
+        bearer_token: str | None = None,
+        twikit_credentials: dict | None = None,
+    ):
         self.cookies = cookies or {}
-        self.bearer_token = bearer_token
+        self.bearer_token = bearer_token or self.PUBLIC_BEARER_TOKEN
         self.session = self._create_session()
         self._request_count = 0
         self._guest_token: str | None = None
+        self._search_hash: str | None = None
+        # twikit credentials: {"username": ..., "email": ..., "password": ...}
+        self._twikit_credentials = twikit_credentials
+        self._detail_hash: str | None = None
+        self._last_graphql_status_code: int | None = None
+        self.last_retrieval_meta: dict[str, Any] = {}
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -188,6 +208,104 @@ class TwitterScraper:
             headers["x-guest-token"] = self._guest_token
         return headers
 
+    def _activate_guest_token(self) -> bool:
+        """Activate a guest token for unauthenticated access."""
+        if self._guest_token:
+            return True
+        headers = {
+            "authorization": f"Bearer {self.bearer_token}",
+            "origin": "https://x.com",
+            "referer": "https://x.com/",
+            "user-agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/144.0.0.0 Safari/537.36"
+            ),
+        }
+        try:
+            response = self.session.post(self.GUEST_ACTIVATE_URL, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            self._guest_token = data.get("guest_token")
+            if self._guest_token:
+                logger.info("Activated guest token for Twitter API access")
+                return True
+            logger.error("Guest token activation returned no token")
+            return False
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to activate guest token: {e}")
+            return False
+
+    def _ensure_auth(self):
+        """Ensure we have some form of authentication (cookies or guest token)."""
+        if self.cookies.get("ct0"):
+            return  # Have cookie-based auth
+        self._activate_guest_token()
+
+    def _discover_graphql_hashes(self):
+        """Discover current GraphQL operation hashes from Twitter's JS bundle."""
+        if self._search_hash and self._detail_hash:
+            return
+
+        try:
+            headers = {
+                "user-agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/144.0.0.0 Safari/537.36"
+                ),
+            }
+            resp = self.session.get(self.MAIN_PAGE_URL, headers=headers)
+            resp.raise_for_status()
+
+            # Find candidate JS bundles where operation names are defined.
+            js_urls = re.findall(
+                r'src="(https://abs\.twimg\.com/responsive-web/client-web/[^"]+\.js)"',
+                resp.text,
+            )
+            js_urls = list(dict.fromkeys(js_urls))
+            if not js_urls:
+                raise ValueError("Could not find main JS bundle URL")
+
+            for js_url in js_urls[:8]:
+                js_resp = self.session.get(js_url, headers=headers)
+                js_resp.raise_for_status()
+                js_text = js_resp.text
+
+                if not self._search_hash:
+                    match = re.search(r'queryId:"([a-zA-Z0-9_-]+)",operationName:"SearchTimeline"', js_text)
+                    if match:
+                        self._search_hash = match.group(1)
+                        logger.info("Discovered SearchTimeline hash from %s", js_url)
+
+                if not self._detail_hash:
+                    match = re.search(r'queryId:"([a-zA-Z0-9_-]+)",operationName:"TweetDetail"', js_text)
+                    if match:
+                        self._detail_hash = match.group(1)
+                        logger.info("Discovered TweetDetail hash from %s", js_url)
+
+                if self._search_hash and self._detail_hash:
+                    break
+
+        except Exception as e:
+            logger.warning(f"Failed to discover GraphQL hashes: {e}; using fallbacks")
+
+        # Use fallbacks if discovery failed
+        if not self._search_hash:
+            self._search_hash = self._FALLBACK_SEARCH_HASH
+        if not self._detail_hash:
+            self._detail_hash = self._FALLBACK_DETAIL_HASH
+
+    @property
+    def _search_timeline_url(self) -> str:
+        self._discover_graphql_hashes()
+        return f"{self.GRAPHQL_BASE_URL}/{self._search_hash}/SearchTimeline"
+
+    @property
+    def _tweet_detail_url(self) -> str:
+        self._discover_graphql_hashes()
+        return f"{self.GRAPHQL_BASE_URL}/{self._detail_hash}/TweetDetail"
+
     def _rate_limit(self, delay: float):
         """Apply rate limiting between requests."""
         if self._request_count > 0:
@@ -195,16 +313,15 @@ class TwitterScraper:
             time.sleep(delay)
         self._request_count += 1
 
+    # Syndication endpoints (public, no auth required)
+    SYNDICATION_TIMELINE_URL = "https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
+
     def _extract_hashtags(self, text: str) -> list[str]:
         """Extract hashtags from text."""
-        import re
-
         return re.findall(r"#(\w+)", text)
 
     def _extract_mentions(self, text: str) -> list[str]:
         """Extract @mentions from text."""
-        import re
-
         return re.findall(r"@(\w+)", text)
 
     def _parse_tweet_result(self, result: dict, config: TwitterScrapeConfig) -> Tweet | None:
@@ -274,6 +391,289 @@ class TwitterScraper:
             person_id=config.person_id,
         )
 
+    def _parse_syndication_tweet(self, tweet_data: dict, config: TwitterScrapeConfig) -> Tweet | None:
+        """Parse a tweet from the syndication __NEXT_DATA__ response."""
+        tweet_id = tweet_data.get("id_str", "")
+        if not tweet_id:
+            return None
+
+        created_at_str = tweet_data.get("created_at", "")
+        try:
+            created_at_dt = datetime.strptime(created_at_str, "%a %b %d %H:%M:%S %z %Y")
+            created_at = int(created_at_dt.timestamp())
+            date_time = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            created_at = 0
+            date_time = ""
+
+        user = tweet_data.get("user", {})
+        username = user.get("screen_name", "")
+        text = tweet_data.get("full_text", "") or tweet_data.get("text", "")
+
+        # Extract media
+        media_urls = []
+        entities = tweet_data.get("extended_entities", {}) or tweet_data.get("entities", {})
+        for media in (entities.get("media", []) if isinstance(entities, dict) else []):
+            media_url = media.get("media_url_https") or media.get("media_url")
+            if media_url:
+                media_urls.append(media_url)
+
+        return Tweet(
+            tweet_id=tweet_id,
+            date_time=date_time,
+            created_at=created_at,
+            text=text,
+            hashtags=self._extract_hashtags(text),
+            mentions=self._extract_mentions(text),
+            likes=tweet_data.get("favorite_count", 0),
+            retweets=tweet_data.get("retweet_count", 0),
+            replies=tweet_data.get("reply_count", 0),
+            quotes=tweet_data.get("quote_count", 0),
+            views=0,
+            url=f"https://x.com/{username}/status/{tweet_id}" if tweet_id and username else "",
+            username=username,
+            display_name=user.get("name", ""),
+            user_verified=bool(user.get("verified") or user.get("is_blue_verified")),
+            is_reply=bool(tweet_data.get("in_reply_to_status_id_str")),
+            is_retweet=bool(tweet_data.get("retweeted_status")),
+            is_quote=bool(tweet_data.get("quoted_status")),
+            reply_to_tweet_id=tweet_data.get("in_reply_to_status_id_str"),
+            quoted_tweet_id=None,
+            media_urls=media_urls,
+            show_id=config.show_id,
+            season_number=config.season_number,
+            person_id=config.person_id,
+        )
+
+    def _scrape_syndication(self, username: str, config: TwitterScrapeConfig) -> list[Tweet]:
+        """Scrape tweets via the public syndication API (no auth required)."""
+        import json
+
+        logger.info(f"Using syndication API for @{username}")
+        self._rate_limit(config.delay_seconds)
+
+        url = self.SYNDICATION_TIMELINE_URL.format(username=username)
+        headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.9",
+            "user-agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/144.0.0.0 Safari/537.36"
+            ),
+        }
+
+        try:
+            response = self.session.get(url, headers=headers)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Syndication request failed for @{username}: {e}")
+            return []
+
+        # Extract __NEXT_DATA__ from the HTML
+        match = re.search(
+            r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            response.text,
+            re.DOTALL,
+        )
+        if not match:
+            logger.error("Could not extract __NEXT_DATA__ from syndication response")
+            return []
+
+        try:
+            next_data = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            logger.error("Failed to parse __NEXT_DATA__ JSON")
+            return []
+
+        entries = (
+            next_data.get("props", {})
+            .get("pageProps", {})
+            .get("timeline", {})
+            .get("entries", [])
+        )
+
+        tweets = []
+        for entry in entries:
+            tweet_data = entry.get("content", {}).get("tweet", {})
+            if not tweet_data:
+                continue
+
+            tweet = self._parse_syndication_tweet(tweet_data, config)
+            if not tweet:
+                continue
+
+            # Check date range
+            if tweet.created_at > 0:
+                if tweet.created_at < config.date_start.timestamp():
+                    continue
+                if tweet.created_at > config.date_end.timestamp():
+                    continue
+
+            tweets.append(tweet)
+            logger.info(
+                f"Found #{len(tweets)}: @{tweet.username} ({tweet.date_time}) "
+                f"- {tweet.likes:,} likes, {tweet.retweets:,} RTs"
+            )
+
+        logger.info(f"Syndication scrape: found {len(tweets)} tweets for @{username}")
+        return tweets
+
+    def _scrape_via_twikit(self, config: TwitterScrapeConfig) -> list[Tweet]:
+        """
+        Scrape tweets using the twikit library (requires credentials or cookies).
+
+        Supports two auth modes:
+        1. Cookies: dict with 'auth_token' and 'ct0' keys (preferred, avoids Cloudflare)
+        2. Login: dict with 'username', 'email', 'password' keys
+
+        Falls back gracefully if twikit is not installed or credentials
+        are missing.
+        """
+        if not self._twikit_credentials:
+            return []
+
+        try:
+            from twikit import Client as TwikitClient  # noqa: F811
+        except ImportError:
+            logger.warning("twikit not installed; skipping twikit fallback")
+            return []
+
+        import asyncio
+
+        async def _search() -> list[Tweet]:
+            client = TwikitClient("en-US")
+
+            # Prefer cookie-based auth (bypasses Cloudflare)
+            auth_token = self._twikit_credentials.get("auth_token", "")
+            ct0 = self._twikit_credentials.get("ct0", "")
+
+            if auth_token and ct0:
+                logger.info("twikit: using cookie-based auth")
+                client.set_cookies({"auth_token": auth_token, "ct0": ct0})
+            else:
+                username = self._twikit_credentials.get("username", "")
+                email = self._twikit_credentials.get("email", "")
+                password = self._twikit_credentials.get("password", "")
+
+                try:
+                    await client.login(
+                        auth_info_1=email or username,
+                        auth_info_2=username,
+                        password=password,
+                    )
+                except Exception as exc:
+                    logger.error(f"twikit login failed: {exc}")
+                    return []
+
+            search_query = config.build_search_query()
+            logger.info(f"twikit search: {search_query}")
+
+            tweets: list[Tweet] = []
+            cursor = None
+            page = 0
+
+            while True:
+                page += 1
+                if config.max_pages and page > config.max_pages:
+                    break
+
+                try:
+                    if cursor:
+                        results = await cursor.next()
+                    else:
+                        results = await client.search_tweet(
+                            search_query, "Latest", count=20
+                        )
+                except Exception as exc:
+                    # Retry once on first page (transient 404s from Twitter)
+                    if page == 1:
+                        logger.warning(
+                            f"twikit search page 1 failed ({exc}); retrying in 5s..."
+                        )
+                        await asyncio.sleep(5)
+                        try:
+                            results = await client.search_tweet(
+                                search_query, "Latest", count=20
+                            )
+                        except Exception as retry_exc:
+                            logger.error(f"twikit retry also failed: {retry_exc}")
+                            break
+                    else:
+                        logger.error(f"twikit search page {page} failed: {exc}")
+                        break
+
+                if not results:
+                    break
+
+                for t in results:
+                    try:
+                        created_at_dt = datetime.strptime(
+                            t.created_at, "%a %b %d %H:%M:%S %z %Y"
+                        )
+                        created_at = int(created_at_dt.timestamp())
+                        date_time = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except (ValueError, TypeError):
+                        created_at = 0
+                        date_time = ""
+
+                    text = t.full_text or t.text or ""
+
+                    tweet = Tweet(
+                        tweet_id=str(t.id),
+                        date_time=date_time,
+                        created_at=created_at,
+                        text=text,
+                        hashtags=self._extract_hashtags(text),
+                        mentions=self._extract_mentions(text),
+                        likes=t.favorite_count or 0,
+                        retweets=t.retweet_count or 0,
+                        replies=t.reply_count or 0,
+                        quotes=t.quote_count or 0,
+                        views=t.view_count or 0,
+                        url=f"https://x.com/{t.user.screen_name}/status/{t.id}"
+                        if t.user
+                        else "",
+                        username=t.user.screen_name if t.user else "",
+                        display_name=t.user.name if t.user else "",
+                        user_verified=bool(
+                            getattr(t.user, "is_blue_verified", False)
+                        )
+                        if t.user
+                        else False,
+                        is_reply=bool(t.in_reply_to),
+                        is_retweet=bool(getattr(t, "retweeted_tweet", None)),
+                        is_quote=bool(getattr(t, "quoted_tweet", None)),
+                        reply_to_tweet_id=str(t.in_reply_to)
+                        if t.in_reply_to
+                        else None,
+                        quoted_tweet_id=None,
+                        media_urls=[],
+                        show_id=config.show_id,
+                        season_number=config.season_number,
+                        person_id=config.person_id,
+                    )
+                    tweets.append(tweet)
+                    logger.info(
+                        f"Found #{len(tweets)}: @{tweet.username} ({tweet.date_time}) "
+                        f"- {tweet.likes:,} likes, {tweet.retweets:,} RTs"
+                    )
+
+                cursor = results
+                time.sleep(config.delay_seconds)
+
+            return tweets
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import nest_asyncio
+
+                nest_asyncio.apply()
+            return loop.run_until_complete(_search())
+        except RuntimeError:
+            return asyncio.run(_search())
+
     def _fetch_search(self, query: str, cursor: str | None = None, delay: float = 2.0) -> dict | None:
         """Fetch search results."""
         import json
@@ -295,14 +695,16 @@ class TwitterScraper:
             "features": json.dumps(self.FEATURES),
         }
 
-        url = f"{self.SEARCH_TIMELINE_URL}?{urllib.parse.urlencode(params)}"
+        url = f"{self._search_timeline_url}?{urllib.parse.urlencode(params)}"
         headers = self._get_headers()
 
         try:
             response = self.session.get(url, headers=headers, cookies=self.cookies)
             response.raise_for_status()
+            self._last_graphql_status_code = response.status_code
             return response.json()
         except requests.exceptions.RequestException as e:
+            self._last_graphql_status_code = getattr(getattr(e, "response", None), "status_code", None)
             logger.error(f"Search request failed: {e}")
             return None
 
@@ -311,6 +713,7 @@ class TwitterScraper:
         import json
         import urllib.parse
 
+        self._ensure_auth()
         self._rate_limit(delay)
 
         variables = {
@@ -329,7 +732,7 @@ class TwitterScraper:
             "features": json.dumps(self.FEATURES),
         }
 
-        url = f"{self.TWEET_DETAIL_URL}?{urllib.parse.urlencode(params)}"
+        url = f"{self._tweet_detail_url}?{urllib.parse.urlencode(params)}"
         headers = self._get_headers()
 
         try:
@@ -370,18 +773,48 @@ class TwitterScraper:
         """
         Scrape tweets matching the search criteria.
 
+        Tries GraphQL search first (requires auth cookies). If that fails,
+        falls back to the syndication API (public, no auth) for ``from:``
+        queries.
+
         Args:
             config: TwitterScrapeConfig with query, date range, etc.
 
         Returns:
             List of Tweet objects matching the search.
         """
+        self._ensure_auth()
+
         search_query = config.build_search_query()
         logger.info(f"Starting Twitter search: {search_query}")
 
-        tweets = []
+        tweets: list[Tweet] = []
+        graphql_404_count = 0
+        fallback_triggered = False
+        retrieval_mode = "graphql"
         cursor = None
         page_num = 0
+        graphql_failed = False
+
+        from_match = re.search(r"(?:^|\s)from:(\w+)", config.query)
+        if from_match and (self._twikit_credentials or not self.cookies.get("ct0")):
+            fallback_triggered = True
+            if self._twikit_credentials:
+                logger.info("Using twikit as primary mode for from: query")
+                tweets = self._scrape_via_twikit(config)
+                retrieval_mode = "twikit"
+            if not tweets:
+                username = from_match.group(1)
+                tweets = self._scrape_syndication(username, config)
+                retrieval_mode = "syndication"
+            if tweets:
+                self.last_retrieval_meta = {
+                    "retrieval_mode": retrieval_mode,
+                    "graphql_404_count": graphql_404_count,
+                    "fallback_triggered": fallback_triggered,
+                    "tweet_count": len(tweets),
+                }
+                return tweets
 
         while True:
             page_num += 1
@@ -392,6 +825,14 @@ class TwitterScraper:
             logger.info(f"Fetching page {page_num}...")
             data = self._fetch_search(search_query, cursor, config.delay_seconds)
             if not data:
+                if self._last_graphql_status_code == 404 and graphql_404_count < 1:
+                    graphql_404_count += 1
+                    # Hashes likely rotated; force rediscovery once.
+                    self._search_hash = None
+                    self._detail_hash = None
+                    logger.warning("GraphQL returned 404; retrying after hash rediscovery")
+                    continue
+                graphql_failed = True
                 break
 
             # Parse search results
@@ -444,5 +885,41 @@ class TwitterScraper:
                 logger.info("No more pages available")
                 break
 
+        # Fallback chain when GraphQL fails
+        if graphql_failed and not tweets:
+            fallback_triggered = True
+            # 1. Try twikit (authenticated search via credentials)
+            if self._twikit_credentials:
+                import time
+
+                # Brief delay after GraphQL failure to avoid Twitter rate limits
+                time.sleep(3)
+                logger.info("GraphQL failed; trying twikit search...")
+                tweets = self._scrape_via_twikit(config)
+                retrieval_mode = "twikit"
+
+            # 2. Try syndication API for from: queries (public, no auth)
+            if not tweets:
+                from_match = re.search(r"from:(\w+)", config.query)
+                if from_match:
+                    username = from_match.group(1)
+                    logger.info(
+                        f"Falling back to syndication API for @{username}"
+                    )
+                    tweets = self._scrape_syndication(username, config)
+                    retrieval_mode = "syndication"
+                elif not self._twikit_credentials:
+                    logger.warning(
+                        "Twitter requires authentication for search. "
+                        "Set SOCIAL_TWITTER_COOKIES_JSON, TWITTER_COOKIES_FILE, "
+                        "or TWIKIT_USERNAME + TWIKIT_PASSWORD env vars."
+                    )
+
         logger.info(f"Search complete: found {len(tweets)} tweets")
+        self.last_retrieval_meta = {
+            "retrieval_mode": retrieval_mode,
+            "graphql_404_count": graphql_404_count,
+            "fallback_triggered": fallback_triggered,
+            "tweet_count": len(tweets),
+        }
         return tweets

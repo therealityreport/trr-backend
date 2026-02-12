@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, HttpUrl
 
 from api.auth import AdminUser
-from api.deps import SupabaseAdminClient
+from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.scraping.bravo_parser import parse_bravo_show_bundle
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,10 @@ router = APIRouter(prefix="/admin/shows", tags=["admin-show-bravo"])
 
 _BRAVO_SOURCE_ID = "bravo"
 _BRAVO_VARIANT = "default"
+_CAST_ANNOUNCEMENT_RE = re.compile(
+    r"\b(cast|friend\s*[- ]?of|full\s*[- ]?time|housewife|joins|joined|returning|returns)\b",
+    re.IGNORECASE,
+)
 
 
 class BravoPreviewRequest(BaseModel):
@@ -610,6 +614,27 @@ def _persist_show_description(db: SupabaseAdminClient, show_id: str, description
         raise HTTPException(status_code=502, detail="Failed to update show description")
 
 
+def _persist_season_overview(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    season_id: str,
+    overview: str | None,
+) -> None:
+    if not isinstance(overview, str) or not overview.strip():
+        return
+    response = (
+        db.schema("core")
+        .table("seasons")
+        .update({"overview": overview.strip()})
+        .eq("id", season_id)
+        .eq("show_id", show_id)
+        .execute()
+    )
+    if getattr(response, "error", None):
+        raise HTTPException(status_code=502, detail="Failed to update season overview")
+
+
 def _persist_person_profile(
     db: SupabaseAdminClient,
     *,
@@ -777,7 +802,10 @@ def _extract_videos_from_snapshot(
     videos_show = normalized.get("videos_show") if isinstance(normalized.get("videos_show"), list) else []
     videos_person = normalized.get("videos_person") if isinstance(normalized.get("videos_person"), list) else []
 
-    if merge_person_sources:
+    # Most recent Bravo show snapshots already embed person video/news payloads.
+    # Avoid reloading person_source_latest on every read unless we need a fallback
+    # for older snapshots that do not include embedded person items.
+    if merge_person_sources and len(videos_person) == 0:
         people = normalized.get("people") if isinstance(normalized.get("people"), list) else []
         person_ids = [
             str(item.get("person_id"))
@@ -807,19 +835,20 @@ def _extract_news_from_snapshot(
     news_show = normalized.get("news_show") if isinstance(normalized.get("news_show"), list) else []
     news_person = normalized.get("news_person") if isinstance(normalized.get("news_person"), list) else []
 
-    people = normalized.get("people") if isinstance(normalized.get("people"), list) else []
-    person_ids = [
-        str(item.get("person_id"))
-        for item in people
-        if isinstance(item, dict) and isinstance(item.get("person_id"), str)
-    ]
-    for row in _fetch_person_snapshots(db, person_ids):
-        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        person_norm = payload.get("normalized") if isinstance(payload, dict) else {}
-        if isinstance(person_norm, dict):
-            person_news = person_norm.get("news")
-            if isinstance(person_news, list):
-                news_person.extend(person_news)
+    if len(news_person) == 0:
+        people = normalized.get("people") if isinstance(normalized.get("people"), list) else []
+        person_ids = [
+            str(item.get("person_id"))
+            for item in people
+            if isinstance(item, dict) and isinstance(item.get("person_id"), str)
+        ]
+        for row in _fetch_person_snapshots(db, person_ids):
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            person_norm = payload.get("normalized") if isinstance(payload, dict) else {}
+            if isinstance(person_norm, dict):
+                person_news = person_norm.get("news")
+                if isinstance(person_news, list):
+                    news_person.extend(person_news)
 
     return _dedupe_items([*news_show, *news_person], "article_url", merge_person_tags=True)
 
@@ -978,6 +1007,217 @@ def _filter_bundle_by_season(bundle: dict[str, Any], season_number: int | None) 
     return filtered_bundle
 
 
+def _is_cast_announcement(text: str | None) -> bool:
+    if not isinstance(text, str) or not text.strip():
+        return False
+    return bool(_CAST_ANNOUNCEMENT_RE.search(text))
+
+
+def _role_labels_from_cast_announcement(text: str | None) -> list[str]:
+    if not _is_cast_announcement(text):
+        return []
+    lowered = (text or "").lower()
+    labels: list[str] = []
+    if re.search(r"\b(friend\s*[- ]?of)\b", lowered, re.IGNORECASE):
+        labels.append("Friend-Of")
+    if re.search(r"\b(full\s*[- ]?time|housewife|househusband)\b", lowered, re.IGNORECASE):
+        labels.append("Full-Time")
+    if not labels:
+        labels.append("Cast")
+    return labels
+
+
+def _normalize_role_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.lower().strip()).strip("_")
+
+
+def _get_or_create_show_role_id(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    role_label: str,
+    actor: str,
+    role_id_cache: dict[str, str],
+) -> str | None:
+    normalized = _normalize_role_name(role_label)
+    if not normalized:
+        return None
+    if normalized in role_id_cache:
+        return role_id_cache[normalized]
+
+    row = {
+        "show_id": show_id,
+        "name": role_label.strip(),
+        "normalized_name": normalized,
+        "sort_order": 0,
+        "is_active": True,
+        "created_by": actor,
+        "updated_by": actor,
+    }
+    upsert_response = (
+        db.schema("core")
+        .table("show_role_catalog")
+        .upsert(row, on_conflict="show_id,normalized_name")
+        .execute()
+    )
+    rows = get_list_result(upsert_response, "upserting show role from bravo sync")
+    if rows and rows[0].get("id"):
+        role_id = str(rows[0]["id"])
+        role_id_cache[normalized] = role_id
+        return role_id
+
+    existing = (
+        db.schema("core")
+        .table("show_role_catalog")
+        .select("id")
+        .eq("show_id", show_id)
+        .eq("normalized_name", normalized)
+        .limit(1)
+        .execute()
+    )
+    existing_rows = get_list_result(existing, "fetching existing show role from bravo sync")
+    if existing_rows and existing_rows[0].get("id"):
+        role_id = str(existing_rows[0]["id"])
+        role_id_cache[normalized] = role_id
+        return role_id
+    return None
+
+
+def _persist_pending_links_from_bravo_sync(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    actor: str,
+) -> int:
+    from api.routers import admin_show_links
+
+    discovered = admin_show_links._discover_show_links(show_id)
+    discovered.extend(admin_show_links._discover_season_links(show_id))
+    discovered.extend(admin_show_links._discover_people_links(show_id))
+
+    upserted = 0
+    for row in discovered:
+        url = str(row.get("url") or "").strip()
+        parsed = urlparse(url)
+        if not url or not parsed.scheme.startswith("http"):
+            continue
+        admin_show_links._upsert_link(
+            db,
+            show_id=show_id,
+            entity_type=str(row.get("entity_type") or "show"),
+            entity_id=str(row.get("entity_id") or show_id),
+            link_group=str(row.get("link_group") or "other"),
+            link_kind=str(row.get("link_kind") or "other"),
+            url=url,
+            label=(str(row.get("label")) if row.get("label") else None),
+            season_number=int(row.get("season_number") or 0),
+            status="pending",
+            confidence=0.75 if str(row.get("link_group") or "") == "cast_announcements" else 0.65,
+            source=(str(row.get("source")) if row.get("source") else "bravo_sync"),
+            discovered_by="bravo_sync",
+            metadata=(row.get("metadata") if isinstance(row.get("metadata"), dict) else {}),
+            actor=actor,
+        )
+        upserted += 1
+    return upserted
+
+
+def _persist_cast_role_suggestions_from_bravo_sync(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    normalized_bundle: dict[str, Any],
+    fallback_season_number: int | None,
+    actor: str,
+) -> dict[str, int]:
+    news_items = (
+        normalized_bundle.get("news_show")
+        if isinstance(normalized_bundle.get("news_show"), list)
+        else []
+    )
+    if not news_items:
+        return {"role_suggestions": 0, "role_assignments": 0, "announcement_people": 0}
+
+    role_id_cache: dict[str, str] = {}
+    season_id_cache: dict[int, str | None] = {}
+    seen_people: set[str] = set()
+    role_suggestions = 0
+    role_assignments = 0
+
+    for item in news_items:
+        if not isinstance(item, dict):
+            continue
+        headline = str(item.get("headline") or "").strip()
+        if not _is_cast_announcement(headline):
+            continue
+        role_labels = _role_labels_from_cast_announcement(headline)
+        if not role_labels:
+            continue
+
+        season_number = (
+            int(item.get("season_number"))
+            if isinstance(item.get("season_number"), int)
+            else int(fallback_season_number or 0)
+        )
+        if season_number not in season_id_cache:
+            season_id_cache[season_number] = (
+                _resolve_season_id(db, show_id=show_id, season_number=season_number)
+                if season_number > 0
+                else None
+            )
+        season_id = season_id_cache[season_number]
+        article_url = str(item.get("article_url") or "").strip() or None
+
+        person_tags = item.get("person_tags") if isinstance(item.get("person_tags"), list) else []
+        for raw_tag in person_tags:
+            if not isinstance(raw_tag, dict):
+                continue
+            person_id = str(raw_tag.get("person_id") or "").strip()
+            if not person_id:
+                continue
+            seen_people.add(person_id)
+            for role_label in role_labels:
+                role_id = _get_or_create_show_role_id(
+                    db,
+                    show_id=show_id,
+                    role_label=role_label,
+                    actor=actor,
+                    role_id_cache=role_id_cache,
+                )
+                if not role_id:
+                    continue
+                role_suggestions += 1
+                assignment = {
+                    "show_id": show_id,
+                    "person_id": person_id,
+                    "season_id": season_id,
+                    "season_number": max(0, season_number),
+                    "role_id": role_id,
+                    "source": "bravo_cast_announcement",
+                    "confidence": 0.8,
+                    "metadata": {
+                        "headline": headline or None,
+                        "article_url": article_url,
+                    },
+                    "created_by": actor,
+                    "updated_by": actor,
+                }
+                assignment_response = (
+                    db.schema("core")
+                    .table("show_cast_role_assignments")
+                    .upsert(assignment, on_conflict="show_id,person_id,season_number,role_id")
+                    .execute()
+                )
+                get_list_result(assignment_response, "upserting cast role suggestion from bravo sync")
+                role_assignments += 1
+
+    return {
+        "role_suggestions": role_suggestions,
+        "role_assignments": role_assignments,
+        "announcement_people": len(seen_people),
+    }
+
+
 @router.post("/{show_id}/import-bravo/preview")
 def preview_bravo_import(
     show_id: UUID,
@@ -1049,6 +1289,7 @@ def commit_bravo_import(
     )
 
     people_refs: list[dict[str, Any]] = []
+    seen_people_ref_ids: set[str] = set()
     for person in bundle.get("people") or []:
         if not isinstance(person, dict):
             continue
@@ -1056,11 +1297,25 @@ def commit_bravo_import(
         if not person_url:
             continue
         mapped_id = person_url_map.get(person_url)
+        if mapped_id:
+            seen_people_ref_ids.add(mapped_id)
         people_refs.append(
             {
                 "person_id": mapped_id,
                 "person_name": person.get("name"),
                 "person_url": person_url,
+            }
+        )
+    for cast_member in show_cast:
+        person_id = str(cast_member.get("person_id") or "").strip()
+        if not person_id or person_id in seen_people_ref_ids:
+            continue
+        seen_people_ref_ids.add(person_id)
+        people_refs.append(
+            {
+                "person_id": person_id,
+                "person_name": cast_member.get("person_name"),
+                "person_url": None,
             }
         )
 
@@ -1097,7 +1352,34 @@ def commit_bravo_import(
     }
 
     show_snapshot = _upsert_show_snapshot(db, show_id=show_id_str, payload=show_payload)
-    _persist_show_description(db, show_id_str, show_description)
+    if season_id:
+        # Bravo copy is typically season-current marketing text; for season-targeted sync
+        # persist it to the selected season overview instead of overwriting global show copy.
+        _persist_season_overview(
+            db,
+            show_id=show_id_str,
+            season_id=season_id,
+            overview=show_description,
+        )
+    else:
+        _persist_show_description(db, show_id_str, show_description)
+    actor = str(
+        (admin_user or {}).get("email")
+        or (admin_user or {}).get("id")
+        or "admin"
+    )
+    discovered_links = _persist_pending_links_from_bravo_sync(
+        db,
+        show_id=show_id_str,
+        actor=actor,
+    )
+    role_suggestion_stats = _persist_cast_role_suggestions_from_bravo_sync(
+        db,
+        show_id=show_id_str,
+        normalized_bundle=normalized,
+        fallback_season_number=payload.season_number,
+        actor=actor,
+    )
 
     person_snapshots: list[dict[str, Any]] = []
     updated_people = 0
@@ -1252,6 +1534,10 @@ def commit_bravo_import(
             "skipped_show_images": imported_show_images_skipped,
             "imported_person_images": imported_person_images,
             "skipped_person_images": skipped_person_images,
+            "discovered_links": discovered_links,
+            "role_suggestions": role_suggestion_stats.get("role_suggestions", 0),
+            "role_assignments": role_suggestion_stats.get("role_assignments", 0),
+            "announcement_people": role_suggestion_stats.get("announcement_people", 0),
         },
         "unmatched_person_urls": unmatched_people,
         "image_import_errors": image_import_errors,

@@ -1,7 +1,10 @@
 # Status — Task 7 (Bravo Import + Cast Eligibility + Videos/News)
 
 Repo: TRR-Backend
+Last updated: February 12, 2026
+=======
 Last updated: February 11, 2026
+>>>>>>> origin/main
 
 ## Phase Status
 
@@ -18,6 +21,44 @@ Last updated: February 11, 2026
 None.
 
 ## Recent Activity
+
+- February 12, 2026: Added RHOSLC backfill runbook for discovered links + cast-role suggestions.
+  - Runbook:
+    - `docs/runbooks/rhoslc-show-admin-backfill.md`
+  - Includes executable `curl` + `psql` commands for:
+    - season-scoped Bravo commit backfill
+    - explicit links discovery
+    - pending link review/approval
+    - role suggestion persistence verification
+
+- February 12, 2026: Optimized persisted Bravo read endpoints to reduce slow show-page loads.
+  - `GET /api/v1/admin/shows/{show_id}/bravo/videos` and `GET /api/v1/admin/shows/{show_id}/bravo/news` now prefer embedded normalized person items already stored in the show snapshot.
+  - Person snapshot fallback queries now run only for older snapshots missing embedded `videos_person` / `news_person`, avoiding redundant large snapshot joins on every read.
+  - File:
+    - `api/routers/admin_show_bravo.py`
+  - Validation:
+    - `ruff check api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py`
+    - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+
+- February 12, 2026: Fixed season-scoped Bravo description persistence behavior.
+  - `POST /api/v1/admin/shows/{show_id}/import-bravo/commit` now persists Bravo description to `core.seasons.overview` when `season_number` is provided (resolved to a real season).
+  - Season-scoped sync no longer overwrites `core.shows.description` with current-season marketing copy.
+  - Show-level sync behavior remains unchanged: when no `season_number` is provided, `core.shows.description` is updated as before.
+  - Files:
+    - `api/routers/admin_show_bravo.py`
+    - `tests/api/routers/test_admin_show_bravo.py`
+  - Validation:
+    - `ruff check api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py`
+    - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+
+- February 12, 2026: Implemented image-variant persistence foundation for gallery performance and crop durability.
+  - Added migration `supabase/migrations/0119_create_media_asset_variants.sql` for `core.media_asset_variants`.
+  - Added generator `trr_backend/media/image_variants.py` for base (`thumb/card/detail`) and crop (`crop_card/crop_detail`) variants with S3 upload + metadata URL fields (`display_url`, `detail_url`, `crop_display_url`, `crop_detail_url`).
+  - Added admin endpoint `POST /api/v1/admin/media-assets/{asset_id}/variants` in `api/routers/admin_media_assets.py`.
+  - Hooked variant generation into scrape import and auto-count crop flows (`api/routers/admin_scrape.py`, `api/routers/admin_image_counts.py`).
+  - Added backfill tooling:
+    - `scripts/media/backfill_media_asset_variants.py`
+    - `scripts/backfill_media_asset_variants.py`
 
 - February 11, 2026: Fixed Bravo snapshot persistence failure in environments missing `core.sources.id='bravo'`.
   - Applied migration `supabase/migrations/0117_add_bravo_source.sql` to active DB.
@@ -64,3 +105,12 @@ None.
 - February 11, 2026: Tightened Bravo show-news relevance filtering to exclude unrelated sidebar/global items (e.g., "Latest Bravo News" cards not tied to the current show/cast).
   - `parse_show_news(...)` now filters by show slug/title and cast person slug relevance before returning persisted news.
   - Added parser test that keeps Summer House-related card and drops unrelated Rachel Zoe item from the same page payload.
+- February 12, 2026: Implemented show-admin backend foundations for links + roles + ingest enrichment.
+  - Added migration `0120_show_admin_links_and_roles.sql` with `core.entity_links`, `core.show_role_catalog`, `core.show_cast_role_assignments`, and `core.v_show_cast_roles_enriched`.
+  - Added admin routers for links discovery/review and show-scoped role assignment/cast-role member listing.
+  - Bravo commit now persists pending link discovery and cast-role suggestions from cast-announcement content.
+  - Season image import path now links imported media to both season and show entities.
+  - Validation:
+    - `ruff check api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
+    - `python -m py_compile api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
+    - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)

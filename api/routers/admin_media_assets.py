@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
+from trr_backend.media.image_variants import generate_media_asset_variants
 from trr_backend.media.s3_mirror import (
     build_hosted_url,
     get_s3_bucket,
@@ -46,6 +47,28 @@ class DeleteMediaAssetResponse(BaseModel):
     deleted_asset: bool
     s3_deleted: bool
     s3_error: str | None = None
+
+
+class GenerateMediaAssetVariantsRequest(BaseModel):
+    force: bool = False
+    crop: dict | None = None
+
+
+class MediaAssetVariantItem(BaseModel):
+    variant_key: str
+    format: str
+    hosted_url: str
+    width: int
+    height: int
+    bytes: int
+    crop_signature: str
+
+
+class GenerateMediaAssetVariantsResponse(BaseModel):
+    asset_id: str
+    generated: int
+    crop_signature: str
+    variants: list[MediaAssetVariantItem]
 
 
 class DetectTextOverlayResponse(BaseModel):
@@ -174,6 +197,47 @@ def mirror_media_asset(
         status="hosted",
         bytes=file_size,
         content_type=content_type,
+    )
+
+
+@router.post("/media-assets/{asset_id}/variants", response_model=GenerateMediaAssetVariantsResponse)
+def generate_variants_for_media_asset(
+    asset_id: UUID,
+    payload: GenerateMediaAssetVariantsRequest | None = None,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> GenerateMediaAssetVariantsResponse:
+    asset_id_str = str(asset_id)
+    payload = payload or GenerateMediaAssetVariantsRequest()
+    try:
+        variants = generate_media_asset_variants(
+            db,
+            asset_id=asset_id_str,
+            crop=payload.crop,
+            force=payload.force,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate variants: {exc}") from exc
+
+    crop_signature = variants[0].crop_signature if variants else ("base" if not payload.crop else "custom")
+    return GenerateMediaAssetVariantsResponse(
+        asset_id=asset_id_str,
+        generated=len(variants),
+        crop_signature=crop_signature,
+        variants=[
+            MediaAssetVariantItem(
+                variant_key=item.variant_key,
+                format=item.format,
+                hosted_url=item.hosted_url,
+                width=item.width,
+                height=item.height,
+                bytes=item.bytes,
+                crop_signature=item.crop_signature,
+            )
+            for item in variants
+        ],
     )
 
 

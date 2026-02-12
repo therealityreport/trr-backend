@@ -4,6 +4,65 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
 
 ## Latest Update (2026-02-11)
 
+- February 12, 2026: Reduced Bravo read latency for show admin pages.
+  - `api/routers/admin_show_bravo.py` now avoids unnecessary `person_source_latest` fan-out reads when show snapshots already contain embedded normalized person videos/news.
+  - Fallback person snapshot reads are preserved only for older snapshots without embedded `videos_person` / `news_person`.
+  - Validation:
+    - `ruff check api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py`
+    - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+
+- February 12, 2026: Implemented image variant persistence and crop derivative generation for existing/new media assets.
+  - Added migration: `supabase/migrations/0119_create_media_asset_variants.sql`.
+  - Added variant generator: `trr_backend/media/image_variants.py`.
+  - Added admin endpoint: `POST /api/v1/admin/media-assets/{asset_id}/variants` (`api/routers/admin_media_assets.py`).
+  - Wired variant generation into:
+    - `api/routers/admin_scrape.py` (new imports + duplicate-link flows)
+    - `api/routers/admin_image_counts.py` (auto-count thumbnail crop -> crop variants)
+  - Added backfill scripts:
+    - `scripts/media/backfill_media_asset_variants.py`
+    - `scripts/backfill_media_asset_variants.py`
+  - Validation:
+    - `ruff check` on touched backend files (pass)
+    - `python3 -m py_compile` on touched backend modules/scripts (pass)
+
+- February 12, 2026: Instagram social ingest reliability + throughput hardening (RHOSLC S6 live debug).
+  - Increased season ingest API defaults for full backfills:
+    - `api/routers/socials.py` `SeasonSocialIngestRequest.max_posts_per_target`: `25 -> 5000` (max `20000`)
+    - `SeasonSocialIngestRequest.max_comments_per_post`: `100 -> 0` (allows post-only ingest)
+  - Added comment-fetch bypass when `max_comments_per_post == 0` for:
+    - Instagram (`_ingest_instagram`)
+    - TikTok (`_ingest_tiktok`)
+    - YouTube (`_ingest_youtube`)
+    - plus ingest options coercion now allows zero comments.
+  - Added Instagram ingest pacing env controls:
+    - `SOCIAL_INSTAGRAM_DELAY_SEC` (default `0.15`)
+    - `SOCIAL_INSTAGRAM_COMMENT_DELAY_SEC` (default `0.25`)
+    - documented in `.env.example`.
+  - Added router test to lock zero-comment behavior:
+    - `tests/api/routers/test_socials_season_analytics.py::test_ingest_allows_zero_comments_limit`
+  - Live smoke result (local DB):
+    - Season `e9161955-6ee4-4985-865e-3386a0f670fb` (RHOSLC S6), Instagram-only pre-season ingest (Aug 14, 2025 → Sep 16, 2025 ET): `51` posts ingested, `0` comments.
+    - Analytics check: week 0 Instagram posts = `47` (`get_analytics(... week=0, platforms=['instagram'])`).
+
+- February 12, 2026: fixed Instagram season-ingest undercount in social analytics.
+  - Root cause: `trr_backend/repositories/social_season_analytics.py` hardcoded `InstagramScraper(cookies={})`, forcing unauthenticated mode (limited to ~12 posts).
+  - Added `_load_instagram_cookies()` with resolution order:
+    1. `SOCIAL_INSTAGRAM_COOKIES_JSON` / `INSTAGRAM_COOKIES_JSON`
+    2. `SOCIAL_INSTAGRAM_COOKIES_FILE` / `INSTAGRAM_COOKIES_FILE`
+    3. repo default `scripts/socials/instagram/instagram_cookies.json`
+  - `_ingest_instagram(...)` now uses resolved cookies and logs a warning when `sessionid` is missing.
+  - Added env docs in `.env.example`:
+    - `SOCIAL_INSTAGRAM_COOKIES_JSON`
+    - `SOCIAL_INSTAGRAM_COOKIES_FILE`
+  - Added tests:
+    - `tests/repositories/test_social_season_analytics.py` (env-json precedence and file fallback)
+  - Improved Instagram GraphQL reliability in `trr_backend/socials/instagram/scraper.py`:
+    - Added doc-id fallback chain (`26035927152742158` then `33944389991841132`)
+    - Added optional env override `INSTAGRAM_PROFILE_POSTS_DOC_ID`
+  - Verification:
+    - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (12 passed)
+    - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (passed)
+
 - Fixed Bravo snapshot persistence failure (`Failed to persist show bravo snapshot`) for environments missing `core.sources.id='bravo'`:
   - Applied migration `supabase/migrations/0117_add_bravo_source.sql` to active DB.
   - Added `_ensure_bravo_source(...)` guard in `api/routers/admin_show_bravo.py` so commit paths verify/create the Bravo source row before writing show/person snapshots.
@@ -661,3 +720,162 @@ PR merge/readiness pass (this session, 2026-02-12):
   - `ruff check api/routers/admin_person_images.py`
   - `pytest -q tests/api/routers/test_admin_person_images.py` (16 passed)
 - Branch pushed and PR #56 is merge-clean with passing checks.
+
+Bravo season-description persistence fix (this session, 2026-02-12):
+- Files:
+  - `api/routers/admin_show_bravo.py`
+  - `tests/api/routers/test_admin_show_bravo.py`
+- Changes:
+  - Added `_persist_season_overview(...)` and updated Bravo commit persistence behavior:
+    - when `season_number` is provided (season-scoped sync), Bravo description is persisted to `core.seasons.overview`
+    - global `core.shows.description` is no longer overwritten in season-scoped runs
+    - show-level sync (no `season_number`) still updates `core.shows.description` as before
+  - Added regression test asserting season-scoped commit calls season-overview persistence and does not call show-description persistence.
+- Validation:
+  - `ruff check api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+  - `python3 -m py_compile api/routers/admin_show_bravo.py` (pass)
+
+Show Admin overhaul foundation: links + roles APIs, season->show media propagation (this session, 2026-02-12):
+- Files:
+  - `supabase/migrations/0120_show_admin_links_and_roles.sql`
+  - `api/routers/admin_show_links.py`
+  - `api/routers/admin_show_roles.py`
+  - `api/routers/admin_scrape.py`
+  - `api/main.py`
+- Changes:
+  - Added `wikipedia` source seed in migration.
+  - Added show admin link registry schema:
+    - `core.entity_links` (`pending|approved|rejected`, group/kind, confidence, provenance metadata)
+  - Added show-scoped role schema:
+    - `core.show_role_catalog`
+    - `core.show_cast_role_assignments`
+    - read model `core.v_show_cast_roles_enriched`
+  - Added new admin routers and mounted endpoints:
+    - `/api/v1/admin/shows/{show_id}/links` (+ discover, patch, delete)
+    - `/api/v1/admin/shows/{show_id}/roles` (+ patch)
+    - `/api/v1/admin/shows/{show_id}/cast/{person_id}/roles`
+    - `/api/v1/admin/shows/{show_id}/cast-role-members`
+  - Updated image import paths so season imports also create show-level media links (while preserving person linking) in both sync and stream handlers.
+- Validation:
+  - `ruff check api/main.py api/routers/admin_show_links.py api/routers/admin_show_roles.py api/routers/admin_scrape.py` (pass)
+  - `python -m py_compile api/main.py api/routers/admin_show_links.py api/routers/admin_show_roles.py api/routers/admin_scrape.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+
+Show Admin Bravo ingest augmentation (this session, 2026-02-12):
+- Files:
+  - `api/routers/admin_show_bravo.py`
+  - `api/routers/admin_show_roles.py`
+  - `supabase/migrations/0120_show_admin_links_and_roles.sql`
+- Changes:
+  - Bravo commit now auto-persists discovery links as `pending` after snapshot write (show + season + person link discovery), enabling review-before-publish flow.
+  - Bravo commit now derives cast-role suggestions from cast-announcement headlines and persists show-scoped role assignments (`source=bravo_cast_announcement`) for tagged people when possible.
+  - Expanded `people_refs` for Bravo normalization to include known show cast names so person tag inference can capture announcement references beyond explicit Bravo people pages.
+  - Enhanced cast roles read model/view to expose `archive_episodes` and `season_numbers` array.
+  - Enhanced cast-role-members endpoint:
+    - season multi-select now filters by actual season membership (`season_numbers`) instead of latest season only
+    - added `archive_mode` filter: `all|exclude|only`
+- Validation:
+  - `ruff check api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
+  - `python -m py_compile api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+
+Social ingest hardening + unified run queue implementation (this session, 2026-02-12):
+- Files:
+  - `trr_backend/socials/instagram/scraper.py`
+  - `trr_backend/socials/tiktok/scraper.py`
+  - `trr_backend/socials/youtube/scraper.py`
+  - `trr_backend/socials/twitter/scraper.py`
+  - `trr_backend/db/pg.py`
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `api/routers/socials.py`
+  - `scripts/socials/worker.py`
+  - `supabase/migrations/0121_social_scrape_runs.sql`
+  - `supabase/migrations/0122_social_scrape_jobs_queue_fields.sql`
+  - `supabase/migrations/0123_social_scrape_jobs_queue_indexes.sql`
+  - `tests/api/routers/test_socials_season_analytics.py`
+  - `tests/repositories/test_social_season_analytics.py`
+- Changes:
+  - Platform retrieval hardening completed:
+    - Instagram GraphQL first-page failure now auto-falls back to profile-info mode with telemetry.
+    - TikTok now classifies challenge/non-JSON responses, applies bounded yt-dlp fallback budgets, and emits retrieval telemetry.
+    - YouTube continuation crawling now respects `max_pages`, no-hit cutoff, unknown-timestamp safeguards, and emits retrieval telemetry.
+    - Twitter now broadens GraphQL hash discovery, retries once on hash-rotation 404, prioritizes `from:` fallback paths earlier, and emits retrieval telemetry.
+  - Added DB helper enhancements for connection reuse and batched SQL helpers in `trr_backend/db/pg.py`.
+  - Reworked season ingest orchestration into run-based staged jobs in `social_season_analytics.py`:
+    - single `run_id` with stage jobs (`posts` then `comments`)
+    - ingest options now include `ingest_mode`, `depth_preset`, `max_replies_per_post`
+    - queue-aware job state fields, run summaries, retry/backoff classification, stage metadata
+    - Twitter stage-2 comment sync hydrates audience replies per post with bounded limits.
+  - Added run/queue APIs in router:
+    - ingest now returns run metadata (`run_id`, `stages`, `queued_or_started_jobs`, summary)
+    - jobs endpoint supports `run_id`, `status`, `platform` filters
+    - added run cancellation endpoint: `POST /api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/cancel`
+  - Added worker entrypoint (`scripts/socials/worker.py`) to process queued jobs with DB-claim flow.
+  - Added migrations for `social.scrape_runs`, queue fields, and queue indexes.
+  - Expanded API + repository tests for run metadata, filtered jobs listing, cancel endpoint, and depth preset defaults.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py api/routers/socials.py scripts/socials/worker.py tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest -q tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (17 passed)
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py scripts/socials/worker.py` (pass)
+
+Cast-role API + Bravo ingest follow-up (this session, 2026-02-12):
+- Files:
+  - `api/routers/admin_show_roles.py`
+  - `api/routers/admin_show_bravo.py`
+  - `supabase/migrations/0120_show_admin_links_and_roles.sql`
+- Changes:
+  - Cast-role members API now supports true season multi-select filtering using `season_numbers` and supports `archive_mode=all|exclude|only`.
+  - Bravo commit now runs pending-link discovery persistence and cast-role suggestion persistence after snapshot write.
+- Validation:
+  - `ruff check api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
+  - `python -m py_compile api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+Queue migration guardrail for social ingest (same session, 2026-02-12):
+- File:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Added queue schema preflight check before ingest/cancel to fail fast with actionable error when migrations `0121`/`0122`/`0123` are missing.
+  - Added legacy-safe `list_jobs` select path that tolerates missing `run_id`/queue columns while migrations are pending.
+  - Added router test for ingest 400 behavior when queue schema is unavailable.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `pytest -q tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (18 passed)
+
+RHOSLC backfill runbook for links + role suggestions (this session, 2026-02-12):
+- Files:
+  - `docs/runbooks/rhoslc-show-admin-backfill.md`
+  - `docs/cross-collab/TASK7/STATUS.md`
+- Changes:
+  - Added executable runbook for RHOSLC backfill covering:
+    - season-scoped Bravo commit runs,
+    - explicit links discovery pass,
+    - pending link review/approval commands,
+    - cast-role suggestion verification queries.
+  - Added cross-collab status entry referencing the runbook.
+- Validation:
+  - Documentation-only update (no runtime code changes).
+
+Social ingest live-progress + full-depth defaults + cancel safety (this session, 2026-02-12):
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `api/routers/socials.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Added in-flight job progress updates during platform loops (Instagram/TikTok/YouTube/Twitter):
+    - updates `social.scrape_jobs.items_found` while jobs run
+    - writes stage/platform/account counters into job metadata
+    - updates heartbeat on each progress flush
+  - Propagated explicit stage labels into ingest execution (`posts` vs `comments`) for progress metadata consistency.
+  - Added cancellation-safe job completion behavior:
+    - if run is cancelled while a job is executing, terminal state remains `cancelled` instead of flipping back to `completed`/`failed`.
+  - Shifted ingest defaults to full-depth behavior:
+    - backend defaults now use `depth_preset=deep`
+    - unsupported `depth_preset` values now gracefully fall back to `deep`
+    - router request defaults raised to high limits for posts/comments/replies to support full ingest.
+  - Updated API router test expectation for default depth preset (`deep`).
+- Validation:
+  - `python3 -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `ruff check trr_backend/repositories/social_season_analytics.py api/routers/socials.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `pytest tests/api/routers/test_socials_season_analytics.py -q` (10 passed)
