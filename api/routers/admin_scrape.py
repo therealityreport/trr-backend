@@ -381,6 +381,7 @@ def import_images(
     3. Saved to media_assets table
     4. Linked to season via media_links table
     """
+    from trr_backend.media.image_variants import generate_media_asset_variants
     from trr_backend.media.s3_mirror import (
         build_cast_photo_s3_key,
         build_hosted_url,
@@ -626,6 +627,21 @@ def import_images(
                     position=idx,
                     context=season_link_ctx,
                 )
+                if request.entity_type == "season" and resolved_show_id:
+                    show_link_ctx = {
+                        **season_link_ctx,
+                        "linked_from_entity_type": "season",
+                        "linked_from_entity_id": entity_id,
+                    }
+                    create_media_link_for_entity(
+                        db,
+                        entity_type="show",
+                        entity_id=resolved_show_id,
+                        media_asset_id=existing["id"],
+                        kind=link_kind,
+                        position=idx,
+                        context=show_link_ctx,
+                    )
 
                 # Also link to person if matched
                 if matched_person:
@@ -695,6 +711,19 @@ def import_images(
                 if request.entity_type == "person" or matched_person:
                     if existing.get("hosted_url"):
                         auto_count_assets[existing["id"]] = existing.get("hosted_url")
+
+                try:
+                    generate_media_asset_variants(
+                        db,
+                        asset_id=str(existing["id"]),
+                        force=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Variant generation failed for existing media_asset %s: %s",
+                        existing.get("id"),
+                        exc,
+                    )
 
                 assets.append(
                     MediaAssetSummary(
@@ -776,6 +805,21 @@ def import_images(
                 position=idx,
                 context=season_link_ctx,
             )
+            if request.entity_type == "season" and resolved_show_id:
+                show_link_ctx = {
+                    **season_link_ctx,
+                    "linked_from_entity_type": "season",
+                    "linked_from_entity_id": entity_id,
+                }
+                create_media_link_for_entity(
+                    db,
+                    entity_type="show",
+                    entity_id=resolved_show_id,
+                    media_asset_id=asset["id"],
+                    kind=link_kind,
+                    position=idx,
+                    context=show_link_ctx,
+                )
 
             # Also link to person if matched
             if matched_person:
@@ -846,6 +890,19 @@ def import_images(
                 auto_count_url = img.url or hosted_url
                 if auto_count_url:
                     auto_count_assets[asset["id"]] = auto_count_url
+
+            try:
+                generate_media_asset_variants(
+                    db,
+                    asset_id=str(asset["id"]),
+                    force=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Variant generation failed for media_asset %s: %s",
+                    asset.get("id"),
+                    exc,
+                )
 
             imported_count += 1
             assets.append(
@@ -957,6 +1014,7 @@ async def import_images_stream(
     - error: {"current": 1, "url": "...", "error": "..."}
     - complete: {"imported": 5, "skipped_duplicates": 0, "errors": [], "assets": [...]}
     """
+    from trr_backend.media.image_variants import generate_media_asset_variants
     from trr_backend.media.s3_mirror import (
         build_cast_photo_s3_key,
         build_hosted_url,
@@ -1211,6 +1269,21 @@ async def import_images_stream(
                         position=idx,
                         context=season_link_ctx,
                     )
+                    if request.entity_type == "season" and resolved_show_id:
+                        show_link_ctx = {
+                            **season_link_ctx,
+                            "linked_from_entity_type": "season",
+                            "linked_from_entity_id": entity_id,
+                        }
+                        create_media_link_for_entity(
+                            db,
+                            entity_type="show",
+                            entity_id=resolved_show_id,
+                            media_asset_id=existing["id"],
+                            kind=link_kind,
+                            position=idx,
+                            context=show_link_ctx,
+                        )
 
                     # Also link to person if matched
                     if matched_person:
@@ -1294,6 +1367,19 @@ async def import_images_stream(
                         if existing.get("hosted_url"):
                             auto_count_assets[existing["id"]] = existing.get("hosted_url")
 
+                    try:
+                        generate_media_asset_variants(
+                            db,
+                            asset_id=str(existing["id"]),
+                            force=False,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Variant generation failed for existing media_asset %s: %s",
+                            existing.get("id"),
+                            exc,
+                        )
+
                     skipped_data = {
                         "current": current,
                         "total": total,
@@ -1371,6 +1457,21 @@ async def import_images_stream(
                     position=idx,
                     context=season_link_ctx,
                 )
+                if request.entity_type == "season" and resolved_show_id:
+                    show_link_ctx = {
+                        **season_link_ctx,
+                        "linked_from_entity_type": "season",
+                        "linked_from_entity_id": entity_id,
+                    }
+                    create_media_link_for_entity(
+                        db,
+                        entity_type="show",
+                        entity_id=resolved_show_id,
+                        media_asset_id=asset["id"],
+                        kind=link_kind,
+                        position=idx,
+                        context=show_link_ctx,
+                    )
 
                 # Also link to person if matched
                 if matched_person:
@@ -1441,6 +1542,19 @@ async def import_images_stream(
                         auto_count_url = img.url or hosted_url
                         if auto_count_url:
                             auto_count_assets[asset["id"]] = auto_count_url
+
+                try:
+                    generate_media_asset_variants(
+                        db,
+                        asset_id=str(asset["id"]),
+                        force=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Variant generation failed for media_asset %s: %s",
+                        asset.get("id"),
+                        exc,
+                    )
 
                 imported_count += 1
                 assets.append(

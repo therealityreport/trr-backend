@@ -9,11 +9,14 @@ Supports:
 - Both API-based and web scraping approaches
 """
 
+import json
 import logging
 import re
+import shutil
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -33,6 +36,7 @@ class YouTubeScrapeConfig:
     date_end: datetime | None = None
     delay_seconds: float = 2.0
     max_results: int | None = None  # None = no limit
+    max_pages: int | None = None  # continuation page limit
 
     # Metadata for tracking
     show_id: int | None = None
@@ -161,6 +165,7 @@ class YouTubeScraper:
         self.api_key = api_key
         self.session = self._create_session()
         self._request_count = 0
+        self.last_retrieval_meta: dict[str, Any] = {}
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -266,7 +271,12 @@ class YouTubeScraper:
         views = self._parse_view_count(view_text)
 
         # Extract published time
-        published_text = renderer.get("publishedTimeText", {}).get("simpleText", "")
+        published_container = renderer.get("publishedTimeText", {}) or {}
+        published_text = published_container.get("simpleText", "")
+        if not published_text:
+            runs = published_container.get("runs", [])
+            if isinstance(runs, list) and runs:
+                published_text = "".join(str(item.get("text", "")) for item in runs if isinstance(item, dict))
         published_at = self._estimate_publish_date(published_text)
 
         # Duration
@@ -351,7 +361,7 @@ class YouTubeScraper:
         if not published_text:
             return 0
         now = datetime.now()
-        text = published_text.lower()
+        text = published_text.lower().replace("streamed", "").replace("premiered", "")
 
         # Parse relative time
         patterns = [
@@ -386,6 +396,61 @@ class YouTubeScraper:
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch channel videos for @{handle}: {e}")
             return None
+
+    def _fetch_continuation(self, continuation_token: str, delay: float = 2.0) -> dict | None:
+        """Fetch next page of channel videos using continuation token."""
+        import json
+
+        self._rate_limit(delay)
+
+        payload = {
+            "context": self.INNERTUBE_CONTEXT,
+            "continuation": continuation_token,
+        }
+        headers = self._get_headers()
+        headers["content-type"] = "application/json"
+
+        browse_url = "https://www.youtube.com/youtubei/v1/browse"
+        try:
+            response = self.session.post(browse_url, headers=headers, data=json.dumps(payload))
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Continuation fetch failed: {e}")
+            return None
+
+    def _extract_channel_continuation_token(self, data: dict) -> str | None:
+        """Extract continuation token from channel page data."""
+        contents = data.get("contents", {})
+        tabs = contents.get("twoColumnBrowseResultsRenderer", {}).get("tabs", [])
+        for tab in tabs:
+            tab_content = tab.get("tabRenderer", {}).get("content", {})
+            rich_grid = tab_content.get("richGridRenderer", {})
+            for item in rich_grid.get("contents", []):
+                cont = item.get("continuationItemRenderer", {})
+                if cont:
+                    endpoint = cont.get("continuationEndpoint", {})
+                    return endpoint.get("continuationCommand", {}).get("token")
+        return None
+
+    def _extract_continuation_videos_and_token(self, data: dict) -> tuple[list[dict], str | None]:
+        """Extract videos and next continuation token from a continuation response."""
+        renderers = []
+        next_token = None
+
+        on_response = data.get("onResponseReceivedActions", [])
+        for action in on_response:
+            append_items = action.get("appendContinuationItemsAction", {})
+            for item in append_items.get("continuationItems", []):
+                video_renderer = item.get("richItemRenderer", {}).get("content", {}).get("videoRenderer", {})
+                if video_renderer:
+                    renderers.append(video_renderer)
+                cont = item.get("continuationItemRenderer", {})
+                if cont:
+                    endpoint = cont.get("continuationEndpoint", {})
+                    next_token = endpoint.get("continuationCommand", {}).get("token")
+
+        return renderers, next_token
 
     def search_channel_videos(self, handle: str, query: str, delay: float = 2.0) -> dict | None:
         """Search for videos from a specific channel with a query."""
@@ -433,6 +498,10 @@ class YouTubeScraper:
         """
         Scrape videos from a YouTube channel with filtering.
 
+        Always fetches from the channel page directly (not search) to ensure
+        correct channel filtering, then applies keyword matching locally.
+        Supports pagination via continuation tokens.
+
         Args:
             config: YouTubeScrapeConfig with channel handle, keywords, date range, etc.
 
@@ -447,23 +516,81 @@ class YouTubeScraper:
             logger.info(f"Date range: {config.date_start} to {config.date_end}")
 
         videos = []
+        reached_date_limit = False
+        continuation_pages = 0
+        timestamp_unknown_count = 0
+        in_range_hits = 0
+        no_hit_pages = 0
 
-        # If keywords are specified, search for each keyword
-        if config.keywords:
-            for keyword in config.keywords:
-                logger.info(f"Searching for '{keyword}' on @{handle}...")
-                data = self.search_channel_videos(handle, keyword, config.delay_seconds)
-                if data:
-                    videos.extend(self._process_video_data(data, config))
+        # Fetch initial channel page
+        logger.info(f"Fetching videos from @{handle} channel page...")
+        data = self.fetch_channel_videos(handle, config.delay_seconds)
+        if not data:
+            logger.error(f"Failed to fetch channel page for @{handle}")
+            return []
 
-                if config.max_results and len(videos) >= config.max_results:
+        # Process initial page
+        videos.extend(self._process_video_data(data, config))
+        continuation_token = self._extract_channel_continuation_token(data)
+
+        # Paginate through older videos using continuation tokens
+        page_num = 1
+        while continuation_token and not reached_date_limit:
+            if config.max_pages and continuation_pages >= config.max_pages:
+                logger.info("Reached max continuation pages limit (%s)", config.max_pages)
+                break
+            if config.max_results and len(videos) >= config.max_results:
+                break
+
+            page_num += 1
+            continuation_pages += 1
+            logger.info(f"Fetching channel page {page_num}...")
+            cont_data = self._fetch_continuation(continuation_token, config.delay_seconds)
+            if not cont_data:
+                break
+
+            renderers, continuation_token = self._extract_continuation_videos_and_token(cont_data)
+            if not renderers:
+                logger.info("No more videos in continuation")
+                break
+
+            page_videos = []
+            page_hits = 0
+            for renderer in renderers:
+                video = self._parse_video_renderer(renderer, config)
+                if not video:
+                    continue
+
+                if video.published_at > 0:
+                    in_range = config.is_in_date_range(video.published_at)
+                    if in_range is None:  # Before range - stop paginating
+                        reached_date_limit = True
+                        break
+                    if in_range is False:  # After range - skip
+                        continue
+                    in_range_hits += 1
+                elif config.date_start or config.date_end:
+                    # Unknown timestamps are increasingly common for dynamic renderers;
+                    # don't let them force unbounded continuation crawling.
+                    timestamp_unknown_count += 1
+                    continue
+
+                combined_text = f"{video.title} {video.description}"
+                if config.matches_keywords(combined_text):
+                    page_videos.append(video)
+                    page_hits += 1
+                    title_short = video.title[:50] + "..." if len(video.title) > 50 else video.title
+                    logger.info(f"Found: {video.video_id} - {title_short} ({video.date_time})")
+
+            videos.extend(page_videos)
+            logger.info(f"Page {page_num}: {len(page_videos)} matches, {len(videos)} total")
+            if page_hits == 0:
+                no_hit_pages += 1
+                if no_hit_pages >= 2 and (config.date_start or config.date_end):
+                    logger.info("Stopping continuation crawl after %d no-hit pages", no_hit_pages)
                     break
-        else:
-            # Fetch all channel videos
-            logger.info(f"Fetching all videos from @{handle}...")
-            data = self.fetch_channel_videos(handle, config.delay_seconds)
-            if data:
-                videos.extend(self._process_video_data(data, config))
+            else:
+                no_hit_pages = 0
 
         # Deduplicate by video_id
         seen = set()
@@ -473,12 +600,128 @@ class YouTubeScraper:
                 seen.add(video.video_id)
                 unique_videos.append(video)
 
-        # Apply max_results limit
+        # Supplement with yt-dlp search if channel browsing found few results
+        if len(unique_videos) < 10 and config.keywords and shutil.which("yt-dlp"):
+            logger.info(
+                f"Channel browsing found only {len(unique_videos)} videos; "
+                "supplementing with yt-dlp search..."
+            )
+            search_videos = self._search_via_ytdlp(config)
+            existing_ids = {v.video_id for v in unique_videos}
+            added = 0
+            for sv in search_videos:
+                if sv.video_id not in existing_ids:
+                    unique_videos.append(sv)
+                    existing_ids.add(sv.video_id)
+                    added += 1
+            if added:
+                logger.info(f"yt-dlp search added {added} additional videos (total: {len(unique_videos)})")
+
         if config.max_results:
             unique_videos = unique_videos[: config.max_results]
 
         logger.info(f"Scrape complete: found {len(unique_videos)} videos")
+        self.last_retrieval_meta = {
+            "retrieval_mode": "channel_continuation",
+            "continuation_pages": continuation_pages,
+            "timestamp_unknown_count": timestamp_unknown_count,
+            "in_range_hits": in_range_hits,
+            "first_page_count": len(unique_videos[: min(10, len(unique_videos))]),
+        }
         return unique_videos
+
+    def _search_via_ytdlp(self, config: YouTubeScrapeConfig) -> list[YouTubeVideo]:
+        """
+        Search YouTube via yt-dlp to find videos by keyword.
+
+        Uses ytsearchN: prefix to search YouTube, then filters results
+        by channel and date range. Much faster than paginating a busy
+        channel's entire video list.
+        """
+        handle = config.channel_handle.lstrip("@")
+        search_terms = [kw for kw in (config.keywords or []) if len(kw) <= 40]
+        if not search_terms:
+            return []
+
+        all_videos: list[YouTubeVideo] = []
+        seen_ids: set[str] = set()
+
+        for term in search_terms[:3]:  # Limit to top 3 keywords
+            query = f"{term} {handle}"
+            cmd = [
+                "yt-dlp",
+                "--dump-json",
+                "--skip-download",
+                f"ytsearch50:{query}",
+            ]
+            logger.info(f"yt-dlp searching YouTube: '{query}'")
+
+            try:
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(f"yt-dlp search timed out for '{query}'")
+                continue
+
+            for line in proc.stdout.strip().splitlines():
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Filter by channel
+                channel = (data.get("channel") or data.get("uploader") or "").lower()
+                if handle.lower() not in channel:
+                    continue
+
+                vid_id = data.get("id", "")
+                if not vid_id or vid_id in seen_ids:
+                    continue
+
+                # Filter by date range
+                ts = data.get("timestamp") or 0
+                if ts and config.date_start:
+                    if ts < config.start_timestamp:
+                        continue
+                if ts and config.date_end:
+                    if ts > config.end_timestamp:
+                        continue
+
+                seen_ids.add(vid_id)
+                dt_str = (
+                    datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    if ts
+                    else ""
+                )
+
+                video = YouTubeVideo(
+                    video_id=vid_id,
+                    title=data.get("title", ""),
+                    description=data.get("description", "") or "",
+                    date_time=dt_str,
+                    published_at=ts,
+                    channel_id=data.get("channel_id", ""),
+                    channel_title=data.get("channel", "") or data.get("uploader", ""),
+                    duration=f"PT{data.get('duration', 0)}S",
+                    duration_seconds=data.get("duration", 0) or 0,
+                    views=data.get("view_count", 0) or 0,
+                    likes=data.get("like_count", 0) or 0,
+                    comments=data.get("comment_count", 0) or 0,
+                    url=f"https://www.youtube.com/watch?v={vid_id}",
+                    thumbnail_url=(data.get("thumbnails") or [{}])[0].get("url", ""),
+                    tags=data.get("tags", []) or [],
+                    keywords_matched=[term],
+                    show_id=config.show_id,
+                    season_number=config.season_number,
+                )
+                all_videos.append(video)
+                logger.info(
+                    f"yt-dlp found: {vid_id} - {video.title[:50]}... ({dt_str})"
+                )
+
+        logger.info(f"yt-dlp search total: {len(all_videos)} videos from Bravo channel")
+        return all_videos
 
     def _process_video_data(self, data: dict, config: YouTubeScrapeConfig) -> list[YouTubeVideo]:
         """Process video data and apply filters."""

@@ -10,6 +10,7 @@ Supports:
 
 import json
 import logging
+import os
 import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
@@ -137,7 +138,12 @@ class InstagramScraper:
     POST_INFO_URL = "https://www.instagram.com/api/v1/media/{media_id}/info/"
     COMMENTS_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/"
     COMMENT_REPLIES_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/{comment_id}/child_comments/"
-    PROFILE_POSTS_DOC_ID = "33944389991841132"
+    PROFILE_POSTS_DOC_IDS = (
+        # Current doc_id observed in live web requests.
+        "26035927152742158",
+        # Backward fallback used by older sessions.
+        "33944389991841132",
+    )
 
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
@@ -146,6 +152,17 @@ class InstagramScraper:
         self.cookies = cookies or {}
         self.session = self._create_session()
         self._request_count = 0
+        self.last_retrieval_meta: dict[str, Any] = {}
+
+    def _profile_posts_doc_ids(self) -> list[str]:
+        override = (os.getenv("INSTAGRAM_PROFILE_POSTS_DOC_ID") or "").strip()
+        ids: list[str] = []
+        if override:
+            ids.append(override)
+        for doc_id in self.PROFILE_POSTS_DOC_IDS:
+            if doc_id not in ids:
+                ids.append(doc_id)
+        return ids
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -345,7 +362,6 @@ class InstagramScraper:
             "fb_api_req_friendly_name": "PolarisProfilePostsTabContentQuery_connection",
             "variables": json.dumps(variables),
             "server_timestamps": "true",
-            "doc_id": self.PROFILE_POSTS_DOC_ID,
         }
 
         headers = self._get_headers(f"https://www.instagram.com/{username}/")
@@ -354,13 +370,20 @@ class InstagramScraper:
         if self.cookies.get("lsd"):
             headers["x-fb-lsd"] = self.cookies["lsd"]
 
-        try:
-            response = self.session.post(self.GRAPHQL_URL, data=data, headers=headers, cookies=self.cookies)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"GraphQL request failed: {e}")
-            return None
+        for doc_id in self._profile_posts_doc_ids():
+            data["doc_id"] = doc_id
+            try:
+                response = self.session.post(self.GRAPHQL_URL, data=data, headers=headers, cookies=self.cookies)
+                response.raise_for_status()
+                payload = response.json()
+                connection = payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+                if connection:
+                    return payload
+                logger.warning("Instagram GraphQL doc_id %s returned no connection data; trying fallback", doc_id)
+            except requests.exceptions.RequestException as e:
+                logger.warning("GraphQL request failed for doc_id %s: %s", doc_id, e)
+                continue
+        return None
 
     def _iter_posts_from_profile_info(self, data: dict) -> Iterator[tuple[dict, dict]]:
         """Iterate posts from profile info response."""
@@ -613,9 +636,21 @@ class InstagramScraper:
         # Determine scrape mode
         has_auth = bool(self.cookies.get("sessionid"))
         if has_auth:
-            return self._scrape_graphql(config)
-        else:
-            return self._scrape_profile_info(config)
+            posts = self._scrape_graphql(config)
+            # If the very first authenticated page fails, degrade gracefully to profile-info mode.
+            if not posts and self.last_retrieval_meta.get("initial_page_failed"):
+                fallback_reason = self.last_retrieval_meta.get("fallback_reason") or "graphql_initial_page_failed"
+                logger.warning(
+                    "Instagram GraphQL initial page failed for @%s; falling back to profile-info mode (%s)",
+                    config.username,
+                    fallback_reason,
+                )
+                posts = self._scrape_profile_info(config)
+                self.last_retrieval_meta["retrieval_mode"] = "profile_info_fallback"
+                self.last_retrieval_meta["fallback_reason"] = fallback_reason
+                self.last_retrieval_meta["first_page_count"] = len(posts)
+            return posts
+        return self._scrape_profile_info(config)
 
     def _scrape_profile_info(self, config: ScrapeConfig) -> list[InstagramPost]:
         """Scrape using public profile info API (limited results)."""
@@ -644,6 +679,12 @@ class InstagramScraper:
                 logger.info(f"Found: {post.shortcode} ({post.date_time})")
 
         logger.info(f"Scrape complete: {len(posts)} posts found")
+        self.last_retrieval_meta = {
+            "retrieval_mode": "profile_info",
+            "first_page_count": len(posts),
+            "fallback_reason": None,
+            "initial_page_failed": False,
+        }
         return posts
 
     def _scrape_graphql(self, config: ScrapeConfig) -> list[InstagramPost]:
@@ -655,6 +696,8 @@ class InstagramScraper:
         page_num = 0
         posts_checked = 0
         reached_date_limit = False
+        initial_page_failed = False
+        failure_reason: str | None = None
 
         while not reached_date_limit:
             page_num += 1
@@ -665,6 +708,9 @@ class InstagramScraper:
             logger.info(f"Fetching page {page_num}...")
             data = self.fetch_posts_graphql(config.username, cursor, config.delay_seconds)
             if not data:
+                if page_num == 1:
+                    initial_page_failed = True
+                    failure_reason = "graphql_empty_or_error"
                 break
 
             page_info = {}
@@ -709,6 +755,14 @@ class InstagramScraper:
             logger.info(f"Page {page_num}: checked {posts_on_page} posts, {len(posts)} matches total")
 
         logger.info(f"Scrape complete: checked {posts_checked} posts, found {len(posts)} matches")
+        self.last_retrieval_meta = {
+            "retrieval_mode": "graphql",
+            "first_page_count": len(posts) if page_num <= 1 else min(len(posts), 12),
+            "fallback_reason": failure_reason,
+            "initial_page_failed": initial_page_failed,
+            "pages_scanned": page_num,
+            "posts_checked": posts_checked,
+        }
         return posts
 
 

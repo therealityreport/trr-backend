@@ -6,10 +6,12 @@ import csv
 import io
 import json
 import logging
+import os
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -19,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube")
 SUPPORTED_SCOPES = ("bravo", "creator", "community")
+SUPPORTED_INGEST_MODES = ("posts_only", "posts_and_comments")
+SUPPORTED_DEPTH_PRESETS = ("quick", "balanced", "deep")
 
 POSITIVE_WORDS = {
     "amazing",
@@ -155,7 +159,10 @@ class IngestOptions:
     source_scope: str
     max_posts_per_target: int
     max_comments_per_post: int
+    max_replies_per_post: int
     fetch_replies: bool
+    ingest_mode: str
+    depth_preset: str
     date_start: datetime | None
     date_end: datetime | None
 
@@ -167,6 +174,52 @@ class IngestOptions:
 
 def _now_utc() -> datetime:
     return datetime.now(tz=UTC)
+
+
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def is_queue_enabled() -> bool:
+    return _env_truthy("SOCIAL_QUEUE_ENABLED", default=False)
+
+
+def _resolve_depth_defaults(
+    *,
+    depth_preset: str,
+    max_posts_per_target: int,
+    max_comments_per_post: int,
+    max_replies_per_post: int,
+    fetch_replies: bool,
+) -> tuple[int, int, int, bool]:
+    normalized = (depth_preset or "balanced").strip().lower()
+    if normalized not in SUPPORTED_DEPTH_PRESETS:
+        normalized = "balanced"
+
+    if normalized == "quick":
+        return (
+            max(1, min(max_posts_per_target, 400)),
+            max(0, min(max_comments_per_post, 20)),
+            max(0, min(max_replies_per_post, 20)),
+            False if max_comments_per_post > 0 else fetch_replies,
+        )
+    if normalized == "deep":
+        return (
+            max(1, max_posts_per_target),
+            max(0, max(max_comments_per_post, 200)),
+            max(0, max(max_replies_per_post, 100)),
+            fetch_replies,
+        )
+    # balanced
+    return (
+        max(1, max_posts_per_target),
+        max(0, max_comments_per_post),
+        max(0, max_replies_per_post),
+        fetch_replies,
+    )
 
 
 def _coerce_dt(value: Any) -> datetime | None:
@@ -295,6 +348,186 @@ def _build_twitter_or_query(*, hashtags: list[str], keywords: list[str]) -> str:
     if len(unique_terms) == 1:
         return unique_terms[0]
     return f"({' OR '.join(unique_terms)})"
+
+
+def _load_instagram_cookies() -> dict[str, str]:
+    """
+    Resolve Instagram auth cookies for season ingest.
+
+    Resolution order:
+    1) SOCIAL_INSTAGRAM_COOKIES_JSON / INSTAGRAM_COOKIES_JSON (inline JSON object)
+    2) SOCIAL_INSTAGRAM_COOKIES_FILE / INSTAGRAM_COOKIES_FILE (path to JSON file)
+    3) scripts/socials/instagram/instagram_cookies.json (repo-local default)
+    """
+    from trr_backend.socials.instagram import load_cookies_from_file
+
+    raw_json = (
+        (os.getenv("SOCIAL_INSTAGRAM_COOKIES_JSON") or "").strip()
+        or (os.getenv("INSTAGRAM_COOKIES_JSON") or "").strip()
+    )
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            logger.warning("Invalid Instagram cookies JSON from env; falling back to file-based cookies")
+        else:
+            if isinstance(parsed, dict):
+                cookies = {str(k): str(v) for k, v in parsed.items() if v is not None and not str(k).startswith("_")}
+                if cookies:
+                    return cookies
+            logger.warning("Instagram cookies JSON env value is not an object; falling back to file-based cookies")
+
+    file_candidates: list[str] = []
+    file_candidates.extend(
+        [
+            (os.getenv("SOCIAL_INSTAGRAM_COOKIES_FILE") or "").strip(),
+            (os.getenv("INSTAGRAM_COOKIES_FILE") or "").strip(),
+        ]
+    )
+    default_path = Path(__file__).resolve().parents[2] / "scripts" / "socials" / "instagram" / "instagram_cookies.json"
+    file_candidates.append(str(default_path))
+
+    for raw_path in file_candidates:
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser()
+        if not path.is_file():
+            continue
+        try:
+            cookies = load_cookies_from_file(str(path))
+        except Exception as exc:
+            logger.warning("Failed to load Instagram cookies from %s: %s", path, exc)
+            continue
+        if cookies:
+            return cookies
+
+    return {}
+
+
+def _load_twitter_auth() -> tuple[dict[str, str], str | None]:
+    """
+    Resolve Twitter auth for season ingest.
+
+    Returns (cookies_dict, bearer_token | None).
+    Resolution:
+    1) SOCIAL_TWITTER_COOKIES_JSON / TWITTER_COOKIES_JSON (inline JSON)
+    2) SOCIAL_TWITTER_COOKIES_FILE / TWITTER_COOKIES_FILE (path to JSON file)
+    3) SOCIAL_TWITTER_BEARER_TOKEN / TWITTER_BEARER_TOKEN (bearer token)
+    """
+    cookies: dict[str, str] = {}
+    raw_json = (
+        (os.getenv("SOCIAL_TWITTER_COOKIES_JSON") or "").strip()
+        or (os.getenv("TWITTER_COOKIES_JSON") or "").strip()
+    )
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, dict):
+                cookies = {str(k): str(v) for k, v in parsed.items() if v is not None and not str(k).startswith("_")}
+        except json.JSONDecodeError:
+            logger.warning("Invalid Twitter cookies JSON from env")
+
+    if not cookies:
+        file_path = (
+            (os.getenv("SOCIAL_TWITTER_COOKIES_FILE") or "").strip()
+            or (os.getenv("TWITTER_COOKIES_FILE") or "").strip()
+        )
+        if file_path:
+            p = Path(file_path).expanduser()
+            if p.is_file():
+                try:
+                    with open(p) as f:
+                        parsed = json.load(f)
+                    if isinstance(parsed, dict):
+                        cookies = {str(k): str(v) for k, v in parsed.items() if v is not None}
+                except Exception as exc:
+                    logger.warning("Failed to load Twitter cookies from %s: %s", p, exc)
+
+    bearer_token = (
+        (os.getenv("SOCIAL_TWITTER_BEARER_TOKEN") or "").strip()
+        or (os.getenv("TWITTER_BEARER_TOKEN") or "").strip()
+        or None
+    )
+
+    return cookies, bearer_token
+
+
+def _load_twikit_credentials() -> dict[str, str] | None:
+    """
+    Load twikit auth from env vars or cookie file.
+
+    Resolution order (first match wins):
+    1) TWIKIT_COOKIES_FILE – JSON file with auth_token + ct0 keys
+    2) TWIKIT_AUTH_TOKEN + TWIKIT_CT0 – inline cookie values
+    3) TWIKIT_USERNAME + TWIKIT_PASSWORD (+ TWIKIT_EMAIL) – login creds
+    """
+    # 1) Cookie file
+    cookie_file = (os.getenv("TWIKIT_COOKIES_FILE") or "").strip()
+    if cookie_file:
+        p = Path(cookie_file).expanduser()
+        if p.is_file():
+            try:
+                with open(p) as f:
+                    parsed = json.load(f)
+                if isinstance(parsed, dict) and parsed.get("auth_token") and parsed.get("ct0"):
+                    return {"auth_token": str(parsed["auth_token"]), "ct0": str(parsed["ct0"])}
+            except Exception as exc:
+                logger.warning("Failed to load twikit cookies from %s: %s", p, exc)
+
+    # 2) Inline cookie env vars
+    auth_token = (os.getenv("TWIKIT_AUTH_TOKEN") or "").strip()
+    ct0 = (os.getenv("TWIKIT_CT0") or "").strip()
+    if auth_token and ct0:
+        return {"auth_token": auth_token, "ct0": ct0}
+
+    # 3) Login credentials
+    username = (os.getenv("TWIKIT_USERNAME") or "").strip()
+    password = (os.getenv("TWIKIT_PASSWORD") or "").strip()
+    email = (os.getenv("TWIKIT_EMAIL") or "").strip()
+    if username and password:
+        return {"username": username, "email": email or username, "password": password}
+
+    return None
+
+
+def _load_tiktok_cookies() -> dict[str, str]:
+    """
+    Resolve TikTok cookies for season ingest.
+
+    Resolution:
+    1) SOCIAL_TIKTOK_COOKIES_JSON / TIKTOK_COOKIES_JSON (inline JSON)
+    2) SOCIAL_TIKTOK_COOKIES_FILE / TIKTOK_COOKIES_FILE (path to JSON file)
+    """
+    raw_json = (
+        (os.getenv("SOCIAL_TIKTOK_COOKIES_JSON") or "").strip()
+        or (os.getenv("TIKTOK_COOKIES_JSON") or "").strip()
+    )
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, dict):
+                cookies = {str(k): str(v) for k, v in parsed.items() if v is not None and not str(k).startswith("_")}
+                if cookies:
+                    return cookies
+        except json.JSONDecodeError:
+            logger.warning("Invalid TikTok cookies JSON from env")
+
+    file_path = (
+        (os.getenv("SOCIAL_TIKTOK_COOKIES_FILE") or "").strip()
+        or (os.getenv("TIKTOK_COOKIES_FILE") or "").strip()
+    )
+    if file_path:
+        p = Path(file_path).expanduser()
+        if p.is_file():
+            try:
+                with open(p) as f:
+                    parsed = json.load(f)
+                if isinstance(parsed, dict):
+                    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+            except Exception as exc:
+                logger.warning("Failed to load TikTok cookies from %s: %s", p, exc)
+
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -554,20 +787,26 @@ def put_targets(
 def _create_job(
     context: SeasonContext,
     *,
+    run_id: str | None,
     platform: str,
     source_scope: str,
     job_type: str,
+    stage: str,
     config: dict[str, Any],
     initiated_by: str | None,
+    status: str,
+    priority: int = 100,
 ) -> str:
     row = pg.fetch_one(
         """
         insert into social.scrape_jobs (
+          run_id,
           platform,
           job_type,
           config,
           status,
-          started_at,
+          available_at,
+          priority,
           show_id,
           season_id,
           source_scope,
@@ -577,22 +816,68 @@ def _create_job(
         values (
           %s,
           %s,
+          %s,
           %s::jsonb,
-          'running',
+          %s,
           now(),
           %s,
           %s,
           %s,
           %s,
-          '{}'::jsonb
+          %s,
+          %s::jsonb
         )
         returning id::text
         """,
-        [platform, job_type, json.dumps(config), context.show_id, context.season_id, source_scope, initiated_by],
+        [
+            run_id,
+            platform,
+            job_type,
+            json.dumps(config),
+            status,
+            priority,
+            context.show_id,
+            context.season_id,
+            source_scope,
+            initiated_by,
+            json.dumps({"stage": stage}),
+        ],
     )
     if not row:
         raise RuntimeError("Failed to create scrape job")
     return str(row["id"])
+
+
+def _set_job_running(job_id: str, *, worker_id: str | None = None) -> None:
+    pg.fetch_one(
+        """
+        update social.scrape_jobs
+        set
+          status = 'running',
+          started_at = coalesce(started_at, now()),
+          claimed_at = now(),
+          heartbeat_at = now(),
+          worker_id = coalesce(%s, worker_id),
+          attempt_count = attempt_count + 1
+        where id = %s
+        returning id::text
+        """,
+        [worker_id, job_id],
+    )
+
+
+def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> None:
+    pg.fetch_one(
+        """
+        update social.scrape_jobs
+        set
+          heartbeat_at = now(),
+          worker_id = coalesce(%s, worker_id)
+        where id = %s
+        returning id::text
+        """,
+        [worker_id, job_id],
+    )
 
 
 def _finish_job(
@@ -602,7 +887,12 @@ def _finish_job(
     items_found: int,
     error_message: str | None = None,
     metadata: dict[str, Any] | None = None,
+    last_error_code: str | None = None,
+    last_error_class: str | None = None,
+    next_available_at: datetime | None = None,
 ) -> None:
+    is_terminal = status in {"completed", "failed", "cancelled"}
+    completed_expr = "now()" if is_terminal else "completed_at"
     pg.fetch_one(
         """
         update social.scrape_jobs
@@ -610,13 +900,172 @@ def _finish_job(
           status = %s,
           items_found = %s,
           error_message = %s,
-          completed_at = now(),
-          metadata = coalesce(%s::jsonb, '{}'::jsonb)
+          completed_at = """
+        + completed_expr
+        + """,
+          metadata = coalesce(%s::jsonb, '{}'::jsonb),
+          heartbeat_at = now(),
+          last_error_code = %s,
+          last_error_class = %s,
+          available_at = coalesce(%s, available_at)
         where id = %s
         returning id::text
         """,
-        [status, items_found, error_message, json.dumps(metadata or {}), job_id],
+        [
+            status,
+            items_found,
+            error_message,
+            json.dumps(metadata or {}),
+            last_error_code,
+            last_error_class,
+            next_available_at,
+            job_id,
+        ],
     )
+
+
+def _create_run(
+    context: SeasonContext,
+    *,
+    source_scope: str,
+    initiated_by: str | None,
+    config: dict[str, Any],
+    status: str,
+) -> str:
+    row = pg.fetch_one(
+        """
+        insert into social.scrape_runs (
+          season_id,
+          show_id,
+          source_scope,
+          status,
+          initiated_by,
+          config,
+          started_at
+        )
+        values (
+          %s,
+          %s,
+          %s,
+          %s,
+          %s,
+          %s::jsonb,
+          case when %s = 'running' then now() else null end
+        )
+        returning id::text
+        """,
+        [
+            context.season_id,
+            context.show_id,
+            source_scope,
+            status,
+            initiated_by,
+            json.dumps(config),
+            status,
+        ],
+    )
+    if not row:
+        raise RuntimeError("Failed to create social scrape run")
+    return str(row["id"])
+
+
+def _set_run_status(run_id: str, status: str) -> None:
+    pg.fetch_one(
+        """
+        update social.scrape_runs
+        set
+          status = %s,
+          started_at = case
+            when %s = 'running' then coalesce(started_at, now())
+            else started_at
+          end,
+          completed_at = case
+            when %s in ('completed', 'failed', 'cancelled') then coalesce(completed_at, now())
+            else completed_at
+          end,
+          cancelled_at = case
+            when %s = 'cancelled' then coalesce(cancelled_at, now())
+            else cancelled_at
+          end
+        where id = %s
+        returning id::text
+        """,
+        [status, status, status, status, run_id],
+    )
+
+
+def _update_run_summary(run_id: str) -> dict[str, Any]:
+    summary_row = pg.fetch_one(
+        """
+        with stats as (
+          select
+            count(*)::int as total_jobs,
+            count(*) filter (where status = 'completed')::int as completed_jobs,
+            count(*) filter (where status = 'failed')::int as failed_jobs,
+            count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active_jobs,
+            coalesce(sum(items_found), 0)::int as items_found_total
+          from social.scrape_jobs
+          where run_id = %s
+        ),
+        stage_stats as (
+          select
+            coalesce(config->>'stage', 'unknown') as stage,
+            count(*)::int as total,
+            count(*) filter (where status = 'completed')::int as completed,
+            count(*) filter (where status = 'failed')::int as failed,
+            count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active
+          from social.scrape_jobs
+          where run_id = %s
+          group by coalesce(config->>'stage', 'unknown')
+        )
+        select
+          (select row_to_json(stats) from stats) as stats,
+          coalesce((select jsonb_object_agg(stage, jsonb_build_object(
+            'total', total,
+            'completed', completed,
+            'failed', failed,
+            'active', active
+          )) from stage_stats), '{}'::jsonb) as stage_counts
+        """,
+        [run_id, run_id],
+    ) or {}
+
+    stats = summary_row.get("stats") or {}
+    stage_counts = summary_row.get("stage_counts") or {}
+    summary = {
+        "total_jobs": int(stats.get("total_jobs") or 0),
+        "completed_jobs": int(stats.get("completed_jobs") or 0),
+        "failed_jobs": int(stats.get("failed_jobs") or 0),
+        "active_jobs": int(stats.get("active_jobs") or 0),
+        "items_found_total": int(stats.get("items_found_total") or 0),
+        "stage_counts": stage_counts,
+    }
+    pg.fetch_one(
+        """
+        update social.scrape_runs
+        set summary = %s::jsonb
+        where id = %s
+        returning id::text
+        """,
+        [json.dumps(summary), run_id],
+    )
+    return summary
+
+
+def _finalize_run_status(run_id: str) -> dict[str, Any]:
+    summary = _update_run_summary(run_id)
+    active_jobs = int(summary.get("active_jobs") or 0)
+    failed_jobs = int(summary.get("failed_jobs") or 0)
+    current = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
+    if str(current.get("status")) == "cancelled":
+        return summary
+    if active_jobs > 0:
+        _set_run_status(run_id, "running")
+    elif failed_jobs > 0:
+        _set_run_status(run_id, "failed")
+    else:
+        _set_run_status(run_id, "completed")
+    return summary
 
 
 def _parse_instagram_time(ts: Any) -> datetime | None:
@@ -631,13 +1080,49 @@ def _parse_tiktok_time(ts: Any) -> datetime | None:
     return _parse_instagram_time(ts)
 
 
+def _pg_upsert(
+    table: str,
+    payload: dict[str, Any],
+    *,
+    conflict_col: str,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
+    """Upsert a row into social.{table} using direct SQL (psycopg2).
+
+    This avoids Supabase PostgREST schema-cache (PGRST002) errors that
+    occur intermittently with the ``social`` schema.
+    """
+    from psycopg2.extras import Json as PgJson
+
+    adapted: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, (dict, list)):
+            adapted[key] = PgJson(value)
+        else:
+            adapted[key] = value
+
+    cols = list(adapted.keys())
+    col_list = ", ".join(cols)
+    placeholders = ", ".join(["%s"] * len(cols))
+    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != conflict_col)
+
+    sql = f"""
+        INSERT INTO social.{table} ({col_list})
+        VALUES ({placeholders})
+        ON CONFLICT ({conflict_col}) DO UPDATE SET {updates}
+        RETURNING *
+    """
+    with pg.db_cursor(conn=conn) as cur:
+        return pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
+
+
 def _upsert_instagram_post(
-    db: Any,
     context: SeasonContext,
     *,
     job_id: str,
     account: str,
     post: Any,
+    conn: Any | None = None,
 ) -> dict[str, Any] | None:
     posted_at = _parse_instagram_time(getattr(post, "taken_at", None))
     payload = {
@@ -659,15 +1144,10 @@ def _upsert_instagram_post(
         "job_id": job_id,
         "source_account": account,
     }
-    resp = db.schema("social").table("instagram_posts").upsert(payload, on_conflict="shortcode").execute()
-    if hasattr(resp, "error") and resp.error:
-        raise RuntimeError(f"instagram_posts upsert failed: {resp.error}")
-    rows = resp.data or []
-    return rows[0] if rows else None
+    return _pg_upsert("instagram_posts", payload, conflict_col="shortcode", conn=conn)
 
 
 def _upsert_instagram_comment_tree(
-    db: Any,
     context: SeasonContext,
     *,
     job_id: str,
@@ -675,6 +1155,7 @@ def _upsert_instagram_comment_tree(
     post_id: str,
     comment: Any,
     parent_comment_db_id: str | None = None,
+    conn: Any | None = None,
 ) -> int:
     created_at = _parse_instagram_time(getattr(comment, "created_at", None))
     payload = {
@@ -694,28 +1175,24 @@ def _upsert_instagram_comment_tree(
         "job_id": job_id,
         "source_account": account,
     }
-    resp = db.schema("social").table("instagram_comments").upsert(payload, on_conflict="comment_id").execute()
-    if hasattr(resp, "error") and resp.error:
-        raise RuntimeError(f"instagram_comments upsert failed: {resp.error}")
-    row = (resp.data or [{}])[0]
-    comment_db_id = row.get("id")
+    row = _pg_upsert("instagram_comments", payload, conflict_col="comment_id", conn=conn)
+    comment_db_id = (row or {}).get("id")
 
     total = 1
     for reply in getattr(comment, "replies", []) or []:
         total += _upsert_instagram_comment_tree(
-            db,
             context,
             job_id=job_id,
             account=account,
             post_id=post_id,
             comment=reply,
             parent_comment_db_id=comment_db_id,
+            conn=conn,
         )
     return total
 
 
 def _ingest_instagram(
-    db: Any,
     context: SeasonContext,
     *,
     account: str,
@@ -723,58 +1200,85 @@ def _ingest_instagram(
     keywords: list[str],
     opts: IngestOptions,
     job_id: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.instagram import InstagramScraper, ScrapeConfig
 
-    scraper = InstagramScraper(cookies={})
+    try:
+        post_delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
+    except ValueError:
+        post_delay_seconds = 0.15
+    try:
+        comment_delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_COMMENT_DELAY_SEC") or "").strip() or "0.25")
+    except ValueError:
+        comment_delay_seconds = 0.25
+
+    cookies = _load_instagram_cookies()
+    if not cookies.get("sessionid"):
+        logger.warning("Instagram ingest running without sessionid cookie; results may be limited to ~12 recent posts")
+    scraper = InstagramScraper(cookies=cookies)
     config = ScrapeConfig(
         username=account,
         hashtags=[],
         date_start=opts.date_start,
         date_end=opts.date_end,
-        delay_seconds=1.0,
+        delay_seconds=post_delay_seconds,
         max_pages=None,
         show_id=context.show_id,
         season_number=context.season_number,
     )
 
+    logger.info("[instagram] Scraping account=%s date_range=%s..%s", account, opts.date_start, opts.date_end)
     posts = scraper.scrape(config)
+    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     post_count = 0
     comment_count = 0
+    skipped_keyword = 0
+    total_scraped = 0
 
-    for post in posts:
-        caption = str(getattr(post, "caption", "") or "")
-        if not _text_contains_any_term(text=caption, hashtags=hashtags, keywords=keywords):
-            continue
-        if post_count >= opts.max_posts_per_target:
-            break
+    with pg.db_connection() as conn:
+        for post in posts:
+            total_scraped += 1
+            caption = str(getattr(post, "caption", "") or "")
+            if not _text_contains_any_term(text=caption, hashtags=hashtags, keywords=keywords):
+                skipped_keyword += 1
+                continue
+            if post_count >= opts.max_posts_per_target:
+                break
 
-        upserted = _upsert_instagram_post(db, context, job_id=job_id, account=account, post=post)
-        if not upserted:
-            continue
-        post_count += 1
+            upserted = _upsert_instagram_post(context, job_id=job_id, account=account, post=post, conn=conn)
+            if not upserted:
+                continue
+            post_count += 1
 
-        comments = scraper.fetch_comments(
-            getattr(post, "shortcode", ""),
-            max_comments=opts.max_comments_per_post,
-            fetch_replies=opts.fetch_replies,
-            delay=0.5,
-        )
-        for comment in comments:
-            comment_count += _upsert_instagram_comment_tree(
-                db,
-                context,
-                job_id=job_id,
-                account=account,
-                post_id=str(upserted["id"]),
-                comment=comment,
-            )
+            if opts.max_comments_per_post > 0:
+                comments = scraper.fetch_comments(
+                    getattr(post, "shortcode", ""),
+                    max_comments=opts.max_comments_per_post,
+                    fetch_replies=opts.fetch_replies,
+                    delay=comment_delay_seconds,
+                )
+                for comment in comments:
+                    comment_count += _upsert_instagram_comment_tree(
+                        context,
+                        job_id=job_id,
+                        account=account,
+                        post_id=str(upserted["id"]),
+                        comment=comment,
+                        conn=conn,
+                    )
 
-    return post_count, comment_count
+    logger.info(
+        "[instagram] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d",
+        total_scraped,
+        post_count,
+        skipped_keyword,
+        comment_count,
+    )
+    return post_count, comment_count, retrieval_meta
 
 
 def _upsert_tiktok_post(
-    db: Any, context: SeasonContext, *, job_id: str, account: str, post: Any
+    context: SeasonContext, *, job_id: str, account: str, post: Any, conn: Any | None = None
 ) -> dict[str, Any] | None:
     posted_at = _parse_tiktok_time(getattr(post, "create_time", None))
     payload = {
@@ -802,15 +1306,10 @@ def _upsert_tiktok_post(
         "job_id": job_id,
         "source_account": account,
     }
-    resp = db.schema("social").table("tiktok_posts").upsert(payload, on_conflict="video_id").execute()
-    if hasattr(resp, "error") and resp.error:
-        raise RuntimeError(f"tiktok_posts upsert failed: {resp.error}")
-    rows = resp.data or []
-    return rows[0] if rows else None
+    return _pg_upsert("tiktok_posts", payload, conflict_col="video_id", conn=conn)
 
 
 def _upsert_tiktok_comment_tree(
-    db: Any,
     context: SeasonContext,
     *,
     job_id: str,
@@ -818,6 +1317,7 @@ def _upsert_tiktok_comment_tree(
     post_id: str,
     comment: Any,
     parent_comment_db_id: str | None = None,
+    conn: Any | None = None,
 ) -> int:
     created_at = _parse_tiktok_time(getattr(comment, "created_at", None))
     payload = {
@@ -838,28 +1338,24 @@ def _upsert_tiktok_comment_tree(
         "job_id": job_id,
         "source_account": account,
     }
-    resp = db.schema("social").table("tiktok_comments").upsert(payload, on_conflict="comment_id").execute()
-    if hasattr(resp, "error") and resp.error:
-        raise RuntimeError(f"tiktok_comments upsert failed: {resp.error}")
-    row = (resp.data or [{}])[0]
-    comment_db_id = row.get("id")
+    row = _pg_upsert("tiktok_comments", payload, conflict_col="comment_id", conn=conn)
+    comment_db_id = (row or {}).get("id")
 
     total = 1
     for reply in getattr(comment, "replies", []) or []:
         total += _upsert_tiktok_comment_tree(
-            db,
             context,
             job_id=job_id,
             account=account,
             post_id=post_id,
             comment=reply,
             parent_comment_db_id=comment_db_id,
+            conn=conn,
         )
     return total
 
 
 def _ingest_tiktok(
-    db: Any,
     context: SeasonContext,
     *,
     account: str,
@@ -867,10 +1363,11 @@ def _ingest_tiktok(
     keywords: list[str],
     opts: IngestOptions,
     job_id: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
-    scraper = TikTokScraper()
+    tiktok_cookies = _load_tiktok_cookies()
+    scraper = TikTokScraper(cookies=tiktok_cookies)
     config = TikTokScrapeConfig(
         username=account,
         hashtags=[],
@@ -882,49 +1379,64 @@ def _ingest_tiktok(
         season_number=context.season_number,
     )
 
+    logger.info("[tiktok] Scraping account=%s date_range=%s..%s", account, opts.date_start, opts.date_end)
     posts = scraper.scrape(config)
+    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     post_count = 0
     comment_count = 0
+    skipped_keyword = 0
+    total_scraped = 0
 
-    for post in posts:
-        description = str(getattr(post, "description", "") or "")
-        if not _text_contains_any_term(text=description, hashtags=hashtags, keywords=keywords):
-            continue
-        if post_count >= opts.max_posts_per_target:
-            break
+    with pg.db_connection() as conn:
+        for post in posts:
+            total_scraped += 1
+            description = str(getattr(post, "description", "") or "")
+            if not _text_contains_any_term(text=description, hashtags=hashtags, keywords=keywords):
+                skipped_keyword += 1
+                continue
+            if post_count >= opts.max_posts_per_target:
+                break
 
-        upserted = _upsert_tiktok_post(db, context, job_id=job_id, account=account, post=post)
-        if not upserted:
-            continue
-        post_count += 1
+            upserted = _upsert_tiktok_post(context, job_id=job_id, account=account, post=post, conn=conn)
+            if not upserted:
+                continue
+            post_count += 1
 
-        comments = scraper.fetch_comments(
-            getattr(post, "video_id", ""),
-            username=account,
-            max_comments=opts.max_comments_per_post,
-            fetch_replies=opts.fetch_replies,
-            delay=0.5,
-        )
-        for comment in comments:
-            comment_count += _upsert_tiktok_comment_tree(
-                db,
-                context,
-                job_id=job_id,
-                account=account,
-                post_id=str(upserted["id"]),
-                comment=comment,
-            )
+            if opts.max_comments_per_post > 0:
+                comments = scraper.fetch_comments(
+                    getattr(post, "video_id", ""),
+                    username=account,
+                    max_comments=opts.max_comments_per_post,
+                    fetch_replies=opts.fetch_replies,
+                    delay=0.5,
+                )
+                for comment in comments:
+                    comment_count += _upsert_tiktok_comment_tree(
+                        context,
+                        job_id=job_id,
+                        account=account,
+                        post_id=str(upserted["id"]),
+                        comment=comment,
+                        conn=conn,
+                    )
 
-    return post_count, comment_count
+    logger.info(
+        "[tiktok] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d",
+        total_scraped,
+        post_count,
+        skipped_keyword,
+        comment_count,
+    )
+    return post_count, comment_count, retrieval_meta
 
 
 def _upsert_youtube_video(
-    db: Any,
     context: SeasonContext,
     *,
     job_id: str,
     account: str,
     video: Any,
+    conn: Any | None = None,
 ) -> dict[str, Any] | None:
     published_at = _parse_instagram_time(getattr(video, "published_at", None))
     payload = {
@@ -947,15 +1459,10 @@ def _upsert_youtube_video(
         "job_id": job_id,
         "source_account": account,
     }
-    resp = db.schema("social").table("youtube_videos").upsert(payload, on_conflict="video_id").execute()
-    if hasattr(resp, "error") and resp.error:
-        raise RuntimeError(f"youtube_videos upsert failed: {resp.error}")
-    rows = resp.data or []
-    return rows[0] if rows else None
+    return _pg_upsert("youtube_videos", payload, conflict_col="video_id", conn=conn)
 
 
 def _upsert_youtube_comment_tree(
-    db: Any,
     context: SeasonContext,
     *,
     job_id: str,
@@ -963,6 +1470,7 @@ def _upsert_youtube_comment_tree(
     video_db_id: str,
     comment: Any,
     parent_comment_db_id: str | None = None,
+    conn: Any | None = None,
 ) -> int:
     created_at = _parse_instagram_time(getattr(comment, "created_at", None))
     payload = {
@@ -982,28 +1490,24 @@ def _upsert_youtube_comment_tree(
         "job_id": job_id,
         "source_account": account,
     }
-    resp = db.schema("social").table("youtube_comments").upsert(payload, on_conflict="comment_id").execute()
-    if hasattr(resp, "error") and resp.error:
-        raise RuntimeError(f"youtube_comments upsert failed: {resp.error}")
-    row = (resp.data or [{}])[0]
-    comment_db_id = row.get("id")
+    row = _pg_upsert("youtube_comments", payload, conflict_col="comment_id", conn=conn)
+    comment_db_id = (row or {}).get("id")
 
     total = 1
     for reply in getattr(comment, "replies", []) or []:
         total += _upsert_youtube_comment_tree(
-            db,
             context,
             job_id=job_id,
             account=account,
             video_db_id=video_db_id,
             comment=reply,
             parent_comment_db_id=comment_db_id,
+            conn=conn,
         )
     return total
 
 
 def _ingest_youtube(
-    db: Any,
     context: SeasonContext,
     *,
     account: str,
@@ -1011,7 +1515,7 @@ def _ingest_youtube(
     keywords: list[str],
     opts: IngestOptions,
     job_id: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.youtube import YouTubeScrapeConfig, YouTubeScraper
 
     scraper = YouTubeScraper()
@@ -1026,42 +1530,70 @@ def _ingest_youtube(
         season_number=context.season_number,
     )
 
+    logger.info(
+        "[youtube] Scraping channel=%s keywords=%s date_range=%s..%s",
+        account,
+        keywords,
+        opts.date_start,
+        opts.date_end,
+    )
     videos = scraper.scrape(config)
+    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     video_count = 0
     comment_count = 0
+    skipped_keyword = 0
+    total_scraped = 0
 
-    for video in videos:
-        combined_text = f"{getattr(video, 'title', '')} {getattr(video, 'description', '')}"
-        if not _text_contains_any_term(text=combined_text, hashtags=hashtags, keywords=keywords):
-            continue
-        if video_count >= opts.max_posts_per_target:
-            break
+    with pg.db_connection() as conn:
+        for video in videos:
+            total_scraped += 1
+            combined_text = f"{getattr(video, 'title', '')} {getattr(video, 'description', '')}"
+            if not _text_contains_any_term(text=combined_text, hashtags=hashtags, keywords=keywords):
+                skipped_keyword += 1
+                continue
+            if video_count >= opts.max_posts_per_target:
+                break
 
-        upserted = _upsert_youtube_video(db, context, job_id=job_id, account=account, video=video)
-        if not upserted:
-            continue
-        video_count += 1
+            upserted = _upsert_youtube_video(context, job_id=job_id, account=account, video=video, conn=conn)
+            if not upserted:
+                continue
+            video_count += 1
 
-        comments = scraper.fetch_comments(
-            getattr(video, "video_id", ""),
-            max_comments=opts.max_comments_per_post,
-            fetch_replies=opts.fetch_replies,
-            delay=0.5,
-        )
-        for comment in comments:
-            comment_count += _upsert_youtube_comment_tree(
-                db,
-                context,
-                job_id=job_id,
-                account=account,
-                video_db_id=str(upserted["id"]),
-                comment=comment,
-            )
+            if opts.max_comments_per_post > 0:
+                comments = scraper.fetch_comments(
+                    getattr(video, "video_id", ""),
+                    max_comments=opts.max_comments_per_post,
+                    fetch_replies=opts.fetch_replies,
+                    delay=0.5,
+                )
+                for comment in comments:
+                    comment_count += _upsert_youtube_comment_tree(
+                        context,
+                        job_id=job_id,
+                        account=account,
+                        video_db_id=str(upserted["id"]),
+                        comment=comment,
+                        conn=conn,
+                    )
 
-    return video_count, comment_count
+    logger.info(
+        "[youtube] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d",
+        total_scraped,
+        video_count,
+        skipped_keyword,
+        comment_count,
+    )
+    return video_count, comment_count, retrieval_meta
 
 
-def _upsert_tweet(db: Any, context: SeasonContext, *, job_id: str, account: str, tweet: Any) -> dict[str, Any] | None:
+def _upsert_tweet(
+    context: SeasonContext,
+    *,
+    job_id: str,
+    account: str,
+    tweet: Any,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
     created_at = _parse_instagram_time(getattr(tweet, "created_at", None))
     payload = {
         "tweet_id": getattr(tweet, "tweet_id", ""),
@@ -1090,15 +1622,10 @@ def _upsert_tweet(db: Any, context: SeasonContext, *, job_id: str, account: str,
         "job_id": job_id,
         "source_account": account,
     }
-    resp = db.schema("social").table("twitter_tweets").upsert(payload, on_conflict="tweet_id").execute()
-    if hasattr(resp, "error") and resp.error:
-        raise RuntimeError(f"twitter_tweets upsert failed: {resp.error}")
-    rows = resp.data or []
-    return rows[0] if rows else None
+    return _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn)
 
 
 def _ingest_twitter(
-    db: Any,
     context: SeasonContext,
     *,
     account: str,
@@ -1106,7 +1633,9 @@ def _ingest_twitter(
     keywords: list[str],
     opts: IngestOptions,
     job_id: str,
-) -> tuple[int, int]:
+    include_reply_records: bool = True,
+    hydrate_audience_replies: bool = False,
+) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
 
     date_start = opts.date_start or datetime.combine(context.anchor_date, time.min, tzinfo=UTC)
@@ -1127,51 +1656,397 @@ def _ingest_twitter(
         show_id=context.show_id,
         season_number=context.season_number,
     )
-    scraper = TwitterScraper()
+    logger.info("[twitter] Searching query=%r date_range=%s..%s", config.query, date_start, date_end)
+    twitter_cookies, twitter_bearer = _load_twitter_auth()
+    twikit_creds = _load_twikit_credentials()
+    scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
     tweets = scraper.scrape(config)[: opts.max_posts_per_target]
+    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+    logger.info("[twitter] Scraper returned %d tweets", len(tweets))
 
     post_count = 0
     reply_count = 0
-    for tweet in tweets:
-        if not _text_contains_any_term(
-            text=str(getattr(tweet, "text", "") or ""),
-            hashtags=hashtag_list,
-            keywords=keyword_list,
-        ):
+    skipped_keyword = 0
+    anchor_posts: list[Any] = []
+    hydrated_replies = 0
+    with pg.db_connection() as conn:
+        for tweet in tweets:
+            text = str(getattr(tweet, "text", "") or "")
+            if not _text_contains_any_term(text=text, hashtags=hashtag_list, keywords=keyword_list):
+                skipped_keyword += 1
+                continue
+            is_reply = bool(getattr(tweet, "is_reply", False))
+            if not is_reply:
+                anchor_posts.append(tweet)
+            if is_reply and not include_reply_records:
+                continue
+            upserted = _upsert_tweet(context, job_id=job_id, account=account, tweet=tweet, conn=conn)
+            if not upserted:
+                continue
+            if is_reply:
+                reply_count += 1
+            else:
+                post_count += 1
+
+        if hydrate_audience_replies and opts.max_comments_per_post > 0:
+            per_post_limit = max(0, opts.max_replies_per_post or opts.max_comments_per_post)
+            if per_post_limit > 0:
+                for tweet in anchor_posts[: opts.max_posts_per_target]:
+                    tweet_id = str(getattr(tweet, "tweet_id", "") or "")
+                    if not tweet_id:
+                        continue
+                    replies = scraper.fetch_tweet_replies(tweet_id, delay=0.5)[:per_post_limit]
+                    for reply in replies:
+                        # Normalize reply linkage for downstream analytics.
+                        if not getattr(reply, "reply_to_tweet_id", None):
+                            reply.reply_to_tweet_id = tweet_id
+                        reply.is_reply = True
+                        if _upsert_tweet(context, job_id=job_id, account=account, tweet=reply, conn=conn):
+                            hydrated_replies += 1
+            reply_count += hydrated_replies
+
+    logger.info(
+        "[twitter] Done: total=%d posts=%d replies=%d hydrated_replies=%d skipped_keyword=%d",
+        len(tweets),
+        post_count,
+        reply_count,
+        hydrated_replies,
+        skipped_keyword,
+    )
+    retrieval_meta["hydrated_replies"] = hydrated_replies
+    return post_count, reply_count, retrieval_meta
+
+
+def _retry_backoff_seconds(attempt_count: int) -> int:
+    return max(5, min(300, 5 * (2 ** max(0, attempt_count - 1))))
+
+
+def _classify_job_error(exc: Exception) -> tuple[str, str, bool]:
+    message = str(exc).lower()
+    error_class = exc.__class__.__name__
+    transient_markers = ("timeout", "temporar", "connection", "network", "429", "502", "503", "504", "rate limit")
+    if any(marker in message for marker in transient_markers):
+        return "transient_error", error_class, True
+    return "fatal_error", error_class, False
+
+
+def _run_platform_stage(
+    *,
+    context: SeasonContext,
+    platform: str,
+    stage: str,
+    account: str,
+    hashtags: list[str],
+    keywords: list[str],
+    opts: IngestOptions,
+    job_id: str,
+) -> tuple[int, int, dict[str, Any]]:
+    if stage not in {"posts", "comments"}:
+        raise ValueError(f"Unsupported ingest stage: {stage}")
+
+    if stage == "posts":
+        stage_opts = replace(opts, max_comments_per_post=0, fetch_replies=False)
+        if platform == "instagram":
+            return _ingest_instagram(
+                context,
+                account=account,
+                hashtags=hashtags,
+                keywords=keywords,
+                opts=stage_opts,
+                job_id=job_id,
+            )
+        if platform == "tiktok":
+            return _ingest_tiktok(
+                context,
+                account=account,
+                hashtags=hashtags,
+                keywords=keywords,
+                opts=stage_opts,
+                job_id=job_id,
+            )
+        if platform == "youtube":
+            return _ingest_youtube(
+                context,
+                account=account,
+                hashtags=hashtags,
+                keywords=keywords,
+                opts=stage_opts,
+                job_id=job_id,
+            )
+        if platform == "twitter":
+            return _ingest_twitter(
+                context,
+                account=account,
+                hashtags=hashtags,
+                keywords=keywords,
+                opts=stage_opts,
+                job_id=job_id,
+                include_reply_records=False,
+                hydrate_audience_replies=False,
+            )
+    else:
+        if opts.max_comments_per_post <= 0:
+            return 0, 0, {}
+        if platform == "instagram":
+            _, comments, meta = _ingest_instagram(
+                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id
+            )
+            return 0, comments, meta
+        if platform == "tiktok":
+            _, comments, meta = _ingest_tiktok(
+                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id
+            )
+            return 0, comments, meta
+        if platform == "youtube":
+            _, comments, meta = _ingest_youtube(
+                context, account=account, hashtags=hashtags, keywords=keywords, opts=opts, job_id=job_id
+            )
+            return 0, comments, meta
+        if platform == "twitter":
+            _, comments, meta = _ingest_twitter(
+                context,
+                account=account,
+                hashtags=hashtags,
+                keywords=keywords,
+                opts=opts,
+                job_id=job_id,
+                include_reply_records=False,
+                hydrate_audience_replies=True,
+            )
+            return 0, comments, meta
+
+    raise RuntimeError(f"Platform {platform} ingest is not supported")
+
+
+def _claim_next_job(*, worker_id: str | None = None, run_id: str | None = None) -> dict[str, Any] | None:
+    return pg.fetch_one(
+        """
+        with candidate as (
+          select id
+          from social.scrape_jobs
+          where status in ('queued', 'pending', 'retrying')
+            and available_at <= now()
+            and (%s::uuid is null or run_id = %s::uuid)
+          order by priority asc, created_at asc
+          for update skip locked
+          limit 1
+        )
+        update social.scrape_jobs as j
+        set
+          status = 'running',
+          started_at = coalesce(j.started_at, now()),
+          claimed_at = now(),
+          heartbeat_at = now(),
+          worker_id = coalesce(%s, j.worker_id),
+          attempt_count = j.attempt_count + 1
+        from candidate
+        where j.id = candidate.id
+        returning
+          j.id::text,
+          j.run_id::text as run_id,
+          j.platform,
+          j.job_type,
+          j.status,
+          j.config,
+          j.metadata,
+          j.attempt_count,
+          j.max_attempts,
+          j.source_scope,
+          j.season_id::text as season_id
+        """,
+        [run_id, run_id, worker_id],
+    )
+
+
+def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
+    job_id = str(job.get("id") or "")
+    run_id = str(job.get("run_id") or "")
+    platform = str(job.get("platform") or "")
+    config = dict(job.get("config") or {})
+    stage = str(config.get("stage") or ((job.get("metadata") or {}).get("stage")) or "posts")
+    context = get_season_context(str(config.get("season_id") or job.get("season_id") or ""))
+    opts = IngestOptions(
+        platforms=None,
+        source_scope=str(config.get("source_scope") or job.get("source_scope") or "bravo"),
+        max_posts_per_target=max(1, int(config.get("max_posts_per_target") or 1000)),
+        max_comments_per_post=max(0, int(config.get("max_comments_per_post") or 0)),
+        max_replies_per_post=max(0, int(config.get("max_replies_per_post") or 0)),
+        fetch_replies=bool(config.get("fetch_replies", True)),
+        ingest_mode=str(config.get("ingest_mode") or "posts_and_comments"),
+        depth_preset=str(config.get("depth_preset") or "balanced"),
+        date_start=_coerce_dt(config.get("date_start")),
+        date_end=_coerce_dt(config.get("date_end")),
+    )
+    account = str(config.get("account") or "")
+    hashtags = [str(item).strip().lstrip("#") for item in (config.get("hashtags") or []) if str(item).strip()]
+    keywords = [str(item).strip() for item in (config.get("keywords") or []) if str(item).strip()]
+
+    try:
+        _touch_job_heartbeat(job_id, worker_id=worker_id)
+        posts_count, comments_count, retrieval_meta = _run_platform_stage(
+            context=context,
+            platform=platform,
+            stage=stage,
+            account=account,
+            hashtags=hashtags,
+            keywords=keywords,
+            opts=opts,
+            job_id=job_id,
+        )
+        _finish_job(
+            job_id,
+            status="completed",
+            items_found=posts_count + comments_count,
+            metadata={
+                "stage": stage,
+                "stage_counters": {"posts": posts_count, "comments": comments_count},
+                "platform": platform,
+                "account": account,
+                "retrieval_meta": retrieval_meta,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        error_code, error_class, transient = _classify_job_error(exc)
+        attempt_count = int(job.get("attempt_count") or 1)
+        max_attempts = int(job.get("max_attempts") or 1)
+        can_retry = transient and attempt_count < max_attempts
+        next_available_at = _now_utc() + timedelta(seconds=_retry_backoff_seconds(attempt_count)) if can_retry else None
+        _finish_job(
+            job_id,
+            status="retrying" if can_retry else "failed",
+            items_found=0,
+            error_message=str(exc),
+            metadata={
+                "stage": stage,
+                "platform": platform,
+                "account": account,
+                "error": str(exc),
+            },
+            last_error_code=error_code,
+            last_error_class=error_class,
+            next_available_at=next_available_at,
+        )
+        logger.exception("Social ingest job failed: job_id=%s stage=%s platform=%s", job_id, stage, platform)
+    finally:
+        if run_id:
+            _finalize_run_status(run_id)
+
+    return pg.fetch_one(
+        """
+        select
+          id::text,
+          run_id::text as run_id,
+          platform,
+          job_type,
+          status,
+          items_found,
+          error_message,
+          metadata
+        from social.scrape_jobs
+        where id = %s
+        """,
+        [job_id],
+    ) or {}
+
+
+def execute_run(run_id: str, *, worker_id: str | None = None) -> dict[str, Any]:
+    _set_run_status(run_id, "running")
+    while True:
+        job = _claim_next_job(worker_id=worker_id, run_id=run_id)
+        if not job:
+            break
+        run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
+        if str(run_state.get("status")) == "cancelled":
+            _finish_job(str(job.get("id")), status="cancelled", items_found=0, metadata={"stage": "cancelled"})
             continue
-        upserted = _upsert_tweet(db, context, job_id=job_id, account=account, tweet=tweet)
-        if not upserted:
-            continue
-        if bool(getattr(tweet, "is_reply", False)):
-            reply_count += 1
-        else:
-            post_count += 1
-    return post_count, reply_count
+        _execute_claimed_job(job, worker_id=worker_id)
+
+    _finalize_run_status(run_id)
+    return pg.fetch_one(
+        """
+        select
+          id::text,
+          season_id::text as season_id,
+          show_id::text as show_id,
+          source_scope,
+          status,
+          config,
+          summary,
+          created_at,
+          started_at,
+          completed_at,
+          cancelled_at
+        from social.scrape_runs
+        where id = %s
+        """,
+        [run_id],
+    ) or {}
+
+
+def process_next_queued_job(*, worker_id: str) -> dict[str, Any] | None:
+    job = _claim_next_job(worker_id=worker_id, run_id=None)
+    if not job:
+        return None
+    return _execute_claimed_job(job, worker_id=worker_id)
 
 
 def ingest_season(
-    db: Any,
     season_id: str,
     *,
     platforms: list[str] | None,
     source_scope: str,
     max_posts_per_target: int,
     max_comments_per_post: int,
+    max_replies_per_post: int = 100,
     fetch_replies: bool,
+    ingest_mode: str = "posts_and_comments",
+    depth_preset: str = "balanced",
     date_start: datetime | None,
     date_end: datetime | None,
     initiated_by: str | None,
 ) -> dict[str, Any]:
     context = get_season_context(season_id)
-
     if source_scope not in SUPPORTED_SCOPES:
         raise ValueError(f"Unsupported source scope: {source_scope}")
+
+    normalized_mode = (ingest_mode or "posts_and_comments").strip().lower()
+    if normalized_mode not in SUPPORTED_INGEST_MODES:
+        raise ValueError(f"Unsupported ingest mode: {ingest_mode}")
+
+    normalized_depth = (depth_preset or "balanced").strip().lower()
+    if normalized_depth not in SUPPORTED_DEPTH_PRESETS:
+        raise ValueError(f"Unsupported depth preset: {depth_preset}")
 
     platform_filter = {p.strip().lower() for p in platforms or [] if isinstance(p, str) and p.strip()}
     if platform_filter:
         unsupported = platform_filter - set(SUPPORTED_PLATFORMS)
         if unsupported:
             raise ValueError(f"Unsupported platforms requested: {', '.join(sorted(unsupported))}")
+
+    resolved_posts, resolved_comments, resolved_replies, resolved_fetch_replies = _resolve_depth_defaults(
+        depth_preset=normalized_depth,
+        max_posts_per_target=max_posts_per_target,
+        max_comments_per_post=max_comments_per_post,
+        max_replies_per_post=max_replies_per_post,
+        fetch_replies=fetch_replies,
+    )
+    if normalized_mode == "posts_only":
+        resolved_comments = 0
+        resolved_replies = 0
+        resolved_fetch_replies = False
+
+    opts = IngestOptions(
+        platforms=platform_filter or None,
+        source_scope=source_scope,
+        max_posts_per_target=resolved_posts,
+        max_comments_per_post=resolved_comments,
+        max_replies_per_post=resolved_replies,
+        fetch_replies=resolved_fetch_replies,
+        ingest_mode=normalized_mode,
+        depth_preset=normalized_depth,
+        date_start=date_start,
+        date_end=date_end,
+    )
 
     targets_payload = get_targets(season_id, source_scope=source_scope)
     targets = [
@@ -1187,21 +2062,36 @@ def ingest_season(
             "show_id": context.show_id,
             "season_number": context.season_number,
             "source_scope": source_scope,
-            "results": [],
+            "run_id": None,
+            "stages": ["posts"] if normalized_mode == "posts_only" else ["posts", "comments"],
+            "queued_or_started_jobs": 0,
             "message": "No active targets configured for selected platforms",
         }
 
-    opts = IngestOptions(
-        platforms=platform_filter or None,
+    run_config = {
+        "season_id": context.season_id,
+        "show_id": context.show_id,
+        "source_scope": source_scope,
+        "date_start": _iso(opts.date_start),
+        "date_end": _iso(opts.date_end),
+        "max_posts_per_target": opts.max_posts_per_target,
+        "max_comments_per_post": opts.max_comments_per_post,
+        "max_replies_per_post": opts.max_replies_per_post,
+        "fetch_replies": opts.fetch_replies,
+        "ingest_mode": opts.ingest_mode,
+        "depth_preset": opts.depth_preset,
+    }
+    run_id = _create_run(
+        context,
         source_scope=source_scope,
-        max_posts_per_target=max(1, max_posts_per_target),
-        max_comments_per_post=max(1, max_comments_per_post),
-        fetch_replies=fetch_replies,
-        date_start=date_start,
-        date_end=date_end,
+        initiated_by=initiated_by,
+        config=run_config,
+        status="queued",
     )
 
-    results: list[IngestResult] = []
+    queue_enabled = is_queue_enabled()
+    initial_job_status = "queued" if queue_enabled else "pending"
+    job_ids: list[str] = []
 
     for target in targets:
         platform = str(target.get("platform") or "").lower()
@@ -1213,15 +2103,13 @@ def ingest_season(
         fallback_hashtags, fallback_keywords = _derive_show_terms(context.show_name)
         hashtags = _normalize_unique_terms([*target_hashtags, *fallback_hashtags])
         keywords = _normalize_unique_terms([*target_keywords, *fallback_keywords])
-
-        if not accounts:
-            continue
-
         for account in accounts:
-            job_config = {
+            base_config = {
+                "run_id": run_id,
                 "season_id": context.season_id,
                 "show_id": context.show_id,
                 "platform": platform,
+                "source_scope": source_scope,
                 "account": account,
                 "hashtags": hashtags,
                 "keywords": keywords,
@@ -1229,131 +2117,116 @@ def ingest_season(
                 "date_end": _iso(opts.date_end),
                 "max_posts_per_target": opts.max_posts_per_target,
                 "max_comments_per_post": opts.max_comments_per_post,
+                "max_replies_per_post": opts.max_replies_per_post,
                 "fetch_replies": opts.fetch_replies,
+                "ingest_mode": opts.ingest_mode,
+                "depth_preset": opts.depth_preset,
             }
-            job_id = _create_job(
-                context,
-                platform=platform,
-                source_scope=source_scope,
-                job_type="comments",
-                config=job_config,
-                initiated_by=initiated_by,
+            job_ids.append(
+                _create_job(
+                    context,
+                    run_id=run_id,
+                    platform=platform,
+                    source_scope=source_scope,
+                    job_type="posts",
+                    stage="posts",
+                    config={**base_config, "stage": "posts"},
+                    initiated_by=initiated_by,
+                    status=initial_job_status,
+                    priority=100,
+                )
             )
-
-            try:
-                if platform == "instagram":
-                    posts_count, comments_count = _ingest_instagram(
-                        db,
+            if normalized_mode == "posts_and_comments" and opts.max_comments_per_post > 0:
+                job_ids.append(
+                    _create_job(
                         context,
-                        account=account,
-                        hashtags=hashtags,
-                        keywords=keywords,
-                        opts=opts,
-                        job_id=job_id,
-                    )
-                elif platform == "tiktok":
-                    posts_count, comments_count = _ingest_tiktok(
-                        db,
-                        context,
-                        account=account,
-                        hashtags=hashtags,
-                        keywords=keywords,
-                        opts=opts,
-                        job_id=job_id,
-                    )
-                elif platform == "youtube":
-                    posts_count, comments_count = _ingest_youtube(
-                        db,
-                        context,
-                        account=account,
-                        hashtags=hashtags,
-                        keywords=keywords,
-                        opts=opts,
-                        job_id=job_id,
-                    )
-                elif platform == "twitter":
-                    posts_count, comments_count = _ingest_twitter(
-                        db,
-                        context,
-                        account=account,
-                        hashtags=hashtags,
-                        keywords=keywords,
-                        opts=opts,
-                        job_id=job_id,
-                    )
-                else:
-                    raise RuntimeError(f"Platform {platform} ingest is not supported in V1")
-
-                _finish_job(
-                    job_id,
-                    status="completed",
-                    items_found=posts_count + comments_count,
-                    metadata={
-                        "posts": posts_count,
-                        "comments": comments_count,
-                        "account": account,
-                    },
-                )
-                results.append(
-                    IngestResult(
+                        run_id=run_id,
                         platform=platform,
                         source_scope=source_scope,
-                        account=account,
-                        job_id=job_id,
-                        status="completed",
-                        posts=posts_count,
-                        comments=comments_count,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Social ingest failed: season=%s platform=%s account=%s", season_id, platform, account)
-                _finish_job(
-                    job_id,
-                    status="failed",
-                    items_found=0,
-                    error_message=str(exc),
-                    metadata={"account": account},
-                )
-                results.append(
-                    IngestResult(
-                        platform=platform,
-                        source_scope=source_scope,
-                        account=account,
-                        job_id=job_id,
-                        status="failed",
-                        posts=0,
-                        comments=0,
-                        error=str(exc),
+                        job_type="comments",
+                        stage="comments",
+                        config={**base_config, "stage": "comments"},
+                        initiated_by=initiated_by,
+                        status=initial_job_status,
+                        priority=200,
                     )
                 )
 
+    summary = _update_run_summary(run_id)
     return {
         "season_id": context.season_id,
         "show_id": context.show_id,
         "season_number": context.season_number,
         "source_scope": source_scope,
-        "results": [
-            {
-                "platform": result.platform,
-                "source_scope": result.source_scope,
-                "account": result.account,
-                "job_id": result.job_id,
-                "status": result.status,
-                "posts": result.posts,
-                "comments": result.comments,
-                "error": result.error,
-            }
-            for result in results
-        ],
+        "run_id": run_id,
+        "status": "queued" if queue_enabled else "pending",
+        "stages": ["posts"] if normalized_mode == "posts_only" else ["posts", "comments"],
+        "queued_or_started_jobs": len(job_ids),
+        "summary": summary,
     }
 
 
-def list_jobs(season_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
-    safe_limit = max(1, min(int(limit), 250))
-    return pg.fetch_all(
+def cancel_run(season_id: str, run_id: str, *, cancelled_by: str | None = None) -> dict[str, Any]:
+    run_row = pg.fetch_one(
         """
+        select id::text, season_id::text, status
+        from social.scrape_runs
+        where id = %s and season_id = %s
+        """,
+        [run_id, season_id],
+    )
+    if not run_row:
+        raise ValueError("Run not found")
+
+    pg.fetch_one(
+        """
+        update social.scrape_runs
+        set
+          status = 'cancelled',
+          cancelled_at = now(),
+          completed_at = now(),
+          summary = coalesce(summary, '{}'::jsonb) || jsonb_build_object('cancelled_by', %s)
+        where id = %s
+        returning id::text
+        """,
+        [cancelled_by, run_id],
+    )
+    cancelled_jobs = pg.execute_returning(
+        """
+        update social.scrape_jobs
+        set
+          status = 'cancelled',
+          completed_at = now(),
+          error_message = coalesce(error_message, 'Cancelled by user request')
+        where run_id = %s
+          and status in ('queued', 'pending', 'retrying', 'running')
+        returning id::text
+        """,
+        [run_id],
+    )
+    summary = _update_run_summary(run_id)
+    return {
+        "run_id": run_id,
+        "season_id": season_id,
+        "status": "cancelled",
+        "cancelled_jobs": len(cancelled_jobs),
+        "summary": summary,
+    }
+
+
+def list_jobs(
+    season_id: str,
+    *,
+    limit: int = 50,
+    run_id: str | None = None,
+    status: str | None = None,
+    platform: str | None = None,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 250))
+    sql = """
         select
           id::text,
+          run_id::text as run_id,
           platform,
           job_type,
           status,
@@ -1365,14 +2238,32 @@ def list_jobs(season_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
           config,
           metadata,
           source_scope,
-          initiated_by
+          initiated_by,
+          attempt_count,
+          max_attempts,
+          priority,
+          available_at,
+          claimed_at,
+          heartbeat_at,
+          worker_id,
+          last_error_code,
+          last_error_class
         from social.scrape_jobs
         where season_id = %s
-        order by created_at desc
-        limit %s
-        """,
-        [season_id, safe_limit],
-    )
+    """
+    params: list[Any] = [season_id]
+    if run_id:
+        sql += " and run_id = %s"
+        params.append(run_id)
+    if status:
+        sql += " and status = %s"
+        params.append(status)
+    if platform:
+        sql += " and platform = %s"
+        params.append(platform)
+    sql += " order by created_at desc limit %s"
+    params.append(safe_limit)
+    return pg.fetch_all(sql, params)
 
 
 # ---------------------------------------------------------------------------
@@ -1703,12 +2594,12 @@ def _rows_for_platform(
 
     if platform == "instagram":
         account_filter_posts = (
-            "and lower(coalesce(p.username, p.source_account, '')) in ('bravotv', 'bravo')"
+            "and lower(coalesce(nullif(p.username, ''), p.source_account, '')) in ('bravotv', 'bravo')"
             if bravo_scope
             else ""
         )
         account_filter_comments = (
-            "and lower(coalesce(p.username, p.source_account, '')) in ('bravotv', 'bravo')"
+            "and lower(coalesce(nullif(p.username, ''), p.source_account, '')) in ('bravotv', 'bravo')"
             if bravo_scope
             else ""
         )
@@ -1758,12 +2649,12 @@ def _rows_for_platform(
 
     if platform == "tiktok":
         account_filter_posts = (
-            "and lower(coalesce(p.username, p.source_account, '')) in ('bravotv', 'bravo')"
+            "and lower(coalesce(nullif(p.username, ''), p.source_account, '')) in ('bravotv', 'bravo')"
             if bravo_scope
             else ""
         )
         account_filter_comments = (
-            "and lower(coalesce(p.username, p.source_account, '')) in ('bravotv', 'bravo')"
+            "and lower(coalesce(nullif(p.username, ''), p.source_account, '')) in ('bravotv', 'bravo')"
             if bravo_scope
             else ""
         )
@@ -1816,12 +2707,12 @@ def _rows_for_platform(
 
     if platform == "youtube":
         account_filter_videos = (
-            "and lower(coalesce(v.channel_title, v.source_account, '')) in ('bravo', 'bravotv')"
+            "and lower(coalesce(nullif(v.channel_title, ''), v.source_account, '')) in ('bravo', 'bravotv')"
             if bravo_scope
             else ""
         )
         account_filter_comments = (
-            "and lower(coalesce(v.channel_title, v.source_account, '')) in ('bravo', 'bravotv')"
+            "and lower(coalesce(nullif(v.channel_title, ''), v.source_account, '')) in ('bravo', 'bravotv')"
             if bravo_scope
             else ""
         )
@@ -1871,7 +2762,7 @@ def _rows_for_platform(
 
     if platform == "twitter":
         account_filter = (
-            "and lower(coalesce(t.username, t.source_account, '')) in ('bravotv', 'bravo')"
+            "and lower(coalesce(nullif(t.username, ''), t.source_account, '')) in ('bravotv', 'bravo')"
             if bravo_scope
             else ""
         )

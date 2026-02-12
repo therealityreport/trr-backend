@@ -104,6 +104,110 @@ def test_put_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     assert body["targets"][0]["platform"] == "instagram"
 
 
+def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    expected = {
+        "season_id": season_id,
+        "show_id": str(uuid4()),
+        "season_number": 6,
+        "source_scope": "bravo",
+        "results": [],
+    }
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "max_posts_per_target": 5000,
+        "max_comments_per_post": 0,
+        "fetch_replies": False,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["season_id"] == season_id
+    assert mocked.call_args.kwargs["max_comments_per_post"] == 0
+
+
+def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-123",
+        "status": "queued",
+        "stages": ["posts", "comments"],
+        "queued_or_started_jobs": 4,
+        "summary": {"total_jobs": 4},
+    }
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+            response = client.post(
+                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "run-123"
+    assert body["stages"] == ["posts", "comments"]
+    assert ingest_mock.call_args.kwargs["ingest_mode"] == "posts_and_comments"
+    assert ingest_mock.call_args.kwargs["depth_preset"] == "balanced"
+
+
+def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    run_id = str(uuid4())
+
+    with patch("trr_backend.repositories.social_season_analytics.list_jobs", return_value=[]) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/jobs"
+            f"?run_id={run_id}&status=running&platform=instagram",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == run_id
+    assert mocked.call_args.kwargs["run_id"] == run_id
+    assert mocked.call_args.kwargs["status"] == "running"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+
+
+def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    run_id = str(uuid4())
+    expected = {"run_id": run_id, "status": "cancelled", "cancelled_jobs": 2}
+
+    with patch("trr_backend.repositories.social_season_analytics.cancel_run", return_value=expected):
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["run_id"] == run_id
+
+
 def test_export_csv(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")

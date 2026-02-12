@@ -8,6 +8,7 @@ Scripts live in this directory:
 - `scripts/media/mirror_cast_photos_to_s3.py`
 - `scripts/media/mirror_media_assets_to_s3.py`
 - `scripts/media/rebuild_hosted_urls.py`
+- `scripts/media/backfill_media_asset_variants.py`
 
 Required environment variables
 ------------------------------
@@ -56,3 +57,12 @@ Troubleshooting
   so the Referer header can be set on download.
 - Re-run the script safely; it is idempotent and skips existing hosted URLs
   unless --force is supplied.
+
+Backfill optimized media variants
+---------------------------------
+
+Generate `thumb/card/detail` variants (and optional crop variants) for existing `core.media_assets`:
+
+```
+PYTHONPATH=. python scripts/media/backfill_media_asset_variants.py --batch-size 50 --with-crops
+```

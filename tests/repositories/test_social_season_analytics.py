@@ -5,6 +5,8 @@ from datetime import date
 from trr_backend.repositories.social_season_analytics import (
     SeasonContext,
     _default_targets,
+    _load_instagram_cookies,
+    _resolve_depth_defaults,
     _text_contains_any_term,
     _text_is_trailer_marker,
     _video_matches_season,
@@ -79,3 +81,53 @@ def test_text_contains_any_term_accepts_phrase_or_hashtag_or_token() -> None:
         hashtags=hashtags,
         keywords=keywords,
     )
+
+
+def test_load_instagram_cookies_prefers_env_json(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "SOCIAL_INSTAGRAM_COOKIES_JSON",
+        '{"sessionid":"abc","csrftoken":"def","_comment":"ignore-me"}',
+    )
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COOKIES_FILE", raising=False)
+    monkeypatch.delenv("INSTAGRAM_COOKIES_FILE", raising=False)
+    cookies = _load_instagram_cookies()
+    assert cookies["sessionid"] == "abc"
+    assert cookies["csrftoken"] == "def"
+    assert "_comment" not in cookies
+
+
+def test_load_instagram_cookies_uses_file_when_env_json_invalid(monkeypatch, tmp_path) -> None:
+    cookie_file = tmp_path / "ig-cookies.json"
+    cookie_file.write_text('{"sessionid":"file-session","csrftoken":"file-csrf","_meta":"ignore"}')
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", "{invalid-json")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_FILE", str(cookie_file))
+    cookies = _load_instagram_cookies()
+    assert cookies["sessionid"] == "file-session"
+    assert cookies["csrftoken"] == "file-csrf"
+    assert "_meta" not in cookies
+
+
+def test_resolve_depth_defaults_balances_limits() -> None:
+    posts, comments, replies, fetch_replies = _resolve_depth_defaults(
+        depth_preset="quick",
+        max_posts_per_target=10000,
+        max_comments_per_post=300,
+        max_replies_per_post=200,
+        fetch_replies=True,
+    )
+    assert posts == 400
+    assert comments == 20
+    assert replies == 20
+    assert fetch_replies is False
+
+    posts2, comments2, replies2, fetch_replies2 = _resolve_depth_defaults(
+        depth_preset="deep",
+        max_posts_per_target=500,
+        max_comments_per_post=50,
+        max_replies_per_post=10,
+        fetch_replies=False,
+    )
+    assert posts2 == 500
+    assert comments2 == 200
+    assert replies2 == 100
+    assert fetch_replies2 is False
