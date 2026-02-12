@@ -831,3 +831,28 @@ Cast-role API + Bravo ingest follow-up (this session, 2026-02-12):
   - `ruff check api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
   - `python -m py_compile api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
   - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+Queue migration guardrail for social ingest (same session, 2026-02-12):
+- File:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Added queue schema preflight check before ingest/cancel to fail fast with actionable error when migrations `0121`/`0122`/`0123` are missing.
+  - Added legacy-safe `list_jobs` select path that tolerates missing `run_id`/queue columns while migrations are pending.
+  - Added router test for ingest 400 behavior when queue schema is unavailable.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `pytest -q tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (18 passed)
+
+RHOSLC backfill runbook for links + role suggestions (this session, 2026-02-12):
+- Files:
+  - `docs/runbooks/rhoslc-show-admin-backfill.md`
+  - `docs/cross-collab/TASK7/STATUS.md`
+- Changes:
+  - Added executable runbook for RHOSLC backfill covering:
+    - season-scoped Bravo commit runs,
+    - explicit links discovery pass,
+    - pending link review/approval commands,
+    - cast-role suggestion verification queries.
+  - Added cross-collab status entry referencing the runbook.
+- Validation:
+  - Documentation-only update (no runtime code changes).

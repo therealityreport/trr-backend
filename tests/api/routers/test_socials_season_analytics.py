@@ -208,6 +208,26 @@ def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.Monk
     assert response.json()["run_id"] == run_id
 
 
+def test_ingest_returns_400_when_queue_schema_missing(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    payload = {"source_scope": "bravo", "platforms": ["instagram"]}
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.ingest_season",
+        side_effect=ValueError("Social ingest queue schema is not migrated"),
+    ):
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+
+    assert response.status_code == 400
+    assert "not migrated" in response.json()["detail"]
+
+
 def test_export_csv(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")

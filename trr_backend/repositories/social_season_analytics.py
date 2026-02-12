@@ -23,6 +23,7 @@ SUPPORTED_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube")
 SUPPORTED_SCOPES = ("bravo", "creator", "community")
 SUPPORTED_INGEST_MODES = ("posts_only", "posts_and_comments")
 SUPPORTED_DEPTH_PRESETS = ("quick", "balanced", "deep")
+JOB_PROGRESS_UPDATE_EVERY = 25
 
 POSITIVE_WORDS = {
     "amazing",
@@ -195,9 +196,9 @@ def _resolve_depth_defaults(
     max_replies_per_post: int,
     fetch_replies: bool,
 ) -> tuple[int, int, int, bool]:
-    normalized = (depth_preset or "balanced").strip().lower()
+    normalized = (depth_preset or "deep").strip().lower()
     if normalized not in SUPPORTED_DEPTH_PRESETS:
-        normalized = "balanced"
+        normalized = "deep"
 
     if normalized == "quick":
         return (
@@ -252,6 +253,48 @@ def _to_et_date(dt: datetime | None, tz_name: str) -> date | None:
         return None
     zone = ZoneInfo(tz_name)
     return dt.astimezone(zone).date()
+
+
+def _relation_exists(qualified_name: str) -> bool:
+    row = pg.fetch_one("select to_regclass(%s) is not null as exists", [qualified_name]) or {}
+    return bool(row.get("exists"))
+
+
+def _column_exists(schema: str, table: str, column: str) -> bool:
+    row = pg.fetch_one(
+        """
+        select exists (
+          select 1
+          from information_schema.columns
+          where table_schema = %s
+            and table_name = %s
+            and column_name = %s
+        ) as exists
+        """,
+        [schema, table, column],
+    ) or {}
+    return bool(row.get("exists"))
+
+
+def _assert_social_queue_schema_ready() -> None:
+    missing: list[str] = []
+    if not _relation_exists("social.scrape_runs"):
+        missing.append("social.scrape_runs table (migration 0121)")
+    for col, migration in (
+        ("run_id", "0122"),
+        ("available_at", "0122"),
+        ("priority", "0122"),
+        ("attempt_count", "0122"),
+    ):
+        if not _column_exists("social", "scrape_jobs", col):
+            missing.append(f"social.scrape_jobs.{col} column (migration {migration})")
+
+    if missing:
+        details = "; ".join(missing)
+        raise ValueError(
+            "Social ingest queue schema is not migrated. Apply migrations 0121, 0122, 0123. "
+            f"Missing: {details}"
+        )
 
 
 def _slug_words(value: str) -> list[str]:
@@ -880,6 +923,27 @@ def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> None:
     )
 
 
+def _update_job_progress(
+    job_id: str,
+    *,
+    items_found: int,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    pg.fetch_one(
+        """
+        update social.scrape_jobs
+        set
+          items_found = %s,
+          metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb,
+          heartbeat_at = now()
+        where id = %s
+          and status in ('queued', 'pending', 'retrying', 'running')
+        returning id::text
+        """,
+        [items_found, json.dumps(metadata or {}), job_id],
+    )
+
+
 def _finish_job(
     job_id: str,
     *,
@@ -1200,6 +1264,7 @@ def _ingest_instagram(
     keywords: list[str],
     opts: IngestOptions,
     job_id: str,
+    stage: str = "posts",
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.instagram import InstagramScraper, ScrapeConfig
 
@@ -1234,6 +1299,38 @@ def _ingest_instagram(
     comment_count = 0
     skipped_keyword = 0
     total_scraped = 0
+    last_progress_total = 0
+
+    def _report_progress(*, force: bool = False) -> None:
+        nonlocal last_progress_total
+        total_items = post_count + comment_count
+        if not force:
+            if total_items == 0:
+                return
+            if (total_items - last_progress_total) < JOB_PROGRESS_UPDATE_EVERY:
+                return
+        last_progress_total = total_items
+        _update_job_progress(
+            job_id,
+            items_found=total_items,
+            metadata={
+                "stage": stage,
+                "platform": "instagram",
+                "account": account,
+                "stage_counters": {"posts": post_count, "comments": comment_count},
+            },
+        )
+
+    _update_job_progress(
+        job_id,
+        items_found=0,
+        metadata={
+            "stage": stage,
+            "platform": "instagram",
+            "account": account,
+            "stage_counters": {"posts": 0, "comments": 0},
+        },
+    )
 
     with pg.db_connection() as conn:
         for post in posts:
@@ -1249,6 +1346,7 @@ def _ingest_instagram(
             if not upserted:
                 continue
             post_count += 1
+            _report_progress()
 
             if opts.max_comments_per_post > 0:
                 comments = scraper.fetch_comments(
@@ -1266,6 +1364,9 @@ def _ingest_instagram(
                         comment=comment,
                         conn=conn,
                     )
+                    _report_progress()
+
+    _report_progress(force=True)
 
     logger.info(
         "[instagram] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d",
@@ -1363,6 +1464,7 @@ def _ingest_tiktok(
     keywords: list[str],
     opts: IngestOptions,
     job_id: str,
+    stage: str = "posts",
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
@@ -1386,6 +1488,38 @@ def _ingest_tiktok(
     comment_count = 0
     skipped_keyword = 0
     total_scraped = 0
+    last_progress_total = 0
+
+    def _report_progress(*, force: bool = False) -> None:
+        nonlocal last_progress_total
+        total_items = post_count + comment_count
+        if not force:
+            if total_items == 0:
+                return
+            if (total_items - last_progress_total) < JOB_PROGRESS_UPDATE_EVERY:
+                return
+        last_progress_total = total_items
+        _update_job_progress(
+            job_id,
+            items_found=total_items,
+            metadata={
+                "stage": stage,
+                "platform": "tiktok",
+                "account": account,
+                "stage_counters": {"posts": post_count, "comments": comment_count},
+            },
+        )
+
+    _update_job_progress(
+        job_id,
+        items_found=0,
+        metadata={
+            "stage": stage,
+            "platform": "tiktok",
+            "account": account,
+            "stage_counters": {"posts": 0, "comments": 0},
+        },
+    )
 
     with pg.db_connection() as conn:
         for post in posts:
@@ -1401,6 +1535,7 @@ def _ingest_tiktok(
             if not upserted:
                 continue
             post_count += 1
+            _report_progress()
 
             if opts.max_comments_per_post > 0:
                 comments = scraper.fetch_comments(
@@ -1419,6 +1554,9 @@ def _ingest_tiktok(
                         comment=comment,
                         conn=conn,
                     )
+                    _report_progress()
+
+    _report_progress(force=True)
 
     logger.info(
         "[tiktok] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d",
@@ -1515,6 +1653,7 @@ def _ingest_youtube(
     keywords: list[str],
     opts: IngestOptions,
     job_id: str,
+    stage: str = "posts",
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.youtube import YouTubeScrapeConfig, YouTubeScraper
 
@@ -1543,6 +1682,38 @@ def _ingest_youtube(
     comment_count = 0
     skipped_keyword = 0
     total_scraped = 0
+    last_progress_total = 0
+
+    def _report_progress(*, force: bool = False) -> None:
+        nonlocal last_progress_total
+        total_items = video_count + comment_count
+        if not force:
+            if total_items == 0:
+                return
+            if (total_items - last_progress_total) < JOB_PROGRESS_UPDATE_EVERY:
+                return
+        last_progress_total = total_items
+        _update_job_progress(
+            job_id,
+            items_found=total_items,
+            metadata={
+                "stage": stage,
+                "platform": "youtube",
+                "account": account,
+                "stage_counters": {"posts": video_count, "comments": comment_count},
+            },
+        )
+
+    _update_job_progress(
+        job_id,
+        items_found=0,
+        metadata={
+            "stage": stage,
+            "platform": "youtube",
+            "account": account,
+            "stage_counters": {"posts": 0, "comments": 0},
+        },
+    )
 
     with pg.db_connection() as conn:
         for video in videos:
@@ -1558,6 +1729,7 @@ def _ingest_youtube(
             if not upserted:
                 continue
             video_count += 1
+            _report_progress()
 
             if opts.max_comments_per_post > 0:
                 comments = scraper.fetch_comments(
@@ -1575,6 +1747,9 @@ def _ingest_youtube(
                         comment=comment,
                         conn=conn,
                     )
+                    _report_progress()
+
+    _report_progress(force=True)
 
     logger.info(
         "[youtube] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d",
@@ -1635,6 +1810,7 @@ def _ingest_twitter(
     job_id: str,
     include_reply_records: bool = True,
     hydrate_audience_replies: bool = False,
+    stage: str = "posts",
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
 
@@ -1669,6 +1845,39 @@ def _ingest_twitter(
     skipped_keyword = 0
     anchor_posts: list[Any] = []
     hydrated_replies = 0
+    last_progress_total = 0
+
+    def _report_progress(*, force: bool = False) -> None:
+        nonlocal last_progress_total
+        total_items = post_count + reply_count
+        if not force:
+            if total_items == 0:
+                return
+            if (total_items - last_progress_total) < JOB_PROGRESS_UPDATE_EVERY:
+                return
+        last_progress_total = total_items
+        _update_job_progress(
+            job_id,
+            items_found=total_items,
+            metadata={
+                "stage": stage,
+                "platform": "twitter",
+                "account": account,
+                "stage_counters": {"posts": post_count, "comments": reply_count},
+            },
+        )
+
+    _update_job_progress(
+        job_id,
+        items_found=0,
+        metadata={
+            "stage": stage,
+            "platform": "twitter",
+            "account": account,
+            "stage_counters": {"posts": 0, "comments": 0},
+        },
+    )
+
     with pg.db_connection() as conn:
         for tweet in tweets:
             text = str(getattr(tweet, "text", "") or "")
@@ -1687,6 +1896,7 @@ def _ingest_twitter(
                 reply_count += 1
             else:
                 post_count += 1
+            _report_progress()
 
         if hydrate_audience_replies and opts.max_comments_per_post > 0:
             per_post_limit = max(0, opts.max_replies_per_post or opts.max_comments_per_post)
@@ -1703,7 +1913,10 @@ def _ingest_twitter(
                         reply.is_reply = True
                         if _upsert_tweet(context, job_id=job_id, account=account, tweet=reply, conn=conn):
                             hydrated_replies += 1
+                            _report_progress()
             reply_count += hydrated_replies
+
+    _report_progress(force=True)
 
     logger.info(
         "[twitter] Done: total=%d posts=%d replies=%d hydrated_replies=%d skipped_keyword=%d",
@@ -2005,6 +2218,7 @@ def ingest_season(
     date_end: datetime | None,
     initiated_by: str | None,
 ) -> dict[str, Any]:
+    _assert_social_queue_schema_ready()
     context = get_season_context(season_id)
     if source_scope not in SUPPORTED_SCOPES:
         raise ValueError(f"Unsupported source scope: {source_scope}")
@@ -2167,6 +2381,7 @@ def ingest_season(
 
 
 def cancel_run(season_id: str, run_id: str, *, cancelled_by: str | None = None) -> dict[str, Any]:
+    _assert_social_queue_schema_ready()
     run_row = pg.fetch_one(
         """
         select id::text, season_id::text, status
@@ -2223,10 +2438,38 @@ def list_jobs(
     platform: str | None = None,
 ) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 250))
+    has_run_id = _column_exists("social", "scrape_jobs", "run_id")
+    has_queue_fields = all(
+        [
+            _column_exists("social", "scrape_jobs", "attempt_count"),
+            _column_exists("social", "scrape_jobs", "max_attempts"),
+            _column_exists("social", "scrape_jobs", "priority"),
+            _column_exists("social", "scrape_jobs", "available_at"),
+            _column_exists("social", "scrape_jobs", "claimed_at"),
+            _column_exists("social", "scrape_jobs", "heartbeat_at"),
+            _column_exists("social", "scrape_jobs", "worker_id"),
+            _column_exists("social", "scrape_jobs", "last_error_code"),
+            _column_exists("social", "scrape_jobs", "last_error_class"),
+        ]
+    )
+
+    select_run_id = "run_id::text as run_id" if has_run_id else "null::text as run_id"
+    select_attempt_count = "attempt_count" if has_queue_fields else "0::int as attempt_count"
+    select_max_attempts = "max_attempts" if has_queue_fields else "0::int as max_attempts"
+    select_priority = "priority" if has_queue_fields else "0::int as priority"
+    select_available_at = "available_at" if has_queue_fields else "null::timestamptz as available_at"
+    select_claimed_at = "claimed_at" if has_queue_fields else "null::timestamptz as claimed_at"
+    select_heartbeat_at = "heartbeat_at" if has_queue_fields else "null::timestamptz as heartbeat_at"
+    select_worker_id = "worker_id" if has_queue_fields else "null::text as worker_id"
+    select_last_error_code = "last_error_code" if has_queue_fields else "null::text as last_error_code"
+    select_last_error_class = "last_error_class" if has_queue_fields else "null::text as last_error_class"
+
     sql = """
         select
           id::text,
-          run_id::text as run_id,
+          """
+    sql += select_run_id
+    sql += """,
           platform,
           job_type,
           status,
@@ -2239,20 +2482,38 @@ def list_jobs(
           metadata,
           source_scope,
           initiated_by,
-          attempt_count,
-          max_attempts,
-          priority,
-          available_at,
-          claimed_at,
-          heartbeat_at,
-          worker_id,
-          last_error_code,
-          last_error_class
+          """
+    sql += select_attempt_count
+    sql += """,
+          """
+    sql += select_max_attempts
+    sql += """,
+          """
+    sql += select_priority
+    sql += """,
+          """
+    sql += select_available_at
+    sql += """,
+          """
+    sql += select_claimed_at
+    sql += """,
+          """
+    sql += select_heartbeat_at
+    sql += """,
+          """
+    sql += select_worker_id
+    sql += """,
+          """
+    sql += select_last_error_code
+    sql += """,
+          """
+    sql += select_last_error_class
+    sql += """
         from social.scrape_jobs
         where season_id = %s
     """
     params: list[Any] = [season_id]
-    if run_id:
+    if run_id and has_run_id:
         sql += " and run_id = %s"
         params.append(run_id)
     if status:

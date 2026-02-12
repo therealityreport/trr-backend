@@ -19,6 +19,15 @@ None.
 
 ## Recent Activity
 
+- February 12, 2026: Added RHOSLC backfill runbook for discovered links + cast-role suggestions.
+  - Runbook:
+    - `docs/runbooks/rhoslc-show-admin-backfill.md`
+  - Includes executable `curl` + `psql` commands for:
+    - season-scoped Bravo commit backfill
+    - explicit links discovery
+    - pending link review/approval
+    - role suggestion persistence verification
+
 - February 12, 2026: Optimized persisted Bravo read endpoints to reduce slow show-page loads.
   - `GET /api/v1/admin/shows/{show_id}/bravo/videos` and `GET /api/v1/admin/shows/{show_id}/bravo/news` now prefer embedded normalized person items already stored in the show snapshot.
   - Person snapshot fallback queries now run only for older snapshots missing embedded `videos_person` / `news_person`, avoiding redundant large snapshot joins on every read.
