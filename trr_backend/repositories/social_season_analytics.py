@@ -2091,7 +2091,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         max_replies_per_post=max(0, int(config.get("max_replies_per_post") or 0)),
         fetch_replies=bool(config.get("fetch_replies", True)),
         ingest_mode=str(config.get("ingest_mode") or "posts_and_comments"),
-        depth_preset=str(config.get("depth_preset") or "balanced"),
+        depth_preset=str(config.get("depth_preset") or "deep"),
         date_start=_coerce_dt(config.get("date_start")),
         date_end=_coerce_dt(config.get("date_end")),
     )
@@ -2285,7 +2285,7 @@ def ingest_season(
     max_replies_per_post: int = 100,
     fetch_replies: bool,
     ingest_mode: str = "posts_and_comments",
-    depth_preset: str = "balanced",
+    depth_preset: str = "deep",
     date_start: datetime | None,
     date_end: datetime | None,
     initiated_by: str | None,
@@ -2299,9 +2299,9 @@ def ingest_season(
     if normalized_mode not in SUPPORTED_INGEST_MODES:
         raise ValueError(f"Unsupported ingest mode: {ingest_mode}")
 
-    normalized_depth = (depth_preset or "balanced").strip().lower()
+    normalized_depth = (depth_preset or "deep").strip().lower()
     if normalized_depth not in SUPPORTED_DEPTH_PRESETS:
-        raise ValueError(f"Unsupported depth preset: {depth_preset}")
+        normalized_depth = "deep"
 
     platform_filter = {p.strip().lower() for p in platforms or [] if isinstance(p, str) and p.strip()}
     if platform_filter:
