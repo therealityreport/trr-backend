@@ -167,7 +167,7 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
     assert body["run_id"] == "run-123"
     assert body["stages"] == ["posts", "comments"]
     assert ingest_mock.call_args.kwargs["ingest_mode"] == "posts_and_comments"
-    assert ingest_mock.call_args.kwargs["depth_preset"] == "balanced"
+    assert ingest_mock.call_args.kwargs["depth_preset"] == "deep"
 
 
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

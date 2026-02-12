@@ -856,3 +856,26 @@ RHOSLC backfill runbook for links + role suggestions (this session, 2026-02-12):
   - Added cross-collab status entry referencing the runbook.
 - Validation:
   - Documentation-only update (no runtime code changes).
+
+Social ingest live-progress + full-depth defaults + cancel safety (this session, 2026-02-12):
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `api/routers/socials.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Added in-flight job progress updates during platform loops (Instagram/TikTok/YouTube/Twitter):
+    - updates `social.scrape_jobs.items_found` while jobs run
+    - writes stage/platform/account counters into job metadata
+    - updates heartbeat on each progress flush
+  - Propagated explicit stage labels into ingest execution (`posts` vs `comments`) for progress metadata consistency.
+  - Added cancellation-safe job completion behavior:
+    - if run is cancelled while a job is executing, terminal state remains `cancelled` instead of flipping back to `completed`/`failed`.
+  - Shifted ingest defaults to full-depth behavior:
+    - backend defaults now use `depth_preset=deep`
+    - unsupported `depth_preset` values now gracefully fall back to `deep`
+    - router request defaults raised to high limits for posts/comments/replies to support full ingest.
+  - Updated API router test expectation for default depth preset (`deep`).
+- Validation:
+  - `python3 -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `ruff check trr_backend/repositories/social_season_analytics.py api/routers/socials.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `pytest tests/api/routers/test_socials_season_analytics.py -q` (10 passed)
