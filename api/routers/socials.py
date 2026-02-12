@@ -766,12 +766,12 @@ class SeasonSocialTargetsPutRequest(BaseModel):
 class SeasonSocialIngestRequest(BaseModel):
     source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
     platforms: list[Literal["instagram", "tiktok", "twitter", "youtube"]] | None = Field(default=None)
-    max_posts_per_target: int = Field(default=5000, ge=1, le=20000)
-    max_comments_per_post: int = Field(default=100, ge=0, le=2000)
-    max_replies_per_post: int = Field(default=100, ge=0, le=2000)
+    max_posts_per_target: int = Field(default=100000, ge=1, le=1000000)
+    max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
+    max_replies_per_post: int = Field(default=100000, ge=0, le=1000000)
     fetch_replies: bool = Field(default=True)
     ingest_mode: Literal["posts_only", "posts_and_comments"] = Field(default="posts_and_comments")
-    depth_preset: Literal["quick", "balanced", "deep"] = Field(default="balanced")
+    depth_preset: Literal["quick", "balanced", "deep"] = Field(default="deep")
     date_start: datetime | None = None
     date_end: datetime | None = None
 
