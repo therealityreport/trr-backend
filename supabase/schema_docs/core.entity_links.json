@@ -1,0 +1,254 @@
+{
+  "schema": "core",
+  "table": "entity_links",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "entity_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "entity_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "season_number",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": "0",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "link_group",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "link_kind",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "label",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url_key",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'pending'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "confidence",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "discovered_by",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "metadata",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_by",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_by",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "entity_links_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "entity_type",
+      "entity_id",
+      "link_kind",
+      "season_number",
+      "url_key"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "entity_links_entity_idx",
+      "columns": [
+        "entity_type",
+        "entity_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX entity_links_entity_idx ON core.entity_links USING btree (entity_type, entity_id)"
+    },
+    {
+      "name": "entity_links_group_idx",
+      "columns": [
+        "link_group"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX entity_links_group_idx ON core.entity_links USING btree (link_group)"
+    },
+    {
+      "name": "entity_links_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX entity_links_pkey ON core.entity_links USING btree (id)"
+    },
+    {
+      "name": "entity_links_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX entity_links_show_id_idx ON core.entity_links USING btree (show_id)"
+    },
+    {
+      "name": "entity_links_status_idx",
+      "columns": [
+        "status"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX entity_links_status_idx ON core.entity_links USING btree (status)"
+    },
+    {
+      "name": "entity_links_unique_active",
+      "columns": [
+        "entity_type",
+        "entity_id",
+        "link_kind",
+        "season_number",
+        "url_key"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX entity_links_unique_active ON core.entity_links USING btree (entity_type, entity_id, link_kind, season_number, url_key)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "entity_type": "example",
+    "entity_id": "00000000-0000-0000-0000-000000000000",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "season_number": 0,
+    "link_group": "example",
+    "link_kind": "example",
+    "label": "example",
+    "url": "example",
+    "url_key": "example",
+    "status": "example",
+    "confidence": 0,
+    "discovered_by": "example",
+    "source": "example",
+    "metadata": {},
+    "created_by": "example",
+    "updated_by": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}
