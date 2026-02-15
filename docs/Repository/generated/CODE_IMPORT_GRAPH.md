@@ -11,16 +11,18 @@ flowchart TB
     n6["trr_backend.models"]
     n7["trr_backend.pipeline"]
     n8["trr_backend.repositories"]
-    n9["trr_backend.utils"]
+    n9["trr_backend.socials"]
+    n10["trr_backend.utils"]
+    n11["trr_backend.vision"]
 
     n1 --> n2
     n1 --> n7
-    n1 --> n9
+    n1 --> n10
     n3 --> n2
     n3 --> n4
     n3 --> n6
     n3 --> n8
-    n4 --> n9
+    n4 --> n10
     n5 --> n2
     n5 --> n8
     n7 --> n0
@@ -31,4 +33,6 @@ flowchart TB
     n7 --> n8
     n8 --> n2
     n8 --> n6
+    n8 --> n9
+    n11 --> n5
 ```
