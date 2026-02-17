@@ -19,12 +19,14 @@ class _FakeDb:
     def __init__(self, rows_by_table):
         self._rows_by_table = rows_by_table
         self._table = None
+        self._pending_update = None
 
     def schema(self, _name):
         return self
 
     def table(self, name):
         self._table = name
+        self._pending_update = None
         return self
 
     def select(self, _fields):
@@ -36,8 +38,15 @@ class _FakeDb:
     def limit(self, _n):
         return self
 
+    def update(self, payload):
+        self._pending_update = payload
+        return self
+
     def execute(self):
         row = self._rows_by_table.get(self._table)
+        if self._pending_update is not None and row is not None:
+            row.update(self._pending_update)
+            return _FakeResponse([row])
         return _FakeResponse([row] if row else [])
 
 
@@ -172,3 +181,57 @@ def test_auto_count_media_asset_still_requires_any_link(monkeypatch) -> None:
     with pytest.raises(HTTPException) as excinfo:
         counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
     assert excinfo.value.status_code == 404
+
+
+def test_auto_count_cast_photo_returns_face_boxes(monkeypatch) -> None:
+    photo_id = uuid4()
+    db = _FakeDb(
+        {
+            "cast_photos": {
+                "id": str(photo_id),
+                "hosted_url": "https://example.com/source.jpg",
+                "url": "https://example.com/source.jpg",
+                "metadata": {},
+            }
+        }
+    )
+
+    monkeypatch.setattr(
+        counts,
+        "count_people",
+        lambda image_url, mode="faces_then_yolo": SimpleNamespace(
+            people_count=2,
+            face_count=2,
+            detector="simulated",
+            model=None,
+            detections=[
+                SimpleNamespace(
+                    x1=0.1,
+                    y1=0.2,
+                    x2=0.3,
+                    y2=0.5,
+                    confidence=0.92,
+                    kind="face",
+                ),
+                SimpleNamespace(
+                    x1=0.4,
+                    y1=0.25,
+                    x2=0.62,
+                    y2=0.58,
+                    confidence=0.88,
+                    kind="face",
+                ),
+            ],
+        ),
+    )
+    monkeypatch.setattr(counts, "get_tags_by_photo_ids", lambda _db, _ids: {})
+    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
+    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
+    monkeypatch.setattr(counts, "auto_thumbnail_crop", lambda _result: None)
+    monkeypatch.setattr(counts, "face_centroid", lambda _result: None)
+
+    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    assert out.people_count == 2
+    assert len(out.face_boxes) == 2
+    assert out.face_boxes[0].x == 0.1
+    assert out.face_boxes[0].width == 0.2

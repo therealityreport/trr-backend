@@ -167,7 +167,6 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
     assert body["run_id"] == "run-123"
     assert body["stages"] == ["posts", "comments"]
     assert ingest_mock.call_args.kwargs["ingest_mode"] == "posts_and_comments"
-    assert ingest_mock.call_args.kwargs["depth_preset"] == "deep"
 
 
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,6 +187,107 @@ def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: p
     assert mocked.call_args.kwargs["run_id"] == run_id
     assert mocked.call_args.kwargs["status"] == "running"
     assert mocked.call_args.kwargs["platform"] == "instagram"
+
+
+def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    runs_payload = [
+        {
+            "id": str(uuid4()),
+            "season_id": season_id,
+            "status": "completed",
+            "source_scope": "bravo",
+        }
+    ]
+
+    with patch("trr_backend.repositories.social_season_analytics.list_runs", return_value=runs_payload) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs"
+            "?status=completed&source_scope=bravo&limit=25",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["season_id"] == season_id
+    assert body["filters"]["status"] == "completed"
+    assert body["filters"]["source_scope"] == "bravo"
+    assert body["runs"] == runs_payload
+    assert mocked.call_args.kwargs["status"] == "completed"
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["limit"] == 25
+
+
+def test_get_ingest_runs_rejects_invalid_season_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    response = client.get(
+        "/api/v1/admin/socials/seasons/not-a-uuid/ingest/runs",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_get_ingest_runs_requires_admin_auth(client: TestClient) -> None:
+    season_id = str(uuid4())
+    response = client.get(f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs")
+    assert response.status_code in {401, 403}
+
+
+def test_refresh_post_comments_endpoint_returns_latest_post_detail(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    refreshed_post = {
+        "platform": "tiktok",
+        "source_id": "72899887766",
+        "author": "bravotv",
+        "text": "Example post",
+        "url": "https://www.tiktok.com/@bravotv/video/72899887766",
+        "posted_at": "2026-02-17T10:00:00+00:00",
+        "stats": {"comments_count": 604, "likes": 59500, "engagement": 564500},
+        "total_comments_in_db": 604,
+        "comments": [],
+    }
+    refresh_summary = {
+        "platform": "tiktok",
+        "source_id": "72899887766",
+        "comments_fetched": 604,
+        "comments_upserted": 604,
+        "total_comments_in_db": 604,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.refresh_post_comments",
+        return_value=refresh_summary,
+    ) as refresh_mock:
+        with patch(
+            "trr_backend.repositories.social_season_analytics.get_post_comments",
+            return_value=refreshed_post,
+        ) as get_mock:
+            response = client.post(
+                f"/api/v1/admin/socials/seasons/{season_id}/analytics/posts/tiktok/72899887766/refresh",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"max_comments_per_post": 1000, "fetch_replies": True},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source_id"] == "72899887766"
+    assert body["refresh"]["comments_upserted"] == 604
+    assert refresh_mock.call_args.kwargs["platform"] == "tiktok"
+    assert refresh_mock.call_args.kwargs["source_id"] == "72899887766"
+    assert refresh_mock.call_args.kwargs["max_comments_per_post"] == 1000
+    assert get_mock.call_args.kwargs["platform"] == "tiktok"
 
 
 def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,6 +372,7 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
         "window": {"week": 0},
         "summary": {},
         "weekly": [],
+        "weekly_platform_engagement": [],
         "platform_breakdown": [],
         "themes": {"positive": [], "negative": []},
         "leaderboards": {"bravo_content": [], "viewer_discussion": []},
@@ -286,6 +387,7 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
 
     assert response.status_code == 200
     assert response.json()["window"]["week"] == 0
+    assert "weekly_platform_engagement" in response.json()
     assert mocked.call_args.kwargs["week"] == 0
 
 

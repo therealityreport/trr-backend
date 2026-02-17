@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+import json
 import re
+import urllib.request
+from functools import lru_cache
 from typing import Any, Literal
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 from uuid import UUID
 
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, HttpUrl
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.db import pg
+from trr_backend.ingestion.show_cast_matrix_scraper import (
+    is_missing_fandom_page,
+    is_missing_wikipedia_page,
+    try_fetch_html,
+)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-links"])
+_BRAVO_VARIANT = "default"
 
 EntityType = Literal["show", "season", "person"]
 LinkGroup = Literal["official", "social", "knowledge", "cast_announcements", "other"]
@@ -105,6 +115,112 @@ def _upsert_link(
 def _show_exists(show_id: str) -> bool:
     row = pg.fetch_one("SELECT id FROM core.shows WHERE id = %s", [show_id])
     return bool(row)
+
+
+@lru_cache(maxsize=256)
+def _resolve_wikidata_enwiki_url(wikidata_id: str) -> str | None:
+    item_id = str(wikidata_id or "").strip()
+    if not re.fullmatch(r"Q\d+", item_id):
+        return None
+    request = urllib.request.Request(
+        f"https://www.wikidata.org/wiki/Special:EntityData/{item_id}.json",
+        headers={"accept": "application/json", "user-agent": "TRR-Backend/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads((response.read() or b"{}").decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001
+        return None
+
+    entities = payload.get("entities") if isinstance(payload, dict) else None
+    entity = entities.get(item_id) if isinstance(entities, dict) else None
+    sitelinks = entity.get("sitelinks") if isinstance(entity, dict) else None
+    enwiki = sitelinks.get("enwiki") if isinstance(sitelinks, dict) else None
+    title = enwiki.get("title") if isinstance(enwiki, dict) else None
+    if not isinstance(title, str) or not title.strip():
+        return None
+    return f"https://en.wikipedia.org/wiki/{quote(title.strip().replace(' ', '_'))}"
+
+
+@lru_cache(maxsize=1024)
+def _normalized_person_name(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _extract_person_page_name_candidates(html: str, resolved_url: str) -> set[str]:
+    candidates: set[str] = set()
+
+    path = unquote(urlparse(resolved_url).path or "")
+    slug = ""
+    if "/wiki/" in path:
+        slug = path.split("/wiki/", 1)[1]
+    elif "/" in path:
+        slug = path.rsplit("/", 1)[-1]
+    if slug:
+        clean_slug = re.sub(r"\s*\(.*?\)\s*$", "", slug.replace("_", " ")).strip()
+        normalized = _normalized_person_name(clean_slug)
+        if normalized:
+            candidates.add(normalized)
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    heading = soup.select_one("h1")
+    if heading is not None:
+        heading_text = re.sub(r"\[\s*\d+\s*]", "", heading.get_text(" ", strip=True))
+        heading_text = re.sub(r"\s*\(.*?\)\s*$", "", heading_text).strip()
+        normalized = _normalized_person_name(heading_text)
+        if normalized:
+            candidates.add(normalized)
+
+    if soup.title is not None:
+        title_text = soup.title.get_text(" ", strip=True)
+        head = re.split(r"\s+[-|]\s+", title_text, maxsplit=1)[0].strip()
+        head = re.sub(r"\s*\(.*?\)\s*$", "", head).strip()
+        normalized = _normalized_person_name(head)
+        if normalized:
+            candidates.add(normalized)
+
+    return candidates
+
+
+def _person_page_matches_expected_name(expected_name: str | None, html: str, resolved_url: str) -> bool:
+    expected = _normalized_person_name(expected_name)
+    if not expected:
+        return True
+
+    expected_tokens = {token for token in expected.split() if token}
+    candidates = _extract_person_page_name_candidates(html, resolved_url)
+    if expected in candidates:
+        return True
+
+    for candidate in candidates:
+        candidate_tokens = {token for token in candidate.split() if token}
+        if expected_tokens and expected_tokens.issubset(candidate_tokens):
+            return True
+
+    return False
+
+
+@lru_cache(maxsize=1024)
+def _validated_person_knowledge_url(
+    url: str,
+    *,
+    kind: str,
+    expected_name: str | None = None,
+) -> str | None:
+    candidate = str(url or "").strip()
+    if not candidate:
+        return None
+    html, final_url, _error = try_fetch_html(candidate)
+    if not html:
+        return None
+    resolved = final_url or candidate
+    if kind == "wikipedia" and is_missing_wikipedia_page(html, resolved):
+        return None
+    if kind == "fandom" and is_missing_fandom_page(html, resolved):
+        return None
+    if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
+        return None
+    return resolved
 
 
 def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
@@ -244,10 +360,10 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
         """
         SELECT payload
         FROM core.show_source_latest
-        WHERE show_id = %s AND source_id = 'bravo' AND variant = 'show_bundle_v1'
+        WHERE show_id = %s AND source_id = 'bravo' AND variant = %s
         LIMIT 1
         """,
-        [show_id],
+        [show_id, _BRAVO_VARIANT],
     )
     payload = snapshot.get("payload") if snapshot and isinstance(snapshot.get("payload"), dict) else {}
     normalized = payload.get("normalized") if isinstance(payload, dict) else {}
@@ -313,7 +429,13 @@ def _discover_season_links(show_id: str) -> list[dict[str, Any]]:
                     "source": "core.seasons.external_wikidata_id",
                 }
             )
-        if show_name:
+        season_wikipedia_url = _resolve_wikidata_enwiki_url(wikidata) if wikidata else None
+        if not season_wikipedia_url and show_name:
+            season_wikipedia_url = (
+                "https://en.wikipedia.org/wiki/"
+                f"{quote((show_name + ' season ' + str(season_number)).replace(' ', '_'))}"
+            )
+        if season_wikipedia_url:
             found.append(
                 {
                     "entity_type": "season",
@@ -322,17 +444,34 @@ def _discover_season_links(show_id: str) -> list[dict[str, Any]]:
                     "link_group": "knowledge",
                     "link_kind": "wikipedia",
                     "label": f"Season {season_number} Wikipedia",
-                    "url": (
-                        "https://en.wikipedia.org/wiki/"
-                        f"{quote((show_name + ' season ' + str(season_number)).replace(' ', '_'))}"
-                    ),
-                    "source": "derived",
+                    "url": season_wikipedia_url,
+                    "source": "wikidata_sitelink" if wikidata and season_wikipedia_url else "derived",
                 }
             )
     return found
 
 
 def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
+    show = pg.fetch_one("SELECT networks FROM core.shows WHERE id = %s", [show_id]) or {}
+    networks = [str(value).strip().lower() for value in (show.get("networks") or []) if isinstance(value, str)]
+    is_bravo_show = "bravo" in networks
+
+    housewife_friend_ids: set[str] = set()
+    if is_bravo_show:
+        role_rows = pg.fetch_all(
+            """
+            SELECT DISTINCT sra.person_id::text AS person_id
+            FROM core.show_cast_role_assignments sra
+            JOIN core.show_role_catalog rc ON rc.id = sra.role_id
+            WHERE sra.show_id = %s
+              AND lower(rc.name) IN ('housewife', 'friend')
+            """,
+            [show_id],
+        )
+        housewife_friend_ids = {
+            str(row.get("person_id") or "").strip() for row in role_rows if row.get("person_id")
+        }
+
     rows = pg.fetch_all(
         """
         SELECT DISTINCT p.id, p.full_name, p.external_ids, cf.source_url AS fandom_url
@@ -347,6 +486,8 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
     for row in rows:
         person_id = str(row.get("id"))
         name = str(row.get("full_name") or "").strip()
+        fandom_url = str(row.get("fandom_url") or "").strip()
+        has_fandom_profile = bool(fandom_url)
         external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
         wikidata = str(external_ids.get("wikidata") or external_ids.get("wikidata_id") or "").strip()
         if wikidata:
@@ -362,34 +503,88 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                     "source": "core.people.external_ids",
                 }
             )
-        if name:
-            found.append(
-                {
-                    "entity_type": "person",
-                    "entity_id": person_id,
-                    "season_number": 0,
-                    "link_group": "knowledge",
-                    "link_kind": "wikipedia",
-                    "label": f"{name} Wikipedia",
-                    "url": f"https://en.wikipedia.org/wiki/{quote(name.replace(' ', '_'))}",
-                    "source": "derived",
-                }
+        if has_fandom_profile and name:
+            wikipedia_url = _validated_person_knowledge_url(
+                f"https://en.wikipedia.org/wiki/{quote(name.replace(' ', '_'))}",
+                kind="wikipedia",
+                expected_name=name,
             )
-        fandom_url = str(row.get("fandom_url") or "").strip()
-        if fandom_url:
-            found.append(
-                {
-                    "entity_type": "person",
-                    "entity_id": person_id,
-                    "season_number": 0,
-                    "link_group": "knowledge",
-                    "link_kind": "fandom",
-                    "label": f"{name} Fandom" if name else "Fandom",
-                    "url": fandom_url,
-                    "source": "core.cast_fandom",
-                }
+            if wikipedia_url:
+                found.append(
+                    {
+                        "entity_type": "person",
+                        "entity_id": person_id,
+                        "season_number": 0,
+                        "link_group": "knowledge",
+                        "link_kind": "wikipedia",
+                        "label": f"{name} Wikipedia",
+                        "url": wikipedia_url,
+                        "source": "derived_validated",
+                        "status": "approved",
+                        "confidence": 0.9,
+                    }
+                )
+        if has_fandom_profile:
+            validated_fandom_url = _validated_person_knowledge_url(
+                fandom_url,
+                kind="fandom",
+                expected_name=name if name else None,
             )
+            if validated_fandom_url:
+                found.append(
+                    {
+                        "entity_type": "person",
+                        "entity_id": person_id,
+                        "season_number": 0,
+                        "link_group": "knowledge",
+                        "link_kind": "fandom",
+                        "label": f"{name} Fandom" if name else "Fandom",
+                        "url": validated_fandom_url,
+                        "source": "core.cast_fandom",
+                        "status": "approved",
+                        "confidence": 0.9,
+                    }
+                )
+        if is_bravo_show and person_id in housewife_friend_ids and name:
+            slug = _slug(name)
+            if slug:
+                found.append(
+                    {
+                        "entity_type": "person",
+                        "entity_id": person_id,
+                        "season_number": 0,
+                        "link_group": "official",
+                        "link_kind": "bravo_profile",
+                        "label": f"{name} Bravo profile",
+                        "url": f"https://www.bravotv.com/people/{slug}",
+                        "source": "cast_matrix_sync",
+                    }
+                )
     return found
+
+
+def _cleanup_stale_pending_person_knowledge_links(show_id: str, valid_identity_keys: set[str]) -> int:
+    params: list[Any] = [show_id, ["wikipedia", "fandom"]]
+    identity_sql = ""
+    if valid_identity_keys:
+        params.append(sorted(valid_identity_keys))
+        identity_sql = "AND NOT ((entity_id::text || '|' || link_kind || '|' || url_key) = ANY(%s::text[]))"
+
+    rows = pg.execute_returning(
+        f"""
+        DELETE FROM core.entity_links
+        WHERE show_id = %s
+          AND entity_type = 'person'
+          AND link_group = 'knowledge'
+          AND link_kind = ANY(%s::text[])
+          AND status = 'pending'
+          AND discovered_by = 'backend_discovery'
+          {identity_sql}
+        RETURNING id
+        """,
+        params,
+    )
+    return len(rows)
 
 
 @router.post("/{show_id}/links/discover")
@@ -410,12 +605,40 @@ def discover_show_links(
     if payload.include_people:
         discovered.extend(_discover_people_links(show_id_str))
 
+    stale_pending_people_deleted = 0
+    if payload.include_people:
+        valid_identity_keys: set[str] = set()
+        for row in discovered:
+            if row.get("entity_type") != "person":
+                continue
+            if row.get("link_group") != "knowledge":
+                continue
+            link_kind = str(row.get("link_kind") or "").strip()
+            if link_kind not in {"wikipedia", "fandom"}:
+                continue
+            entity_id = str(row.get("entity_id") or "").strip()
+            url = str(row.get("url") or "").strip()
+            if not entity_id or not url:
+                continue
+            identity_key = f"{entity_id}|{link_kind}|{_url_key(url)}"
+            valid_identity_keys.add(identity_key)
+        stale_pending_people_deleted = _cleanup_stale_pending_person_knowledge_links(
+            show_id_str,
+            valid_identity_keys,
+        )
+
     upserted = 0
     by_group: dict[str, int] = {}
     for row in discovered:
         parsed = urlparse(str(row["url"]))
         if not parsed.scheme.startswith("http"):
             continue
+        status = str(row.get("status") or "pending")
+        confidence_raw = row.get("confidence")
+        if isinstance(confidence_raw, (int, float)):
+            confidence = float(confidence_raw)
+        else:
+            confidence = 0.9 if status == "approved" else 0.65
         _upsert_link(
             db,
             show_id=show_id_str,
@@ -426,8 +649,8 @@ def discover_show_links(
             url=str(row["url"]),
             label=(str(row.get("label")) if row.get("label") else None),
             season_number=int(row.get("season_number") or 0),
-            status="pending",
-            confidence=0.65,
+            status=status,
+            confidence=confidence,
             source=(str(row.get("source")) if row.get("source") else None),
             discovered_by="backend_discovery",
             metadata=(row.get("metadata") if isinstance(row.get("metadata"), dict) else {}),
@@ -440,6 +663,7 @@ def discover_show_links(
         "show_id": show_id_str,
         "discovered": upserted,
         "counts_by_group": by_group,
+        "stale_pending_people_deleted": stale_pending_people_deleted,
     }
 
 

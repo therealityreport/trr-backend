@@ -152,6 +152,24 @@ class TwitterScraper:
         "longform_notetweets_inline_media_enabled": True,
         "responsive_web_enhance_cards_enabled": False,
     }
+    # TweetDetail has stricter feature requirements than SearchTimeline.
+    TWEET_DETAIL_FEATURE_OVERRIDES = {
+        "post_ctas_fetch_enabled": False,
+        "responsive_web_grok_annotations_enabled": False,
+        "responsive_web_grok_analysis_button_from_backend": False,
+        "responsive_web_grok_imagine_annotation_enabled": False,
+        "responsive_web_grok_community_note_auto_translation_is_enabled": False,
+        "responsive_web_profile_redirect_enabled": False,
+        "responsive_web_grok_show_grok_translated_post": False,
+        "responsive_web_grok_share_attachment_enabled": False,
+        "profile_label_improvements_pcf_label_in_post_enabled": False,
+        "premium_content_api_read_enabled": False,
+        "responsive_web_grok_analyze_post_followups_enabled": False,
+        "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+        "responsive_web_grok_image_annotation_enabled": False,
+        "rweb_video_screen_enabled": False,
+        "responsive_web_jetfuel_frame": False,
+    }
 
     def __init__(
         self,
@@ -336,9 +354,12 @@ class TwitterScraper:
 
         user_result = result.get("core", {}).get("user_results", {}).get("result", {})
         user = user_result.get("legacy", {})
+        user_core = user_result.get("core", {})
 
         tweet_id = tweet.get("id_str", "")
-        username = user.get("screen_name", "")
+        username = user.get("screen_name", "") or user_core.get("screen_name", "")
+        display_name = user.get("name", "") or user_core.get("name", "")
+        user_verified = bool(user_result.get("is_blue_verified") or user.get("verified"))
 
         # Parse created_at
         created_at_str = tweet.get("created_at", "")
@@ -378,8 +399,8 @@ class TwitterScraper:
             views=views,
             url=f"https://x.com/{username}/status/{tweet_id}" if tweet_id and username else "",
             username=username,
-            display_name=user.get("name", ""),
-            user_verified=user_result.get("is_blue_verified", False),
+            display_name=display_name,
+            user_verified=user_verified,
             is_reply=bool(tweet.get("in_reply_to_status_id_str")),
             is_retweet=bool(tweet.get("retweeted_status_result")),
             is_quote=bool(result.get("quoted_status_result")),
@@ -708,6 +729,28 @@ class TwitterScraper:
             logger.error(f"Search request failed: {e}")
             return None
 
+    def _extract_required_feature_flags(self, response: requests.Response) -> list[str]:
+        """Parse Twitter validation errors and extract missing feature-flag names."""
+        try:
+            payload = response.json()
+        except ValueError:
+            return []
+        flags: list[str] = []
+        for error in payload.get("errors", []) or []:
+            message = str(error.get("message", "") or "")
+            marker = "cannot be null:"
+            idx = message.find(marker)
+            if idx < 0:
+                continue
+            suffix = message[idx + len(marker) :]
+            for raw_name in suffix.split(","):
+                name = raw_name.strip().strip(".")
+                if not name:
+                    continue
+                if re.fullmatch(r"[A-Za-z0-9_]+", name):
+                    flags.append(name)
+        return list(dict.fromkeys(flags))
+
     def fetch_tweet_replies(self, tweet_id: str, delay: float = 2.0) -> list[Tweet]:
         """Fetch replies to a specific tweet."""
         import json
@@ -727,16 +770,28 @@ class TwitterScraper:
             "withVoice": True,
         }
 
-        params = {
-            "variables": json.dumps(variables),
-            "features": json.dumps(self.FEATURES),
-        }
-
-        url = f"{self._tweet_detail_url}?{urllib.parse.urlencode(params)}"
+        features = dict(self.FEATURES)
+        features.update(self.TWEET_DETAIL_FEATURE_OVERRIDES)
         headers = self._get_headers()
 
+        def _request(detail_features: dict[str, bool]) -> requests.Response:
+            params = {
+                "variables": json.dumps(variables),
+                "features": json.dumps(detail_features),
+            }
+            url = f"{self._tweet_detail_url}?{urllib.parse.urlencode(params)}"
+            return self.session.get(url, headers=headers, cookies=self.cookies)
+
         try:
-            response = self.session.get(url, headers=headers, cookies=self.cookies)
+            response = _request(features)
+            if response.status_code == 400:
+                # Twitter frequently adds required flags. Auto-apply once when signaled.
+                missing_flags = self._extract_required_feature_flags(response)
+                if missing_flags:
+                    logger.info("TweetDetail requires %d additional feature flags; retrying", len(missing_flags))
+                    for flag in missing_flags:
+                        features.setdefault(flag, False)
+                    response = _request(features)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:

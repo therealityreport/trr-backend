@@ -123,8 +123,18 @@ def test_commit_bravo_import_returns_snapshot_metadata(client: TestClient, monke
                                             "api.routers.admin_show_bravo._import_bravo_person_image",
                                             return_value={"imported": 1, "skipped": 0, "errors": []},
                                         ):
-                                            with patch("api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync", return_value=0):
-                                                with patch("api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync", return_value={"role_suggestions": 0, "role_assignments": 0, "announcement_people": 0}):
+                                            with patch(
+                                                "api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync",
+                                                return_value=0,
+                                            ):
+                                                with patch(
+                                                    "api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync",
+                                                    return_value={
+                                                        "role_suggestions": 0,
+                                                        "role_assignments": 0,
+                                                        "announcement_people": 0,
+                                                    },
+                                                ):
                                                     response = client.post(
                                                         f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
                                                         headers={"Authorization": f"Bearer {token}"},
@@ -202,8 +212,18 @@ def test_commit_bravo_import_persists_season_overview_for_season_scoped_sync(
                                             with patch(
                                                 "api.routers.admin_show_bravo._persist_season_overview"
                                             ) as persist_season_overview_mock:
-                                                with patch("api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync", return_value=0):
-                                                    with patch("api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync", return_value={"role_suggestions": 0, "role_assignments": 0, "announcement_people": 0}):
+                                                with patch(
+                                                    "api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync",
+                                                    return_value=0,
+                                                ):
+                                                    with patch(
+                                                        "api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync",
+                                                        return_value={
+                                                            "role_suggestions": 0,
+                                                            "role_assignments": 0,
+                                                            "announcement_people": 0,
+                                                        },
+                                                    ):
                                                         response = client.post(
                                                             f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
                                                             headers={"Authorization": f"Bearer {token}"},
@@ -284,8 +304,18 @@ def test_commit_bravo_import_uses_selected_show_image_kinds(
                                                     errors=[],
                                                 ),
                                             ) as import_images_mock:
-                                                with patch("api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync", return_value=0):
-                                                    with patch("api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync", return_value={"role_suggestions": 0, "role_assignments": 0, "announcement_people": 0}):
+                                                with patch(
+                                                    "api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync",
+                                                    return_value=0,
+                                                ):
+                                                    with patch(
+                                                        "api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync",
+                                                        return_value={
+                                                            "role_suggestions": 0,
+                                                            "role_assignments": 0,
+                                                            "announcement_people": 0,
+                                                        },
+                                                    ):
                                                         response = client.post(
                                                             f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
                                                             headers={"Authorization": f"Bearer {token}"},
@@ -309,6 +339,98 @@ def test_commit_bravo_import_uses_selected_show_image_kinds(
     import_request = import_images_mock.call_args.args[0]
     kinds = [image.kind for image in import_request.images]
     assert kinds == ["logo", "poster"]
+
+
+def test_commit_bravo_import_invokes_cast_matrix_sync_when_enabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    mock_db = MagicMock()
+
+    bundle = {
+        "show": {
+            "canonical_url": "https://www.bravotv.com/the-valley",
+            "title": "The Valley",
+            "description": "Bravo description",
+            "airs_text": "Tuesdays 9/8c",
+        },
+        "videos": [],
+        "news": [],
+        "people": [
+            {
+                "canonical_url": "https://www.bravotv.com/people/janet-caperna",
+                "name": "Janet Caperna",
+                "bio": "Bio",
+                "hero_image_url": None,
+                "social_links": {},
+                "videos": [],
+                "news": [],
+            }
+        ],
+        "image_candidates": [],
+        "discovered_person_urls": ["https://www.bravotv.com/people/janet-caperna"],
+        "raw": {},
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch("api.routers.admin_show_bravo.parse_bravo_show_bundle", return_value=bundle):
+                    with patch(
+                        "api.routers.admin_show_bravo._build_show_cast_index",
+                        return_value=[{"person_id": person_id, "person_name": "Janet Caperna"}],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_bravo._upsert_show_snapshot",
+                            return_value={"show_id": show_id, "source_id": "bravo", "variant": "default"},
+                        ):
+                            with patch("api.routers.admin_show_bravo._persist_show_description"):
+                                with patch(
+                                    "api.routers.admin_show_bravo._upsert_person_snapshot",
+                                    return_value={"person_id": person_id, "source_id": "bravo", "variant": "default"},
+                                ):
+                                    with patch("api.routers.admin_show_bravo._persist_person_profile"):
+                                        with patch(
+                                            "api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync",
+                                            return_value=0,
+                                        ):
+                                            with patch(
+                                                "api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync",
+                                                return_value={
+                                                    "role_suggestions": 0,
+                                                    "role_assignments": 0,
+                                                    "announcement_people": 0,
+                                                },
+                                            ):
+                                                with patch(
+                                                    "api.routers.admin_show_roles.sync_cast_matrix_for_show",
+                                                    return_value={
+                                                        "counts": {
+                                                            "season_role_assignments_upserted": 2,
+                                                            "relationship_role_assignments_upserted": 1,
+                                                            "global_kid_assignments_upserted": 1,
+                                                            "bravo_links_upserted": 1,
+                                                        }
+                                                    },
+                                                ) as sync_mock:
+                                                    response = client.post(
+                                                        f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
+                                                        headers={"Authorization": f"Bearer {token}"},
+                                                        json={"show_url": "https://www.bravotv.com/the-valley"},
+                                                    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["counts"]["cast_matrix_season_roles"] == 2
+    assert payload["counts"]["cast_matrix_relationship_roles"] == 1
+    assert payload["counts"]["cast_matrix_kid_roles"] == 1
+    assert payload["counts"]["cast_matrix_bravo_links"] == 1
+    assert sync_mock.called
 
 
 def test_preview_bravo_import_filters_videos_by_season(

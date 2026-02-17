@@ -275,6 +275,7 @@ def _update_asset_variant_metadata(db, asset_id: str, variants: list[VariantResu
         return None
 
     if crop_signature == "base":
+        metadata["thumb_url"] = _best_url("thumb")
         metadata["display_url"] = _best_url("card")
         metadata["detail_url"] = _best_url("detail")
     else:

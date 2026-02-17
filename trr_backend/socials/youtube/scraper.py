@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -570,10 +570,9 @@ class YouTubeScraper:
                         continue
                     in_range_hits += 1
                 elif config.date_start or config.date_end:
-                    # Unknown timestamps are increasingly common for dynamic renderers;
-                    # don't let them force unbounded continuation crawling.
+                    # Unknown timestamps are increasingly common for dynamic renderers.
+                    # Still allow keyword matching but track the count.
                     timestamp_unknown_count += 1
-                    continue
 
                 combined_text = f"{video.title} {video.description}"
                 if config.matches_keywords(combined_text):
@@ -586,7 +585,7 @@ class YouTubeScraper:
             logger.info(f"Page {page_num}: {len(page_videos)} matches, {len(videos)} total")
             if page_hits == 0:
                 no_hit_pages += 1
-                if no_hit_pages >= 2 and (config.date_start or config.date_end):
+                if no_hit_pages >= 5 and (config.date_start or config.date_end):
                     logger.info("Stopping continuation crawl after %d no-hit pages", no_hit_pages)
                     break
             else:
@@ -690,7 +689,7 @@ class YouTubeScraper:
 
                 seen_ids.add(vid_id)
                 dt_str = (
-                    datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
                     if ts
                     else ""
                 )
@@ -802,13 +801,23 @@ class YouTubeScraper:
                 break
 
             # Parse comments from response
+            entity_index = self._build_comment_entity_index(comment_data)
             items, next_continuation = self._parse_comment_response(comment_data)
+            parsed_on_page = 0
 
             for item in items:
-                comment = self._parse_comment_thread(item, video_id, video_url, fetch_replies, delay)
+                comment = self._parse_comment_thread(
+                    item,
+                    video_id,
+                    video_url,
+                    fetch_replies,
+                    delay,
+                    entity_index=entity_index,
+                )
                 if comment:
                     comments.append(comment)
                     comments_fetched += 1
+                    parsed_on_page += 1
                     logger.info(f"  Comment {comment.comment_id}: {comment.likes} likes, {comment.reply_count} replies")
 
                 if max_comments and comments_fetched >= max_comments:
@@ -818,10 +827,35 @@ class YouTubeScraper:
 
             if max_comments and comments_fetched >= max_comments:
                 break
+            # Guard against schema drift / continuation loops that never yield parsable comments.
+            if not items and not next_continuation:
+                break
+            if continuation_token == next_continuation:
+                logger.warning("YouTube comment continuation token did not advance; stopping pagination")
+                break
+            if parsed_on_page == 0 and not next_continuation:
+                break
             continuation_token = next_continuation
 
         logger.info(f"Total: {len(comments)} comments fetched for video {video_id}")
         return comments
+
+    def _build_comment_entity_index(self, data: dict) -> dict[str, dict]:
+        """Build an index of commentId -> commentEntityPayload from framework updates."""
+        index: dict[str, dict] = {}
+        mutations = (
+            data.get("frameworkUpdates", {})
+            .get("entityBatchUpdate", {})
+            .get("mutations", [])
+        )
+        for mutation in mutations:
+            payload = mutation.get("payload", {})
+            entity = payload.get("commentEntityPayload", {})
+            props = entity.get("properties", {})
+            comment_id = props.get("commentId")
+            if isinstance(comment_id, str) and comment_id:
+                index[comment_id] = entity
+        return index
 
     def _extract_comment_continuation(self, yt_data: dict) -> str | None:
         """Extract the continuation token for comments from ytInitialData."""
@@ -920,15 +954,22 @@ class YouTubeScraper:
         video_url: str,
         fetch_replies: bool = True,
         delay: float = 2.0,
+        entity_index: dict[str, dict] | None = None,
     ) -> YouTubeComment | None:
         """Parse a comment thread into YouTubeComment."""
         try:
             thread = item.get("commentThreadRenderer", {})
             comment_renderer = thread.get("comment", {}).get("commentRenderer", {})
-            if not comment_renderer:
-                return None
-
-            comment = self._parse_comment_renderer(comment_renderer, video_id, video_url)
+            if comment_renderer:
+                comment = self._parse_comment_renderer(comment_renderer, video_id, video_url)
+            else:
+                comment_vm = thread.get("commentViewModel", {}).get("commentViewModel", {})
+                comment = self._parse_comment_view_model(
+                    comment_vm,
+                    entity_index or {},
+                    video_id,
+                    video_url,
+                )
             if not comment:
                 return None
 
@@ -954,6 +995,50 @@ class YouTubeScraper:
             return comment
         except (KeyError, TypeError):
             return None
+
+    def _parse_comment_view_model(
+        self,
+        comment_view_model: dict,
+        entity_index: dict[str, dict],
+        video_id: str,
+        video_url: str,
+        is_reply: bool = False,
+        parent_id: str | None = None,
+    ) -> YouTubeComment | None:
+        """Parse YouTube's modern commentViewModel schema into YouTubeComment."""
+        comment_id = comment_view_model.get("commentId", "")
+        if not comment_id:
+            return None
+
+        entity = entity_index.get(comment_id, {})
+        properties = entity.get("properties", {})
+        author_data = entity.get("author", {})
+        toolbar = entity.get("toolbar", {})
+
+        text = properties.get("content", {}).get("content", "") or ""
+        author = author_data.get("displayName", "") or ""
+        author_channel_id = author_data.get("channelId", "") or ""
+        likes_text = toolbar.get("likeCountNotliked") or toolbar.get("likeCountLiked") or "0"
+        likes = self._parse_like_count(str(likes_text))
+        reply_count_text = toolbar.get("replyCount") or "0"
+        reply_count = self._parse_like_count(str(reply_count_text))
+        published_text = str(properties.get("publishedTime", "") or "")
+        created_at = self._estimate_publish_date(published_text)
+
+        return YouTubeComment(
+            comment_id=comment_id,
+            text=text,
+            author=author,
+            author_channel_id=author_channel_id,
+            likes=likes,
+            created_at=created_at,
+            date_time=datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S") if created_at else "",
+            is_reply=is_reply,
+            parent_comment_id=parent_id,
+            reply_count=reply_count,
+            video_id=video_id,
+            video_url=video_url,
+        )
 
     def _parse_comment_renderer(
         self,
@@ -1042,25 +1127,42 @@ class YouTubeScraper:
                 break
 
             next_continuation = None
+            entity_index = self._build_comment_entity_index(data)
             try:
                 on_response = data.get("onResponseReceivedEndpoints", [])
                 for endpoint in on_response:
-                    append_items = endpoint.get("appendContinuationItemsAction", {})
-                    if append_items:
-                        for item in append_items.get("continuationItems", []):
-                            comment_renderer = item.get("commentRenderer", {})
-                            if comment_renderer:
-                                reply = self._parse_comment_renderer(
-                                    comment_renderer, video_id, video_url, is_reply=True, parent_id=parent_id
-                                )
-                                if reply:
-                                    replies.append(reply)
+                    append_items = endpoint.get("appendContinuationItemsAction", {}).get("continuationItems", [])
+                    reload_items = endpoint.get("reloadContinuationItemsCommand", {}).get("continuationItems", [])
+                    for item in [*append_items, *reload_items]:
+                        comment_renderer = item.get("commentRenderer", {})
+                        if comment_renderer:
+                            reply = self._parse_comment_renderer(
+                                comment_renderer,
+                                video_id,
+                                video_url,
+                                is_reply=True,
+                                parent_id=parent_id,
+                            )
+                            if reply:
+                                replies.append(reply)
+                        else:
+                            reply_vm = item.get("commentViewModel", {})
+                            reply = self._parse_comment_view_model(
+                                reply_vm,
+                                entity_index,
+                                video_id,
+                                video_url,
+                                is_reply=True,
+                                parent_id=parent_id,
+                            )
+                            if reply:
+                                replies.append(reply)
 
-                            # Check for more replies
-                            cont_renderer = item.get("continuationItemRenderer", {})
-                            if cont_renderer:
-                                ep = cont_renderer.get("continuationEndpoint", {})
-                                next_continuation = ep.get("continuationCommand", {}).get("token")
+                        # Check for more replies
+                        cont_renderer = item.get("continuationItemRenderer", {})
+                        if cont_renderer:
+                            ep = cont_renderer.get("continuationEndpoint", {})
+                            next_continuation = ep.get("continuationCommand", {}).get("token")
             except (KeyError, TypeError):
                 break
 
