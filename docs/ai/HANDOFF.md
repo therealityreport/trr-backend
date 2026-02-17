@@ -2,7 +2,87 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
-## Latest Update (2026-02-11)
+## Latest Update (2026-02-17)
+
+- February 17, 2026: Expanded Bravo social account targeting and source-scoped analytics for RHOSLC Season 6.
+  - Account map updates for `source_scope=bravo`:
+    - YouTube now targets both `bravo` and `wwhl`.
+    - Instagram includes `bravotv`, `bravowwhl`, and `bravodailydish`.
+    - TikTok includes `bravotv` and `bravowwhl`.
+    - Twitter/X includes `BravoTV` and `BravoWWHL`.
+  - Repository changes:
+    - `trr_backend/repositories/social_season_analytics.py`
+    - Replaced hardcoded account filters with dynamic platform-specific target account sets.
+    - Added account-handle normalization and scoped filtering for analytics rows + week details.
+    - Preserved unscoped `community` behavior while enforcing scoped empty-results for Bravo/Creator when no mapped accounts exist for a platform.
+  - Test updates:
+    - `tests/repositories/test_social_season_analytics.py`
+    - `tests/api/routers/test_socials_season_analytics.py`
+    - Updated expectations for dynamic `= any(%s)` account filtering and week-detail account handle passing.
+  - Validation:
+    - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+    - `pytest -q tests/repositories/test_social_season_analytics.py` (`19 passed`)
+    - `pytest -q tests/api/routers/test_socials_season_analytics.py` (`10 passed`)
+
+- February 17, 2026: Fixed RHOSLC YouTube false positives, added IG/TikTok thumbnail persistence, and shipped a cleanup utility for existing bad rows.
+  - YouTube strict show matching and cross-show exclusion:
+    - `trr_backend/repositories/social_season_analytics.py`
+    - Enforced title-or-hashtag matching for show relevance.
+    - Added explicit exclusion for titles containing both `wife swap` and `real housewives edition`.
+  - Thumbnail ingestion and persistence:
+    - `trr_backend/socials/instagram/scraper.py` (populate `media_urls` + `thumbnail_url`)
+    - `trr_backend/socials/tiktok/scraper.py` (extract API/yt-dlp thumbnail candidates + `thumbnail_url`)
+    - `trr_backend/repositories/social_season_analytics.py` (upsert/payload support for IG/TT thumbnails; post-detail thumbnail support for IG/TT/YT)
+  - DB migration:
+    - `supabase/migrations/0124_social_thumbnails_and_reddit_sources.sql`
+    - Added:
+      - `social.instagram_posts.thumbnail_url text`
+      - `social.tiktok_posts.thumbnail_url text`
+  - One-off cleanup utility:
+    - `scripts/socials/cleanup_youtube_false_positives.py`
+    - Supports `--dry-run`; scoped for RHOSLC + Wife Swap cross-show title pattern.
+  - Tests:
+    - `tests/repositories/test_social_season_analytics.py`
+    - `tests/socials/test_comment_scraper_fixes.py`
+    - Added coverage for strict YouTube matching/exclusions and IG/TT thumbnail parsing + payload wiring.
+  - Validation:
+    - `ruff check trr_backend/repositories/social_season_analytics.py trr_backend/socials/instagram/scraper.py trr_backend/socials/tiktok/scraper.py tests/repositories/test_social_season_analytics.py tests/socials/test_comment_scraper_fixes.py scripts/socials/cleanup_youtube_false_positives.py` (pass)
+    - `python3 -m py_compile trr_backend/repositories/social_season_analytics.py trr_backend/socials/instagram/scraper.py trr_backend/socials/tiktok/scraper.py scripts/socials/cleanup_youtube_false_positives.py` (pass)
+    - `pytest -q tests/repositories/test_social_season_analytics.py tests/socials/test_comment_scraper_fixes.py` (`27 passed`)
+
+- February 17, 2026: Implemented global cast-matrix sync with Wiki/Fandom role ingestion, relationship roles, Kid global assignment, and Bravo auto-link/image enforcement.
+  - Added cast-matrix scraper + relationship extraction:
+    - `trr_backend/ingestion/show_cast_matrix_scraper.py`
+  - Extended Fandom person parser label + family relation handling:
+    - `trr_backend/ingestion/fandom_person_scraper.py`
+  - Added new admin endpoint:
+    - `POST /api/v1/admin/shows/{show_id}/cast-matrix/sync`
+    - Router/service implementation: `api/routers/admin_show_roles.py`
+  - Extended Bravo commit contract with auto-trigger:
+    - `sync_cast_matrix: bool = true` in `api/routers/admin_show_bravo.py`
+  - Fixed Bravo snapshot variant mismatch for link discovery reads:
+    - `api/routers/admin_show_links.py` now uses the same `default` variant as Bravo writer.
+  - Added/updated backend tests and fixtures:
+    - `tests/ingestion/test_show_cast_matrix_scraper.py`
+    - `tests/ingestion/test_fandom_person_scraper.py`
+    - `tests/api/routers/test_admin_show_roles.py`
+    - `tests/api/routers/test_admin_show_links.py`
+    - `tests/api/routers/test_admin_show_bravo.py`
+    - `tests/fixtures/wikipedia/rhoslc_cast_table_sample.html`
+    - `tests/fixtures/fandom/rhoslc_cast_table_sample.html`
+    - `tests/fixtures/fandom/lisa_barlow_person_live_infobox_sample.html`
+  - Validation:
+    - `pytest -q tests/ingestion/test_show_cast_matrix_scraper.py tests/ingestion/test_fandom_person_scraper.py tests/api/routers/test_admin_show_roles.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py` (`21 passed`)
+
+- February 13, 2026: Added Bravo profile-picture tagging + thumbnail metadata persistence.
+  - `api/routers/admin_show_bravo.py`
+    - Bravo person hero imports now persist `context_type="profile_picture"` (legacy `profile` removed for new imports).
+    - Updated image labels to "Bravo profile picture".
+  - `trr_backend/media/image_variants.py`
+    - Base variant metadata now writes `thumb_url` for lightweight gallery card rendering.
+  - Validation:
+    - `ruff check api/routers/admin_show_bravo.py trr_backend/media/image_variants.py` (pass)
+    - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
 
 - February 12, 2026: Reduced Bravo read latency for show admin pages.
   - `api/routers/admin_show_bravo.py` now avoids unnecessary `person_source_latest` fan-out reads when show snapshots already contain embedded normalized person videos/news.
@@ -879,3 +959,113 @@ Social ingest live-progress + full-depth defaults + cancel safety (this session,
   - `python3 -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
   - `ruff check trr_backend/repositories/social_season_analytics.py api/routers/socials.py tests/api/routers/test_socials_season_analytics.py` (pass)
   - `pytest tests/api/routers/test_socials_season_analytics.py -q` (10 passed)
+
+People links discovery tightening (this session, 2026-02-12):
+- Files:
+  - `api/routers/admin_show_links.py`
+  - `docs/cross-collab/TASK7/STATUS.md`
+- Changes:
+  - Person knowledge discovery now only emits `wikipedia` + `fandom` links when a fandom profile URL exists for that person (`core.cast_fandom` join presence).
+- RHOSLC data update executed:
+  - Deleted existing RHOSLC person `wikipedia`/`fandom` links and reran links discovery.
+  - Resulting RHOSLC person link kinds now paired: `fandom:66`, `wikipedia:66`.
+- Validation:
+  - `ruff check api/routers/admin_show_links.py` (pass)
+  - `python -m py_compile api/routers/admin_show_links.py` (pass)
+
+Comment scraping debug + platform fixes + parallel worker option (this session, 2026-02-12):
+- Files:
+  - `trr_backend/socials/instagram/scraper.py`
+  - `trr_backend/socials/tiktok/scraper.py`
+  - `trr_backend/socials/youtube/scraper.py`
+  - `trr_backend/socials/twitter/scraper.py`
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `scripts/socials/worker.py`
+  - `tests/socials/test_comment_scraper_fixes.py`
+- Changes:
+  - TikTok comment scraping fixed by including `aid=1988` on comments/replies endpoints and adding robust status/non-JSON handling with explicit failure reasons.
+  - YouTube comment scraping fixed for modern payload shape by parsing `commentViewModel` + entity payloads (in addition to legacy renderers), including safer continuation progress guards.
+  - Twitter reply scraping fixed by adding required TweetDetail feature flags and implementing one retry path that auto-adds newly required flags from 400 validation payloads.
+  - Twitter reply author parsing improved with `core.screen_name`/`core.name` fallback when legacy username/name fields are missing.
+  - Instagram comment scraping now classifies HTML challenge/auth responses and non-JSON failures with actionable reason codes.
+  - Season analytics ingest metadata now records platform comment failure reasons for diagnostics.
+  - Worker script now supports:
+    - `--parallel N` for generic multi-worker `--run-id` processing.
+    - stage pinning via `--stage posts|comments`.
+    - tandem mode via `--tandem --posts-workers N --comments-workers N` to run dedicated posts and comments workers concurrently for faster throughput.
+- Validation:
+  - `pytest -q tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (23 passed)
+  - `ruff check trr_backend/socials/instagram/scraper.py trr_backend/socials/tiktok/scraper.py trr_backend/socials/youtube/scraper.py trr_backend/socials/twitter/scraper.py trr_backend/repositories/social_season_analytics.py scripts/socials/worker.py tests/socials/test_comment_scraper_fixes.py` (pass)
+  - `python -m py_compile trr_backend/socials/instagram/scraper.py trr_backend/socials/tiktok/scraper.py trr_backend/socials/youtube/scraper.py trr_backend/socials/twitter/scraper.py trr_backend/repositories/social_season_analytics.py scripts/socials/worker.py` (pass)
+
+Twitter analytics comment-scope correction for Bravo posts (this session, 2026-02-12):
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/repositories/test_social_season_analytics.py`
+- Changes:
+  - Refactored Twitter analytics rows in `_rows_for_platform(...)` to split explicit `posts` and `comments` CTE branches (matching other platforms).
+  - Corrected Bravo comment scoping to include audience replies on Bravo posts:
+    - posts branch remains Bravo-owned posts only (`bravo`/`bravotv`) in the selected window.
+    - comments branch now includes replies with Bravo `source_account` context.
+    - added legacy fallback for older rows missing `source_account` by recursively walking reply chains that originate from in-scope Bravo posts.
+  - Preserved analytics row output schema (platform/kind/source_id/text/engagement/ts/url/author).
+  - Added repository tests asserting:
+    - Bravo Twitter SQL includes explicit post/comment stage filters, source-account scope, legacy reply-chain fallback, and time-window filters.
+    - non-Bravo Twitter SQL keeps open comment scope and excludes Bravo-only alias filters.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (20 passed)
+
+Season Social Analytics V3 — no-data weekly engagement bars + contextual sentiment (this session, 2026-02-17):
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/repositories/test_social_season_analytics.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+  - `.env.example`
+  - `docs/cross-collab/TASK8/PLAN.md`
+  - `docs/cross-collab/TASK8/STATUS.md`
+  - `docs/cross-collab/TASK8/OTHER_PROJECTS.md`
+- Changes:
+  - Added additive analytics field `weekly_platform_engagement` with per-platform engagement totals, `total_engagement`, and `has_data`.
+  - Upgraded analytics sentiment flow to contextual rule-based classification with:
+    - negation/intensifier/contrast handling,
+    - cast/entity-aware token treatment,
+    - optional Gemini disambiguation for ambiguous comments only (`SOCIAL_SENTIMENT_GEMINI_*` flags, fallback-safe).
+  - Updated sentiment driver extraction to:
+    - exclude cast-name-derived tokens and handles/mentions,
+    - score from resolved comment sentiment labels.
+  - Added repository and API tests for sentiment behavior, driver filtering, and analytics payload field presence.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (29 passed)
+  - Note: `ruff check .` still reports unrelated pre-existing repo issues (outside touched scope), including `api/main.py` and `trr_backend/db/pg.py`.
+
+Cast matrix relationship sync now uses person-level Fandom + Wikipedia pages (this session, 2026-02-17):
+- Files:
+  - `trr_backend/ingestion/show_cast_matrix_scraper.py`
+  - `api/routers/admin_show_roles.py`
+  - `tests/ingestion/test_show_cast_matrix_scraper.py`
+  - `tests/api/routers/test_admin_show_roles.py`
+- Changes:
+  - Added person-level URL builders for knowledge pages:
+    - `build_person_fandom_url(person_name)` -> `https://real-housewives.fandom.com/wiki/<Person_Name>`
+    - `build_person_wikipedia_url(person_name)` -> `https://en.wikipedia.org/wiki/<Person_Name>`
+  - Extended relationship parsing to support person-page extraction from both sources:
+    - new `extract_relationship_data_from_wikipedia_html(...)` for infobox `Spouse/Partner/Children/Family/Relatives` data.
+    - enhanced Fandom infobox extraction to emit `global_partner_roles` (season `0`) in addition to season table matches and kids.
+  - Updated relationship role inference patterns to include `spouse` and `partner` variants (including ex- forms) and map them to existing canonical cast-matrix relationship roles.
+  - Updated cast sync relationship URL resolution to fetch per-person pages from:
+    - existing `core.cast_fandom` URL,
+    - person `entity_links` (`fandom` + `wikipedia`),
+    - deterministic person slugs as fallback.
+  - Relationship assignment builder now ingests both Fandom and Wikipedia person pages and writes:
+    - season-scoped relationship roles when season evidence exists,
+    - global season `0` relationship roles from infobox relationship fields,
+    - global season `0` kid roles.
+  - Added safeguard to skip self-relationship assignments when source person matches inferred related person.
+- Validation:
+  - `ruff check trr_backend/ingestion/show_cast_matrix_scraper.py api/routers/admin_show_roles.py tests/ingestion/test_show_cast_matrix_scraper.py tests/api/routers/test_admin_show_roles.py` (pass)
+  - `python -m py_compile trr_backend/ingestion/show_cast_matrix_scraper.py api/routers/admin_show_roles.py` (pass)
+  - `pytest -q tests/ingestion/test_show_cast_matrix_scraper.py tests/api/routers/test_admin_show_roles.py` (9 passed)

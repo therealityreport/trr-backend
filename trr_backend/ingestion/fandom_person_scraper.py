@@ -179,19 +179,65 @@ def _extract_summary(article_root: BeautifulSoup, soup: BeautifulSoup) -> str | 
     return max(candidates, key=len)
 
 
-def _extract_link_entries(container: BeautifulSoup) -> list[dict[str, str]]:
-    entries: list[dict[str, str]] = []
+def _extract_structured_value_entries(container: BeautifulSoup) -> list[dict[str, str | None]]:
+    segments: list[str] = []
+    current: list[str] = []
+    for child in container.children:
+        if getattr(child, "name", None) == "br":
+            text = _normalize_text(" ".join(current))
+            if text:
+                segments.append(text)
+            current = []
+            continue
+        if getattr(child, "name", None):
+            text = _normalize_text(child.get_text(" ", strip=True))
+        else:
+            text = _normalize_text(str(child))
+        if text:
+            current.append(text)
+
+    trailing = _normalize_text(" ".join(current))
+    if trailing:
+        segments.append(trailing)
+
+    links: dict[str, str] = {}
     for link in container.find_all("a", href=True):
         name = _normalize_text(link.get_text(" ", strip=True))
+        if name and name not in links:
+            links[name] = str(link["href"])
+
+    entries: list[dict[str, str | None]] = []
+    for raw in segments:
+        value = raw.rstrip(",")
+        if value.startswith("(") and value.endswith(")") and entries:
+            entries[-1]["relation"] = value.strip("()")
+            continue
+
+        match = re.match(r"^(.*?)(?:\s*\(([^)]*)\))?$", value)
+        if not match:
+            continue
+        name = _normalize_text(match.group(1))
         if not name:
             continue
-        entries.append({"name": name, "url": str(link["href"])})
+        relation = _normalize_text(match.group(2)) or None
+        entries.append(
+            {
+                "name": name,
+                "relation": relation,
+                "url": links.get(name),
+            }
+        )
+    return entries
+
+
+def _extract_link_entries(container: BeautifulSoup) -> list[dict[str, str | None]]:
+    entries = _extract_structured_value_entries(container)
     if entries:
         return entries
 
     text = _normalize_text(container.get_text(" ", strip=True))
     if text:
-        return [{"name": text}]
+        return [{"name": text, "relation": None, "url": None}]
     return []
 
 
@@ -481,6 +527,8 @@ def _parse_infobox(
         "enemies": "enemies",
         "installment": "installment",
         "main seasons": "main_seasons_display",
+        "main season(s)": "main_seasons_display",
+        "main": "main_seasons_display",
     }
 
     for item in infobox.select(".pi-item.pi-data"):

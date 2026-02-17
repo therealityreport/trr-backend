@@ -7,6 +7,8 @@ import argparse
 import logging
 import os
 import socket
+import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 
@@ -32,11 +34,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=2.0, help="Idle sleep interval in seconds")
     parser.add_argument("--once", action="store_true", help="Process at most one job then exit")
     parser.add_argument("--run-id", default=None, help="Execute one specific run id then exit")
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="Number of worker processes for --run-id mode (default: 1)",
+    )
+    parser.add_argument(
+        "--stage",
+        choices=["any", "posts", "comments"],
+        default="any",
+        help="Optional stage filter when claiming jobs",
+    )
+    parser.add_argument(
+        "--tandem",
+        action="store_true",
+        help="For --run-id mode, run dedicated posts/comments workers in parallel",
+    )
+    parser.add_argument(
+        "--posts-workers",
+        type=int,
+        default=1,
+        help="Worker count for posts stage in --tandem mode (default: 1)",
+    )
+    parser.add_argument(
+        "--comments-workers",
+        type=int,
+        default=1,
+        help="Worker count for comments stage in --tandem mode (default: 1)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    stage_filter = None if args.stage == "any" else args.stage
     worker_id = _build_worker_id(args.worker_id)
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -45,14 +77,84 @@ def main() -> int:
     logger.info("Starting socials worker: worker_id=%s", worker_id)
 
     if args.run_id:
-        logger.info("Executing specific run_id=%s", args.run_id)
-        execute_run(args.run_id, worker_id=worker_id)
+        if args.tandem:
+            posts_workers = max(0, int(args.posts_workers))
+            comments_workers = max(0, int(args.comments_workers))
+            if posts_workers + comments_workers == 0:
+                logger.error("No workers requested for tandem mode")
+                return 2
+            logger.info(
+                "Executing run_id=%s in tandem mode (posts=%d comments=%d)",
+                args.run_id,
+                posts_workers,
+                comments_workers,
+            )
+            children: list[subprocess.Popen] = []
+
+            def _spawn_group(stage: str, count: int) -> None:
+                for index in range(count):
+                    child_worker_id = f"{worker_id}:{stage}:p{index + 1}"
+                    cmd = [
+                        sys.executable,
+                        "-m",
+                        "scripts.socials.worker",
+                        "--run-id",
+                        args.run_id,
+                        "--worker-id",
+                        child_worker_id,
+                        "--stage",
+                        stage,
+                        "--parallel",
+                        "1",
+                    ]
+                    children.append(subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy()))
+
+            _spawn_group("posts", posts_workers)
+            _spawn_group("comments", comments_workers)
+
+            exit_code = 0
+            for proc in children:
+                rc = proc.wait()
+                if rc != 0:
+                    exit_code = rc
+            return exit_code
+        if args.parallel > 1:
+            logger.info(
+                "Executing run_id=%s with %d parallel workers",
+                args.run_id,
+                args.parallel,
+            )
+            children: list[subprocess.Popen] = []
+            for index in range(args.parallel):
+                child_worker_id = f"{worker_id}:p{index + 1}"
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "scripts.socials.worker",
+                    "--run-id",
+                    args.run_id,
+                    "--worker-id",
+                    child_worker_id,
+                    "--parallel",
+                    "1",
+                ]
+                if stage_filter:
+                    cmd.extend(["--stage", stage_filter])
+                children.append(subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy()))
+            exit_code = 0
+            for proc in children:
+                rc = proc.wait()
+                if rc != 0:
+                    exit_code = rc
+            return exit_code
+        logger.info("Executing specific run_id=%s stage=%s", args.run_id, stage_filter or "any")
+        execute_run(args.run_id, worker_id=worker_id, stage=stage_filter)
         return 0
 
     processed = 0
     while True:
         started = datetime.now(tz=UTC)
-        job = process_next_queued_job(worker_id=worker_id)
+        job = process_next_queued_job(worker_id=worker_id, stage=stage_filter)
         if job:
             processed += 1
             logger.info(

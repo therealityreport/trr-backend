@@ -119,6 +119,7 @@ class TikTokPost:
 
     # Media URLs
     media_urls: list[str] = field(default_factory=list)
+    thumbnail_url: str | None = None
 
     # Comments (populated when fetch_comments is called)
     comment_list: list[TikTokComment] = field(default_factory=list)
@@ -423,6 +424,15 @@ class TikTokScraper:
         create_time = data.get("timestamp", 0)
         username = data.get("uploader", config.username)
         video_id = data.get("id", "")
+        media_urls: list[str] = []
+        thumbnail = data.get("thumbnail")
+        if isinstance(thumbnail, str) and thumbnail:
+            media_urls.append(thumbnail)
+        for entry in data.get("thumbnails") or []:
+            if isinstance(entry, dict):
+                url = str(entry.get("url") or "").strip()
+                if url and url not in media_urls:
+                    media_urls.append(url)
 
         return TikTokPost(
             video_id=video_id,
@@ -445,6 +455,8 @@ class TikTokScraper:
             duration=data.get("duration", 0) or 0,
             music_title=data.get("track", ""),
             music_author=data.get("artist", ""),
+            media_urls=media_urls,
+            thumbnail_url=media_urls[0] if media_urls else None,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -472,13 +484,14 @@ class TikTokScraper:
         logger.info("Attempting yt-dlp bulk fallback scraper...")
 
         # Estimate how many videos to fetch based on date range.
-        # @bravotv posts ~10 videos/day; add generous buffer.
+        # @bravotv posts ~16 videos/day across all shows; use 22/day for buffer.
         max_videos = 500
         if config.date_start:
             days_back = (datetime.now(tz=UTC) - config.date_start).days
-            max_videos = max(500, min(5000, days_back * 15))
-        if max_videos_hint is not None:
-            max_videos = min(max_videos, max(50, max_videos_hint))
+            max_videos = max(500, min(12000, days_back * 22))
+        # max_videos_hint is advisory only — never reduce below the date-based estimate
+        if max_videos_hint is not None and max_videos_hint > max_videos:
+            max_videos = max_videos_hint
 
         url = f"https://www.tiktok.com/@{config.username}"
         cmd = [
@@ -552,6 +565,7 @@ class TikTokScraper:
         video_id = item.get("id", "")
         create_time = item.get("createTime", 0)
         description = item.get("desc", "")
+        media_urls = self._extract_media_urls(item)
 
         # Author info
         author = item.get("author", {})
@@ -585,6 +599,8 @@ class TikTokScraper:
             duration=duration,
             music_title=music.get("title", ""),
             music_author=music.get("authorName", ""),
+            media_urls=media_urls,
+            thumbnail_url=media_urls[0] if media_urls else None,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -763,30 +779,20 @@ class TikTokScraper:
 
         logger.info(f"Scrape complete: checked {posts_checked} posts, found {len(posts)} matches")
 
-        # Final fallback: try yt-dlp bulk mode if no posts found
-        if not posts and self._has_ytdlp():
-            logger.info("API/HTML scraping returned no posts; trying yt-dlp bulk fallback...")
-            max_videos_hint = (config.max_pages or 10) * 30
-            posts = self._scrape_via_ytdlp(
-                config,
-                max_videos_hint=max_videos_hint,
-                max_posts_hint=config.max_pages * 30 if config.max_pages else None,
+        # yt-dlp fallback: always try when API/HTML found few or no matching posts,
+        # since yt-dlp can paginate much deeper into the profile history.
+        if len(posts) < 5 and self._has_ytdlp():
+            logger.info(
+                f"API/HTML found only {len(posts)} posts in date range; "
+                "trying yt-dlp bulk fallback for deeper pagination..."
             )
-            existing_ids = {p.video_id for p in posts if p.video_id}
-
-        # Supplement: if yt-dlp found posts but we have very few, try to get more
-        if posts and len(posts) < 5 and self._has_ytdlp():
-            logger.info(f"Only {len(posts)} posts found, trying yt-dlp to supplement...")
-            max_videos_hint = (config.max_pages or 10) * 30
-            ytdlp_posts = self._scrape_via_ytdlp(
-                config,
-                max_videos_hint=max_videos_hint,
-                max_posts_hint=config.max_pages * 30 if config.max_pages else None,
-            )
+            ytdlp_posts = self._scrape_via_ytdlp(config)
             for p in ytdlp_posts:
                 if p.video_id and p.video_id not in existing_ids:
                     posts.append(p)
                     existing_ids.add(p.video_id)
+            if ytdlp_posts:
+                logger.info(f"yt-dlp added {len(ytdlp_posts)} posts (total now {len(posts)})")
 
         self.last_retrieval_meta = {
             "retrieval_mode": (
@@ -822,6 +828,7 @@ class TikTokScraper:
         Returns:
             List of TikTokComment objects with nested replies
         """
+        self._last_api_fail_reason = None
         post_url = f"https://www.tiktok.com/@{username}/video/{video_id}" if username else ""
         logger.info(f"Fetching comments for video {video_id}")
 
@@ -836,15 +843,30 @@ class TikTokScraper:
                 "aweme_id": video_id,
                 "count": 50,
                 "cursor": cursor,
+                # TikTok's comments endpoints currently require aid=1988.
+                "aid": 1988,
             }
             headers = self._get_headers(post_url or "https://www.tiktok.com/")
 
             try:
                 response = self.session.get(self.COMMENTS_URL, params=params, headers=headers, cookies=self.cookies)
                 response.raise_for_status()
-                data = response.json()
+                data = self._safe_response_json(response)
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to fetch comments: {e}")
+                break
+            if not data:
+                break
+
+            status_code = int(data.get("status_code", 0) or 0)
+            if status_code != 0:
+                self._last_api_fail_reason = f"comment_status_{status_code}"
+                logger.warning(
+                    "TikTok comments API returned non-zero status (video_id=%s status_code=%s status_msg=%s)",
+                    video_id,
+                    status_code,
+                    data.get("status_msg", ""),
+                )
                 break
 
             # Parse comments
@@ -895,6 +917,8 @@ class TikTokScraper:
                 "comment_id": comment_id,
                 "count": 50,
                 "cursor": cursor,
+                # TikTok's replies endpoint currently requires aid=1988.
+                "aid": 1988,
             }
             headers = self._get_headers(post_url or "https://www.tiktok.com/")
 
@@ -903,9 +927,22 @@ class TikTokScraper:
                     self.COMMENT_REPLIES_URL, params=params, headers=headers, cookies=self.cookies
                 )
                 response.raise_for_status()
-                data = response.json()
+                data = self._safe_response_json(response)
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to fetch replies for comment {comment_id}: {e}")
+                break
+            if not data:
+                break
+
+            status_code = int(data.get("status_code", 0) or 0)
+            if status_code != 0:
+                self._last_api_fail_reason = f"reply_status_{status_code}"
+                logger.warning(
+                    "TikTok replies API returned non-zero status (comment_id=%s status_code=%s status_msg=%s)",
+                    comment_id,
+                    status_code,
+                    data.get("status_msg", ""),
+                )
                 break
 
             # Parse reply comments

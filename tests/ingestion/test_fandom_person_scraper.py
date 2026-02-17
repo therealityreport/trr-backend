@@ -48,3 +48,19 @@ def test_fandom_person_parsing_infobox_taglines_reunion_images() -> None:
     assert ("taglines", "intro_card") in contexts
     assert ("reunion_seating", "reunion_look") in contexts
     assert ("article", "inline") in contexts
+
+
+def test_fandom_person_parsing_live_infobox_family_and_main_seasons_variant() -> None:
+    html = _read_fixture("lisa_barlow_person_live_infobox_sample.html")
+    payload, _photos = parse_fandom_person_html(
+        html,
+        source_url="https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+    )
+
+    assert payload["main_seasons_display"] == "1 – 6"
+    family = payload.get("family")
+    assert isinstance(family, list)
+    assert family[0]["name"] == "Jack Barlow"
+    assert family[0]["relation"] == "Son"
+    assert family[1]["name"] == "Henry Barlow"
+    assert family[1]["relation"] == "Son"
