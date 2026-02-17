@@ -4,6 +4,45 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
 
 ## Latest Update (2026-02-17)
 
+- February 17, 2026: Implemented social admin reliability contract additions for run history and query performance hardening.
+  - Files:
+    - `api/routers/socials.py`
+    - `trr_backend/repositories/social_season_analytics.py`
+    - `supabase/migrations/0125_social_analytics_query_indexes.sql`
+    - `start-api.sh`
+    - `tests/api/routers/test_socials_season_analytics.py`
+    - `tests/repositories/test_social_season_analytics.py`
+  - Changes:
+    - Added additive endpoint `GET /api/v1/admin/socials/seasons/{season_id}/ingest/runs` with `limit`, optional `status`, optional `source_scope`.
+    - Added repository `list_runs(...)` with ordering by `created_at desc` and optional filters.
+    - Removed duplicate `_pg_upsert` helper definition from social analytics repository.
+    - Added migration `0125` with additive `if not exists` social analytics indexes for IG/TT/YT/Twitter post+comment query paths and scrape job recency.
+    - Tuned local reload behavior in `start-api.sh` to watch only `api` + `trr_backend` and exclude noisy dirs (`.logs`, `.venv`, `tests`, `scripts`, `supabase`) while keeping reload enabled by default.
+  - Validation:
+    - `ruff check api/routers/socials.py trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+    - `bash -n start-api.sh` (pass)
+    - `pytest -q tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (`35 passed`)
+
+- February 17, 2026: Hardened person knowledge-link ownership validation and relationship-text sanitization for cast-matrix sync.
+  - Person knowledge link validation hardening:
+    - `api/routers/admin_show_links.py`
+    - `_validated_person_knowledge_url(...)` now validates that fetched Wikipedia/Fandom pages actually match the expected person name (URL slug + page heading/title candidates), in addition to missing-page checks.
+    - Prevents false-positive person links where a name appears on an unrelated page (for example show pages or the wrong cast member page).
+    - Discovery now also prunes stale pending auto-discovered person knowledge links that are no longer valid and reports `stale_pending_people_deleted` in discovery response payload.
+  - Relationship parser cleanup:
+    - `trr_backend/ingestion/show_cast_matrix_scraper.py`
+    - Added cleanup for zero-width chars, wiki template CSS leakage (`.mw-parser-output...`), and citation markers.
+    - Improved chunk splitting to respect parentheses/braces so marriage-template style text no longer fragments names.
+    - Added noise-name filtering to skip numeric/template fragments in relationship extraction.
+  - Test updates:
+    - `tests/api/routers/test_admin_show_links.py`
+      - Added validation tests for mismatched Wikipedia/Fandom pages and matched fandom person pages.
+    - `tests/ingestion/test_show_cast_matrix_scraper.py`
+      - Added regression for CSS/template spouse text cleanup + semicolon split behavior.
+  - Validation:
+    - `ruff check api/routers/admin_show_links.py trr_backend/ingestion/show_cast_matrix_scraper.py tests/api/routers/test_admin_show_links.py tests/ingestion/test_show_cast_matrix_scraper.py` (pass)
+    - `pytest -q tests/api/routers/test_admin_show_links.py tests/ingestion/test_show_cast_matrix_scraper.py` (`16 passed`)
+
 - February 17, 2026: Expanded Bravo social account targeting and source-scoped analytics for RHOSLC Season 6.
   - Account map updates for `source_scope=bravo`:
     - YouTube now targets both `bravo` and `wwhl`.
@@ -1128,3 +1167,94 @@ Cast matrix relationship sync now uses person-level Fandom + Wikipedia pages (th
   - `ruff check trr_backend/ingestion/show_cast_matrix_scraper.py api/routers/admin_show_roles.py tests/ingestion/test_show_cast_matrix_scraper.py tests/api/routers/test_admin_show_roles.py` (pass)
   - `python -m py_compile trr_backend/ingestion/show_cast_matrix_scraper.py api/routers/admin_show_roles.py` (pass)
   - `pytest -q tests/ingestion/test_show_cast_matrix_scraper.py tests/api/routers/test_admin_show_roles.py` (9 passed)
+
+Post-level social comment re-sync endpoint for analytics modal (this session, 2026-02-17):
+- Files:
+  - `api/routers/socials.py`
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Added `POST /api/v1/admin/socials/seasons/{season_id}/analytics/posts/{platform}/{source_id}/refresh`.
+  - New repository helper `refresh_post_comments(...)` re-fetches comments for a single post/video (Instagram, TikTok, YouTube, Twitter replies), upserts them, and returns refresh summary counts.
+  - Endpoint now refreshes comments then returns the latest full post-detail payload (same shape as existing GET) with an additional `refresh` summary object.
+  - Updated low-level upsert helpers to accept nullable `job_id` for direct on-demand refresh writes outside queue jobs.
+  - Added router coverage test for the new refresh endpoint and payload forwarding.
+- Validation:
+  - `pytest -q tests/api/routers/test_socials_season_analytics.py` (11 passed)
+  - `ruff check api/routers/socials.py trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+
+Cast matrix discovery hardening + person link validation + Wikidata season resolution (this session, 2026-02-17):
+- Files:
+  - `trr_backend/ingestion/show_cast_matrix_scraper.py`
+  - `api/routers/admin_show_roles.py`
+  - `api/routers/admin_show_links.py`
+  - `tests/ingestion/test_show_cast_matrix_scraper.py`
+  - `tests/api/routers/test_admin_show_roles.py`
+  - `tests/api/routers/test_admin_show_links.py`
+- Changes:
+  - Added explicit missing-page detection guards for Wikipedia and Fandom person pages so non-existent pages are ignored during relationship extraction and link validation.
+  - Tightened cast-matrix name parsing cleanup to strip template/CSS leakage and numeric ref markers before relationship inference.
+  - Updated relationship sync path to skip relationship parsing when fetched person knowledge pages are missing.
+  - Updated show link discovery:
+    - season Wikipedia links now prefer Wikidata `enwiki` sitelinks (actual season article URL),
+    - person Wikipedia/Fandom links are validated before emission,
+    - missing person pages are excluded.
+  - Added auto-approval behavior when person profile ingestion succeeds from Bravo profile URLs (`entity_links` updated to approved with raised confidence).
+  - Person discovery rows now honor per-row status/confidence overrides in upsert path.
+- Validation:
+  - `ruff check api/routers/admin_show_links.py api/routers/admin_show_roles.py trr_backend/ingestion/show_cast_matrix_scraper.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_roles.py tests/ingestion/test_show_cast_matrix_scraper.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_roles.py tests/ingestion/test_show_cast_matrix_scraper.py` (16 passed)
+
+Admin image metadata enhancements: face boxes + content-type endpoint (this session, 2026-02-17):
+- Files:
+  - `api/routers/admin_image_counts.py`
+  - `api/routers/admin_asset_flags.py`
+  - `tests/api/routers/test_admin_image_counts_fallback.py`
+  - `tests/api/routers/test_admin_asset_flags.py`
+- Changes:
+  - Extended auto-count responses to include normalized `face_boxes` derived from Screenalytics detections.
+  - Persisted auto-count face boxes to image metadata/context:
+    - cast photos: `core.cast_photos.metadata.face_boxes`
+    - media assets: propagated into linked `core.media_links.context.face_boxes`.
+  - Added new admin endpoint:
+    - `POST /api/v1/admin/assets/content-type`
+    - updates normalized content type in metadata and table-specific fields (`kind` / `context_type`) by origin.
+    - updates linked `media_links.context` when origin is `media_assets` so app consumers see content-type changes immediately.
+  - Added/updated router tests for:
+    - face-box response behavior from auto-count,
+    - content-type update success and invalid input rejection.
+- Validation:
+  - `pytest -q tests/api/routers/test_admin_image_counts_fallback.py tests/api/routers/test_admin_asset_flags.py` (10 passed)
+  - `ruff check api/routers/admin_image_counts.py api/routers/admin_asset_flags.py tests/api/routers/test_admin_image_counts_fallback.py tests/api/routers/test_admin_asset_flags.py` (pass)
+
+Person profile ownership hardening for fandom enrichment (this session, 2026-02-17):
+- Files:
+  - `api/routers/admin_person_images.py`
+  - `scripts/enrich/enrich_show_cast.py`
+  - `tests/api/routers/test_admin_person_images.py`
+- Changes:
+  - Tightened `_names_match(...)` so person matching no longer accepts last-name-only matches.
+  - Added honorific-aware tokenization (`Dr.`, `Mr.`, etc.) while still requiring first+last person-level alignment.
+  - Hardened Fandom profile ownership checks:
+    - if page URL slug owner does not match expected person, reject the profile row even when scraped fields look similar.
+  - Applied the same matching/ownership guard in both the admin refresh path and the enrichment script path.
+  - Added regression tests covering:
+    - `Henry Barlow` not matching `Lisa Barlow` / `John Barlow`,
+    - mismatched page-owner URL rejection (`Lisa_Barlow` URL cannot hydrate `John Barlow`).
+- Validation:
+  - `ruff check api/routers/admin_person_images.py scripts/enrich/enrich_show_cast.py tests/api/routers/test_admin_person_images.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_person_images.py` (18 passed)
+
+Cast latest-season derivation fix for show cast grid (this session, 2026-02-17):
+- Files:
+  - `api/routers/admin_show_roles.py`
+  - `tests/api/routers/test_admin_show_roles.py`
+- Changes:
+  - Updated `GET /api/v1/admin/shows/{show_id}/cast-role-members` aggregation logic to derive season metrics from the union of:
+    - episode-credit season evidence (`season_numbers` from `v_show_cast_roles_enriched`), and
+    - role-assignment seasons (`show_cast_role_assignments`, excluding global season `0`).
+  - `latest_season`, `seasons_appeared`, and `season_numbers` are now recomputed from that union before filtering/sorting, so role assignments in later seasons are reflected in cast cards.
+  - Added regression test proving a person with episode evidence only in season 1 but role assignment in season 3 now resolves to `latest_season = 3` and `season_numbers = [1,3]`.
+- Validation:
+  - `pytest -q tests/api/routers/test_admin_show_roles.py` (5 passed)
+  - `ruff check api/routers/admin_show_roles.py tests/api/routers/test_admin_show_roles.py` (pass)

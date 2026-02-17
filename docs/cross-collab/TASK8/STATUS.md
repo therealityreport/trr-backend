@@ -19,6 +19,25 @@ None.
 
 ## Recent Activity
 
+- February 17, 2026: Added social admin runs-history endpoint + index/reload reliability hardening for season social analytics.
+  - Files:
+    - `api/routers/socials.py`
+    - `trr_backend/repositories/social_season_analytics.py`
+    - `supabase/migrations/0125_social_analytics_query_indexes.sql`
+    - `start-api.sh`
+    - `tests/api/routers/test_socials_season_analytics.py`
+    - `tests/repositories/test_social_season_analytics.py`
+  - Changes:
+    - Added additive runs endpoint: `GET /api/v1/admin/socials/seasons/{season_id}/ingest/runs`.
+    - Added repository `list_runs(...)` with `status`/`source_scope` filters and `created_at desc` ordering.
+    - Added additive query indexes for IG/TT/YT/Twitter + scrape jobs to improve analytics/jobs fetch latency.
+    - Deduplicated `_pg_upsert` helper definition in social analytics repository.
+    - Hardened local backend reload watcher scope in `start-api.sh` to reduce transient restart churn.
+  - Validation:
+    - `ruff check api/routers/socials.py trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+    - `bash -n start-api.sh` (pass)
+    - `pytest -q tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (`35 passed`)
+
 - February 17, 2026: Expanded Bravo scoped account targeting for RHOSLC S6 social analytics.
   - Files:
     - `trr_backend/repositories/social_season_analytics.py`
