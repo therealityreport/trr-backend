@@ -284,3 +284,71 @@ def test_detect_media_asset_text_overlay_falls_back_to_hosted_key_when_url_downl
     assert result.has_text_overlay is False
     assert url_calls
     assert hosted_key_calls == ["images/people/example.webp"]
+
+
+def test_resolve_gemini_model_selection_prefers_fast_alias(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_MODEL_FAST", "gemini-2.5-flash-fast")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-canonical")
+    monkeypatch.delenv("GOOGLE_GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GEMINI-MODEL", raising=False)
+
+    model, source, route, fallback = text_overlay._resolve_gemini_model_selection()
+
+    assert model == "gemini-2.5-flash-fast"
+    assert source == "GEMINI_MODEL_FAST"
+    assert route == "fast"
+    assert fallback is None
+
+
+def test_resolve_gemini_model_selection_tracks_canonical_fallback_path(monkeypatch) -> None:
+    monkeypatch.delenv("GEMINI_MODEL_FAST", raising=False)
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-canonical")
+    monkeypatch.delenv("GOOGLE_GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GEMINI-MODEL", raising=False)
+
+    model, source, route, fallback = text_overlay._resolve_gemini_model_selection()
+
+    assert model == "gemini-2.5-flash-canonical"
+    assert source == "GEMINI_MODEL"
+    assert route == "fast"
+    assert fallback == "GEMINI_MODEL_FAST->GEMINI_MODEL"
+
+
+def test_detect_media_asset_text_overlay_persists_model_telemetry_fields(monkeypatch) -> None:
+    db = _FakeDb(
+        {
+            "media_assets": {
+                "id": "asset-1",
+                "hosted_url": "https://cdn.example.com/image.webp",
+                "source_url": None,
+                "metadata": {},
+                "hosted_key": None,
+            }
+        }
+    )
+
+    monkeypatch.setattr(text_overlay, "is_text_overlay_detection_configured", lambda: True)
+    monkeypatch.setattr(text_overlay, "_download_image_bytes", lambda *_args, **_kwargs: (b"img", "image/webp"))
+    monkeypatch.setattr(
+        text_overlay,
+        "_detect_text_overlay_with_gemini",
+        lambda *_args, **_kwargs: text_overlay.TextOverlayResult(
+            has_text_overlay=True,
+            confidence=0.91,
+            detector="gemini",
+            model="gemini-2.5-flash",
+            detected_at="2026-02-17T00:00:00+00:00",
+            prompt_version="v1",
+            model_source="GEMINI_MODEL",
+            model_route="fast",
+            model_fallback_path="GEMINI_MODEL_FAST->GEMINI_MODEL",
+        ),
+    )
+
+    result = text_overlay.detect_and_update_media_asset_text_overlay(db, "asset-1", force=True)
+    stored = db.updated_rows["media_assets"]["metadata"]
+
+    assert result.has_text_overlay is True
+    assert stored["text_overlay_model_source"] == "GEMINI_MODEL"
+    assert stored["text_overlay_model_route"] == "fast"
+    assert stored["text_overlay_model_fallback_path"] == "GEMINI_MODEL_FAST->GEMINI_MODEL"

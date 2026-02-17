@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -10,6 +12,9 @@ from typing import Any, Literal
 import requests
 
 from trr_backend.media.s3_mirror import get_s3_bucket, get_s3_client, normalize_fandom_file_url
+
+LOGGER = logging.getLogger(__name__)
+_DEPRECATED_GEMINI_MODEL_ALIAS_WARNED = False
 
 
 class TextOverlayDetectionNotConfiguredError(RuntimeError):
@@ -56,6 +61,9 @@ class TextOverlayResult:
     error: str | None = None
     finish_reason: str | None = None
     reason_code: str | None = None
+    model_source: str | None = None
+    model_route: str | None = None
+    model_fallback_path: str | None = None
 
     def to_metadata_patch(self) -> dict[str, Any]:
         return {
@@ -69,6 +77,9 @@ class TextOverlayResult:
             "text_overlay_error": self.error,
             "text_overlay_finish_reason": self.finish_reason,
             "text_overlay_error_code": self.reason_code,
+            "text_overlay_model_source": self.model_source,
+            "text_overlay_model_route": self.model_route,
+            "text_overlay_model_fallback_path": self.model_fallback_path,
         }
 
 
@@ -79,6 +90,9 @@ def _build_unknown_text_overlay_result(
     error: str,
     finish_reason: str | None = None,
     reason_code: str | None = None,
+    model_source: str | None = None,
+    model_route: str | None = None,
+    model_fallback_path: str | None = None,
 ) -> TextOverlayResult:
     return TextOverlayResult(
         has_text_overlay=None,
@@ -91,6 +105,9 @@ def _build_unknown_text_overlay_result(
         error=error,
         finish_reason=finish_reason,
         reason_code=reason_code,
+        model_source=model_source,
+        model_route=model_route,
+        model_fallback_path=model_fallback_path,
     )
 
 
@@ -102,12 +119,48 @@ def _get_gemini_api_key() -> str | None:
     return None
 
 
+def _resolve_gemini_model_selection() -> tuple[str, str, str, str | None]:
+    fast = (os.getenv("GEMINI_MODEL_FAST") or "").strip()
+    if fast:
+        return fast, "GEMINI_MODEL_FAST", "fast", None
+
+    canonical = (os.getenv("GEMINI_MODEL") or "").strip()
+    if canonical:
+        return canonical, "GEMINI_MODEL", "fast", "GEMINI_MODEL_FAST->GEMINI_MODEL"
+
+    google_alias = (os.getenv("GOOGLE_GEMINI_MODEL") or "").strip()
+    if google_alias:
+        return (
+            google_alias,
+            "GOOGLE_GEMINI_MODEL",
+            "fast",
+            "GEMINI_MODEL_FAST->GEMINI_MODEL->GOOGLE_GEMINI_MODEL",
+        )
+
+    deprecated_alias = (os.getenv("GEMINI-MODEL") or "").strip()
+    if deprecated_alias:
+        global _DEPRECATED_GEMINI_MODEL_ALIAS_WARNED
+        if not _DEPRECATED_GEMINI_MODEL_ALIAS_WARNED:
+            LOGGER.warning("GEMINI-MODEL is deprecated; use GEMINI_MODEL")
+            _DEPRECATED_GEMINI_MODEL_ALIAS_WARNED = True
+        return (
+            deprecated_alias,
+            "GEMINI-MODEL",
+            "fast",
+            "GEMINI_MODEL_FAST->GEMINI_MODEL->GOOGLE_GEMINI_MODEL->GEMINI-MODEL",
+        )
+
+    return (
+        "gemini-2.5-flash",
+        "default",
+        "fast",
+        "GEMINI_MODEL_FAST->GEMINI_MODEL->GOOGLE_GEMINI_MODEL->default",
+    )
+
+
 def _get_gemini_model() -> str:
-    for name in ("GEMINI-MODEL", "GEMINI_MODEL", "GOOGLE_GEMINI_MODEL"):
-        value = (os.getenv(name) or "").strip()
-        if value:
-            return value
-    return "gemini-2.5-flash"
+    model_name, _model_source, _model_route, _fallback_path = _resolve_gemini_model_selection()
+    return model_name
 
 
 def is_text_overlay_detection_configured() -> bool:
@@ -390,19 +443,58 @@ def _download_detection_target_bytes(
     return image_bytes, content_type
 
 
+def _build_gemini_content_generator(*, api_key: str, model_name: str):
+    try:
+        from google import genai as google_genai  # type: ignore
+        from google.genai import types as google_genai_types  # type: ignore
+
+        client = google_genai.Client(api_key=api_key)
+
+        def _generate(
+            *,
+            prompt: str,
+            image_bytes: bytes,
+            mime: str,
+            generation_config: dict[str, Any],
+        ) -> Any:
+            contents: list[Any] = [prompt]
+            try:
+                contents.append(google_genai_types.Part.from_bytes(data=image_bytes, mime_type=mime))
+            except Exception:  # noqa: BLE001
+                # Fallback for SDK shape changes.
+                contents.append(
+                    {
+                        "inline_data": {
+                            "mime_type": mime,
+                            "data": base64.b64encode(image_bytes).decode("utf-8"),
+                        }
+                    }
+                )
+            return client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=generation_config,
+            )
+
+        return _generate
+    except Exception as exc:  # noqa: BLE001
+        raise TextOverlayDetectionNotConfiguredError("google-genai is not installed") from exc
+
+
 def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | None) -> TextOverlayResult:
     api_key = _get_gemini_api_key()
     if not api_key:
         raise TextOverlayDetectionNotConfiguredError("GEMINI_API_KEY is not set")
 
-    # Lazy import to avoid import-time failures/hangs in some environments.
-    try:
-        import google.generativeai as genai  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        raise TextOverlayDetectionNotConfiguredError("google-generativeai is not installed") from exc
-
-    model_name = _get_gemini_model()
-    genai.configure(api_key=api_key)
+    model_name, model_source, model_route, fallback_path = _resolve_gemini_model_selection()
+    LOGGER.info(
+        "Gemini text-overlay route=%s model=%s source=%s fallback_path=%s",
+        model_route,
+        model_name,
+        model_source,
+        fallback_path or "none",
+    )
+    generate_content = _build_gemini_content_generator(api_key=api_key, model_name=model_name)
 
     prompt = (
         "You are a strict JSON API.\n"
@@ -412,8 +504,6 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
         '- "has_text_overlay": boolean\n'
         '- "confidence": number between 0 and 1 (optional)\n'
     )
-
-    model = genai.GenerativeModel(model_name)
 
     mime = content_type or "image/jpeg"
 
@@ -427,11 +517,10 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
         if structured_json:
             generation_config["response_mime_type"] = "application/json"
 
-        response = model.generate_content(
-            [
-                prompt,
-                {"mime_type": mime, "data": image_bytes},
-            ],
+        response = generate_content(
+            prompt=prompt,
+            image_bytes=image_bytes,
+            mime=mime,
             generation_config=generation_config,
         )
         return _extract_gemini_response_text(response)
@@ -444,6 +533,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
             model=model_name,
             error=f"Gemini request failed: {exc}",
             reason_code=TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED,
+            model_source=model_source,
+            model_route=model_route,
+            model_fallback_path=fallback_path,
         )
 
     used_structured_retry = False
@@ -460,6 +552,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
                 error=f"Gemini retry request failed: {exc}",
                 finish_reason=finish_reason,
                 reason_code=TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED,
+                model_source=model_source,
+                model_route=model_route,
+                model_fallback_path=fallback_path,
             )
 
         finish_reason = retry_finish_reason or finish_reason
@@ -472,6 +567,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
             error=f"Gemini returned no candidate text content{suffix}",
             finish_reason=finish_reason,
             reason_code=TEXT_OVERLAY_REASON_GEMINI_NO_TEXT,
+            model_source=model_source,
+            model_route=model_route,
+            model_fallback_path=fallback_path,
         )
 
     try:
@@ -484,6 +582,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
                 error=f"Failed to parse Gemini response as JSON after retry: {parse_exc}",
                 finish_reason=finish_reason,
                 reason_code=TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED,
+                model_source=model_source,
+                model_route=model_route,
+                model_fallback_path=fallback_path,
             )
         try:
             retry_text, retry_finish_reason = _request_model_text(structured_json=True)
@@ -497,6 +598,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
                 ),
                 finish_reason=finish_reason,
                 reason_code=TEXT_OVERLAY_REASON_GEMINI_REQUEST_FAILED,
+                model_source=model_source,
+                model_route=model_route,
+                model_fallback_path=fallback_path,
             )
         finish_reason = retry_finish_reason or finish_reason
         if not retry_text:
@@ -506,6 +610,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
                 error=f"Failed to parse Gemini response as JSON and retry returned no text: {parse_exc}",
                 finish_reason=finish_reason,
                 reason_code=TEXT_OVERLAY_REASON_GEMINI_NO_TEXT,
+                model_source=model_source,
+                model_route=model_route,
+                model_fallback_path=fallback_path,
             )
         try:
             parsed = _extract_first_json_object(retry_text)
@@ -519,6 +626,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
                 ),
                 finish_reason=finish_reason,
                 reason_code=TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED,
+                model_source=model_source,
+                model_route=model_route,
+                model_fallback_path=fallback_path,
             )
 
     has_text_overlay = _as_bool(parsed.get("has_text_overlay"))
@@ -529,6 +639,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
             error="Gemini response missing has_text_overlay boolean",
             finish_reason=finish_reason,
             reason_code=TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED,
+            model_source=model_source,
+            model_route=model_route,
+            model_fallback_path=fallback_path,
         )
 
     confidence = _as_float_0_1(parsed.get("confidence"))
@@ -542,6 +655,9 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
         prompt_version=TEXT_OVERLAY_PROMPT_VERSION,
         status="detected",
         finish_reason=finish_reason,
+        model_source=model_source,
+        model_route=model_route,
+        model_fallback_path=fallback_path,
     )
 
 
@@ -562,6 +678,24 @@ def _extract_existing_fields(metadata: dict[str, Any]) -> TextOverlayResult | No
     detector_str = detector.strip() if isinstance(detector, str) and detector.strip() else "unknown"
     model = metadata.get("text_overlay_model")
     model_str = model.strip() if isinstance(model, str) and model.strip() else None
+    model_source = metadata.get("text_overlay_model_source")
+    model_source_str = (
+        model_source.strip()
+        if isinstance(model_source, str) and model_source.strip()
+        else None
+    )
+    model_route = metadata.get("text_overlay_model_route")
+    model_route_str = (
+        model_route.strip()
+        if isinstance(model_route, str) and model_route.strip()
+        else None
+    )
+    fallback_path = metadata.get("text_overlay_model_fallback_path")
+    fallback_path_str = (
+        fallback_path.strip()
+        if isinstance(fallback_path, str) and fallback_path.strip()
+        else None
+    )
     prompt_version = metadata.get("text_overlay_prompt_version")
     prompt_version_str = (
         prompt_version.strip()
@@ -591,6 +725,9 @@ def _extract_existing_fields(metadata: dict[str, Any]) -> TextOverlayResult | No
         error=stored_error_str,
         finish_reason=finish_reason_str,
         reason_code=reason_code_str,
+        model_source=model_source_str,
+        model_route=model_route_str,
+        model_fallback_path=fallback_path_str,
     )
 
 

@@ -584,6 +584,334 @@ def test_list_runs_applies_filters_and_order(monkeypatch) -> None:
     assert params == ["season-1", "completed", "bravo", 25]
 
 
+def test_decide_comment_refresh_matrix() -> None:
+    now = datetime(2026, 2, 17, 15, 0, tzinfo=UTC)
+    fresh_snapshot = social_repo.CommentLifecycleSnapshot(
+        active_count=10,
+        total_count=10,
+        latest_comment_created_at=now - timedelta(days=1),
+        last_seen_at=now - timedelta(hours=2),
+        last_checked_at=now - timedelta(hours=2),
+    )
+
+    decision = social_repo._decide_comment_refresh(
+        sync_strategy="incremental",
+        expected_count=11,
+        snapshot=fresh_snapshot,
+        post_published_at=now - timedelta(days=5),
+        now=now,
+    )
+    assert decision.should_refresh is True
+    assert decision.reason == "count_gap"
+
+    decision = social_repo._decide_comment_refresh(
+        sync_strategy="incremental",
+        expected_count=9,
+        snapshot=fresh_snapshot,
+        post_published_at=now - timedelta(days=5),
+        now=now,
+    )
+    assert decision.should_refresh is True
+    assert decision.reason == "count_drop"
+
+    decision = social_repo._decide_comment_refresh(
+        sync_strategy="incremental",
+        expected_count=10,
+        snapshot=None,
+        post_published_at=now - timedelta(days=1),
+        now=now,
+    )
+    assert decision.should_refresh is True
+    assert decision.reason == "never_checked"
+
+    stale_snapshot = social_repo.CommentLifecycleSnapshot(
+        active_count=10,
+        total_count=10,
+        latest_comment_created_at=now - timedelta(days=2),
+        last_seen_at=now - timedelta(days=2),
+        last_checked_at=now - timedelta(hours=25),
+    )
+    decision = social_repo._decide_comment_refresh(
+        sync_strategy="incremental",
+        expected_count=10,
+        snapshot=stale_snapshot,
+        post_published_at=now - timedelta(days=3),
+        now=now,
+    )
+    assert decision.should_refresh is True
+    assert decision.reason == "stale_recheck"
+
+    quiet_snapshot = social_repo.CommentLifecycleSnapshot(
+        active_count=10,
+        total_count=10,
+        latest_comment_created_at=now - timedelta(days=15),
+        last_seen_at=now - timedelta(hours=1),
+        last_checked_at=now - timedelta(hours=1),
+    )
+    decision = social_repo._decide_comment_refresh(
+        sync_strategy="incremental",
+        expected_count=10,
+        snapshot=quiet_snapshot,
+        post_published_at=now - timedelta(days=20),
+        now=now,
+    )
+    assert decision.should_refresh is True
+    assert decision.reason == "quiet_post_force_recheck"
+
+    decision = social_repo._decide_comment_refresh(
+        sync_strategy="full_refresh",
+        expected_count=10,
+        snapshot=fresh_snapshot,
+        post_published_at=now - timedelta(days=1),
+        now=now,
+    )
+    assert decision.should_refresh is True
+    assert decision.reason == "full_refresh"
+
+    decision = social_repo._decide_comment_refresh(
+        sync_strategy="incremental",
+        expected_count=10,
+        snapshot=fresh_snapshot,
+        post_published_at=now - timedelta(days=1),
+        now=now,
+    )
+    assert decision.should_refresh is False
+    assert decision.reason == "up_to_date"
+
+
+def test_is_comment_fetch_complete_is_conservative() -> None:
+    assert social_repo._is_comment_fetch_complete(
+        fetch_failed=False,
+        fail_reason=None,
+        auth_failed=False,
+        fetched_count=10,
+        max_comments_per_post=1000,
+    )
+    assert not social_repo._is_comment_fetch_complete(
+        fetch_failed=True,
+        fail_reason=None,
+        auth_failed=False,
+        fetched_count=0,
+        max_comments_per_post=1000,
+    )
+    assert not social_repo._is_comment_fetch_complete(
+        fetch_failed=False,
+        fail_reason="comment_status_10201",
+        auth_failed=False,
+        fetched_count=0,
+        max_comments_per_post=1000,
+    )
+    assert not social_repo._is_comment_fetch_complete(
+        fetch_failed=False,
+        fail_reason=None,
+        auth_failed=True,
+        fetched_count=0,
+        max_comments_per_post=1000,
+    )
+    assert not social_repo._is_comment_fetch_complete(
+        fetch_failed=False,
+        fail_reason=None,
+        auth_failed=False,
+        fetched_count=1000,
+        max_comments_per_post=1000,
+    )
+
+
+def test_upsert_instagram_comment_tree_reappearance_clears_missing(monkeypatch) -> None:
+    captured_payload: dict[str, object] = {}
+
+    class _Comment:
+        comment_id = "comment-1"
+        username = "viewer"
+        user_id = "user-1"
+        text = "hello"
+        likes = 3
+        is_reply = False
+        reply_count = 0
+        created_at = datetime(2026, 2, 10, tzinfo=UTC)
+        replies: list[object] = []
+
+        def to_dict(self) -> dict[str, object]:
+            return {"comment_id": self.comment_id}
+
+    def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn: object | None = None):
+        captured_payload.update(payload)
+        assert table == "instagram_comments"
+        assert conflict_col == "comment_id"
+        return {"id": "row-1"}
+
+    monkeypatch.setattr(social_repo, "_pg_upsert", _fake_upsert)
+    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda table: table == "instagram_comments")
+
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+
+    written = social_repo._upsert_instagram_comment_tree(
+        context,
+        job_id="job-1",
+        run_id="run-1",
+        account="bravotv",
+        post_id="post-1",
+        comment=_Comment(),
+    )
+
+    assert written == 1
+    assert captured_payload["is_missing"] is False
+    assert captured_payload["missing_at"] is None
+    assert captured_payload["last_seen_run_id"] == "run-1"
+
+
+def test_ingest_season_stores_sync_strategy_and_platform_scope(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    captured_run_configs: list[dict[str, object]] = []
+    created_job_configs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo, "get_season_context", lambda season_id: context)
+    monkeypatch.setattr(
+        social_repo,
+        "get_targets",
+        lambda *_args, **_kwargs: {
+            "targets": [
+                {
+                    "platform": "instagram",
+                    "accounts": ["bravotv"],
+                    "hashtags": ["rhoslc"],
+                    "keywords": ["Salt Lake City"],
+                    "is_active": True,
+                }
+            ]
+        },
+    )
+
+    def _fake_create_run(*_args, **kwargs):
+        captured_run_configs.append(kwargs["config"])
+        return "run-1"
+
+    def _fake_create_job(*_args, **kwargs):
+        created_job_configs.append(kwargs["config"])
+        return f"job-{len(created_job_configs)}"
+
+    monkeypatch.setattr(social_repo, "_create_run", _fake_create_run)
+    monkeypatch.setattr(social_repo, "_create_job", _fake_create_job)
+    monkeypatch.setattr(social_repo, "_update_run_summary", lambda _run_id: {"total_jobs": len(created_job_configs)})
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+
+    payload = social_repo.ingest_season(
+        "season-1",
+        platforms=["instagram"],
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=500,
+        max_comments_per_post=300,
+        max_replies_per_post=200,
+        fetch_replies=True,
+        ingest_mode="posts_and_comments",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 10, tzinfo=UTC),
+        initiated_by="admin@test",
+    )
+
+    assert payload["run_id"] == "run-1"
+    assert captured_run_configs
+    assert captured_run_configs[0]["sync_strategy"] == "incremental"
+    assert captured_run_configs[0]["platforms"] == ["instagram"]
+    assert all(config["sync_strategy"] == "incremental" for config in created_job_configs)
+
+    captured_run_configs.clear()
+    created_job_configs.clear()
+
+    social_repo.ingest_season(
+        "season-1",
+        platforms=None,
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=500,
+        max_comments_per_post=300,
+        max_replies_per_post=200,
+        fetch_replies=True,
+        ingest_mode="posts_and_comments",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 10, tzinfo=UTC),
+        initiated_by="admin@test",
+    )
+    assert captured_run_configs[0]["platforms"] == "all"
+
+
 def test_repository_has_single_pg_upsert_definition() -> None:
     source = inspect.getsource(social_repo)
     assert source.count("def _pg_upsert(") == 1
+
+
+def test_resolve_sentiment_gemini_model_selection_prefers_pro_alias(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_SENTIMENT_GEMINI_MODEL", "")
+    monkeypatch.setenv("GEMINI_MODEL_PRO", "gemini-2.5-pro")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL_FAST", "gemini-2.5-flash-lite")
+    monkeypatch.delenv("GOOGLE_GEMINI_MODEL", raising=False)
+
+    model, source, fallback = social_repo._resolve_sentiment_gemini_model_selection()
+
+    assert model == "gemini-2.5-pro"
+    assert source == "GEMINI_MODEL_PRO"
+    assert fallback == "SOCIAL_SENTIMENT_GEMINI_MODEL->GEMINI_MODEL_PRO"
+
+
+def test_classify_ambiguous_sentiments_logs_model_source_and_fallback(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("SOCIAL_SENTIMENT_GEMINI_ENABLED", "true")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("SOCIAL_SENTIMENT_GEMINI_MODEL", "")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-pro-canonical")
+    monkeypatch.delenv("GEMINI_MODEL_PRO", raising=False)
+    monkeypatch.delenv("GOOGLE_GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL_FAST", raising=False)
+
+    class _Response:
+        text = '[{"index":0,"sentiment":"positive","confidence":0.9}]'
+
+    monkeypatch.setattr(
+        social_repo,
+        "_build_gemini_text_generator",
+        lambda **_kwargs: (lambda _prompt: _Response(), "google-genai"),
+    )
+
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    analyzer_context = SentimentAnalyzerContext(
+        cast_terms=set(),
+        cast_phrases=set(),
+        episode_terms=set(),
+        episode_summary="",
+    )
+
+    with caplog.at_level("INFO", logger=social_repo.__name__):
+        overrides = social_repo._classify_ambiguous_sentiments_with_gemini(
+            [("comment-1", "Loved this episode")],
+            context=context,
+            analyzer_context=analyzer_context,
+        )
+
+    assert overrides["comment-1"][0] == "positive"
+    assert any(
+        "Gemini sentiment route=pro model=gemini-2.5-pro-canonical sdk=google-genai "
+        "source=GEMINI_MODEL "
+        "fallback_path=SOCIAL_SENTIMENT_GEMINI_MODEL->GEMINI_MODEL_PRO->GOOGLE_GEMINI_MODEL->GEMINI_MODEL"
+        in record.message
+        for record in caplog.records
+    )

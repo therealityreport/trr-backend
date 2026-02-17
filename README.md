@@ -188,9 +188,12 @@ SUPABASE_DB_URL=postgresql://user:password@db.your-project.supabase.co:5432/post
 
 # Optional Configuration
 REALITEASE_TMDB_SHOW_LIMIT=5
-GEMINI-MODEL=gemini-2.5-flash
 GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL_FAST=gemini-2.5-flash
+GEMINI_MODEL_PRO=gemini-2.5-pro
 GOOGLE_GEMINI_MODEL=gemini-2.5-flash
+# Deprecated fallback alias (temporary)
+GEMINI-MODEL=gemini-2.5-flash
 
 # Legacy Google Sheets (archived)
 SPREADSHEET_NAME=Realitease2025Data

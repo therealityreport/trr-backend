@@ -122,6 +122,17 @@ def _resolve_wikidata_enwiki_url(wikidata_id: str) -> str | None:
     item_id = str(wikidata_id or "").strip()
     if not re.fullmatch(r"Q\d+", item_id):
         return None
+    summary, fetch_error = _fetch_wikidata_summary(item_id)
+    if fetch_error or not summary:
+        return None
+    return summary.get("enwiki_url")
+
+
+@lru_cache(maxsize=512)
+def _fetch_wikidata_summary(wikidata_id: str) -> tuple[dict[str, str] | None, bool]:
+    item_id = str(wikidata_id or "").strip()
+    if not re.fullmatch(r"Q\d+", item_id):
+        return None, False
     request = urllib.request.Request(
         f"https://www.wikidata.org/wiki/Special:EntityData/{item_id}.json",
         headers={"accept": "application/json", "user-agent": "TRR-Backend/1.0"},
@@ -130,21 +141,57 @@ def _resolve_wikidata_enwiki_url(wikidata_id: str) -> str | None:
         with urllib.request.urlopen(request, timeout=20) as response:
             payload = json.loads((response.read() or b"{}").decode("utf-8", errors="replace"))
     except Exception:  # noqa: BLE001
-        return None
+        return None, True
 
     entities = payload.get("entities") if isinstance(payload, dict) else None
     entity = entities.get(item_id) if isinstance(entities, dict) else None
-    sitelinks = entity.get("sitelinks") if isinstance(entity, dict) else None
-    enwiki = sitelinks.get("enwiki") if isinstance(sitelinks, dict) else None
-    title = enwiki.get("title") if isinstance(enwiki, dict) else None
-    if not isinstance(title, str) or not title.strip():
-        return None
-    return f"https://en.wikipedia.org/wiki/{quote(title.strip().replace(' ', '_'))}"
+    if not isinstance(entity, dict):
+        return None, False
+
+    sitelinks = entity.get("sitelinks") if isinstance(entity.get("sitelinks"), dict) else {}
+    enwiki = sitelinks.get("enwiki") if isinstance(sitelinks.get("enwiki"), dict) else {}
+    enwiki_title = str(enwiki.get("title") or "").strip()
+    if not enwiki_title:
+        return None, False
+
+    labels = entity.get("labels") if isinstance(entity.get("labels"), dict) else {}
+    en_label_payload = labels.get("en") if isinstance(labels.get("en"), dict) else {}
+    en_label = str(en_label_payload.get("value") or "").strip()
+
+    return (
+        {
+            "item_id": item_id,
+            "label": en_label,
+            "enwiki_title": enwiki_title,
+            "enwiki_url": f"https://en.wikipedia.org/wiki/{quote(enwiki_title.replace(' ', '_'))}",
+        },
+        False,
+    )
 
 
 @lru_cache(maxsize=1024)
 def _normalized_person_name(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _person_name_candidates_match(expected_name: str | None, candidates: list[str | None]) -> bool:
+    expected = _normalized_person_name(expected_name)
+    if not expected:
+        return True
+    expected_tokens = {token for token in expected.split() if token}
+    if not expected_tokens:
+        return False
+
+    for candidate in candidates:
+        normalized = _normalized_person_name(candidate)
+        if not normalized:
+            continue
+        if normalized == expected:
+            return True
+        candidate_tokens = {token for token in normalized.split() if token}
+        if expected_tokens.issubset(candidate_tokens):
+            return True
+    return False
 
 
 def _extract_person_page_name_candidates(html: str, resolved_url: str) -> set[str]:
@@ -183,21 +230,131 @@ def _extract_person_page_name_candidates(html: str, resolved_url: str) -> set[st
 
 
 def _person_page_matches_expected_name(expected_name: str | None, html: str, resolved_url: str) -> bool:
-    expected = _normalized_person_name(expected_name)
-    if not expected:
-        return True
+    candidates = list(_extract_person_page_name_candidates(html, resolved_url))
+    return _person_name_candidates_match(expected_name, candidates)
 
-    expected_tokens = {token for token in expected.split() if token}
-    candidates = _extract_person_page_name_candidates(html, resolved_url)
-    if expected in candidates:
-        return True
 
-    for candidate in candidates:
-        candidate_tokens = {token for token in candidate.split() if token}
-        if expected_tokens and expected_tokens.issubset(candidate_tokens):
-            return True
+def _extract_wikidata_item_id(value: str | None) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    parsed = urlparse(candidate)
+    if parsed.scheme and parsed.netloc:
+        path = unquote(parsed.path or "").strip()
+        if "/wiki/" in path:
+            candidate = path.split("/wiki/", 1)[1].strip()
+        else:
+            candidate = path.rsplit("/", 1)[-1].strip()
+    return candidate if re.fullmatch(r"Q\d+", candidate) else None
 
-    return False
+
+def _extract_wikipedia_title(value: str | None) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    parsed = urlparse(candidate)
+    if parsed.scheme and parsed.netloc:
+        if "wikipedia.org" not in parsed.netloc.lower():
+            return None
+        path = unquote(parsed.path or "").strip()
+        if "/wiki/" not in path:
+            return None
+        candidate = path.split("/wiki/", 1)[1].strip()
+
+    candidate = candidate.split("#", 1)[0].split("?", 1)[0].strip()
+    if not candidate or candidate.lower().startswith("special:"):
+        return None
+    return candidate.replace("_", " ")
+
+
+@lru_cache(maxsize=2048)
+def _fetch_wikipedia_page_summary(value: str) -> tuple[dict[str, str] | None, bool]:
+    title = _extract_wikipedia_title(value)
+    if not title:
+        return None, False
+
+    request = urllib.request.Request(
+        (
+            "https://en.wikipedia.org/w/api.php?action=query&format=json&redirects=1"
+            f"&prop=info&inprop=url&titles={quote(title)}"
+        ),
+        headers={"accept": "application/json", "user-agent": "TRR-Backend/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads((response.read() or b"{}").decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001
+        return None, True
+
+    query = payload.get("query") if isinstance(payload, dict) else None
+    pages = query.get("pages") if isinstance(query, dict) else None
+    if not isinstance(pages, dict) or not pages:
+        return None, False
+
+    first_page = next(iter(pages.values()))
+    if not isinstance(first_page, dict):
+        return None, False
+    if first_page.get("missing") is not None:
+        return None, False
+
+    canonical_title = str(first_page.get("title") or "").strip()
+    if not canonical_title:
+        return None, False
+    canonical_url = str(first_page.get("fullurl") or "").strip()
+    if not canonical_url:
+        canonical_url = f"https://en.wikipedia.org/wiki/{quote(canonical_title.replace(' ', '_'))}"
+
+    return {
+        "title": canonical_title,
+        "url": canonical_url,
+    }, False
+
+
+def _validate_person_knowledge_url(
+    url: str,
+    *,
+    kind: str,
+    expected_name: str | None = None,
+) -> tuple[str | None, Literal["valid", "invalid", "fetch_error"]]:
+    candidate = str(url or "").strip()
+    if not candidate:
+        return None, "invalid"
+
+    if kind == "wikidata":
+        item_id = _extract_wikidata_item_id(candidate)
+        if not item_id:
+            return None, "invalid"
+        summary, fetch_error = _fetch_wikidata_summary(item_id)
+        if fetch_error:
+            return None, "fetch_error"
+        if not summary:
+            return None, "invalid"
+        if expected_name and not _person_name_candidates_match(
+            expected_name,
+            [summary.get("label"), summary.get("enwiki_title")],
+        ):
+            return None, "invalid"
+        return f"https://www.wikidata.org/wiki/{item_id}", "valid"
+    if kind == "wikipedia":
+        summary, summary_fetch_error = _fetch_wikipedia_page_summary(candidate)
+        if not summary_fetch_error:
+            if not summary:
+                return None, "invalid"
+            if expected_name and not _person_name_candidates_match(expected_name, [summary.get("title")]):
+                return None, "invalid"
+            return str(summary.get("url") or candidate), "valid"
+
+    html, final_url, error = try_fetch_html(candidate)
+    if not html:
+        return (None, "fetch_error") if error else (None, "invalid")
+    resolved = final_url or candidate
+    if kind == "wikipedia" and is_missing_wikipedia_page(html, resolved):
+        return None, "invalid"
+    if kind == "fandom" and is_missing_fandom_page(html, resolved):
+        return None, "invalid"
+    if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
+        return None, "invalid"
+    return resolved, "valid"
 
 
 @lru_cache(maxsize=1024)
@@ -207,18 +364,8 @@ def _validated_person_knowledge_url(
     kind: str,
     expected_name: str | None = None,
 ) -> str | None:
-    candidate = str(url or "").strip()
-    if not candidate:
-        return None
-    html, final_url, _error = try_fetch_html(candidate)
-    if not html:
-        return None
-    resolved = final_url or candidate
-    if kind == "wikipedia" and is_missing_wikipedia_page(html, resolved):
-        return None
-    if kind == "fandom" and is_missing_fandom_page(html, resolved):
-        return None
-    if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
+    resolved, outcome = _validate_person_knowledge_url(url, kind=kind, expected_name=expected_name)
+    if outcome != "valid":
         return None
     return resolved
 
@@ -491,18 +638,26 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
         external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
         wikidata = str(external_ids.get("wikidata") or external_ids.get("wikidata_id") or "").strip()
         if wikidata:
-            found.append(
-                {
-                    "entity_type": "person",
-                    "entity_id": person_id,
-                    "season_number": 0,
-                    "link_group": "knowledge",
-                    "link_kind": "wikidata",
-                    "label": f"{name} Wikidata" if name else "Wikidata",
-                    "url": f"https://www.wikidata.org/wiki/{wikidata}",
-                    "source": "core.people.external_ids",
-                }
+            wikidata_url = _validated_person_knowledge_url(
+                f"https://www.wikidata.org/wiki/{wikidata}",
+                kind="wikidata",
+                expected_name=name if name else None,
             )
+            if wikidata_url:
+                found.append(
+                    {
+                        "entity_type": "person",
+                        "entity_id": person_id,
+                        "season_number": 0,
+                        "link_group": "knowledge",
+                        "link_kind": "wikidata",
+                        "label": f"{name} Wikidata" if name else "Wikidata",
+                        "url": wikidata_url,
+                        "source": "core.people.external_ids",
+                        "status": "approved",
+                        "confidence": 0.9,
+                    }
+                )
         if has_fandom_profile and name:
             wikipedia_url = _validated_person_knowledge_url(
                 f"https://en.wikipedia.org/wiki/{quote(name.replace(' ', '_'))}",
@@ -563,28 +718,106 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
     return found
 
 
-def _cleanup_stale_pending_person_knowledge_links(show_id: str, valid_identity_keys: set[str]) -> int:
-    params: list[Any] = [show_id, ["wikipedia", "fandom"]]
-    identity_sql = ""
-    if valid_identity_keys:
-        params.append(sorted(valid_identity_keys))
-        identity_sql = "AND NOT ((entity_id::text || '|' || link_kind || '|' || url_key) = ANY(%s::text[]))"
+def _load_show_cast_names_by_person_id(show_id: str) -> dict[str, str]:
+    rows = pg.fetch_all(
+        """
+        SELECT DISTINCT
+          sc.person_id::text AS person_id,
+          COALESCE(p.full_name, sc.cast_member_name) AS person_name
+        FROM core.v_show_cast sc
+        LEFT JOIN core.people p ON p.id = sc.person_id
+        WHERE sc.show_id = %s
+        """,
+        [show_id],
+    )
+    out: dict[str, str] = {}
+    for row in rows:
+        person_id = str(row.get("person_id") or "").strip()
+        person_name = str(row.get("person_name") or "").strip()
+        if person_id and person_name:
+            out[person_id] = person_name
+    return out
 
-    rows = pg.execute_returning(
-        f"""
-        DELETE FROM core.entity_links
+
+def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
+    cast_people = _load_show_cast_names_by_person_id(show_id)
+    links = pg.fetch_all(
+        """
+        SELECT
+          id::text AS id,
+          entity_id::text AS person_id,
+          link_kind,
+          status,
+          url
+        FROM core.entity_links
         WHERE show_id = %s
           AND entity_type = 'person'
           AND link_group = 'knowledge'
           AND link_kind = ANY(%s::text[])
-          AND status = 'pending'
-          AND discovered_by = 'backend_discovery'
-          {identity_sql}
+        """,
+        [show_id, ["wikipedia", "fandom", "wikidata"]],
+    )
+
+    invalid_rows: list[dict[str, Any]] = []
+    validation_failures = 0
+    for row in links:
+        link_id = str(row.get("id") or "").strip()
+        person_id = str(row.get("person_id") or "").strip()
+        link_kind = str(row.get("link_kind") or "").strip().lower()
+        url = str(row.get("url") or "").strip()
+        if not link_id or not person_id or link_kind not in {"wikipedia", "fandom", "wikidata"} or not url:
+            continue
+
+        expected_name = cast_people.get(person_id)
+        if not expected_name:
+            invalid_rows.append({**row, "reason": "person_not_in_show_cast"})
+            continue
+
+        _resolved, outcome = _validate_person_knowledge_url(
+            url,
+            kind=link_kind,
+            expected_name=expected_name,
+        )
+        if outcome == "fetch_error":
+            validation_failures += 1
+            continue
+        if outcome != "valid":
+            invalid_rows.append({**row, "reason": "invalid_or_mismatched_owner"})
+
+    return {
+        "scanned_rows": links,
+        "scanned": len(links),
+        "invalid_rows": invalid_rows,
+        "validation_failures": validation_failures,
+    }
+
+
+def _delete_entity_links_by_id(link_ids: list[str]) -> int:
+    ids = [str(link_id).strip() for link_id in link_ids if str(link_id).strip()]
+    if not ids:
+        return 0
+    deleted_rows = pg.execute_returning(
+        """
+        DELETE FROM core.entity_links
+        WHERE id = ANY(%s::uuid[])
         RETURNING id
         """,
-        params,
+        [ids],
     )
-    return len(rows)
+    return len(deleted_rows)
+
+
+def _cleanup_invalid_person_knowledge_links(show_id: str) -> dict[str, int]:
+    scan = _scan_invalid_person_knowledge_links(show_id)
+    invalid_rows = scan.get("invalid_rows") if isinstance(scan.get("invalid_rows"), list) else []
+    invalid_ids = [str(row.get("id") or "").strip() for row in invalid_rows if row.get("id")]
+    deleted = _delete_entity_links_by_id(invalid_ids)
+    return {
+        "scanned": int(scan.get("scanned") or 0),
+        "invalid": len(invalid_rows),
+        "deleted": deleted,
+        "validation_failures": int(scan.get("validation_failures") or 0),
+    }
 
 
 @router.post("/{show_id}/links/discover")
@@ -604,28 +837,6 @@ def discover_show_links(
         discovered.extend(_discover_season_links(show_id_str))
     if payload.include_people:
         discovered.extend(_discover_people_links(show_id_str))
-
-    stale_pending_people_deleted = 0
-    if payload.include_people:
-        valid_identity_keys: set[str] = set()
-        for row in discovered:
-            if row.get("entity_type") != "person":
-                continue
-            if row.get("link_group") != "knowledge":
-                continue
-            link_kind = str(row.get("link_kind") or "").strip()
-            if link_kind not in {"wikipedia", "fandom"}:
-                continue
-            entity_id = str(row.get("entity_id") or "").strip()
-            url = str(row.get("url") or "").strip()
-            if not entity_id or not url:
-                continue
-            identity_key = f"{entity_id}|{link_kind}|{_url_key(url)}"
-            valid_identity_keys.add(identity_key)
-        stale_pending_people_deleted = _cleanup_stale_pending_person_knowledge_links(
-            show_id_str,
-            valid_identity_keys,
-        )
 
     upserted = 0
     by_group: dict[str, int] = {}
@@ -659,11 +870,18 @@ def discover_show_links(
         upserted += 1
         by_group[row["link_group"]] = by_group.get(row["link_group"], 0) + 1
 
+    invalid_people_cleanup = {"deleted": 0, "validation_failures": 0}
+    if payload.include_people:
+        invalid_people_cleanup = _cleanup_invalid_person_knowledge_links(show_id_str)
+
     return {
         "show_id": show_id_str,
         "discovered": upserted,
         "counts_by_group": by_group,
-        "stale_pending_people_deleted": stale_pending_people_deleted,
+        "invalid_people_links_deleted": int(invalid_people_cleanup.get("deleted") or 0),
+        "invalid_people_links_validation_failures": int(
+            invalid_people_cleanup.get("validation_failures") or 0
+        ),
     }
 
 

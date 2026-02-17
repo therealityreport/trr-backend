@@ -4,6 +4,36 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
 
 ## Latest Update (2026-02-17)
 
+- February 17, 2026: Implemented Task 10 social admin incremental sync and comment lifecycle reconciliation.
+  - Files:
+    - `api/routers/socials.py`
+    - `trr_backend/repositories/social_season_analytics.py`
+    - `supabase/migrations/0126_social_comment_lifecycle_flags.sql`
+    - `tests/api/routers/test_socials_season_analytics.py`
+    - `tests/repositories/test_social_season_analytics.py`
+    - `docs/cross-collab/TASK10/PLAN.md`
+    - `docs/cross-collab/TASK10/OTHER_PROJECTS.md`
+    - `docs/cross-collab/TASK10/STATUS.md`
+  - Changes:
+    - Added additive ingest request field `sync_strategy` with default `incremental` and `full_refresh` override.
+    - Persisted run config details for `sync_strategy` and explicit platform scope in scrape runs.
+    - Added migration `0126` with additive lifecycle fields/indexes for social comments/tweets:
+      - `is_missing`, `missing_at`, `first_seen_at`, `last_seen_at`, `last_seen_run_id`.
+    - Replaced comment refresh skip heuristic with policy matrix:
+      - count gap/drop checks,
+      - never-checked refresh,
+      - 24h stale recheck,
+      - 14-day quiet-post force rerun refresh,
+      - full-refresh override.
+    - Added conservative missing-mark logic:
+      - mark missing only on complete comment fetches,
+      - clear missing flags on reappearance during upsert.
+  - Validation:
+    - `pytest -q tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (`39 passed`)
+  - Cross-repo:
+    - screenalytics compatibility validation completed (no code changes required).
+    - TRR-APP consumer/UX updates completed under `TRR-APP/docs/cross-collab/TASK9/`.
+
 - February 17, 2026: Implemented social admin reliability contract additions for run history and query performance hardening.
   - Files:
     - `api/routers/socials.py`
@@ -1258,3 +1288,152 @@ Cast latest-season derivation fix for show cast grid (this session, 2026-02-17):
 - Validation:
   - `pytest -q tests/api/routers/test_admin_show_roles.py` (5 passed)
   - `ruff check api/routers/admin_show_roles.py tests/api/routers/test_admin_show_roles.py` (pass)
+
+TRR stack audit remediation baseline (this session, 2026-02-17):
+- Files:
+  - `.github/workflows/ci.yml`
+  - `.env.example`
+  - `README.md`
+  - `requirements.in`
+  - `requirements.lock.txt`
+  - `requirements.txt`
+  - `scripts/check_env_example.py`
+  - `trr_backend/vision/text_overlay.py`
+  - `docs/cross-collab/TASK9/PLAN.md`
+  - `docs/cross-collab/TASK9/OTHER_PROJECTS.md`
+  - `docs/cross-collab/TASK9/STATUS.md`
+- Changes:
+  - Added CI merge-marker guard (`<<<<<<<`/`>>>>>>>`) fail-fast step.
+  - Added env contract validation for `.env.example` (required keys, duplicate keys, invalid key names).
+  - Canonicalized Gemini model resolution to prefer `GEMINI_MODEL`, then `GOOGLE_GEMINI_MODEL`, with deprecated `GEMINI-MODEL` fallback warning.
+  - Introduced lock-driven Python install flow:
+    - source manifest: `requirements.in`
+    - lock artifact: `requirements.lock.txt`
+    - compatibility entrypoint: `requirements.txt -> -r requirements.lock.txt`
+  - Added CI lock-freshness verification for backend lock artifact.
+- Validation:
+  - `python3 scripts/check_env_example.py --file .env.example --required SCREENALYTICS_API_URL TRR_INTERNAL_ADMIN_SHARED_SECRET SCREENALYTICS_SERVICE_TOKEN --allow-hyphen GEMINI-MODEL` (pass)
+  - `python3 -m py_compile trr_backend/vision/text_overlay.py scripts/check_env_example.py` (pass)
+  - `ruff check trr_backend/vision/text_overlay.py scripts/check_env_example.py` (pass)
+  - `uv pip compile requirements.in --python-version 3.11 -o requirements.lock.txt` + diff-against-baseline lock check (pass)
+- Follow-up in same session:
+  - Migrated backend Gemini call sites to prefer `google-genai` with legacy fallback compatibility:
+    - `trr_backend/vision/text_overlay.py`
+    - `trr_backend/repositories/social_season_analytics.py`
+  - Added route-aware model key support (`GEMINI_MODEL_FAST`, `GEMINI_MODEL_PRO`) and updated env/docs examples.
+  - Replaced `google-generativeai` dependency with `google-genai` in `requirements.in` and regenerated `requirements.lock.txt`.
+  - Validation:
+    - `python3 -m py_compile trr_backend/vision/text_overlay.py trr_backend/repositories/social_season_analytics.py` (pass)
+    - `ruff check trr_backend/vision/text_overlay.py trr_backend/repositories/social_season_analytics.py` (pass)
+    - `uv pip compile requirements.in --python-version 3.11 -o requirements.lock.txt` + diff-against-baseline lock check (pass)
+- Continuation (same session):
+  - Removed legacy `google.generativeai` fallback branches from backend Gemini callsites; runtime now expects `google-genai`.
+  - Updated sentiment/text-overlay model resolution to support route keys (`GEMINI_MODEL_FAST`, `GEMINI_MODEL_PRO`) with canonical fallback chain.
+  - Validation:
+    - `python3 -m py_compile trr_backend/vision/text_overlay.py trr_backend/repositories/social_season_analytics.py` (pass)
+    - `ruff check trr_backend/vision/text_overlay.py trr_backend/repositories/social_season_analytics.py` (pass)
+
+Cast episode scope + person knowledge ownership hardening (this session, 2026-02-17):
+- Files:
+  - `api/routers/admin_show_roles.py`
+  - `api/routers/admin_show_links.py`
+  - `tests/api/routers/test_admin_show_roles.py`
+  - `tests/api/routers/test_admin_show_links.py`
+  - `scripts/shows/cleanup_invalid_person_knowledge_links.py`
+- Changes:
+  - `GET /api/v1/admin/shows/{show_id}/cast-role-members` now scopes `total_episodes` to selected seasons when `seasons` query is provided, while preserving all-season totals when no season filter is present.
+  - Relationship-role sync now validates each relationship source URL against the source person before parsing; mismatched ownership pages are skipped.
+  - Person knowledge discovery now validates `wikidata` links in addition to `wikipedia`/`fandom`.
+  - Replaced stale-pending-only cleanup with full invalid person-knowledge cleanup across statuses/origins (`wikipedia`, `fandom`, `wikidata`), with fetch-error rows preserved and reported.
+  - `POST /api/v1/admin/shows/{show_id}/links/discover` response now includes:
+    - `invalid_people_links_deleted`
+    - `invalid_people_links_validation_failures`
+  - Added one-off cleanup script with `--show-id`, `--dry-run` (default behavior), and `--apply`.
+- Validation:
+  - `ruff check api/routers/admin_show_links.py api/routers/admin_show_roles.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_roles.py scripts/shows/cleanup_invalid_person_knowledge_links.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_roles.py` (`17 passed`)
+  - `python3 -m py_compile api/routers/admin_show_links.py api/routers/admin_show_roles.py scripts/shows/cleanup_invalid_person_knowledge_links.py` (pass)
+- RHOSLC cleanup run:
+  - Dry-run:
+    - `PYTHONPATH=/Users/thomashulihan/Projects/TRR/TRR-Backend /Users/thomashulihan/Projects/TRR/TRR-Backend/.venv/bin/python scripts/shows/cleanup_invalid_person_knowledge_links.py --show-id 7782652f-783a-488b-8860-41b97de32e75 --dry-run`
+    - scanned `132`, invalid `48`, validation_failures `38`, deleted `0`
+  - Apply:
+    - `PYTHONPATH=/Users/thomashulihan/Projects/TRR/TRR-Backend /Users/thomashulihan/Projects/TRR/TRR-Backend/.venv/bin/python scripts/shows/cleanup_invalid_person_knowledge_links.py --show-id 7782652f-783a-488b-8860-41b97de32e75 --apply`
+    - scanned `132`, invalid `48`, validation_failures `38`, deleted `48`
+
+Continuation (same session, 2026-02-17) — cross-collab sync only:
+- Updated `docs/cross-collab/TASK9/STATUS.md` to reflect downstream screenalytics TASK7 completion for lint-signal restoration and Wave A dependency validation.
+- No backend code/runtime changes in this continuation block.
+
+Continuation (same session, 2026-02-17) — Gemini telemetry modernization:
+- Updated `trr_backend/vision/text_overlay.py`:
+  - Added model selection telemetry (`model_source`, `model_route`, `model_fallback_path`)
+  - Persisted telemetry fields to metadata patch:
+    - `text_overlay_model_source`
+    - `text_overlay_model_route`
+    - `text_overlay_model_fallback_path`
+  - Added route/source/fallback logging for Gemini text-overlay detection requests.
+- Updated `trr_backend/repositories/social_season_analytics.py`:
+  - Added model selection helper returning `(model, source, fallback_path)`
+  - Enhanced Gemini sentiment logging with `source` + `fallback_path` while keeping route `pro`.
+  - Formatted two long `_upsert_tweet(...)` lines to satisfy Ruff line-length checks.
+
+Validation evidence:
+- `python3 -m py_compile trr_backend/vision/text_overlay.py trr_backend/repositories/social_season_analytics.py` (pass)
+- `ruff check trr_backend/vision/text_overlay.py trr_backend/repositories/social_season_analytics.py --target-version py311` (pass)
+
+Wikipedia person URL hardening + RHOSLC cleanup rerun (this session, 2026-02-17):
+- Files:
+  - `api/routers/admin_show_links.py`
+  - `tests/api/routers/test_admin_show_links.py`
+- Changes:
+  - Added Wikipedia API title-resolution fallback (`w/api.php?action=query&redirects=1&prop=info&inprop=url`) for person URL validation.
+  - `_validate_person_knowledge_url(..., kind="wikipedia")` now:
+    - rejects missing articles directly from API response,
+    - validates owner-name match from canonical title,
+    - returns canonical Wikipedia URL when valid,
+    - falls back to HTML fetch path only when API fetch has transient errors.
+  - Added regression tests for:
+    - missing article rejection (`Whitney_Comstock_Duncan` style case),
+    - API-validated accept path,
+    - API owner mismatch rejection.
+- Validation:
+  - `PYTHONPATH=. .venv/bin/python -m pytest tests/api/routers/test_admin_show_links.py -q` (`14 passed`)
+- RHOSLC cleanup rerun (same session):
+  - `PYTHONPATH=. .venv/bin/python scripts/shows/cleanup_invalid_person_knowledge_links.py --show-id 7782652f-783a-488b-8860-41b97de32e75 --dry-run`:
+    - scanned `84`, invalid `42`, validation_failures `0`
+  - `--apply` run(s) until stable:
+    - deleted invalid rows across runs (`37`, then `3`, then `1`)
+  - final apply snapshot:
+    - scanned `43`, invalid `0`, validation_failures `1`, deleted `0`
+
+Continuation (same session, 2026-02-17) — Gemini telemetry acceptance hardening:
+- Files:
+  - `tests/vision/test_text_overlay_fallback.py`
+  - `tests/repositories/test_social_season_analytics.py`
+- Changes:
+  - Added text-overlay Gemini model-selection tests for route-specific precedence and canonical fallback-path reporting.
+  - Added persisted metadata telemetry assertion for:
+    - `text_overlay_model_source`
+    - `text_overlay_model_route`
+    - `text_overlay_model_fallback_path`
+  - Added social sentiment Gemini regression tests validating:
+    - `GEMINI_MODEL_PRO` selection precedence
+    - route log payload includes `source` + `fallback_path`.
+- Validation:
+  - `pytest -q tests/vision/test_text_overlay_fallback.py::test_resolve_gemini_model_selection_prefers_fast_alias tests/vision/test_text_overlay_fallback.py::test_resolve_gemini_model_selection_tracks_canonical_fallback_path tests/vision/test_text_overlay_fallback.py::test_detect_media_asset_text_overlay_persists_model_telemetry_fields tests/repositories/test_social_season_analytics.py::test_resolve_sentiment_gemini_model_selection_prefers_pro_alias tests/repositories/test_social_season_analytics.py::test_classify_ambiguous_sentiments_logs_model_source_and_fallback` (`5 passed`)
+  - `ruff check tests/vision/test_text_overlay_fallback.py tests/repositories/test_social_season_analytics.py` (pass)
+
+Continuation (same session, 2026-02-17) — remediation PR stabilization + green CI:
+- Branch/PR:
+  - `codex/plan-remediation-backend`
+  - `https://github.com/therealityreport/trr-backend/pull/63`
+- Final stabilization actions:
+  - Pushed consolidated remediation commit with env contract checks, lock workflow artifacts, social lifecycle parity updates, migration `0126`, and cross-collab TASK9/TASK10 docs.
+  - Resolved prior CI mismatch by ensuring PR checks run against the updated branch head.
+- Validation:
+  - Local: `pytest -q` (`549 passed, 18 skipped`)
+  - GitHub checks on head `6d015478035b61f0342b9ad7bdf9212111c9b5dc`:
+    - `ci / test` (success)
+    - `Secret Scan / gitleaks` (success)
+    - `Repository Map / generate-repo-map` (success)

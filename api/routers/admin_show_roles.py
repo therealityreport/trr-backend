@@ -539,6 +539,8 @@ def _build_relationship_assignments(
     by_norm_name: dict[str, str],
     season_filter: set[int],
 ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    from api.routers import admin_show_links
+
     assignments: list[dict[str, Any]] = []
     unmatched_names: list[str] = []
     missing_season_evidence: list[str] = []
@@ -554,14 +556,33 @@ def _build_relationship_assignments(
             continue
 
         for source_kind, source_url in source_urls:
-            html, final_url, error = try_fetch_html(source_url)
+            validated_source_url, validation_outcome = admin_show_links._validate_person_knowledge_url(
+                source_url,
+                kind=source_kind,
+                expected_name=person_name,
+            )
+            if validation_outcome != "valid" or not validated_source_url:
+                if validation_outcome == "fetch_error":
+                    logger.debug(
+                        "Relationship source validation fetch failure for %s (%s)",
+                        person_name,
+                        source_url,
+                    )
+                continue
+
+            html, final_url, error = try_fetch_html(validated_source_url)
             if not html:
                 if error:
-                    logger.debug("Skipping relationship fetch for %s (%s): %s", person_name, source_url, error)
+                    logger.debug(
+                        "Skipping relationship fetch for %s (%s): %s",
+                        person_name,
+                        validated_source_url,
+                        error,
+                    )
                 continue
-            if source_kind == "wikipedia" and is_missing_wikipedia_page(html, final_url or source_url):
+            if source_kind == "wikipedia" and is_missing_wikipedia_page(html, final_url or validated_source_url):
                 continue
-            if source_kind == "fandom" and is_missing_fandom_page(html, final_url or source_url):
+            if source_kind == "fandom" and is_missing_fandom_page(html, final_url or validated_source_url):
                 continue
 
             data = (
@@ -569,7 +590,7 @@ def _build_relationship_assignments(
                 if source_kind == "wikipedia"
                 else extract_relationship_data_from_fandom_html(html)
             )
-            resolved_source_url = final_url or source_url
+            resolved_source_url = final_url or validated_source_url
             for detail in data.get("missing_season_evidence") or []:
                 missing_season_evidence.append(f"{person_name}: {detail}")
 
@@ -1185,6 +1206,38 @@ def list_cast_with_roles(
         if archive_mode == "only" and not (archive_episodes > 0 and regular_episodes <= 0):
             continue
         filtered.append(row)
+
+    if season_numbers and filtered:
+        scoped_person_ids = [
+            str(row.get("person_id") or "").strip()
+            for row in filtered
+            if str(row.get("person_id") or "").strip()
+        ]
+        if scoped_person_ids:
+            scoped_rows = pg.fetch_all(
+                """
+                SELECT
+                  person_id::text AS person_id,
+                  COUNT(DISTINCT episode_id)::int AS total_episodes
+                FROM core.v_episode_credits
+                WHERE show_id = %s
+                  AND person_id = ANY(%s::uuid[])
+                  AND season_number = ANY(%s::int[])
+                  AND COALESCE(appearance_type, 'appears') <> 'archive_footage'
+                GROUP BY person_id
+                """,
+                [show_id_str, scoped_person_ids, season_numbers],
+            )
+            scoped_totals = {
+                str(item.get("person_id") or "").strip(): int(item.get("total_episodes") or 0)
+                for item in scoped_rows
+                if item.get("person_id")
+            }
+            for row in filtered:
+                person_id = str(row.get("person_id") or "").strip()
+                if not person_id:
+                    continue
+                row["total_episodes"] = scoped_totals.get(person_id, 0)
 
     reverse = order.lower() != "asc"
     if sort_by == "name":
