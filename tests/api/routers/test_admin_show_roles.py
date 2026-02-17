@@ -193,12 +193,16 @@ def test_sync_cast_matrix_for_show_replaces_auto_sources_and_preserves_manual_so
                                                 "api.routers.admin_show_roles._delete_replaceable_assignments",
                                                 return_value=7,
                                             ) as delete_mock:
-                                                result = sync_cast_matrix_for_show(
-                                                    show_id=show_id,
-                                                    payload=payload,
-                                                    db=mock_db,
-                                                    admin_user={"email": "admin@example.com"},
-                                                )
+                                                with patch(
+                                                    "api.routers.admin_show_roles._load_existing_bravo_profile_links",
+                                                    return_value={},
+                                                ):
+                                                    result = sync_cast_matrix_for_show(
+                                                        show_id=show_id,
+                                                        payload=payload,
+                                                        db=mock_db,
+                                                        admin_user={"email": "admin@example.com"},
+                                                    )
 
     assert result["counts"]["season_role_assignments_upserted"] == 1
     assert result["counts"]["relationship_role_assignments_upserted"] == 1
