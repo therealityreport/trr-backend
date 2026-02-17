@@ -7,6 +7,8 @@ from trr_backend.ingestion.show_cast_matrix_scraper import (
     build_person_wikipedia_url,
     extract_relationship_data_from_fandom_html,
     extract_relationship_data_from_wikipedia_html,
+    is_missing_fandom_page,
+    is_missing_wikipedia_page,
     merge_cast_matrices,
     parse_fandom_cast_matrix_html,
     parse_wikipedia_cast_matrix_html,
@@ -119,3 +121,35 @@ def test_extract_relationship_data_from_wikipedia_html_parses_spouse_and_childre
 
     assert data["global_partner_roles"] == [{"name": "John Barlow", "role": "Husband"}]
     assert data["kid_names"] == ["Jack Barlow", "Henry Barlow"]
+
+
+def test_extract_relationship_data_from_wikipedia_html_strips_template_noise_and_splits_entries() -> None:
+    html = """
+    <table class="infobox biography vcard">
+      <tr>
+        <th>Spouse</th>
+        <td>
+          .mw-parser-output .marriage-line-margin2px{line-height:0;margin-bottom:-2px}
+          Frank William Gay III [4] (m. 2000; div. 2014);
+          .mw-parser-output .marriage-display-inline{display:inline}
+          Jake Burton (m. 2018)
+        </td>
+      </tr>
+    </table>
+    """
+    data = extract_relationship_data_from_wikipedia_html(html)
+
+    names = {row["name"] for row in data["global_partner_roles"]}
+    assert names == {"Frank William Gay III", "Jake Burton"}
+    assert all(".mw-parser-output" not in name for name in names)
+    assert all(row["role"] == "Husband" for row in data["global_partner_roles"])
+
+
+def test_is_missing_wikipedia_page_detects_article_missing_notice() -> None:
+    html = "<div>Wikipedia does not have an article with this exact name.</div>"
+    assert is_missing_wikipedia_page(html, "https://en.wikipedia.org/wiki/Georgia_Gay")
+
+
+def test_is_missing_fandom_page_detects_empty_page_notice() -> None:
+    html = "<div>There is currently no text in this page.</div>"
+    assert is_missing_fandom_page(html, "https://real-housewives.fandom.com/wiki/Georgia_Gay")

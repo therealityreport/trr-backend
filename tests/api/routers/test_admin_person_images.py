@@ -53,6 +53,30 @@ def client():
     return TestClient(app)
 
 
+def test_names_match_requires_first_and_last_name_alignment() -> None:
+    assert admin_person_images._names_match("Henry Barlow", "Henry Barlow")
+    assert admin_person_images._names_match("Wendy Osefo", "Dr. Wendy Osefo")
+    assert not admin_person_images._names_match("Henry Barlow", "Lisa Barlow")
+    assert not admin_person_images._names_match("Henry Barlow", "John Barlow")
+
+
+def test_fandom_profile_match_rejects_mismatched_page_owner() -> None:
+    cast_fandom = {
+        "full_name": "John Barlow",
+        "page_title": "John Barlow",
+    }
+    assert not admin_person_images._fandom_profile_matches_person_name(
+        "John Barlow",
+        cast_fandom,
+        page_url="https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+    )
+    assert admin_person_images._fandom_profile_matches_person_name(
+        "John Barlow",
+        cast_fandom,
+        page_url="https://real-housewives.fandom.com/wiki/John_Barlow",
+    )
+
+
 class TestRefreshPersonImages:
     """Test POST /api/v1/admin/person/{person_id}/refresh-images."""
 

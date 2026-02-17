@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import jwt
 import pytest
@@ -15,6 +15,7 @@ from api.routers.admin_show_roles import (
     _SYNC_SOURCE_RELATIONSHIP,
     CastMatrixSyncRequest,
     _build_relationship_assignments,
+    list_cast_with_roles,
     sync_cast_matrix_for_show,
 )
 
@@ -281,3 +282,87 @@ def test_build_relationship_assignments_fetches_person_fandom_and_wikipedia_page
     assert relationship_assignment["metadata"]["source_url"] == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
     assert kid_assignment["person_id"] == "person-jack"
     assert kid_assignment["season_number"] == 0
+
+
+def test_build_relationship_assignments_skips_missing_person_pages() -> None:
+    cast_people = [
+        {
+            "person_id": "person-georgia",
+            "person_name": "Georgia Gay",
+            "full_name": "Georgia Gay",
+            "cast_member_name": "Georgia Gay",
+            "fandom_url": "https://real-housewives.fandom.com/wiki/Georgia_Gay",
+            "fandom_link_url": None,
+            "wikipedia_url": "https://en.wikipedia.org/wiki/Georgia_Gay",
+        }
+    ]
+    by_norm_name = {"georgiagay": "person-georgia"}
+
+    def _mock_fetch(url: str) -> tuple[str | None, str | None, str | None]:
+        if "wikipedia" in url:
+            return (
+                "<html><body>Wikipedia does not have an article with this exact name</body></html>",
+                url,
+                None,
+            )
+        return ("<html><body>There is currently no text in this page.</body></html>", url, None)
+
+    with patch("api.routers.admin_show_roles.try_fetch_html", side_effect=_mock_fetch):
+        with patch("api.routers.admin_show_roles.extract_relationship_data_from_fandom_html") as fandom_parser:
+            with patch("api.routers.admin_show_roles.extract_relationship_data_from_wikipedia_html") as wiki_parser:
+                assignments, unmatched, missing = _build_relationship_assignments(
+                    show_name="The Real Housewives of Salt Lake City",
+                    cast_people=cast_people,
+                    by_norm_name=by_norm_name,
+                    season_filter=set(),
+                )
+
+    assert assignments == []
+    assert unmatched == []
+    assert missing == []
+    assert fandom_parser.call_count == 0
+    assert wiki_parser.call_count == 0
+
+
+def test_list_cast_with_roles_derives_latest_season_from_role_assignments() -> None:
+    show_id = str(uuid4())
+
+    rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-mary",
+            "person_name": "Mary Cosby",
+            "total_episodes": 16,
+            "archive_episodes": 0,
+            "seasons_appeared": 1,
+            "season_numbers": [1],
+            "latest_season": 1,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/mary.jpg",
+        }
+    ]
+    role_rows = [
+        {"person_id": "person-mary", "season_number": 1, "role_name": "Housewife"},
+        {"person_id": "person-mary", "season_number": 3, "role_name": "Friend"},
+        {"person_id": "person-mary", "season_number": 0, "role_name": "Guest"},
+    ]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch("api.routers.admin_show_roles.pg.fetch_all", side_effect=[rows, role_rows]):
+            payload = list_cast_with_roles(
+                UUID(show_id),
+                {},
+                sort_by="season",
+                order="desc",
+                seasons=None,
+                roles=None,
+                has_image=None,
+                archive_mode="all",
+            )
+
+    assert len(payload) == 1
+    assert payload[0]["person_id"] == "person-mary"
+    assert payload[0]["latest_season"] == 3
+    assert payload[0]["seasons_appeared"] == 2
+    assert payload[0]["season_numbers"] == [1, 3]
+    assert sorted(payload[0]["roles"]) == ["Friend", "Guest", "Housewife"]

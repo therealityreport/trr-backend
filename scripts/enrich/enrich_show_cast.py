@@ -339,24 +339,44 @@ def _normalize_name_for_match(value: str | None) -> str:
     return " ".join(text.split()).strip().lower()
 
 
+_HONORIFIC_NAME_TOKENS = {"dr", "doctor", "mr", "mrs", "ms", "miss", "sir", "lady"}
+
+
+def _tokenize_name_for_match(value: str | None) -> list[str]:
+    normalized = _normalize_name_for_match(value)
+    if not normalized:
+        return []
+    tokens = [token for token in normalized.split() if token]
+    while tokens and tokens[0] in _HONORIFIC_NAME_TOKENS:
+        tokens.pop(0)
+    return tokens
+
+
 def _names_match(expected: str | None, candidate: str | None) -> bool:
-    expected_norm = _normalize_name_for_match(expected)
-    candidate_norm = _normalize_name_for_match(candidate)
-    if not expected_norm or not candidate_norm:
-        return False
-    if expected_norm == candidate_norm:
-        return True
-    if expected_norm in candidate_norm:
-        return True
-    if candidate_norm in expected_norm:
-        return True
-    expected_tokens = expected_norm.split()
-    candidate_tokens = candidate_norm.split()
+    expected_tokens = _tokenize_name_for_match(expected)
+    candidate_tokens = _tokenize_name_for_match(candidate)
     if not expected_tokens or not candidate_tokens:
         return False
-    if expected_tokens[-1] == candidate_tokens[-1]:
+    if expected_tokens == candidate_tokens:
         return True
-    if set(expected_tokens) & set(candidate_tokens):
+    if len(expected_tokens) == 1 or len(candidate_tokens) == 1:
+        return expected_tokens[0] == candidate_tokens[0]
+    expected_first = expected_tokens[0]
+    expected_last = expected_tokens[-1]
+    candidate_first = candidate_tokens[0]
+    candidate_last = candidate_tokens[-1]
+    if expected_last != candidate_last:
+        return False
+    if expected_first == candidate_first:
+        return True
+    if (
+        len(expected_first) >= 3
+        and len(candidate_first) >= 3
+        and (
+            expected_first.startswith(candidate_first)
+            or candidate_first.startswith(expected_first)
+        )
+    ):
         return True
     return False
 
@@ -386,10 +406,13 @@ def _fandom_page_matches_name(
     *,
     page_url: str | None = None,
 ) -> bool:
+    page_owner = _name_from_fandom_url(page_url)
+    if page_owner and not _names_match(expected_name, page_owner):
+        return False
     candidates = [
         cast_fandom.get("full_name"),
         cast_fandom.get("page_title"),
-        _name_from_fandom_url(page_url),
+        page_owner,
     ]
     return any(_names_match(expected_name, cand) for cand in candidates)
 
