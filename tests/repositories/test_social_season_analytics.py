@@ -1,5 +1,6 @@
 """Unit tests for season social analytics helpers."""
 
+import inspect
 from datetime import UTC, date, datetime, timedelta
 
 import trr_backend.repositories.social_season_analytics as social_repo
@@ -549,3 +550,40 @@ def test_get_post_comments_youtube_includes_thumbnail_url(monkeypatch) -> None:
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda sql, params: [])
     payload = get_post_comments("season-1", platform="youtube", source_id="vid123")
     assert payload["thumbnail_url"] == "https://example.com/yt-thumb.jpg"
+
+
+def test_list_runs_applies_filters_and_order(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"id": "run-1", "status": "completed"}]
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    rows = social_repo.list_runs(
+        "season-1",
+        limit=25,
+        status="completed",
+        source_scope="bravo",
+    )
+
+    assert rows == [{"id": "run-1", "status": "completed"}]
+    sql = str(captured["sql"]).lower()
+    params = captured["params"]
+    assert "from social.scrape_runs" in sql
+    assert "where season_id = %s" in sql
+    assert "summary" in sql
+    assert "created_at" in sql
+    assert "started_at" in sql
+    assert "completed_at" in sql
+    assert "and status = %s" in sql
+    assert "and source_scope = %s" in sql
+    assert "order by created_at desc limit %s" in sql
+    assert params == ["season-1", "completed", "bravo", 25]
+
+
+def test_repository_has_single_pg_upsert_definition() -> None:
+    source = inspect.getsource(social_repo)
+    assert source.count("def _pg_upsert(") == 1
