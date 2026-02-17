@@ -1386,6 +1386,42 @@ def _pg_upsert(
         return pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
 
 
+def _pg_upsert(
+    table: str,
+    payload: dict[str, Any],
+    *,
+    conflict_col: str,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
+    """Upsert a row into social.{table} using direct SQL (psycopg2).
+
+    This avoids Supabase PostgREST schema-cache (PGRST002) errors that
+    occur intermittently with the ``social`` schema.
+    """
+    from psycopg2.extras import Json as PgJson
+
+    adapted: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, (dict, list)):
+            adapted[key] = PgJson(value)
+        else:
+            adapted[key] = value
+
+    cols = list(adapted.keys())
+    col_list = ", ".join(cols)
+    placeholders = ", ".join(["%s"] * len(cols))
+    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != conflict_col)
+
+    sql = f"""
+        INSERT INTO social.{table} ({col_list})
+        VALUES ({placeholders})
+        ON CONFLICT ({conflict_col}) DO UPDATE SET {updates}
+        RETURNING *
+    """
+    with pg.db_cursor(conn=conn) as cur:
+        return pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
+
+
 def _upsert_instagram_post(
     context: SeasonContext,
     *,

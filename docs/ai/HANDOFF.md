@@ -143,6 +143,65 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
     - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (12 passed)
     - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (passed)
 
+- February 12, 2026: Reduced Bravo read latency for show admin pages.
+  - `api/routers/admin_show_bravo.py` now avoids unnecessary `person_source_latest` fan-out reads when show snapshots already contain embedded normalized person videos/news.
+  - Fallback person snapshot reads are preserved only for older snapshots without embedded `videos_person` / `news_person`.
+  - Validation:
+    - `ruff check api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py`
+    - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+
+- February 12, 2026: Implemented image variant persistence and crop derivative generation for existing/new media assets.
+  - Added migration: `supabase/migrations/0119_create_media_asset_variants.sql`.
+  - Added variant generator: `trr_backend/media/image_variants.py`.
+  - Added admin endpoint: `POST /api/v1/admin/media-assets/{asset_id}/variants` (`api/routers/admin_media_assets.py`).
+  - Wired variant generation into:
+    - `api/routers/admin_scrape.py` (new imports + duplicate-link flows)
+    - `api/routers/admin_image_counts.py` (auto-count thumbnail crop -> crop variants)
+  - Added backfill scripts:
+    - `scripts/media/backfill_media_asset_variants.py`
+    - `scripts/backfill_media_asset_variants.py`
+  - Validation:
+    - `ruff check` on touched backend files (pass)
+    - `python3 -m py_compile` on touched backend modules/scripts (pass)
+
+- February 12, 2026: Instagram social ingest reliability + throughput hardening (RHOSLC S6 live debug).
+  - Increased season ingest API defaults for full backfills:
+    - `api/routers/socials.py` `SeasonSocialIngestRequest.max_posts_per_target`: `25 -> 5000` (max `20000`)
+    - `SeasonSocialIngestRequest.max_comments_per_post`: `100 -> 0` (allows post-only ingest)
+  - Added comment-fetch bypass when `max_comments_per_post == 0` for:
+    - Instagram (`_ingest_instagram`)
+    - TikTok (`_ingest_tiktok`)
+    - YouTube (`_ingest_youtube`)
+    - plus ingest options coercion now allows zero comments.
+  - Added Instagram ingest pacing env controls:
+    - `SOCIAL_INSTAGRAM_DELAY_SEC` (default `0.15`)
+    - `SOCIAL_INSTAGRAM_COMMENT_DELAY_SEC` (default `0.25`)
+    - documented in `.env.example`.
+  - Added router test to lock zero-comment behavior:
+    - `tests/api/routers/test_socials_season_analytics.py::test_ingest_allows_zero_comments_limit`
+  - Live smoke result (local DB):
+    - Season `e9161955-6ee4-4985-865e-3386a0f670fb` (RHOSLC S6), Instagram-only pre-season ingest (Aug 14, 2025 → Sep 16, 2025 ET): `51` posts ingested, `0` comments.
+    - Analytics check: week 0 Instagram posts = `47` (`get_analytics(... week=0, platforms=['instagram'])`).
+
+- February 12, 2026: fixed Instagram season-ingest undercount in social analytics.
+  - Root cause: `trr_backend/repositories/social_season_analytics.py` hardcoded `InstagramScraper(cookies={})`, forcing unauthenticated mode (limited to ~12 posts).
+  - Added `_load_instagram_cookies()` with resolution order:
+    1. `SOCIAL_INSTAGRAM_COOKIES_JSON` / `INSTAGRAM_COOKIES_JSON`
+    2. `SOCIAL_INSTAGRAM_COOKIES_FILE` / `INSTAGRAM_COOKIES_FILE`
+    3. repo default `scripts/socials/instagram/instagram_cookies.json`
+  - `_ingest_instagram(...)` now uses resolved cookies and logs a warning when `sessionid` is missing.
+  - Added env docs in `.env.example`:
+    - `SOCIAL_INSTAGRAM_COOKIES_JSON`
+    - `SOCIAL_INSTAGRAM_COOKIES_FILE`
+  - Added tests:
+    - `tests/repositories/test_social_season_analytics.py` (env-json precedence and file fallback)
+  - Improved Instagram GraphQL reliability in `trr_backend/socials/instagram/scraper.py`:
+    - Added doc-id fallback chain (`26035927152742158` then `33944389991841132`)
+    - Added optional env override `INSTAGRAM_PROFILE_POSTS_DOC_ID`
+  - Verification:
+    - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (12 passed)
+    - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (passed)
+
 - Fixed Bravo snapshot persistence failure (`Failed to persist show bravo snapshot`) for environments missing `core.sources.id='bravo'`:
   - Applied migration `supabase/migrations/0117_add_bravo_source.sql` to active DB.
   - Added `_ensure_bravo_source(...)` guard in `api/routers/admin_show_bravo.py` so commit paths verify/create the Bravo source row before writing show/person snapshots.
