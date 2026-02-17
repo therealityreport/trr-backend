@@ -1386,42 +1386,6 @@ def _pg_upsert(
         return pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
 
 
-def _pg_upsert(
-    table: str,
-    payload: dict[str, Any],
-    *,
-    conflict_col: str,
-    conn: Any | None = None,
-) -> dict[str, Any] | None:
-    """Upsert a row into social.{table} using direct SQL (psycopg2).
-
-    This avoids Supabase PostgREST schema-cache (PGRST002) errors that
-    occur intermittently with the ``social`` schema.
-    """
-    from psycopg2.extras import Json as PgJson
-
-    adapted: dict[str, Any] = {}
-    for key, value in payload.items():
-        if isinstance(value, (dict, list)):
-            adapted[key] = PgJson(value)
-        else:
-            adapted[key] = value
-
-    cols = list(adapted.keys())
-    col_list = ", ".join(cols)
-    placeholders = ", ".join(["%s"] * len(cols))
-    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != conflict_col)
-
-    sql = f"""
-        INSERT INTO social.{table} ({col_list})
-        VALUES ({placeholders})
-        ON CONFLICT ({conflict_col}) DO UPDATE SET {updates}
-        RETURNING *
-    """
-    with pg.db_cursor(conn=conn) as cur:
-        return pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
-
-
 def _upsert_instagram_post(
     context: SeasonContext,
     *,
@@ -1459,7 +1423,7 @@ def _upsert_instagram_post(
 def _upsert_instagram_comment_tree(
     context: SeasonContext,
     *,
-    job_id: str,
+    job_id: str | None,
     account: str,
     post_id: str,
     comment: Any,
@@ -1481,9 +1445,10 @@ def _upsert_instagram_comment_tree(
         "scraped_at": _now_utc(),
         "raw_data": comment.to_dict() if hasattr(comment, "to_dict") else {},
         "season_id": context.season_id,
-        "job_id": job_id,
         "source_account": account,
     }
+    if job_id:
+        payload["job_id"] = job_id
     row = _pg_upsert("instagram_comments", payload, conflict_col="comment_id", conn=conn)
     comment_db_id = (row or {}).get("id")
 
@@ -1748,7 +1713,7 @@ def _upsert_tiktok_post(
 def _upsert_tiktok_comment_tree(
     context: SeasonContext,
     *,
-    job_id: str,
+    job_id: str | None,
     account: str,
     post_id: str,
     comment: Any,
@@ -1771,9 +1736,10 @@ def _upsert_tiktok_comment_tree(
         "scraped_at": _now_utc(),
         "raw_data": comment.to_dict() if hasattr(comment, "to_dict") else {},
         "season_id": context.season_id,
-        "job_id": job_id,
         "source_account": account,
     }
+    if job_id:
+        payload["job_id"] = job_id
     row = _pg_upsert("tiktok_comments", payload, conflict_col="comment_id", conn=conn)
     comment_db_id = (row or {}).get("id")
 
@@ -2016,7 +1982,7 @@ def _upsert_youtube_video(
 def _upsert_youtube_comment_tree(
     context: SeasonContext,
     *,
-    job_id: str,
+    job_id: str | None,
     account: str,
     video_db_id: str,
     comment: Any,
@@ -2038,9 +2004,10 @@ def _upsert_youtube_comment_tree(
         "scraped_at": _now_utc(),
         "raw_data": comment.to_dict() if hasattr(comment, "to_dict") else {},
         "season_id": context.season_id,
-        "job_id": job_id,
         "source_account": account,
     }
+    if job_id:
+        payload["job_id"] = job_id
     row = _pg_upsert("youtube_comments", payload, conflict_col="comment_id", conn=conn)
     comment_db_id = (row or {}).get("id")
 
@@ -2245,7 +2212,7 @@ def _ingest_youtube(
 def _upsert_tweet(
     context: SeasonContext,
     *,
-    job_id: str,
+    job_id: str | None,
     account: str,
     tweet: Any,
     conn: Any | None = None,
@@ -2275,9 +2242,10 @@ def _upsert_tweet(
         "raw_data": tweet.to_dict() if hasattr(tweet, "to_dict") else {},
         "show_id": context.show_id,
         "season_id": context.season_id,
-        "job_id": job_id,
         "source_account": account,
     }
+    if job_id:
+        payload["job_id"] = job_id
     return _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn)
 
 
@@ -3163,6 +3131,43 @@ def list_jobs(
     if platform:
         sql += " and platform = %s"
         params.append(platform)
+    sql += " order by created_at desc limit %s"
+    params.append(safe_limit)
+    return pg.fetch_all(sql, params)
+
+
+def list_runs(
+    season_id: str,
+    *,
+    limit: int = 50,
+    status: str | None = None,
+    source_scope: str | None = None,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 250))
+    sql = """
+        select
+          id::text,
+          season_id::text as season_id,
+          show_id::text as show_id,
+          source_scope,
+          status,
+          config,
+          summary,
+          initiated_by,
+          created_at,
+          started_at,
+          completed_at,
+          cancelled_at
+        from social.scrape_runs
+        where season_id = %s
+    """
+    params: list[Any] = [season_id]
+    if status:
+        sql += " and status = %s"
+        params.append(status)
+    if source_scope:
+        sql += " and source_scope = %s"
+        params.append(source_scope)
     sql += " order by created_at desc limit %s"
     params.append(safe_limit)
     return pg.fetch_all(sql, params)
@@ -5746,6 +5751,229 @@ def get_post_comments(
         }
 
     raise ValueError(f"Unsupported platform: {platform}")
+
+
+def refresh_post_comments(
+    season_id: str,
+    *,
+    platform: str,
+    source_id: str,
+    max_comments_per_post: int = 100000,
+    fetch_replies: bool = True,
+) -> dict[str, Any]:
+    """Re-sync comments for a single post/video/reply thread."""
+    normalized_platform = (platform or "").strip().lower()
+    if normalized_platform not in SUPPORTED_PLATFORMS:
+        raise ValueError(f"Unsupported platform: {platform}")
+
+    context = get_season_context(season_id)
+    try:
+        max_comments = max(0, int(max_comments_per_post))
+    except (TypeError, ValueError):
+        max_comments = 0
+
+    if normalized_platform == "instagram":
+        row = pg.fetch_one(
+            """
+            select p.id::text as id,
+                   coalesce(nullif(p.source_account, ''), nullif(p.username, ''), '') as account
+            from social.instagram_posts p
+            where p.season_id = %s and p.shortcode = %s
+            """,
+            [season_id, source_id],
+        )
+        if not row:
+            raise ValueError("Post not found")
+
+        from trr_backend.socials.instagram import InstagramScraper
+
+        account = str(row.get("account") or "")
+        scraper = InstagramScraper(cookies=_load_instagram_cookies())
+        comments = (
+            scraper.fetch_comments(
+                source_id,
+                max_comments=max_comments,
+                fetch_replies=fetch_replies,
+                delay=0.25,
+            )
+            if max_comments > 0
+            else []
+        )
+        upserted = 0
+        with pg.db_connection() as conn:
+            for comment in comments:
+                upserted += _upsert_instagram_comment_tree(
+                    context,
+                    job_id=None,
+                    account=account,
+                    post_id=str(row["id"]),
+                    comment=comment,
+                    conn=conn,
+                )
+        total_comments = _count_stored_comments([str(row["id"])], "instagram").get(str(row["id"]), 0)
+        return {
+            "platform": normalized_platform,
+            "source_id": source_id,
+            "comments_fetched": len(comments),
+            "comments_upserted": upserted,
+            "total_comments_in_db": total_comments,
+            "fetch_replies": fetch_replies,
+            "max_comments_per_post": max_comments,
+            "comment_fetch_reason": str(getattr(scraper, "last_comment_fetch_reason", "") or ""),
+            "comments_auth_failed": bool(getattr(scraper, "comments_auth_failed", False)),
+        }
+
+    if normalized_platform == "tiktok":
+        row = pg.fetch_one(
+            """
+            select p.id::text as id,
+                   coalesce(nullif(p.source_account, ''), nullif(p.username, ''), '') as account
+            from social.tiktok_posts p
+            where p.season_id = %s and p.video_id = %s
+            """,
+            [season_id, source_id],
+        )
+        if not row:
+            raise ValueError("Post not found")
+
+        from trr_backend.socials.tiktok import TikTokScraper
+
+        account = str(row.get("account") or "")
+        scraper = TikTokScraper(cookies=_load_tiktok_cookies())
+        comments = (
+            scraper.fetch_comments(
+                source_id,
+                username=account,
+                max_comments=max_comments,
+                fetch_replies=fetch_replies,
+                delay=0.5,
+            )
+            if max_comments > 0
+            else []
+        )
+        upserted = 0
+        with pg.db_connection() as conn:
+            for comment in comments:
+                upserted += _upsert_tiktok_comment_tree(
+                    context,
+                    job_id=None,
+                    account=account,
+                    post_id=str(row["id"]),
+                    comment=comment,
+                    conn=conn,
+                )
+        total_comments = _count_stored_comments([str(row["id"])], "tiktok").get(str(row["id"]), 0)
+        return {
+            "platform": normalized_platform,
+            "source_id": source_id,
+            "comments_fetched": len(comments),
+            "comments_upserted": upserted,
+            "total_comments_in_db": total_comments,
+            "fetch_replies": fetch_replies,
+            "max_comments_per_post": max_comments,
+            "comment_fetch_reason": str(getattr(scraper, "_last_api_fail_reason", "") or ""),
+        }
+
+    if normalized_platform == "youtube":
+        row = pg.fetch_one(
+            """
+            select v.id::text as id,
+                   coalesce(nullif(v.source_account, ''), nullif(v.channel_title, ''), '') as account
+            from social.youtube_videos v
+            where v.season_id = %s and v.video_id = %s
+            """,
+            [season_id, source_id],
+        )
+        if not row:
+            raise ValueError("Post not found")
+
+        from trr_backend.socials.youtube import YouTubeScraper
+
+        account = str(row.get("account") or "")
+        scraper = YouTubeScraper()
+        comments = (
+            scraper.fetch_comments(
+                source_id,
+                max_comments=max_comments,
+                fetch_replies=fetch_replies,
+                delay=0.5,
+            )
+            if max_comments > 0
+            else []
+        )
+        upserted = 0
+        with pg.db_connection() as conn:
+            for comment in comments:
+                upserted += _upsert_youtube_comment_tree(
+                    context,
+                    job_id=None,
+                    account=account,
+                    video_db_id=str(row["id"]),
+                    comment=comment,
+                    conn=conn,
+                )
+        total_comments = _count_stored_comments([str(row["id"])], "youtube").get(str(row["id"]), 0)
+        return {
+            "platform": normalized_platform,
+            "source_id": source_id,
+            "comments_fetched": len(comments),
+            "comments_upserted": upserted,
+            "total_comments_in_db": total_comments,
+            "fetch_replies": fetch_replies,
+            "max_comments_per_post": max_comments,
+        }
+
+    row = pg.fetch_one(
+        """
+        select t.tweet_id,
+               coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '') as account
+        from social.twitter_tweets t
+        where t.season_id = %s and t.tweet_id = %s and t.is_reply = false
+        """,
+        [season_id, source_id],
+    )
+    if not row:
+        raise ValueError("Post not found")
+
+    from trr_backend.socials.twitter import TwitterScraper
+
+    account = str(row.get("account") or "")
+    twitter_cookies, twitter_bearer = _load_twitter_auth()
+    twikit_creds = _load_twikit_credentials()
+    if not twitter_cookies.get("ct0") and twikit_creds:
+        if twikit_creds.get("auth_token") and twikit_creds.get("ct0"):
+            twitter_cookies = {**twitter_cookies, "auth_token": twikit_creds["auth_token"], "ct0": twikit_creds["ct0"]}
+
+    scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
+    replies = (
+        scraper.fetch_tweet_replies(source_id, delay=0.5)[:max_comments]
+        if fetch_replies and max_comments > 0
+        else []
+    )
+    upserted = 0
+    with pg.db_connection() as conn:
+        for reply in replies:
+            if not getattr(reply, "reply_to_tweet_id", None):
+                reply.reply_to_tweet_id = source_id
+            reply.is_reply = True
+            if _upsert_tweet(
+                context,
+                job_id=None,
+                account=account,
+                tweet=reply,
+                conn=conn,
+            ):
+                upserted += 1
+    total_comments = _count_stored_replies([source_id]).get(source_id, 0)
+    return {
+        "platform": normalized_platform,
+        "source_id": source_id,
+        "comments_fetched": len(replies),
+        "comments_upserted": upserted,
+        "total_comments_in_db": total_comments,
+        "fetch_replies": fetch_replies,
+        "max_comments_per_post": max_comments,
+    }
 
 
 def build_csv(snapshot: dict[str, Any]) -> str:
