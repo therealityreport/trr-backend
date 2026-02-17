@@ -1423,3 +1423,17 @@ Continuation (same session, 2026-02-17) — Gemini telemetry acceptance hardenin
 - Validation:
   - `pytest -q tests/vision/test_text_overlay_fallback.py::test_resolve_gemini_model_selection_prefers_fast_alias tests/vision/test_text_overlay_fallback.py::test_resolve_gemini_model_selection_tracks_canonical_fallback_path tests/vision/test_text_overlay_fallback.py::test_detect_media_asset_text_overlay_persists_model_telemetry_fields tests/repositories/test_social_season_analytics.py::test_resolve_sentiment_gemini_model_selection_prefers_pro_alias tests/repositories/test_social_season_analytics.py::test_classify_ambiguous_sentiments_logs_model_source_and_fallback` (`5 passed`)
   - `ruff check tests/vision/test_text_overlay_fallback.py tests/repositories/test_social_season_analytics.py` (pass)
+
+Continuation (same session, 2026-02-17) — remediation PR stabilization + green CI:
+- Branch/PR:
+  - `codex/plan-remediation-backend`
+  - `https://github.com/therealityreport/trr-backend/pull/63`
+- Final stabilization actions:
+  - Pushed consolidated remediation commit with env contract checks, lock workflow artifacts, social lifecycle parity updates, migration `0126`, and cross-collab TASK9/TASK10 docs.
+  - Resolved prior CI mismatch by ensuring PR checks run against the updated branch head.
+- Validation:
+  - Local: `pytest -q` (`549 passed, 18 skipped`)
+  - GitHub checks on head `6d015478035b61f0342b9ad7bdf9212111c9b5dc`:
+    - `ci / test` (success)
+    - `Secret Scan / gitleaks` (success)
+    - `Repository Map / generate-repo-map` (success)
