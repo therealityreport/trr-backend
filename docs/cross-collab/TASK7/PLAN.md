@@ -40,3 +40,18 @@ Add Bravo parsing + persisted snapshot APIs for admin import/sync, and support T
 3. Show/person snapshot rows are written to latest + history tables.
 4. Social merge does not overwrite non-empty existing handles.
 5. Backend targeted tests and lint pass.
+
+## Addendum (2026-02-17) — Cast Matrix Sync
+
+1. Add manual cast matrix sync endpoint:
+   - `POST /api/v1/admin/shows/{show_id}/cast-matrix/sync`
+2. Parse cast matrix roles from:
+   - Wikipedia (primary) and Fandom (fallback) with `Main/Friend/Guest/TBA` handling.
+3. Parse relationship/kid signals from Fandom person pages:
+   - season-scoped relationship roles (`Husband/Ex-Husband/Boyfriend/Ex-Boyfriend/Fiance/Ex-Fiance`)
+   - global `Kid` role (`season_number=0`).
+4. Add Bravo-link/image enforcement for Bravo-network shows:
+   - upsert person `bravo_profile` links for Housewife/Friend cast
+   - import missing Bravo profile images for default cast thumbnails.
+5. Auto-trigger the same cast-matrix sync from Bravo commit with:
+   - `sync_cast_matrix: true` default.

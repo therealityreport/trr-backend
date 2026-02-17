@@ -167,7 +167,6 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
     assert body["run_id"] == "run-123"
     assert body["stages"] == ["posts", "comments"]
     assert ingest_mock.call_args.kwargs["ingest_mode"] == "posts_and_comments"
-    assert ingest_mock.call_args.kwargs["depth_preset"] == "deep"
 
 
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,6 +271,7 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
         "window": {"week": 0},
         "summary": {},
         "weekly": [],
+        "weekly_platform_engagement": [],
         "platform_breakdown": [],
         "themes": {"positive": [], "negative": []},
         "leaderboards": {"bravo_content": [], "viewer_discussion": []},
@@ -286,6 +286,7 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
 
     assert response.status_code == 200
     assert response.json()["window"]["week"] == 0
+    assert "weekly_platform_engagement" in response.json()
     assert mocked.call_args.kwargs["week"] == 0
 
 

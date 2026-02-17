@@ -64,6 +64,7 @@ class BravoCommitRequest(BaseModel):
     airs_override: str | None = None
     person_url_mappings: dict[str, UUID] | None = None
     season_number: int | None = Field(default=None, ge=1, le=200)
+    sync_cast_matrix: bool = True
 
 
 def _to_iso_now() -> str:
@@ -697,12 +698,12 @@ def _import_bravo_person_image(
                 ImportImageItem(
                     candidate_id=f"bravo-person-hero-{person_id}",
                     url=hero_image_url,
-                    caption=f"Bravo profile image{f' ({person_name})' if person_name else ''}",
+                    caption=f"Bravo profile picture{f' ({person_name})' if person_name else ''}",
                     kind="promo",
                     person_ids=[UUID(person_id)],
                     context_section="bravo_profile",
-                    context_type="profile",
-                    asset_name="Bravo profile image",
+                    context_type="profile_picture",
+                    asset_name="Bravo profile picture",
                 )
             ],
         )
@@ -715,11 +716,11 @@ def _import_bravo_person_image(
                 ImportImageItem(
                     candidate_id=f"bravo-person-hero-{person_id}",
                     url=hero_image_url,
-                    caption=f"Bravo profile image{f' ({person_name})' if person_name else ''}",
+                    caption=f"Bravo profile picture{f' ({person_name})' if person_name else ''}",
                     kind="promo",
                     context_section="bravo_profile",
-                    context_type="profile",
-                    asset_name="Bravo profile image",
+                    context_type="profile_picture",
+                    asset_name="Bravo profile picture",
                 )
             ],
         )
@@ -1380,6 +1381,27 @@ def commit_bravo_import(
         fallback_season_number=payload.season_number,
         actor=actor,
     )
+    cast_matrix_sync: dict[str, Any] | None = None
+    cast_matrix_sync_error: str | None = None
+    if payload.sync_cast_matrix:
+        try:
+            from api.routers.admin_show_roles import CastMatrixSyncRequest, sync_cast_matrix_for_show
+
+            cast_matrix_sync = sync_cast_matrix_for_show(
+                show_id=show_id_str,
+                payload=CastMatrixSyncRequest(
+                    season_numbers=[int(payload.season_number)] if payload.season_number else [],
+                    include_relationship_roles=True,
+                    include_bravo_links=True,
+                    include_bravo_images=True,
+                    dry_run=False,
+                ),
+                db=db,
+                admin_user=admin_user,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("cast-matrix sync failed for show_id=%s", show_id_str)
+            cast_matrix_sync_error = str(exc)
 
     person_snapshots: list[dict[str, Any]] = []
     updated_people = 0
@@ -1523,6 +1545,8 @@ def commit_bravo_import(
     return {
         "show_snapshot": show_snapshot,
         "person_snapshots": person_snapshots,
+        "cast_matrix_sync": cast_matrix_sync,
+        "cast_matrix_sync_error": cast_matrix_sync_error,
         "counts": {
             "show_videos": len(normalized.get("videos_show") or []),
             "show_news": len(normalized.get("news_show") or []),
@@ -1538,6 +1562,18 @@ def commit_bravo_import(
             "role_suggestions": role_suggestion_stats.get("role_suggestions", 0),
             "role_assignments": role_suggestion_stats.get("role_assignments", 0),
             "announcement_people": role_suggestion_stats.get("announcement_people", 0),
+            "cast_matrix_season_roles": int(
+                ((cast_matrix_sync or {}).get("counts") or {}).get("season_role_assignments_upserted", 0)
+            ),
+            "cast_matrix_relationship_roles": int(
+                ((cast_matrix_sync or {}).get("counts") or {}).get("relationship_role_assignments_upserted", 0)
+            ),
+            "cast_matrix_kid_roles": int(
+                ((cast_matrix_sync or {}).get("counts") or {}).get("global_kid_assignments_upserted", 0)
+            ),
+            "cast_matrix_bravo_links": int(
+                ((cast_matrix_sync or {}).get("counts") or {}).get("bravo_links_upserted", 0)
+            ),
         },
         "unmatched_person_urls": unmatched_people,
         "image_import_errors": image_import_errors,

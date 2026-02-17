@@ -13,6 +13,7 @@ from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.db import pg
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-links"])
+_BRAVO_VARIANT = "default"
 
 EntityType = Literal["show", "season", "person"]
 LinkGroup = Literal["official", "social", "knowledge", "cast_announcements", "other"]
@@ -244,10 +245,10 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
         """
         SELECT payload
         FROM core.show_source_latest
-        WHERE show_id = %s AND source_id = 'bravo' AND variant = 'show_bundle_v1'
+        WHERE show_id = %s AND source_id = 'bravo' AND variant = %s
         LIMIT 1
         """,
-        [show_id],
+        [show_id, _BRAVO_VARIANT],
     )
     payload = snapshot.get("payload") if snapshot and isinstance(snapshot.get("payload"), dict) else {}
     normalized = payload.get("normalized") if isinstance(payload, dict) else {}
@@ -333,6 +334,26 @@ def _discover_season_links(show_id: str) -> list[dict[str, Any]]:
 
 
 def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
+    show = pg.fetch_one("SELECT networks FROM core.shows WHERE id = %s", [show_id]) or {}
+    networks = [str(value).strip().lower() for value in (show.get("networks") or []) if isinstance(value, str)]
+    is_bravo_show = "bravo" in networks
+
+    housewife_friend_ids: set[str] = set()
+    if is_bravo_show:
+        role_rows = pg.fetch_all(
+            """
+            SELECT DISTINCT sra.person_id::text AS person_id
+            FROM core.show_cast_role_assignments sra
+            JOIN core.show_role_catalog rc ON rc.id = sra.role_id
+            WHERE sra.show_id = %s
+              AND lower(rc.name) IN ('housewife', 'friend')
+            """,
+            [show_id],
+        )
+        housewife_friend_ids = {
+            str(row.get("person_id") or "").strip() for row in role_rows if row.get("person_id")
+        }
+
     rows = pg.fetch_all(
         """
         SELECT DISTINCT p.id, p.full_name, p.external_ids, cf.source_url AS fandom_url
@@ -347,6 +368,8 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
     for row in rows:
         person_id = str(row.get("id"))
         name = str(row.get("full_name") or "").strip()
+        fandom_url = str(row.get("fandom_url") or "").strip()
+        has_fandom_profile = bool(fandom_url)
         external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
         wikidata = str(external_ids.get("wikidata") or external_ids.get("wikidata_id") or "").strip()
         if wikidata:
@@ -362,7 +385,7 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                     "source": "core.people.external_ids",
                 }
             )
-        if name:
+        if has_fandom_profile and name:
             found.append(
                 {
                     "entity_type": "person",
@@ -375,8 +398,7 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                     "source": "derived",
                 }
             )
-        fandom_url = str(row.get("fandom_url") or "").strip()
-        if fandom_url:
+        if has_fandom_profile:
             found.append(
                 {
                     "entity_type": "person",
@@ -389,6 +411,21 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                     "source": "core.cast_fandom",
                 }
             )
+        if is_bravo_show and person_id in housewife_friend_ids and name:
+            slug = _slug(name)
+            if slug:
+                found.append(
+                    {
+                        "entity_type": "person",
+                        "entity_id": person_id,
+                        "season_number": 0,
+                        "link_group": "official",
+                        "link_kind": "bravo_profile",
+                        "label": f"{name} Bravo profile",
+                        "url": f"https://www.bravotv.com/people/{slug}",
+                        "source": "cast_matrix_sync",
+                    }
+                )
     return found
 
 

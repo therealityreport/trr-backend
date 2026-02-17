@@ -114,6 +114,7 @@ class InstagramPost:
 
     # Media URLs
     media_urls: list[str] = field(default_factory=list)
+    thumbnail_url: str | None = None
 
     # Comments (populated when fetch_comments is called)
     comment_list: list[InstagramComment] = field(default_factory=list)
@@ -153,6 +154,8 @@ class InstagramScraper:
         self.session = self._create_session()
         self._request_count = 0
         self.last_retrieval_meta: dict[str, Any] = {}
+        self.comments_auth_failed = False
+        self.last_comment_fetch_reason: str | None = None
 
     def _profile_posts_doc_ids(self) -> list[str]:
         override = (os.getenv("INSTAGRAM_PROFILE_POSTS_DOC_ID") or "").strip()
@@ -185,10 +188,13 @@ class InstagramScraper:
             "accept-language": "en-US,en;q=0.9",
             "origin": "https://www.instagram.com",
             "referer": referer or "https://www.instagram.com/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
             "user-agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/144.0.0.0 Safari/537.36"
+                "Chrome/131.0.0.0 Safari/537.36"
             ),
             "x-ig-app-id": "936619743392459",
             "x-requested-with": "XMLHttpRequest",
@@ -298,6 +304,7 @@ class InstagramScraper:
         """Parse a post node into InstagramPost."""
         shortcode = self._extract_shortcode(node)
         taken_at = self._extract_timestamp(node)
+        media_urls = self._extract_media_urls(node)
 
         return InstagramPost(
             shortcode=shortcode,
@@ -313,6 +320,8 @@ class InstagramScraper:
             url=f"https://www.instagram.com/p/{shortcode}/" if shortcode else "",
             pk=str(node.get("pk") or node.get("id", "")),
             username=config.username,
+            media_urls=media_urls,
+            thumbnail_url=media_urls[0] if media_urls else None,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -415,7 +424,11 @@ class InstagramScraper:
     def fetch_post_info(self, shortcode: str, delay: float = 2.0) -> dict | None:
         """Fetch detailed post info including media URLs."""
         self._rate_limit(delay)
-        media_id = self._shortcode_to_media_id(shortcode)
+        try:
+            media_id = self._shortcode_to_media_id(shortcode)
+        except (ValueError, IndexError):
+            logger.error(f"Invalid shortcode '{shortcode}' — skipping post info fetch")
+            return None
         url = self.POST_INFO_URL.format(media_id=media_id)
         headers = self._get_headers(f"https://www.instagram.com/p/{shortcode}/")
 
@@ -446,7 +459,12 @@ class InstagramScraper:
         Returns:
             List of InstagramComment objects with nested replies
         """
-        media_id = self._shortcode_to_media_id(shortcode)
+        self.last_comment_fetch_reason = None
+        try:
+            media_id = self._shortcode_to_media_id(shortcode)
+        except (ValueError, IndexError):
+            logger.error(f"Invalid shortcode '{shortcode}' — skipping comment fetch")
+            return []
         post_url = f"https://www.instagram.com/p/{shortcode}/"
         logger.info(f"Fetching comments for {shortcode} (media_id: {media_id})")
 
@@ -466,9 +484,37 @@ class InstagramScraper:
             try:
                 response = self.session.get(url, params=params, headers=headers, cookies=self.cookies)
                 response.raise_for_status()
-                data = response.json()
+                content_type = response.headers.get("content-type", "")
+                if "text/html" in content_type:
+                    if not self.comments_auth_failed:
+                        logger.error(
+                            "Instagram returned HTML instead of JSON for comments on %s "
+                            "(session cookie likely expired — re-export cookies to fix)",
+                            shortcode,
+                        )
+                    self.comments_auth_failed = True
+                    self.last_comment_fetch_reason = "html_challenge_or_auth_required"
+                    break
+                try:
+                    data = response.json()
+                except ValueError:
+                    self.last_comment_fetch_reason = "non_json_response"
+                    logger.error(
+                        "Instagram comments endpoint returned a non-JSON payload for %s "
+                        "(status=%s content-type=%s)",
+                        shortcode,
+                        response.status_code,
+                        content_type or "unknown",
+                    )
+                    break
             except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to fetch comments: {e}")
+                self.last_comment_fetch_reason = "request_error"
+                logger.error(
+                    "Failed to fetch comments for %s (status=%s): %s",
+                    shortcode,
+                    getattr(response, "status_code", "?") if "response" in dir() else "?",
+                    e,
+                )
                 break
 
             # Parse comments
@@ -524,8 +570,28 @@ class InstagramScraper:
             try:
                 response = self.session.get(url, params=params, headers=headers, cookies=self.cookies)
                 response.raise_for_status()
-                data = response.json()
+                content_type = response.headers.get("content-type", "")
+                if "text/html" in content_type:
+                    logger.error(
+                        "Instagram returned HTML for replies on comment %s (session cookie likely expired)",
+                        comment_id,
+                    )
+                    self.last_comment_fetch_reason = "html_challenge_or_auth_required"
+                    break
+                try:
+                    data = response.json()
+                except ValueError:
+                    self.last_comment_fetch_reason = "non_json_response"
+                    logger.error(
+                        "Instagram replies endpoint returned a non-JSON payload for comment %s "
+                        "(status=%s content-type=%s)",
+                        comment_id,
+                        response.status_code,
+                        content_type or "unknown",
+                    )
+                    break
             except requests.exceptions.RequestException as e:
+                self.last_comment_fetch_reason = "request_error"
                 logger.error(f"Failed to fetch replies for comment {comment_id}: {e}")
                 break
 

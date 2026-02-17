@@ -1,21 +1,25 @@
 # AGENTS — TRR-Backend (Operational Rules)
 
-This file defines how automated agents and contributors should work in **TRR-Backend**.
-For cross-repo coordination rules, see the workspace root:
+This file is the canonical policy for agents working in `TRR-Backend`.
+Workspace-level coordination rules are defined at:
 - `/Users/thomashulihan/Projects/TRR/AGENTS.md`
 - `/Users/thomashulihan/Projects/TRR/CLAUDE.md`
 
 ## Scope
-- API: FastAPI app in `api/` (routes mounted under `/api/v1`)
-- Library: shared code in `trr_backend/`
-- Database: Supabase migrations and schema artifacts in `supabase/`
-- Scripts: sync/backfill/verify utilities in `scripts/`
+- FastAPI app: `api/` (mounted under `/api/v1/*`)
+- Shared backend library: `trr_backend/`
+- Supabase schema/migrations: `supabase/`
+- Operational scripts: `scripts/`
 
 ## Git Workflow
-This repo intentionally does **not** prescribe branching.
-- Default is work on `main`.
-- Only create/use a branch or worktree if explicitly asked.
+- Default: work on `main` unless explicitly asked otherwise.
+- Only create/use a branch or worktree if explicitly requested.
 - Never force-push to `main`.
+
+## Start-of-Session Checklist
+1. Read this file and `/Users/thomashulihan/Projects/TRR/TRR-Backend/CLAUDE.md`.
+2. Read workspace `/Users/thomashulihan/Projects/TRR/AGENTS.md` for cross-repo ordering.
+3. Confirm whether task changes API contracts, DB schema, or screenalytics integration.
 
 ## Essential Commands
 Setup:
@@ -38,52 +42,72 @@ ruff format --check .
 pytest
 ```
 
-Medium checks (pre-PR / when relevant):
+Medium checks (when relevant):
 ```bash
-make schema-docs-check       # if schema/migrations changed
-make repo-map-check          # if repo structure changed
+make schema-docs-check
+make repo-map-check
 ```
 
-Slow (CI simulation):
+Slow/CI simulation:
 ```bash
 make ci-local
 ```
 
-## Coding Conventions
-- Python: 3.11+, type hints on public functions, explicit exceptions (no bare `except`).
-- Formatting/linting: `ruff` is the source of truth.
-- FastAPI:
-  - Routers live in `api/routers/`
-  - Prefer small request/response models and keep backwards compatibility.
+## Coding and API Conventions
+- Python 3.11+, explicit types on public functions, no bare `except`.
+- `ruff` is formatting/lint source of truth.
+- FastAPI routers live in `api/routers/`.
+- Prefer additive API changes; preserve backward compatibility.
 
-## API Contract Rules
-- Additive changes only unless you update all consumers in the same change set.
-- New response fields must be optional for consumers (and safely defaulted).
-- If you change any endpoint shape used by TRR-APP, update the consumer code:
+Contract rules:
+- If TRR-APP consumers are affected, update in same session:
   - `TRR-APP/apps/web/src/lib/server/trr-api/`
-- If you change any screenalytics integration behavior, update:
+- If screenalytics integration changes, update:
   - `trr_backend/clients/screenalytics.py`
 
-## Auth / Admin Safety
+## Auth and Admin Safety
 - Admin access must be allowlist-only (`ADMIN_EMAIL_ALLOWLIST`).
-- Shared secret between TRR-APP and TRR-Backend:
-  - `TRR_INTERNAL_ADMIN_SHARED_SECRET`
-- Service-to-service token for `/api/v1/screenalytics/*`:
-  - `SCREENALYTICS_SERVICE_TOKEN`
+- Shared secret with TRR-APP: `TRR_INTERNAL_ADMIN_SHARED_SECRET`.
+- Service token for `/api/v1/screenalytics/*`: `SCREENALYTICS_SERVICE_TOKEN`.
 
-## Database / Migrations
-- Never edit an existing migration. Always create a new migration.
-- After changing migrations/schema, keep docs in sync:
-  - `make schema-docs-check` (or `make schema-docs-reset-check` for a fresh DB)
-
-## PostgREST Schema Cache
-If you add/modify database functions and PostgREST can’t see them:
+## Database and Migrations
+- Never edit an existing migration; create a new migration.
+- Keep schema docs in sync after migration/schema changes.
+- If PostgREST cannot see new functions, reload schema cache:
 ```bash
 ./scripts/reload_postgrest_schema.sh
 ```
 
-## Cross-Repo Coordination (TRR Workspace)
-- Implementation order: TRR-Backend first → screenalytics (if impacted) → TRR-APP.
-- Keep `docs/cross-collab/TASK*/` aligned with any cross-repo changes.
-- Update `docs/ai/HANDOFF.md` before ending a session if you touched this repo.
+## Cross-Repo Implementation Order (Must Follow)
+Implementation order is fixed by workspace policy:
+1. `TRR-Backend` schema/contracts first
+2. `screenalytics` consumers next (if impacted)
+3. `TRR-APP` UI/consumer updates last
 
+## Validation and Handoff (Required)
+Before ending session:
+1. Run fast checks for changed backend behavior.
+2. Run targeted tests for changed endpoints/contracts.
+3. Update `docs/ai/HANDOFF.md`.
+
+## Skill Routing (Repo)
+Use the smallest set of skills that fully covers the backend task.
+
+Primary skills:
+- `senior-backend`: API routes, schema/migrations, backend performance/security.
+- `senior-architect`: system/API design tradeoffs, layering/dependency checks.
+- `senior-qa`: backend test coverage and regression validation.
+- `code-reviewer`: PR risk scans and prioritized review findings.
+
+Secondary skills:
+- `senior-fullstack`: if backend change requires coordinated frontend integration.
+- `tdd-guide`: test-first implementation workflow.
+- `senior-devops`: CI/deploy/pipeline hardening.
+- `tech-stack-evaluator`: only for non-trivial architecture/tooling decisions.
+- `aws-solution-architect`: only if AWS migration/architecture is explicitly requested.
+
+Skill sequencing for backend feature work:
+1. `senior-architect` (if decision-heavy)
+2. `senior-backend`
+3. `senior-qa`
+4. `code-reviewer` (review/refinement)

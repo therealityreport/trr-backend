@@ -1,10 +1,7 @@
 # Status — Task 7 (Bravo Import + Cast Eligibility + Videos/News)
 
 Repo: TRR-Backend
-Last updated: February 12, 2026
-=======
-Last updated: February 11, 2026
->>>>>>> origin/main
+Last updated: February 17, 2026
 
 ## Phase Status
 
@@ -21,6 +18,45 @@ Last updated: February 11, 2026
 None.
 
 ## Recent Activity
+
+- February 17, 2026: Implemented global cast-matrix sync and Bravo auto-trigger integration.
+  - Added endpoint:
+    - `POST /api/v1/admin/shows/{show_id}/cast-matrix/sync`
+  - Added Wiki/Fandom cast table parser + merge:
+    - `trr_backend/ingestion/show_cast_matrix_scraper.py`
+  - Extended Fandom person parser for relationship/family variants:
+    - `trr_backend/ingestion/fandom_person_scraper.py`
+  - Added role sync service with auto-source replacement preserving manual rows:
+    - `api/routers/admin_show_roles.py`
+  - Added Bravo commit auto-sync flag (`sync_cast_matrix=true` default):
+    - `api/routers/admin_show_bravo.py`
+  - Fixed Bravo snapshot variant mismatch in link discovery read path:
+    - `api/routers/admin_show_links.py` now uses variant `default`.
+  - Validation:
+    - `pytest -q tests/ingestion/test_show_cast_matrix_scraper.py tests/ingestion/test_fandom_person_scraper.py tests/api/routers/test_admin_show_roles.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py` (`21 passed`)
+
+- February 13, 2026: Implemented Bravo profile-picture content typing + thumbnail metadata persistence for gallery performance.
+  - `api/routers/admin_show_bravo.py`
+    - Bravo person image import now writes:
+      - `context_section: "bravo_profile"`
+      - `context_type: "profile_picture"` (legacy `profile` replaced)
+      - `asset_name/caption`: "Bravo profile picture"
+  - `trr_backend/media/image_variants.py`
+    - Base variant metadata now persists `thumb_url` in addition to `display_url`/`detail_url`.
+  - Validation:
+    - `ruff check api/routers/admin_show_bravo.py trr_backend/media/image_variants.py` (pass)
+    - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+
+- February 12, 2026: Tightened people link discovery to require fandom profile presence for person Wikipedia/Fandom links.
+  - Updated `api/routers/admin_show_links.py`:
+    - person `wikipedia` and `fandom` links are now emitted only when `core.cast_fandom` has a fandom URL for that person.
+  - RHOSLC immediate data cleanup + rediscovery run:
+    - deleted stale RHOSLC person `wikipedia`/`fandom` link rows
+    - reran `POST /api/v1/admin/shows/{show_id}/links/discover`
+    - resulting RHOSLC person link kinds: `fandom:66`, `wikipedia:66` (paired)
+  - Validation:
+    - `ruff check api/routers/admin_show_links.py` (pass)
+    - `python -m py_compile api/routers/admin_show_links.py` (pass)
 
 - February 12, 2026: Added RHOSLC backfill runbook for discovered links + cast-role suggestions.
   - Runbook:
