@@ -40,6 +40,21 @@ _RELATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bex\s*[- ]?fiance(?:e|é)?\b", re.IGNORECASE), "Ex-Fiance"),
     (re.compile(r"\bfiance(?:e|é)?\b", re.IGNORECASE), "Fiance"),
 ]
+_WIKIPEDIA_MISSING_PATTERNS = (
+    "wikipedia does not have an article with this exact name",
+    "no article title matches",
+    "the page does not exist",
+)
+_FANDOM_MISSING_PATTERNS = (
+    "there is currently no text in this page",
+    "this page is currently unavailable",
+)
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+_WIKI_TEMPLATE_CSS_RE = re.compile(
+    r"(?:\s*\.mw-parser-output\s+\.[a-z0-9_.\-\s]+\{[^}]*\}\s*)+",
+    re.IGNORECASE,
+)
+_WIKI_REFERENCE_RE = re.compile(r"\[\s*\d+\s*]")
 
 if requests is not None:
     _FETCH_ERRORS: tuple[type[BaseException], ...] = (requests.RequestException, urllib.error.URLError)
@@ -50,7 +65,8 @@ else:
 def _normalize_text(value: str | None) -> str:
     if value is None:
         return ""
-    return " ".join(str(value).split()).strip()
+    clean = _ZERO_WIDTH_RE.sub("", str(value))
+    return " ".join(clean.split()).strip()
 
 
 def _strip_accents(value: str) -> str:
@@ -328,7 +344,60 @@ def infer_relationship_role(value: str | None) -> str | None:
     return None
 
 
+def _clean_relationship_text(value: str | None) -> str:
+    cleaned = _normalize_text(value)
+    if not cleaned:
+        return ""
+    cleaned = _WIKI_TEMPLATE_CSS_RE.sub(" ", cleaned)
+    cleaned = _WIKI_REFERENCE_RE.sub("", cleaned)
+    cleaned = _normalize_text(cleaned).strip(" ,;")
+    return cleaned
+
+
+def _looks_like_noise_name(value: str) -> bool:
+    cleaned = _clean_relationship_text(value)
+    if not cleaned:
+        return True
+    if cleaned.lower().startswith(".mw-parser-output"):
+        return True
+    if re.fullmatch(r"[0-9]+", cleaned):
+        return True
+    return not bool(re.search(r"[a-zA-Z]", cleaned))
+
+
+def _split_relationship_chunks(value: str) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    depth = 0
+    brace_depth = 0
+
+    for char in value:
+        if char == "(":
+            depth += 1
+        elif char == ")" and depth > 0:
+            depth -= 1
+        elif char == "{":
+            brace_depth += 1
+        elif char == "}" and brace_depth > 0:
+            brace_depth -= 1
+
+        if char in {",", ";"} and depth == 0 and brace_depth == 0:
+            chunk = _clean_relationship_text("".join(current))
+            if chunk:
+                chunks.append(chunk)
+            current = []
+            continue
+        current.append(char)
+
+    tail = _clean_relationship_text("".join(current))
+    if tail:
+        chunks.append(tail)
+    return chunks
+
+
 def _extract_segment_text(node: Any) -> str:
+    if getattr(node, "name", None) in {"style", "script"}:
+        return ""
     if getattr(node, "name", None):
         return _normalize_text(node.get_text(" ", strip=True))
     return _normalize_text(str(node))
@@ -354,46 +423,52 @@ def _extract_infobox_entries(value_node: Any) -> list[dict[str, str | None]]:
         segments.append(tail)
 
     links: dict[str, str] = {}
+    links_by_key: dict[str, str] = {}
     for link in value_node.find_all("a", href=True):
-        text = _normalize_text(link.get_text(" ", strip=True))
+        text = _clean_relationship_text(link.get_text(" ", strip=True))
         if text and text not in links:
             links[text] = str(link["href"])
+        key = _slugify(text)
+        if key and key not in links_by_key:
+            links_by_key[key] = str(link["href"])
 
     out: list[dict[str, str | None]] = []
     for segment in segments:
-        clean = segment.rstrip(",")
-        if clean.startswith("(") and clean.endswith(")") and out:
-            out[-1]["relation"] = clean.strip("()")
-            continue
+        for clean in _split_relationship_chunks(segment):
+            if clean.startswith("(") and clean.endswith(")") and out:
+                relation = _clean_relationship_text(clean.strip("()")) or None
+                if relation:
+                    out[-1]["relation"] = relation
+                continue
 
-        match = re.match(r"^(.*?)(?:\s*\(([^)]*)\))?$", clean)
-        if not match:
-            continue
-        name = _normalize_text(match.group(1))
-        if not name:
-            continue
-        relation = _normalize_text(match.group(2)) or None
-        entry: dict[str, str | None] = {
-            "name": name,
-            "relation": relation,
-            "url": links.get(name),
-        }
-        out.append(entry)
+            match = re.match(r"^(.*?)(?:\s*\(([^)]*)\))?$", clean)
+            if not match:
+                continue
+            name = _clean_relationship_text(match.group(1))
+            if _looks_like_noise_name(name):
+                continue
+            relation = _clean_relationship_text(match.group(2)) or None
+            entry: dict[str, str | None] = {
+                "name": name,
+                "relation": relation,
+                "url": links.get(name) or links_by_key.get(_slugify(name)),
+            }
+            out.append(entry)
 
     return out
 
 
 def _parse_single_entry(raw: str, *, url: str | None = None) -> dict[str, str | None] | None:
-    clean = _normalize_text(raw).rstrip(",")
+    clean = _clean_relationship_text(raw)
     if not clean:
         return None
     match = re.match(r"^(.*?)(?:\s*\(([^)]*)\))?$", clean)
     if not match:
         return None
-    name = _normalize_text(match.group(1))
-    if not name:
+    name = _clean_relationship_text(match.group(1))
+    if _looks_like_noise_name(name):
         return None
-    relation = _normalize_text(match.group(2)) or None
+    relation = _clean_relationship_text(match.group(2)) or None
     return {"name": name, "relation": relation, "url": url}
 
 
@@ -442,9 +517,9 @@ def _extract_person_entries(value_node: Any) -> list[dict[str, str | None]]:
     if entries:
         return entries
 
-    text = _normalize_text(value_node.get_text(" ", strip=True))
+    text = _clean_relationship_text(value_node.get_text(" ", strip=True))
     if text:
-        for chunk in re.split(r",|;", text):
+        for chunk in _split_relationship_chunks(text):
             _append(_parse_single_entry(chunk, url=None))
     return entries
 
@@ -754,3 +829,19 @@ def try_fetch_html(url: str) -> tuple[str | None, str | None, str | None]:
         return html, final_url, None
     except _FETCH_ERRORS as exc:
         return None, None, str(exc)
+
+
+def is_missing_wikipedia_page(html: str | None, url: str | None = None) -> bool:
+    text = _strip_accents(_normalize_text(html).lower()) if html else ""
+    final_url = str(url or "").strip().lower()
+    if "/wiki/special:search" in final_url:
+        return True
+    return any(pattern in text for pattern in _WIKIPEDIA_MISSING_PATTERNS)
+
+
+def is_missing_fandom_page(html: str | None, url: str | None = None) -> bool:
+    text = _strip_accents(_normalize_text(html).lower()) if html else ""
+    final_url = str(url or "").strip().lower()
+    if "/wiki/special:search" in final_url:
+        return True
+    return any(pattern in text for pattern in _FANDOM_MISSING_PATTERNS)

@@ -19,6 +19,8 @@ from trr_backend.ingestion.show_cast_matrix_scraper import (
     extract_relationship_data_from_fandom_html,
     extract_relationship_data_from_wikipedia_html,
     infer_relationship_role,
+    is_missing_fandom_page,
+    is_missing_wikipedia_page,
     merge_cast_matrices,
     parse_fandom_cast_matrix_html,
     parse_wikipedia_cast_matrix_html,
@@ -353,6 +355,24 @@ def _import_missing_bravo_profile_images(
             skipped += 1
             continue
 
+        if not dry_run:
+            pg.execute_returning(
+                """
+                UPDATE core.entity_links
+                SET
+                  status = 'approved',
+                  confidence = GREATEST(COALESCE(confidence, 0), 0.9),
+                  updated_at = NOW()
+                WHERE show_id = %s
+                  AND entity_type = 'person'
+                  AND entity_id = %s::uuid
+                  AND link_kind = 'bravo_profile'
+                  AND status <> 'rejected'
+                RETURNING id
+                """,
+                [show_id, person_id],
+            )
+
         hero_image_url = str(profile.get("hero_image_url") or "").strip()
         person_url = str(profile.get("canonical_url") or profile_url).strip() or profile_url
         if not hero_image_url:
@@ -538,6 +558,10 @@ def _build_relationship_assignments(
             if not html:
                 if error:
                     logger.debug("Skipping relationship fetch for %s (%s): %s", person_name, source_url, error)
+                continue
+            if source_kind == "wikipedia" and is_missing_wikipedia_page(html, final_url or source_url):
+                continue
+            if source_kind == "fandom" and is_missing_fandom_page(html, final_url or source_url):
                 continue
 
             data = (
@@ -1126,14 +1150,25 @@ def list_cast_with_roles(
         row["roles"] = selected_roles
 
         row_roles_lc = [value.lower() for value in selected_roles]
-        row_seasons = [
+        episode_seasons = [
             int(value)
             for value in (row.get("season_numbers") or [])
             if isinstance(value, int) and value > 0
         ]
-        matched_assignment_seasons = role_season_map.get(person_id, set())
+        matched_assignment_seasons = {
+            int(value)
+            for value in role_season_map.get(person_id, set())
+            if isinstance(value, int) and value > 0
+        }
+        combined_seasons = sorted({*episode_seasons, *matched_assignment_seasons})
+
+        latest_season = max(combined_seasons) if combined_seasons else int(row.get("latest_season") or 0)
+        row["latest_season"] = latest_season if latest_season > 0 else None
+        row["seasons_appeared"] = len(combined_seasons) if combined_seasons else int(row.get("seasons_appeared") or 0)
+        row["season_numbers"] = combined_seasons if combined_seasons else episode_seasons
+
         if season_numbers:
-            has_episode_match = any(value in row_seasons for value in season_numbers)
+            has_episode_match = any(value in episode_seasons for value in season_numbers)
             has_assignment_match = any(value in matched_assignment_seasons for value in season_numbers)
             if not has_episode_match and not has_assignment_match:
                 continue
