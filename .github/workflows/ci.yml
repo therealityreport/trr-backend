@@ -13,10 +13,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check for unresolved merge markers
+        run: |
+          if git grep -n -E '^(<<<<<<< |>>>>>>> )' -- .; then
+            echo "Unresolved merge markers detected. Resolve conflicts before merge." >&2
+            exit 1
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11.9"
+
+      - name: Validate env contract
+        run: |
+          python scripts/check_env_example.py \
+            --file .env.example \
+            --required SCREENALYTICS_API_URL TRR_INTERNAL_ADMIN_SHARED_SECRET SCREENALYTICS_SERVICE_TOKEN \
+            --allow-hyphen GEMINI-MODEL
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.9.27"
+
+      - name: Verify requirements lock freshness
+        run: |
+          cp requirements.lock.txt /tmp/requirements.lock.before.txt
+          uv pip compile requirements.in --python-version 3.11 -o requirements.lock.txt
+          diff -u /tmp/requirements.lock.before.txt requirements.lock.txt
 
       - name: Install dependencies
         run: |

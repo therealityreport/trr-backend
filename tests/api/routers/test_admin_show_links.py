@@ -4,10 +4,11 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from api.routers.admin_show_links import (
-    _cleanup_stale_pending_person_knowledge_links,
+    _cleanup_invalid_person_knowledge_links,
     _discover_people_links,
     _discover_season_links,
     _discover_show_links,
+    _validate_person_knowledge_url,
     _validated_person_knowledge_url,
 )
 
@@ -128,22 +129,81 @@ def test_discover_season_links_prefers_wikidata_enwiki_sitelink() -> None:
 
 def test_validated_person_knowledge_url_rejects_mismatched_wikipedia_page() -> None:
     _validated_person_knowledge_url.cache_clear()
-    html = """
-    <html>
-      <head><title>The Real Housewives of Salt Lake City - Wikipedia</title></head>
-      <body><h1 id="firstHeading">The Real Housewives of Salt Lake City</h1></body>
-    </html>
-    """
-    with patch(
-        "api.routers.admin_show_links.try_fetch_html",
-        return_value=(html, "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City", None),
-    ):
-        resolved = _validated_person_knowledge_url(
-            "https://en.wikipedia.org/wiki/Georgia_Gay",
-            kind="wikipedia",
-            expected_name="Georgia Gay",
-        )
+    with patch("api.routers.admin_show_links._fetch_wikipedia_page_summary", return_value=(None, True)):
+        html = """
+        <html>
+          <head><title>The Real Housewives of Salt Lake City - Wikipedia</title></head>
+          <body><h1 id="firstHeading">The Real Housewives of Salt Lake City</h1></body>
+        </html>
+        """
+        with patch(
+            "api.routers.admin_show_links.try_fetch_html",
+            return_value=(html, "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City", None),
+        ):
+            resolved = _validated_person_knowledge_url(
+                "https://en.wikipedia.org/wiki/Georgia_Gay",
+                kind="wikipedia",
+                expected_name="Georgia Gay",
+            )
     assert resolved is None
+
+
+def test_validate_person_knowledge_url_rejects_missing_wikipedia_article_from_api() -> None:
+    with patch("api.routers.admin_show_links._fetch_wikipedia_page_summary", return_value=(None, False)):
+        with patch("api.routers.admin_show_links.try_fetch_html") as try_fetch_html:
+            resolved, outcome = _validate_person_knowledge_url(
+                "https://en.wikipedia.org/wiki/Whitney_Comstock_Duncan",
+                kind="wikipedia",
+                expected_name="Whitney Comstock Duncan",
+            )
+
+    assert resolved is None
+    assert outcome == "invalid"
+    try_fetch_html.assert_not_called()
+
+
+def test_validate_person_knowledge_url_accepts_wikipedia_article_from_api() -> None:
+    with patch(
+        "api.routers.admin_show_links._fetch_wikipedia_page_summary",
+        return_value=(
+            {
+                "title": "Lisa Barlow",
+                "url": "https://en.wikipedia.org/wiki/Lisa_Barlow",
+            },
+            False,
+        ),
+    ):
+        with patch("api.routers.admin_show_links.try_fetch_html") as try_fetch_html:
+            resolved, outcome = _validate_person_knowledge_url(
+                "https://en.wikipedia.org/wiki/Lisa_Barlow",
+                kind="wikipedia",
+                expected_name="Lisa Barlow",
+            )
+
+    assert resolved == "https://en.wikipedia.org/wiki/Lisa_Barlow"
+    assert outcome == "valid"
+    try_fetch_html.assert_not_called()
+
+
+def test_validate_person_knowledge_url_rejects_wikipedia_owner_mismatch_from_api() -> None:
+    with patch(
+        "api.routers.admin_show_links._fetch_wikipedia_page_summary",
+        return_value=(
+            {
+                "title": "Heather Gay",
+                "url": "https://en.wikipedia.org/wiki/Heather_Gay",
+            },
+            False,
+        ),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "https://en.wikipedia.org/wiki/Heather_Gay",
+            kind="wikipedia",
+            expected_name="Ashley Gay",
+        )
+
+    assert resolved is None
+    assert outcome == "invalid"
 
 
 def test_validated_person_knowledge_url_rejects_mismatched_fandom_page() -> None:
@@ -186,18 +246,106 @@ def test_validated_person_knowledge_url_accepts_matching_fandom_person_page() ->
     assert resolved == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
 
 
-def test_cleanup_stale_pending_person_knowledge_links_uses_identity_guard_when_keys_present() -> None:
-    with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
-        execute_returning.return_value = [{"id": "1"}]
-        deleted = _cleanup_stale_pending_person_knowledge_links(
-            str(uuid4()),
+def test_validate_person_knowledge_url_rejects_wikidata_mismatched_person() -> None:
+    with patch(
+        "api.routers.admin_show_links._fetch_wikidata_summary",
+        return_value=(
             {
-                "person-1|wikipedia|https://en.wikipedia.org/wiki/lisa_barlow",
-                "person-2|fandom|https://real-housewives.fandom.com/wiki/lisa_barlow",
+                "item_id": "Q123",
+                "label": "Heather Gay",
+                "enwiki_title": "Heather Gay",
+                "enwiki_url": "https://en.wikipedia.org/wiki/Heather_Gay",
             },
+            False,
+        ),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "https://www.wikidata.org/wiki/Q123",
+            kind="wikidata",
+            expected_name="Ashley Gay",
         )
+    assert resolved is None
+    assert outcome == "invalid"
 
-    assert deleted == 1
+
+def test_validate_person_knowledge_url_rejects_wikidata_without_enwiki() -> None:
+    with patch("api.routers.admin_show_links._fetch_wikidata_summary", return_value=(None, False)):
+        resolved, outcome = _validate_person_knowledge_url(
+            "https://www.wikidata.org/wiki/Q122761552",
+            kind="wikidata",
+            expected_name="Lisa Barlow",
+        )
+    assert resolved is None
+    assert outcome == "invalid"
+
+
+def test_cleanup_invalid_person_knowledge_links_deletes_all_statuses_and_non_cast_rows() -> None:
+    show_id = str(uuid4())
+    cast_person_id = str(uuid4())
+    non_cast_person_id = str(uuid4())
+    invalid_wiki_id = str(uuid4())
+    non_cast_fandom_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links._load_show_cast_names_by_person_id") as cast_lookup:
+        cast_lookup.return_value = {cast_person_id: "Lisa Barlow"}
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": invalid_wiki_id,
+                    "person_id": cast_person_id,
+                    "link_kind": "wikipedia",
+                    "status": "approved",
+                    "url": "https://en.wikipedia.org/wiki/Heather_Gay",
+                },
+                {
+                    "id": non_cast_fandom_id,
+                    "person_id": non_cast_person_id,
+                    "link_kind": "fandom",
+                    "status": "pending",
+                    "url": "https://real-housewives.fandom.com/wiki/Robyn_Dixon",
+                },
+            ]
+            with patch("api.routers.admin_show_links._validate_person_knowledge_url") as validate_url:
+                validate_url.return_value = (None, "invalid")
+                with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
+                    execute_returning.return_value = [{"id": invalid_wiki_id}, {"id": non_cast_fandom_id}]
+                    result = _cleanup_invalid_person_knowledge_links(show_id)
+
+    assert result["scanned"] == 2
+    assert result["invalid"] == 2
+    assert result["deleted"] == 2
+    assert result["validation_failures"] == 0
     sql, params = execute_returning.call_args.args
-    assert "NOT ((entity_id::text || '|' || link_kind || '|' || url_key) = ANY(%s::text[]))" in sql
-    assert len(params) == 3
+    assert "DELETE FROM core.entity_links" in sql
+    assert params == [[invalid_wiki_id, non_cast_fandom_id]]
+
+
+def test_cleanup_invalid_person_knowledge_links_keeps_rows_on_validation_fetch_error() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    link_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links._load_show_cast_names_by_person_id") as cast_lookup:
+        cast_lookup.return_value = {person_id: "Lisa Barlow"}
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": link_id,
+                    "person_id": person_id,
+                    "link_kind": "wikipedia",
+                    "status": "approved",
+                    "url": "https://en.wikipedia.org/wiki/Lisa_Barlow",
+                }
+            ]
+            with patch(
+                "api.routers.admin_show_links._validate_person_knowledge_url",
+                return_value=(None, "fetch_error"),
+            ):
+                with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
+                    result = _cleanup_invalid_person_knowledge_links(show_id)
+
+    assert result["scanned"] == 1
+    assert result["invalid"] == 0
+    assert result["deleted"] == 0
+    assert result["validation_failures"] == 1
+    execute_returning.assert_not_called()

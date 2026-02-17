@@ -134,6 +134,7 @@ def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pyte
     assert response.status_code == 200
     assert response.json()["season_id"] == season_id
     assert mocked.call_args.kwargs["max_comments_per_post"] == 0
+    assert mocked.call_args.kwargs["sync_strategy"] == "incremental"
 
 
 def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,6 +153,7 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
     payload = {
         "source_scope": "bravo",
         "platforms": ["instagram"],
+        "sync_strategy": "full_refresh",
     }
 
     with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
@@ -167,6 +169,7 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
     assert body["run_id"] == "run-123"
     assert body["stages"] == ["posts", "comments"]
     assert ingest_mock.call_args.kwargs["ingest_mode"] == "posts_and_comments"
+    assert ingest_mock.call_args.kwargs["sync_strategy"] == "full_refresh"
 
 
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

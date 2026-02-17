@@ -766,6 +766,7 @@ class SeasonSocialTargetsPutRequest(BaseModel):
 class SeasonSocialIngestRequest(BaseModel):
     source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
     platforms: list[Literal["instagram", "tiktok", "twitter", "youtube"]] | None = Field(default=None)
+    sync_strategy: Literal["incremental", "full_refresh"] = Field(default="incremental")
     max_posts_per_target: int = Field(default=100000, ge=1, le=1000000)
     max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
     max_replies_per_post: int = Field(default=100000, ge=0, le=1000000)
@@ -846,6 +847,7 @@ async def ingest_season_social(
             max_replies_per_post=payload.max_replies_per_post,
             fetch_replies=payload.fetch_replies,
             ingest_mode=payload.ingest_mode,
+            sync_strategy=payload.sync_strategy,
             date_start=payload.date_start,
             date_end=payload.date_end,
             initiated_by=email,

@@ -240,31 +240,35 @@ def test_build_relationship_assignments_fetches_person_fandom_and_wikipedia_page
             return "<html>wikipedia</html>", url, None
         return None, None, "404"
 
-    with patch("api.routers.admin_show_roles.try_fetch_html", side_effect=_mock_fetch) as fetch_mock:
-        with patch(
-            "api.routers.admin_show_roles.extract_relationship_data_from_fandom_html",
-            return_value={
-                "season_partner_roles": [],
-                "global_partner_roles": [{"name": "John Barlow", "role": "Husband"}],
-                "kid_names": ["Jack Barlow"],
-                "missing_season_evidence": [],
-            },
-        ):
+    with patch(
+        "api.routers.admin_show_links._validate_person_knowledge_url",
+        side_effect=lambda url, kind, expected_name=None: (url, "valid"),
+    ):
+        with patch("api.routers.admin_show_roles.try_fetch_html", side_effect=_mock_fetch) as fetch_mock:
             with patch(
-                "api.routers.admin_show_roles.extract_relationship_data_from_wikipedia_html",
+                "api.routers.admin_show_roles.extract_relationship_data_from_fandom_html",
                 return_value={
                     "season_partner_roles": [],
-                    "global_partner_roles": [],
-                    "kid_names": [],
+                    "global_partner_roles": [{"name": "John Barlow", "role": "Husband"}],
+                    "kid_names": ["Jack Barlow"],
                     "missing_season_evidence": [],
                 },
-            ) as wiki_parser_mock:
-                assignments, unmatched, missing = _build_relationship_assignments(
-                    show_name="The Real Housewives of Salt Lake City",
-                    cast_people=cast_people,
-                    by_norm_name=by_norm_name,
-                    season_filter=set(),
-                )
+            ):
+                with patch(
+                    "api.routers.admin_show_roles.extract_relationship_data_from_wikipedia_html",
+                    return_value={
+                        "season_partner_roles": [],
+                        "global_partner_roles": [],
+                        "kid_names": [],
+                        "missing_season_evidence": [],
+                    },
+                ) as wiki_parser_mock:
+                    assignments, unmatched, missing = _build_relationship_assignments(
+                        show_name="The Real Housewives of Salt Lake City",
+                        cast_people=cast_people,
+                        by_norm_name=by_norm_name,
+                        season_filter=set(),
+                    )
 
     fetched_urls = [str(call.args[0]) for call in fetch_mock.call_args_list]
     assert "https://real-housewives.fandom.com/wiki/Lisa_Barlow" in fetched_urls
@@ -298,16 +302,10 @@ def test_build_relationship_assignments_skips_missing_person_pages() -> None:
     ]
     by_norm_name = {"georgiagay": "person-georgia"}
 
-    def _mock_fetch(url: str) -> tuple[str | None, str | None, str | None]:
-        if "wikipedia" in url:
-            return (
-                "<html><body>Wikipedia does not have an article with this exact name</body></html>",
-                url,
-                None,
-            )
-        return ("<html><body>There is currently no text in this page.</body></html>", url, None)
-
-    with patch("api.routers.admin_show_roles.try_fetch_html", side_effect=_mock_fetch):
+    with patch(
+        "api.routers.admin_show_links._validate_person_knowledge_url",
+        return_value=(None, "invalid"),
+    ):
         with patch("api.routers.admin_show_roles.extract_relationship_data_from_fandom_html") as fandom_parser:
             with patch("api.routers.admin_show_roles.extract_relationship_data_from_wikipedia_html") as wiki_parser:
                 assignments, unmatched, missing = _build_relationship_assignments(
@@ -322,6 +320,51 @@ def test_build_relationship_assignments_skips_missing_person_pages() -> None:
     assert missing == []
     assert fandom_parser.call_count == 0
     assert wiki_parser.call_count == 0
+
+
+def test_list_cast_with_roles_scopes_total_episodes_to_selected_seasons() -> None:
+    show_id = str(uuid4())
+
+    rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-heather",
+            "person_name": "Heather Gay",
+            "total_episodes": 80,
+            "archive_episodes": 0,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/heather.jpg",
+        }
+    ]
+    role_rows = [
+        {"person_id": "person-heather", "season_number": 1, "role_name": "Housewife"},
+        {"person_id": "person-heather", "season_number": 4, "role_name": "Housewife"},
+    ]
+    scoped_episode_rows = [{"person_id": "person-heather", "total_episodes": 12}]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch(
+            "api.routers.admin_show_roles.pg.fetch_all",
+            side_effect=[rows, role_rows, scoped_episode_rows],
+        ):
+            payload = list_cast_with_roles(
+                UUID(show_id),
+                {},
+                sort_by="episodes",
+                order="desc",
+                seasons="4",
+                roles=None,
+                has_image=None,
+                archive_mode="all",
+            )
+
+    assert len(payload) == 1
+    assert payload[0]["person_id"] == "person-heather"
+    assert payload[0]["total_episodes"] == 12
+    assert payload[0]["season_numbers"] == [1, 2, 3, 4]
 
 
 def test_list_cast_with_roles_derives_latest_season_from_role_assignments() -> None:
@@ -362,6 +405,7 @@ def test_list_cast_with_roles_derives_latest_season_from_role_assignments() -> N
 
     assert len(payload) == 1
     assert payload[0]["person_id"] == "person-mary"
+    assert payload[0]["total_episodes"] == 16
     assert payload[0]["latest_season"] == 3
     assert payload[0]["seasons_appeared"] == 2
     assert payload[0]["season_numbers"] == [1, 3]
