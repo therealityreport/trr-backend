@@ -775,6 +775,11 @@ class SeasonSocialIngestRequest(BaseModel):
     date_end: datetime | None = None
 
 
+class PostCommentRefreshRequest(BaseModel):
+    max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
+    fetch_replies: bool = Field(default=True)
+
+
 @router.get("/seasons/{season_id}/targets")
 async def get_season_targets(
     season_id: UUID,
@@ -904,6 +909,35 @@ async def get_season_ingest_jobs(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/seasons/{season_id}/ingest/runs")
+async def get_season_ingest_runs(
+    season_id: UUID,
+    limit: int = Query(default=50, ge=1, le=250),
+    status: Literal["queued", "pending", "running", "retrying", "completed", "failed", "cancelled"] | None = Query(
+        default=None
+    ),
+    source_scope: Literal["bravo", "creator", "community"] | None = Query(default=None),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import list_runs
+
+    try:
+        runs = list_runs(
+            str(season_id),
+            limit=limit,
+            status=status,
+            source_scope=source_scope,
+        )
+        return {
+            "season_id": str(season_id),
+            "filters": {"status": status, "source_scope": source_scope},
+            "runs": runs,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to list social runs: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/seasons/{season_id}/ingest/runs/{run_id}/cancel")
 async def cancel_season_ingest_run(
     season_id: UUID,
@@ -1001,6 +1035,46 @@ async def get_post_comments(
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Failed to fetch post comments: season=%s platform=%s source_id=%s",
+            season_id,
+            platform,
+            source_id,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/seasons/{season_id}/analytics/posts/{platform}/{source_id}/refresh")
+async def refresh_post_comments_for_post(
+    season_id: UUID,
+    platform: str,
+    source_id: str,
+    payload: PostCommentRefreshRequest | None = None,
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import (
+        get_post_comments as _get_post_comments,
+    )
+    from trr_backend.repositories.social_season_analytics import (
+        refresh_post_comments as _refresh_post_comments,
+    )
+
+    request_payload = payload or PostCommentRefreshRequest()
+
+    try:
+        refresh_summary = _refresh_post_comments(
+            str(season_id),
+            platform=platform,
+            source_id=source_id,
+            max_comments_per_post=request_payload.max_comments_per_post,
+            fetch_replies=request_payload.fetch_replies,
+        )
+        refreshed = _get_post_comments(str(season_id), platform=platform, source_id=source_id)
+        refreshed["refresh"] = refresh_summary
+        return refreshed
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to refresh post comments: season=%s platform=%s source_id=%s",
             season_id,
             platform,
             source_id,
