@@ -124,6 +124,36 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
     - screenalytics compatibility validation completed (no code changes required).
     - TRR-APP consumer/UX updates completed under `TRR-APP/docs/cross-collab/TASK9/`.
 
+- February 17, 2026: Implemented Task 10 social admin incremental sync and comment lifecycle reconciliation.
+  - Files:
+    - `api/routers/socials.py`
+    - `trr_backend/repositories/social_season_analytics.py`
+    - `supabase/migrations/0126_social_comment_lifecycle_flags.sql`
+    - `tests/api/routers/test_socials_season_analytics.py`
+    - `tests/repositories/test_social_season_analytics.py`
+    - `docs/cross-collab/TASK10/PLAN.md`
+    - `docs/cross-collab/TASK10/OTHER_PROJECTS.md`
+    - `docs/cross-collab/TASK10/STATUS.md`
+  - Changes:
+    - Added additive ingest request field `sync_strategy` with default `incremental` and `full_refresh` override.
+    - Persisted run config details for `sync_strategy` and explicit platform scope in scrape runs.
+    - Added migration `0126` with additive lifecycle fields/indexes for social comments/tweets:
+      - `is_missing`, `missing_at`, `first_seen_at`, `last_seen_at`, `last_seen_run_id`.
+    - Replaced comment refresh skip heuristic with policy matrix:
+      - count gap/drop checks,
+      - never-checked refresh,
+      - 24h stale recheck,
+      - 14-day quiet-post force rerun refresh,
+      - full-refresh override.
+    - Added conservative missing-mark logic:
+      - mark missing only on complete comment fetches,
+      - clear missing flags on reappearance during upsert.
+  - Validation:
+    - `pytest -q tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (`39 passed`)
+  - Cross-repo:
+    - screenalytics compatibility validation completed (no code changes required).
+    - TRR-APP consumer/UX updates completed under `TRR-APP/docs/cross-collab/TASK9/`.
+
 - February 17, 2026: Implemented social admin reliability contract additions for run history and query performance hardening.
   - Files:
     - `api/routers/socials.py`

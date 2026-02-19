@@ -869,7 +869,6 @@ def test_ingest_season_stores_sync_strategy_and_platform_scope(monkeypatch) -> N
     assert len(created_job_configs) == 1
     assert all(config["stage"] == "comments" for config in created_job_configs)
 
-
 def test_repository_has_single_pg_upsert_definition() -> None:
     source = inspect.getsource(social_repo)
     assert source.count("def _pg_upsert(") == 1

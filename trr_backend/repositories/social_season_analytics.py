@@ -3389,7 +3389,11 @@ def ingest_season(
     elif normalized_mode == "comments_only":
         resolved_posts = 0
 
-    stage_plan = ["posts"] if normalized_mode == "posts_only" else ["comments"] if normalized_mode == "comments_only" else ["posts", "comments"]
+    stage_plan = (
+        ["posts"]
+        if normalized_mode == "posts_only"
+        else ["comments"] if normalized_mode == "comments_only" else ["posts", "comments"]
+    )
 
     opts = IngestOptions(
         platforms=platform_filter or None,
