@@ -368,6 +368,8 @@ def update_asset_with_mirror_result(
     hosted_bytes: int,
     hosted_content_type: str | None = None,
     hosted_etag: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
     completed_at: str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -386,6 +388,8 @@ def update_asset_with_mirror_result(
         hosted_bytes: File size in bytes
         hosted_content_type: MIME type
         hosted_etag: S3 ETag
+        width: Optional image width
+        height: Optional image height
         completed_at: Completion timestamp (ISO format)
 
     Returns:
@@ -410,6 +414,10 @@ def update_asset_with_mirror_result(
         payload["hosted_content_type"] = hosted_content_type
     if hosted_etag:
         payload["hosted_etag"] = hosted_etag
+    if isinstance(width, int) and width > 0:
+        payload["width"] = width
+    if isinstance(height, int) and height > 0:
+        payload["height"] = height
     if metadata is not None:
         payload["metadata"] = dict(metadata)
 

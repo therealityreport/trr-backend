@@ -13,6 +13,7 @@ Provides endpoints to:
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -771,7 +772,7 @@ class SeasonSocialIngestRequest(BaseModel):
     max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
     max_replies_per_post: int = Field(default=100000, ge=0, le=1000000)
     fetch_replies: bool = Field(default=True)
-    ingest_mode: Literal["posts_only", "posts_and_comments"] = Field(default="posts_and_comments")
+    ingest_mode: Literal["posts_only", "posts_and_comments", "comments_only"] = Field(default="posts_and_comments")
     date_start: datetime | None = None
     date_end: datetime | None = None
 
@@ -859,7 +860,22 @@ async def ingest_season_social(
 
             def _run_sync() -> None:
                 try:
-                    execute_run(run_id, worker_id="api-background")
+                    if payload.ingest_mode == "comments_only":
+                        worker_count = min(4, max(1, int(run_payload.get("queued_or_started_jobs") or 1)))
+                        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                            futures = [
+                                pool.submit(
+                                    execute_run,
+                                    run_id,
+                                    worker_id=f"api-background:comments:{index + 1}",
+                                    stage="comments",
+                                )
+                                for index in range(worker_count)
+                            ]
+                            for future in futures:
+                                future.result()
+                    else:
+                        execute_run(run_id, worker_id="api-background")
                 except Exception:  # noqa: BLE001
                     logger.exception("Background social ingest run failed: season=%s run_id=%s", sid, run_id)
 

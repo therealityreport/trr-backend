@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 from collections.abc import Mapping
@@ -378,6 +379,29 @@ def build_logo_s3_key(
     return "/".join(segments)
 
 
+def build_logo_variant_s3_key(
+    kind: str,
+    entity_id: str | int,
+    variant: str,
+    sha256: str,
+    ext: str,
+) -> str:
+    """
+    Build S3 key for monochrome logo variants.
+
+    Path: images/logos/{kind}/{entity_id}/{variant}/{sha256}.{ext}
+    """
+    segments = [
+        "images",
+        "logos",
+        str(kind),
+        str(entity_id),
+        str(variant),
+        f"{sha256}{ext}",
+    ]
+    return "/".join(segments)
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -440,6 +464,214 @@ def _sanitize_etag(value: str | None) -> str | None:
     if not value:
         return None
     return value.strip('"')
+
+
+def _extract_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        return None, None
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            width = int(image.width) if image.width else None
+            height = int(image.height) if image.height else None
+            return width, height
+    except Exception:
+        return None, None
+
+
+def _is_meaningful_alpha(image) -> bool:
+    if image.mode != "RGBA":
+        return False
+    alpha = image.getchannel("A")
+    minimum, maximum = alpha.getextrema()
+    if maximum <= 0:
+        return False
+    if minimum < 255:
+        return True
+    # Fully opaque alpha channel: treat as not meaningful.
+    return False
+
+
+def _derive_alpha_mask_from_opaque_logo(image):
+    from PIL import Image, ImageChops, ImageFilter
+
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+    if width <= 2 or height <= 2:
+        return None
+
+    sample_points = [
+        (0, 0),
+        (width - 1, 0),
+        (0, height - 1),
+        (width - 1, height - 1),
+        (width // 2, 0),
+        (width // 2, height - 1),
+        (0, height // 2),
+        (width - 1, height // 2),
+    ]
+    colors = [rgb.getpixel(point) for point in sample_points]
+    bg = tuple(int(sum(ch) / len(colors)) for ch in zip(*colors, strict=False))
+
+    bg_img = Image.new("RGB", rgb.size, bg)
+    diff = ImageChops.difference(rgb, bg_img).convert("L")
+    # Start with a strict threshold; relax later via luminance fallback if needed.
+    alpha = diff.point(lambda px: 255 if px > 18 else 0)
+    alpha = alpha.filter(ImageFilter.MedianFilter(size=3))
+
+    bbox = alpha.getbbox()
+    if not bbox:
+        return None
+    coverage = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) / max(width * height, 1)
+    if coverage < 0.003:
+        return None
+    return alpha
+
+
+def _derive_alpha_mask_luminance_fallback(image):
+    from PIL import ImageStat
+
+    gray = image.convert("L")
+    mean = ImageStat.Stat(gray).mean[0]
+    # If background is likely light, keep dark pixels; otherwise keep light pixels.
+    threshold = 230 if mean > 127 else 25
+    if mean > 127:
+        alpha = gray.point(lambda px: 255 if px < threshold else 0)
+    else:
+        alpha = gray.point(lambda px: 255 if px > threshold else 0)
+
+    bbox = alpha.getbbox()
+    if not bbox:
+        return None
+    width, height = gray.size
+    coverage = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) / max(width * height, 1)
+    if coverage < 0.003:
+        return None
+    return alpha
+
+
+def _build_monochrome_logo_variants(
+    data: bytes,
+    content_type: str | None,
+) -> tuple[tuple[bytes, str, str], tuple[bytes, str, str]]:
+    try:
+        from PIL import Image
+    except Exception as exc:
+        raise RuntimeError("logo_decode_failed") from exc
+
+    try:
+        image = Image.open(io.BytesIO(data))
+    except Exception as exc:
+        raise RuntimeError("logo_decode_failed") from exc
+
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGBA")
+
+    if _is_meaningful_alpha(image):
+        alpha = image.getchannel("A")
+    else:
+        alpha = _derive_alpha_mask_from_opaque_logo(image)
+        if alpha is None:
+            alpha = _derive_alpha_mask_luminance_fallback(image)
+        if alpha is None:
+            raise RuntimeError("transparent_extraction_failed")
+
+    black = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    black.putalpha(alpha)
+
+    white = Image.new("RGBA", image.size, (255, 255, 255, 0))
+    white.putalpha(alpha)
+
+    black_out = io.BytesIO()
+    black.save(black_out, format="PNG")
+    white_out = io.BytesIO()
+    white.save(white_out, format="PNG")
+    return (
+        (black_out.getvalue(), "image/png", ".png"),
+        (white_out.getvalue(), "image/png", ".png"),
+    )
+
+
+@dataclass(frozen=True)
+class MonochromeLogoMirrorResult:
+    patch: dict[str, Any]
+    black_mirrored: int
+    white_mirrored: int
+
+
+def _apply_logo_variant_upload(
+    *,
+    row: Mapping[str, Any],
+    kind: str,
+    entity_id: str | int,
+    variant: str,
+    data: bytes,
+    content_type: str,
+    ext: str,
+    force: bool,
+    s3_client,
+) -> tuple[dict[str, Any], int]:
+    field_prefix = f"hosted_logo_{variant}"
+    key_field = f"{field_prefix}_key"
+    url_field = f"{field_prefix}_url"
+    sha_field = f"{field_prefix}_sha256"
+    content_type_field = f"{field_prefix}_content_type"
+    bytes_field = f"{field_prefix}_bytes"
+    etag_field = f"{field_prefix}_etag"
+    at_field = f"{field_prefix}_at"
+
+    existing_url = row.get(url_field)
+    existing_key = row.get(key_field)
+    existing_sha = row.get(sha_field)
+
+    sha256 = _sha256_bytes(data)
+    key = build_logo_variant_s3_key(
+        kind=kind,
+        entity_id=entity_id,
+        variant=variant,
+        sha256=sha256,
+        ext=ext,
+    )
+    desired_url = build_hosted_url(key)
+
+    if not force and existing_sha == sha256 and isinstance(existing_url, str) and existing_url.strip():
+        patch: dict[str, Any] = {}
+        if existing_key != key:
+            patch[key_field] = key
+        if existing_url != desired_url:
+            patch[url_field] = desired_url
+        return patch, 0
+
+    bucket = get_s3_bucket()
+    head = _head_object(s3_client, bucket, key)
+    if head is None:
+        etag, bytes_len = upload_bytes_to_s3(
+            s3_client,
+            bucket=bucket,
+            key=key,
+            data=data,
+            content_type=content_type,
+        )
+        hosted_content_type = content_type
+        hosted_bytes = bytes_len
+        hosted_etag = etag
+    else:
+        hosted_content_type = head.get("ContentType") or content_type
+        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_etag = _sanitize_etag(head.get("ETag"))
+
+    mirrored = int(force or existing_sha != sha256 or not existing_key or not existing_url)
+    patch = {
+        key_field: key,
+        url_field: desired_url,
+        sha_field: sha256,
+        content_type_field: hosted_content_type,
+        bytes_field: hosted_bytes,
+        etag_field: hosted_etag,
+        at_field: datetime.now(UTC).isoformat(),
+    }
+    return patch, mirrored
 
 
 def _head_object(s3_client, bucket: str, key: str) -> dict[str, Any] | None:
@@ -557,6 +789,95 @@ def mirror_cast_photo_row(
     return patch
 
 
+def mirror_media_asset_row(
+    row: Mapping[str, Any],
+    *,
+    force: bool = False,
+    s3_client=None,
+) -> dict[str, Any] | None:
+    hosted_url = row.get("hosted_url")
+    hosted_key = row.get("hosted_key")
+    if not force:
+        if hosted_key:
+            desired_url = build_hosted_url(hosted_key)
+            if hosted_url != desired_url:
+                return {"hosted_url": desired_url}
+            if hosted_url:
+                return None
+        elif hosted_url:
+            return None
+
+    source_url = row.get("source_url")
+    if not isinstance(source_url, str) or not source_url.strip():
+        return None
+
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    referer = (
+        metadata.get("page_url")
+        if isinstance(metadata.get("page_url"), str)
+        else metadata.get("source_page_url")
+        if isinstance(metadata.get("source_page_url"), str)
+        else None
+    )
+    source = str(row.get("source") or "").strip().lower() or "web_scrape"
+
+    from trr_backend.scraping.url_image_scraper import download_and_hash_image
+
+    data, sha256, content_type = download_and_hash_image(source_url, referer=referer)
+    current_sha = row.get("hosted_sha256")
+
+    if current_sha and current_sha == sha256 and hosted_url and not force:
+        return None
+
+    ext = guess_ext_from_content_type(content_type)
+    key = row.get("hosted_key") or build_shared_media_s3_key(sha256, ext)
+    bucket = get_s3_bucket()
+    s3_client = s3_client or get_s3_client()
+
+    head = _head_object(s3_client, bucket, key)
+    if head is None:
+        etag, bytes_len = upload_bytes_to_s3(
+            s3_client,
+            bucket=bucket,
+            key=key,
+            data=data,
+            content_type=content_type or "application/octet-stream",
+        )
+        hosted_content_type = content_type or "application/octet-stream"
+        hosted_bytes = bytes_len
+        hosted_etag = etag
+    else:
+        hosted_content_type = head.get("ContentType") or content_type
+        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(data)
+        hosted_etag = _sanitize_etag(head.get("ETag"))
+
+    hosted_url = build_hosted_url(key)
+    hosted_at = datetime.now(UTC).isoformat()
+    width, height = _extract_image_dimensions(data)
+    metadata_out = dict(metadata or {})
+    metadata_out["mirrored_at"] = hosted_at
+    metadata_out.setdefault("mirrored_from", source_url)
+
+    patch: dict[str, Any] = {
+        "source": source,
+        "sha256": sha256,
+        "hosted_bucket": bucket,
+        "hosted_key": key,
+        "hosted_url": hosted_url,
+        "hosted_sha256": sha256,
+        "hosted_content_type": hosted_content_type,
+        "hosted_bytes": hosted_bytes,
+        "hosted_etag": hosted_etag,
+        "hosted_at": hosted_at,
+        "metadata": metadata_out,
+    }
+    if isinstance(width, int) and width > 0:
+        patch["width"] = width
+    if isinstance(height, int) and height > 0:
+        patch["height"] = height
+    return patch
+
+
 def _get_tmdb_original_url(file_path: str) -> str:
     """Build TMDb original resolution URL from file_path."""
     return f"https://image.tmdb.org/t/p/original{file_path}"
@@ -645,6 +966,158 @@ def mirror_tmdb_logo_row(
         "hosted_logo_etag": hosted_etag,
         "hosted_logo_at": hosted_at,
     }
+
+
+def mirror_external_logo_row(
+    row: Mapping[str, Any],
+    *,
+    kind: str,
+    source_url: str,
+    id_field: str = "id",
+    force: bool = False,
+    s3_client=None,
+    source: str = "wikimedia",
+) -> dict[str, Any] | None:
+    """
+    Mirror an external logo URL (for example Wikimedia) to S3.
+    """
+    hosted_url = row.get("hosted_logo_url")
+    hosted_key = row.get("hosted_logo_key")
+    if not force:
+        if hosted_key:
+            desired_url = build_hosted_url(hosted_key)
+            if hosted_url != desired_url:
+                return {"hosted_logo_url": desired_url}
+            if hosted_url:
+                return None
+        elif hosted_url:
+            return None
+
+    candidate_url = str(source_url or "").strip()
+    if not candidate_url:
+        return None
+
+    entity_id = row.get(id_field)
+    if entity_id is None:
+        return None
+
+    data, content_type = download_image(candidate_url, source=source)
+    png_payload = _ensure_png_bytes(data, content_type)
+    if not png_payload:
+        return None
+    png_bytes, png_content_type, ext = png_payload
+    sha256 = _sha256_bytes(png_bytes)
+    current_sha = row.get("hosted_logo_sha256")
+
+    if current_sha and current_sha == sha256 and hosted_url and not force:
+        return None
+
+    key = build_logo_s3_key(
+        kind=kind,
+        entity_id=entity_id,
+        sha256=sha256,
+        ext=ext,
+    )
+    bucket = get_s3_bucket()
+    s3_client = s3_client or get_s3_client()
+
+    head = _head_object(s3_client, bucket, key)
+    if head is None:
+        etag, bytes_len = upload_bytes_to_s3(
+            s3_client,
+            bucket=bucket,
+            key=key,
+            data=png_bytes,
+            content_type=png_content_type,
+        )
+        hosted_content_type = png_content_type
+        hosted_bytes = bytes_len
+        hosted_etag = etag
+    else:
+        hosted_content_type = head.get("ContentType") or png_content_type
+        hosted_bytes = int(head.get("ContentLength")) if head.get("ContentLength") is not None else len(png_bytes)
+        hosted_etag = _sanitize_etag(head.get("ETag"))
+
+    hosted_url = build_hosted_url(key)
+    hosted_at = datetime.now(UTC).isoformat()
+
+    return {
+        "logo_path": key,
+        "hosted_logo_key": key,
+        "hosted_logo_url": hosted_url,
+        "hosted_logo_sha256": sha256,
+        "hosted_logo_content_type": hosted_content_type,
+        "hosted_logo_bytes": hosted_bytes,
+        "hosted_logo_etag": hosted_etag,
+        "hosted_logo_at": hosted_at,
+    }
+
+
+def mirror_logo_monochrome_variants_row(
+    row: Mapping[str, Any],
+    *,
+    kind: str,
+    source_url: str,
+    id_field: str = "id",
+    force: bool = False,
+    s3_client=None,
+    source: str = "wikimedia",
+) -> MonochromeLogoMirrorResult | None:
+    """
+    Generate and mirror black/white transparent logo variants to S3.
+    """
+    entity_id = row.get(id_field)
+    if entity_id is None:
+        return None
+    candidate_url = str(source_url or "").strip()
+    if not candidate_url:
+        return None
+
+    existing_black = str(row.get("hosted_logo_black_url") or "").strip()
+    existing_white = str(row.get("hosted_logo_white_url") or "").strip()
+    if not force and existing_black and existing_white:
+        return None
+
+    s3_client = s3_client or get_s3_client()
+    data, content_type = download_image(candidate_url, source=source)
+    try:
+        black_payload, white_payload = _build_monochrome_logo_variants(data, content_type)
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("transparent_extraction_failed") from exc
+
+    black_patch, black_mirrored = _apply_logo_variant_upload(
+        row=row,
+        kind=kind,
+        entity_id=entity_id,
+        variant="black",
+        data=black_payload[0],
+        content_type=black_payload[1],
+        ext=black_payload[2],
+        force=force,
+        s3_client=s3_client,
+    )
+    white_patch, white_mirrored = _apply_logo_variant_upload(
+        row=row,
+        kind=kind,
+        entity_id=entity_id,
+        variant="white",
+        data=white_payload[0],
+        content_type=white_payload[1],
+        ext=white_payload[2],
+        force=force,
+        s3_client=s3_client,
+    )
+    patch = {**black_patch, **white_patch}
+    if not patch:
+        return None
+
+    return MonochromeLogoMirrorResult(
+        patch=patch,
+        black_mirrored=black_mirrored,
+        white_mirrored=white_mirrored,
+    )
 
 
 def mirror_show_image_row(

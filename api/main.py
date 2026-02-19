@@ -77,8 +77,8 @@ from api.routers import (  # noqa: E402
     admin_media_assets,
     admin_person_images,
     admin_show_bravo,
+    admin_show_news,
     admin_scrape,
-    admin_show_bravo,
     admin_show_links,
     admin_show_roles,
     admin_show_sync,
@@ -108,6 +108,7 @@ app.include_router(admin_show_links.router, prefix="/api/v1")
 app.include_router(admin_show_roles.router, prefix="/api/v1")
 app.include_router(admin_person_images.router, prefix="/api/v1")
 app.include_router(admin_show_bravo.router, prefix="/api/v1")
+app.include_router(admin_show_news.router, prefix="/api/v1")
 app.include_router(admin_scrape.router, prefix="/api/v1")
 app.include_router(admin_show_sync.router, prefix="/api/v1")
 app.include_router(socials.router, prefix="/api/v1")

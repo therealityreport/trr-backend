@@ -2,7 +2,97 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
-## Latest Update (2026-02-17)
+## Latest Update (2026-02-19)
+
+- February 19, 2026: Completed production logo completion pipeline with black/white transparent variants + unresolved reporting contract.
+  - Files:
+    - `trr_backend/media/s3_mirror.py`
+    - `scripts/sync/sync_networks_streaming_links.py`
+    - `api/routers/admin_show_sync.py`
+    - `supabase/migrations/0128_add_network_provider_monochrome_logo_fields.sql` (new)
+    - `tests/media/test_s3_mirror.py`
+    - `tests/scripts/test_sync_networks_streaming_links.py`
+    - `tests/api/routers/test_admin_show_sync.py`
+  - Changes:
+    - Added explicit monochrome variant persistence columns for `core.networks` and `core.watch_providers` (`hosted_logo_black_*`, `hosted_logo_white_*`).
+    - Added deterministic monochrome variant pipeline in S3 mirror utility:
+      - key namespace `images/logos/{kind}/{entity_id}/{black|white}/{sha}.png`
+      - transparent alpha extraction from existing alpha, corner background removal, then luminance fallback
+      - no-overwrite behavior unless forced.
+    - Extended `sync_networks_streaming_links` to:
+      - process used-row scope only,
+      - mirror base logos + black/white variants,
+      - emit unresolved-logo records with reason codes and machine-parsable log lines.
+    - Expanded admin sync endpoint response with:
+      - `variants_black_mirrored`, `variants_white_mirrored`
+      - `unresolved_logos_count`, `unresolved_logos`, `unresolved_logos_truncated`
+      - unresolved payload truncation cap (300).
+    - Added/updated tests for:
+      - variant generation and transparent output,
+      - no-overwrite behavior,
+      - used-row scope filtering,
+      - unresolved reason mapping,
+      - admin endpoint unresolved-list truncation behavior.
+  - Validation:
+    - `ruff check trr_backend/media/s3_mirror.py scripts/sync/sync_networks_streaming_links.py api/routers/admin_show_sync.py tests/media/test_s3_mirror.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (pass)
+    - `pytest tests/media/test_s3_mirror.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (`55 passed`)
+
+- February 19, 2026: Added networks/streaming enrichment persistence, sync pipeline orchestration, and admin sync endpoint.
+  - Files:
+    - `supabase/migrations/0127_add_network_provider_link_fields.sql` (new)
+    - `scripts/sync/sync_networks_streaming_links.py` (new)
+    - `scripts/sync_networks_streaming_links.py` (new)
+    - `api/routers/admin_show_sync.py`
+    - `trr_backend/media/s3_mirror.py`
+    - `scripts/README.md`
+    - `tests/scripts/test_sync_networks_streaming_links.py` (new)
+    - `tests/api/routers/test_admin_show_sync.py`
+    - `tests/media/test_s3_mirror.py`
+  - Changes:
+    - Added additive enrichment columns on both dimension tables:
+      - `wikidata_id`, `wikipedia_url`, `wikimedia_logo_file`, `link_enriched_at`, `link_enrichment_source`.
+    - Implemented new enrichment script:
+      - Wikidata entity resolution by name
+      - Wikipedia sitelink persistence
+      - Wikimedia logo extraction from Wikidata claims (`P154`/`P2910`)
+      - fallback mirror-to-S3 for missing logos (or forced runs)
+      - summary counters (`processed`, `links_enriched`, `wikidata_linked`, `wikipedia_linked`, `logos_mirrored`, `failures`).
+    - Added admin endpoint:
+      - `POST /api/v1/admin/shows/sync-networks-streaming`
+      - orchestrates `sync_tmdb_show_entities --all`, `sync_tmdb_watch_providers --all`, `sync_networks_streaming_links --all`
+      - returns per-step status/metrics + aggregate counters.
+    - Added generic external-logo mirror helper in S3 mirror utility for wiki/commons image ingestion.
+  - Validation:
+    - `pytest -q tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py tests/media/test_s3_mirror.py` (`45 passed`)
+    - `ruff check api/routers/admin_show_sync.py scripts/sync/sync_networks_streaming_links.py scripts/sync_networks_streaming_links.py trr_backend/media/s3_mirror.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py tests/media/test_s3_mirror.py` (pass)
+
+- February 17, 2026: Implemented person-gallery reliability pipeline upgrades (cast + media mirroring, cast-photo variants, resize stage, and counter expansion).
+  - Files:
+    - `api/routers/admin_person_images.py`
+    - `api/routers/admin_media_assets.py`
+    - `api/routers/admin_cast_photos.py`
+    - `trr_backend/media/s3_mirror.py`
+    - `trr_backend/media/image_variants.py`
+    - `trr_backend/repositories/media_assets.py`
+    - `tests/api/routers/test_admin_person_images.py`
+    - `tests/api/routers/test_admin_cast_photos.py` (new)
+    - `tests/repositories/test_media_assets_mirroring.py`
+  - Changes:
+    - Added shared media-asset mirror helper (`mirror_media_asset_row`) with optional dimension extraction and reused it in admin media-assets mirror route.
+    - Extended media-asset mirror persistence to optionally backfill `width`/`height`.
+    - Added cast-photo variant generation support:
+      - new variant key namespace `cast-photo-variants/{photo_id}/{crop_signature_hash}/...`
+      - metadata wiring (`variants`, `thumb_url`, `display_url`, `detail_url`, crop variant URLs/signature).
+    - Added endpoint:
+      - `POST /api/v1/admin/cast-photos/{photo_id}/variants`
+    - Upgraded person refresh pipelines (`refresh-images` + `refresh-images/stream`) to:
+      - mirror both cast photos and person-linked media assets,
+      - report split mirror counters and aggregate totals,
+      - run variant generation stage for cast/media (base + crop variants),
+      - emit/return resize counters and stream `stage: "resizing"` progress.
+  - Validation:
+    - `ruff check api/routers/admin_cast_photos.py api/routers/admin_media_assets.py api/routers/admin_person_images.py trr_backend/media/image_variants.py trr_backend/media/s3_mirror.py trr_backend/repositories/media_assets.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_cast_photos.py tests/repositories/test_media_assets_mirroring.py` (pass)
+    - `pytest tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_cast_photos.py tests/repositories/test_media_assets_mirroring.py` (`36 passed`)
 
 - February 17, 2026: Implemented Task 10 social admin incremental sync and comment lifecycle reconciliation.
   - Files:
@@ -1437,3 +1527,24 @@ Continuation (same session, 2026-02-17) — remediation PR stabilization + green
     - `ci / test` (success)
     - `Secret Scan / gitleaks` (success)
     - `Repository Map / generate-repo-map` (success)
+
+Continuation (same session, 2026-02-18) — Health Center pipeline orchestration + episode precedence:
+- Files:
+  - `api/routers/admin_show_sync.py`
+  - `scripts/sync/sync_seasons_episodes.py`
+  - `trr_backend/ingestion/show_importer.py`
+  - `tests/api/routers/test_admin_show_sync.py`
+  - `tests/ingestion/test_show_importer_episode_precedence.py`
+- Changes:
+  - Reordered refresh stream `seasons_episodes` execution to IMDb episodes first, then seasons.
+  - Added optional structured SSE progress metadata for consumers:
+    - `stage_key`
+    - `topic`
+    - `provider`
+  - Reordered composed sync script to run episodes before seasons.
+  - Updated episode precedence behavior:
+    - IMDb episode text fields are authoritative when present (`title`, `overview`, `synopsis`, `air_date`).
+    - TMDb enrichment now fills canonical text only when missing, while still updating TMDb-specific fields.
+  - Added tests for stream order/metadata and precedence regression coverage.
+- Validation:
+  - `pytest -q tests/api/routers/test_admin_show_sync.py tests/ingestion/test_show_importer_episode_precedence.py` (`11 passed`)

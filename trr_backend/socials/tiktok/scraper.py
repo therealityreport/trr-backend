@@ -147,6 +147,7 @@ class TikTokScraper:
 
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
+    REQUEST_TIMEOUT_SECONDS = (10, 45)
 
     def __init__(self, cookies: dict | None = None):
         self.cookies = cookies or {}
@@ -264,7 +265,12 @@ class TikTokScraper:
         }
 
         try:
-            response = self.session.get(url, headers=headers, cookies=self.cookies)
+            response = self.session.get(
+                url,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             html = response.text
         except requests.exceptions.RequestException as e:
@@ -614,7 +620,13 @@ class TikTokScraper:
         headers = self._get_headers(f"https://www.tiktok.com/@{username}")
 
         try:
-            response = self.session.get(self.USER_DETAIL_URL, params=params, headers=headers, cookies=self.cookies)
+            response = self.session.get(
+                self.USER_DETAIL_URL,
+                params=params,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             parsed = self._safe_response_json(response)
             if parsed is None:
@@ -637,7 +649,13 @@ class TikTokScraper:
         headers = self._get_headers(f"https://www.tiktok.com/@{username}")
 
         try:
-            response = self.session.get(self.USER_POST_URL, params=params, headers=headers, cookies=self.cookies)
+            response = self.session.get(
+                self.USER_POST_URL,
+                params=params,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             parsed = self._safe_response_json(response)
             if parsed is None:
@@ -849,7 +867,13 @@ class TikTokScraper:
             headers = self._get_headers(post_url or "https://www.tiktok.com/")
 
             try:
-                response = self.session.get(self.COMMENTS_URL, params=params, headers=headers, cookies=self.cookies)
+                response = self.session.get(
+                    self.COMMENTS_URL,
+                    params=params,
+                    headers=headers,
+                    cookies=self.cookies,
+                    timeout=self.REQUEST_TIMEOUT_SECONDS,
+                )
                 response.raise_for_status()
                 data = self._safe_response_json(response)
             except requests.exceptions.RequestException as e:
@@ -924,7 +948,11 @@ class TikTokScraper:
 
             try:
                 response = self.session.get(
-                    self.COMMENT_REPLIES_URL, params=params, headers=headers, cookies=self.cookies
+                    self.COMMENT_REPLIES_URL,
+                    params=params,
+                    headers=headers,
+                    cookies=self.cookies,
+                    timeout=self.REQUEST_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
                 data = self._safe_response_json(response)

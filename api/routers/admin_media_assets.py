@@ -12,17 +12,14 @@ from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.image_variants import generate_media_asset_variants
 from trr_backend.media.s3_mirror import (
-    build_hosted_url,
     get_s3_bucket,
     get_s3_client,
-    guess_ext_from_content_type,
-    upload_bytes_to_s3,
+    mirror_media_asset_row,
 )
 from trr_backend.repositories.media_assets import (
     update_asset_with_mirror_result,
     update_ingest_status,
 )
-from trr_backend.scraping.url_image_scraper import download_and_hash_image
 
 router = APIRouter(prefix="/admin", tags=["admin-media-assets"])
 
@@ -83,10 +80,6 @@ class DetectTextOverlayResponse(BaseModel):
     text_overlay_error_code: str | None = None
 
 
-def _build_media_asset_s3_key(sha256: str, ext: str) -> str:
-    return f"media/{sha256[:2]}/{sha256}{ext}"
-
-
 @router.post("/media-assets/{asset_id}/mirror", response_model=MirrorMediaAssetResponse)
 def mirror_media_asset(
     asset_id: UUID,
@@ -100,7 +93,10 @@ def mirror_media_asset(
     response = (
         db.schema("core")
         .table("media_assets")
-        .select("id, source_url, hosted_url, hosted_key, metadata")
+        .select(
+            "id, source, source_url, hosted_url, hosted_key, hosted_sha256, hosted_bucket, "
+            "hosted_content_type, hosted_bytes, hosted_etag, metadata"
+        )
         .eq("id", asset_id_str)
         .limit(1)
         .execute()
@@ -118,13 +114,9 @@ def mirror_media_asset(
             hosted_key=row.get("hosted_key"),
             status="skipped",
         )
-
     source_url = row.get("source_url")
-    if not source_url:
+    if not isinstance(source_url, str) or not source_url.strip():
         raise HTTPException(status_code=409, detail="Media asset has no source_url to mirror")
-
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    referer = payload.referer or (metadata.get("page_url") if isinstance(metadata, dict) else None)
 
     update_ingest_status(
         db,
@@ -133,10 +125,11 @@ def mirror_media_asset(
     )
 
     try:
-        image_bytes, sha256, content_type = download_and_hash_image(
-            source_url,
-            referer=referer,
-        )
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if payload.referer:
+            metadata = {**metadata, "page_url": payload.referer}
+            row = {**row, "metadata": metadata}
+        patch = mirror_media_asset_row(row, force=payload.force)
     except Exception as exc:
         update_ingest_status(
             db,
@@ -145,41 +138,64 @@ def mirror_media_asset(
             error=str(exc),
             failed_at=datetime.now(UTC).isoformat(),
         )
-        raise HTTPException(status_code=502, detail=f"Failed to download source_url: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Failed to mirror source_url: {exc}") from exc
 
-    ext = guess_ext_from_content_type(content_type)
-    hosted_key = row.get("hosted_key") or _build_media_asset_s3_key(sha256, ext)
+    if not patch:
+        update_ingest_status(
+            db,
+            asset_id_str,
+            "hosted",
+            completed_at=datetime.now(UTC).isoformat(),
+        )
+        return MirrorMediaAssetResponse(
+            asset_id=asset_id_str,
+            hosted_url=row.get("hosted_url"),
+            hosted_key=row.get("hosted_key"),
+            status="skipped",
+        )
 
     try:
-        s3_client = get_s3_client()
-        bucket = get_s3_bucket()
-        etag, file_size = upload_bytes_to_s3(
-            s3_client,
-            bucket=bucket,
-            key=hosted_key,
-            data=image_bytes,
-            content_type=content_type,
-        )
-        hosted_url = build_hosted_url(hosted_key)
-        # Preserve original metadata, but always record when we created/updated the S3 mirror.
-        now_iso = datetime.now(UTC).isoformat()
-        metadata_out = metadata if isinstance(metadata, dict) else {}
-        metadata_out = dict(metadata_out)
-        metadata_out["mirrored_at"] = now_iso
-        metadata_out.setdefault("mirrored_from", source_url)
-        update_asset_with_mirror_result(
-            db,
-            asset_id=asset_id_str,
-            sha256=sha256,
-            hosted_bucket=bucket,
-            hosted_key=hosted_key,
-            hosted_url=hosted_url,
-            hosted_bytes=file_size,
-            hosted_content_type=content_type,
-            hosted_etag=etag,
-            completed_at=now_iso,
-            metadata=metadata_out,
-        )
+        if set(patch.keys()) == {"hosted_url"}:
+            db.schema("core").table("media_assets").update({"hosted_url": patch["hosted_url"]}).eq(
+                "id", asset_id_str
+            ).execute()
+            update_ingest_status(
+                db,
+                asset_id_str,
+                "hosted",
+                completed_at=datetime.now(UTC).isoformat(),
+            )
+            hosted_url = patch["hosted_url"]
+            hosted_key = row.get("hosted_key")
+            file_size = int(row.get("hosted_bytes") or 0) or None
+            content_type = row.get("hosted_content_type")
+        else:
+            now_iso = str(patch.get("hosted_at") or datetime.now(UTC).isoformat())
+            update_asset_with_mirror_result(
+                db,
+                asset_id=asset_id_str,
+                sha256=str(patch.get("sha256") or patch.get("hosted_sha256") or ""),
+                hosted_bucket=str(patch.get("hosted_bucket") or ""),
+                hosted_key=str(patch.get("hosted_key") or ""),
+                hosted_url=str(patch.get("hosted_url") or ""),
+                hosted_bytes=int(patch.get("hosted_bytes") or 0),
+                hosted_content_type=(
+                    str(patch.get("hosted_content_type"))
+                    if patch.get("hosted_content_type") is not None
+                    else None
+                ),
+                hosted_etag=(
+                    str(patch.get("hosted_etag")) if patch.get("hosted_etag") is not None else None
+                ),
+                width=int(patch.get("width")) if patch.get("width") is not None else None,
+                height=int(patch.get("height")) if patch.get("height") is not None else None,
+                completed_at=now_iso,
+                metadata=patch.get("metadata") if isinstance(patch.get("metadata"), dict) else None,
+            )
+            hosted_url = patch.get("hosted_url")
+            hosted_key = patch.get("hosted_key")
+            file_size = patch.get("hosted_bytes")
+            content_type = patch.get("hosted_content_type")
     except Exception as exc:
         update_ingest_status(
             db,
@@ -192,11 +208,11 @@ def mirror_media_asset(
 
     return MirrorMediaAssetResponse(
         asset_id=asset_id_str,
-        hosted_url=hosted_url,
-        hosted_key=hosted_key,
+        hosted_url=str(hosted_url) if hosted_url else None,
+        hosted_key=str(hosted_key) if hosted_key else None,
         status="hosted",
-        bytes=file_size,
-        content_type=content_type,
+        bytes=int(file_size) if file_size is not None else None,
+        content_type=str(content_type) if content_type else None,
     )
 
 
