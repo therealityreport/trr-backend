@@ -160,6 +160,7 @@ class YouTubeScraper:
 
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
+    REQUEST_TIMEOUT_SECONDS = (10, 45)
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
@@ -390,7 +391,7 @@ class YouTubeScraper:
         headers = self._get_headers()
 
         try:
-            response = self.session.get(url, headers=headers)
+            response = self.session.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status()
             return self._extract_ytinital_data(response.text)
         except requests.exceptions.RequestException as e:
@@ -412,7 +413,12 @@ class YouTubeScraper:
 
         browse_url = "https://www.youtube.com/youtubei/v1/browse"
         try:
-            response = self.session.post(browse_url, headers=headers, data=json.dumps(payload))
+            response = self.session.post(
+                browse_url,
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -462,7 +468,12 @@ class YouTubeScraper:
         headers = self._get_headers()
 
         try:
-            response = self.session.get(self.CHANNEL_SEARCH_URL, params=params, headers=headers)
+            response = self.session.get(
+                self.CHANNEL_SEARCH_URL,
+                params=params,
+                headers=headers,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             return self._extract_ytinital_data(response.text)
         except requests.exceptions.RequestException as e:
@@ -772,7 +783,11 @@ class YouTubeScraper:
         # First, get the video page to extract the comment continuation token
         self._rate_limit(delay)
         try:
-            response = self.session.get(video_url, headers=self._get_headers())
+            response = self.session.get(
+                video_url,
+                headers=self._get_headers(),
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             yt_data = self._extract_ytinital_data(response.text)
         except requests.exceptions.RequestException as e:
@@ -905,6 +920,7 @@ class YouTubeScraper:
                 self.COMMENT_API_URL,
                 headers=headers,
                 data=json.dumps(payload),
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             return response.json()

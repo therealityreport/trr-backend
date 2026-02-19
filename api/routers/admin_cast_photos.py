@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
+from trr_backend.media.image_variants import generate_cast_photo_variants
 from trr_backend.media.s3_mirror import mirror_cast_photo_row
 from trr_backend.repositories.cast_photos import update_cast_photo_hosted_fields
 
@@ -33,6 +34,28 @@ class DetectTextOverlayResponse(BaseModel):
     text_overlay_detected_at: str | None = None
     text_overlay_prompt_version: str | None = None
     text_overlay_error_code: str | None = None
+
+
+class GenerateCastPhotoVariantsRequest(BaseModel):
+    force: bool = False
+    crop: dict | None = None
+
+
+class CastPhotoVariantItem(BaseModel):
+    variant_key: str
+    format: str
+    hosted_url: str
+    width: int
+    height: int
+    bytes: int
+    crop_signature: str
+
+
+class GenerateCastPhotoVariantsResponse(BaseModel):
+    photo_id: str
+    generated: int
+    crop_signature: str
+    variants: list[CastPhotoVariantItem]
 
 
 @router.post("/cast-photos/{photo_id}/mirror", response_model=MirrorCastPhotoResponse)
@@ -130,4 +153,46 @@ def detect_text_overlay_cast_photo(
         text_overlay_detected_at=result.detected_at,
         text_overlay_prompt_version=result.prompt_version,
         text_overlay_error_code=result.reason_code,
+    )
+
+
+@router.post("/cast-photos/{photo_id}/variants", response_model=GenerateCastPhotoVariantsResponse)
+def generate_variants_for_cast_photo(
+    photo_id: UUID,
+    payload: GenerateCastPhotoVariantsRequest | None = None,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> GenerateCastPhotoVariantsResponse:
+    photo_id_str = str(photo_id)
+    payload = payload or GenerateCastPhotoVariantsRequest()
+
+    try:
+        variants = generate_cast_photo_variants(
+            db,
+            photo_id=photo_id_str,
+            crop=payload.crop,
+            force=payload.force,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate variants: {exc}") from exc
+
+    crop_signature = variants[0].crop_signature if variants else ("base" if not payload.crop else "custom")
+    return GenerateCastPhotoVariantsResponse(
+        photo_id=photo_id_str,
+        generated=len(variants),
+        crop_signature=crop_signature,
+        variants=[
+            CastPhotoVariantItem(
+                variant_key=item.variant_key,
+                format=item.format,
+                hosted_url=item.hosted_url,
+                width=item.width,
+                height=item.height,
+                bytes=item.bytes,
+                crop_signature=item.crop_signature,
+            )
+            for item in variants
+        ],
     )

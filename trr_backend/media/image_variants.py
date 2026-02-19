@@ -90,6 +90,11 @@ def _variant_key_for(asset_id: str, crop_signature: str, variant_key: str, ext: 
     return f"media-variants/{asset_id}/{signature_hash}/{variant_key}.{ext}"
 
 
+def _cast_variant_key_for(photo_id: str, crop_signature: str, variant_key: str, ext: str) -> str:
+    signature_hash = hashlib.sha1(crop_signature.encode("utf-8")).hexdigest()[:12]
+    return f"cast-photo-variants/{photo_id}/{signature_hash}/{variant_key}.{ext}"
+
+
 def _load_image_bytes(asset_row: dict[str, Any]) -> bytes:
     hosted_bucket = asset_row.get("hosted_bucket")
     hosted_key = asset_row.get("hosted_key")
@@ -105,6 +110,23 @@ def _load_image_bytes(asset_row: dict[str, Any]) -> bytes:
         return resp.content
 
     raise RuntimeError("Asset has no hosted source to generate variants")
+
+
+def _load_cast_photo_image_bytes(photo_row: dict[str, Any]) -> bytes:
+    hosted_bucket = photo_row.get("hosted_bucket")
+    hosted_key = photo_row.get("hosted_key")
+    if isinstance(hosted_bucket, str) and hosted_bucket and isinstance(hosted_key, str) and hosted_key:
+        s3_client = get_s3_client()
+        response = s3_client.get_object(Bucket=hosted_bucket, Key=hosted_key)
+        return response["Body"].read()
+
+    hosted_url = photo_row.get("hosted_url")
+    if isinstance(hosted_url, str) and hosted_url:
+        resp = requests.get(hosted_url, timeout=45)
+        resp.raise_for_status()
+        return resp.content
+
+    raise RuntimeError("Cast photo has no hosted source to generate variants")
 
 
 def _resize_to_width(image: Image.Image, width: int) -> Image.Image:
@@ -172,6 +194,22 @@ def _get_asset_row(db, asset_id: str) -> dict[str, Any]:
         raise RuntimeError("Database error fetching media asset")
     if not response.data:
         raise RuntimeError("Media asset not found")
+    return response.data[0]
+
+
+def _get_cast_photo_row(db, photo_id: str) -> dict[str, Any]:
+    response = (
+        db.schema("core")
+        .table("cast_photos")
+        .select("id, hosted_url, hosted_bucket, hosted_key, metadata")
+        .eq("id", photo_id)
+        .limit(1)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError("Database error fetching cast photo")
+    if not response.data:
+        raise RuntimeError("Cast photo not found")
     return response.data[0]
 
 
@@ -292,6 +330,84 @@ def _update_asset_variant_metadata(db, asset_id: str, variants: list[VariantResu
     )
 
 
+def _existing_cast_metadata_variants(
+    metadata: dict[str, Any],
+    crop_signature: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    variants = metadata.get("variants")
+    if not isinstance(variants, dict):
+        return {}
+    signature_bucket = variants.get(crop_signature)
+    if not isinstance(signature_bucket, dict):
+        return {}
+
+    existing: dict[tuple[str, str], dict[str, Any]] = {}
+    for variant_key, by_format in signature_bucket.items():
+        if not isinstance(variant_key, str) or not isinstance(by_format, dict):
+            continue
+        for fmt, payload in by_format.items():
+            if not isinstance(fmt, str) or not isinstance(payload, dict):
+                continue
+            if isinstance(payload.get("url"), str):
+                existing[(variant_key, fmt)] = payload
+    return existing
+
+
+def _update_cast_photo_variant_metadata(
+    db,
+    photo_id: str,
+    metadata: dict[str, Any],
+    variants: list[VariantResult],
+    crop_signature: str,
+) -> None:
+    if not variants:
+        return
+
+    variants_meta = dict(metadata.get("variants") or {})
+    signature_bucket = dict(variants_meta.get(crop_signature) or {})
+    for variant in variants:
+        slot = dict(signature_bucket.get(variant.variant_key) or {})
+        slot[variant.format] = {
+            "url": variant.hosted_url,
+            "width": variant.width,
+            "height": variant.height,
+            "bytes": variant.bytes,
+        }
+        signature_bucket[variant.variant_key] = slot
+
+    variants_meta[crop_signature] = signature_bucket
+    metadata["variants"] = variants_meta
+
+    def _best_url(variant_key: str) -> str | None:
+        data = signature_bucket.get(variant_key)
+        if not isinstance(data, dict):
+            return None
+        webp = data.get("webp")
+        jpg = data.get("jpg")
+        if isinstance(webp, dict) and isinstance(webp.get("url"), str):
+            return webp["url"]
+        if isinstance(jpg, dict) and isinstance(jpg.get("url"), str):
+            return jpg["url"]
+        return None
+
+    if crop_signature == "base":
+        metadata["thumb_url"] = _best_url("thumb")
+        metadata["display_url"] = _best_url("card")
+        metadata["detail_url"] = _best_url("detail")
+    else:
+        metadata["crop_display_url"] = _best_url("crop_card")
+        metadata["crop_detail_url"] = _best_url("crop_detail")
+        metadata["active_crop_signature"] = crop_signature
+
+    (
+        db.schema("core")
+        .table("cast_photos")
+        .update({"metadata": metadata})
+        .eq("id", photo_id)
+        .execute()
+    )
+
+
 def generate_media_asset_variants(
     db,
     *,
@@ -379,4 +495,81 @@ def generate_media_asset_variants(
             )
 
     _update_asset_variant_metadata(db, asset_id, created, crop_signature)
+    return created
+
+
+def generate_cast_photo_variants(
+    db,
+    *,
+    photo_id: str,
+    crop: dict[str, Any] | None = None,
+    force: bool = False,
+) -> list[VariantResult]:
+    """Generate base variants (or crop variants when crop is provided) for a cast photo."""
+    photo = _get_cast_photo_row(db, photo_id)
+    image_bytes = _load_cast_photo_image_bytes(photo)
+
+    image = Image.open(io.BytesIO(image_bytes))
+    image = ImageOps.exif_transpose(image)
+
+    metadata = dict(photo.get("metadata") or {})
+    crop_spec = _normalize_crop(crop)
+    crop_signature = _crop_signature(crop_spec)
+    existing = _existing_cast_metadata_variants(metadata, crop_signature)
+
+    bucket = get_s3_bucket()
+    s3_client = get_s3_client()
+
+    created: list[VariantResult] = []
+
+    if crop_spec is None:
+        variant_specs: list[tuple[str, Image.Image]] = [
+            (variant_key, _resize_to_width(image, width)) for variant_key, width in _BASE_VARIANT_WIDTHS
+        ]
+    else:
+        variant_specs = [
+            (variant_key, _focus_crop(image, crop_spec, out_w, out_h))
+            for variant_key, out_w, out_h in _CROP_VARIANTS
+        ]
+
+    for variant_key, variant_image in variant_specs:
+        for fmt in ("webp", "jpg"):
+            if not force and (variant_key, fmt) in existing:
+                row = existing[(variant_key, fmt)]
+                created.append(
+                    VariantResult(
+                        variant_key=variant_key,
+                        format=fmt,
+                        hosted_url=str(row.get("url") or ""),
+                        width=int(row.get("width") or variant_image.width),
+                        height=int(row.get("height") or variant_image.height),
+                        bytes=int(row.get("bytes") or 0),
+                        crop_signature=crop_signature,
+                    )
+                )
+                continue
+
+            encoded, content_type, ext = _encode_image(variant_image, fmt)
+            hosted_key = _cast_variant_key_for(photo_id, crop_signature, variant_key, ext)
+            s3_client.put_object(
+                Bucket=bucket,
+                Key=hosted_key,
+                Body=encoded,
+                ContentType=content_type,
+                CacheControl="public, max-age=31536000, immutable",
+            )
+            hosted_url = build_hosted_url(hosted_key)
+            created.append(
+                VariantResult(
+                    variant_key=variant_key,
+                    format=fmt,
+                    hosted_url=hosted_url,
+                    width=variant_image.width,
+                    height=variant_image.height,
+                    bytes=len(encoded),
+                    crop_signature=crop_signature,
+                )
+            )
+
+    _update_cast_photo_variant_metadata(db, photo_id, metadata, created, crop_signature)
     return created

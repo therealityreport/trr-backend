@@ -1641,8 +1641,6 @@ def upsert_candidates_into_supabase(
                                             if ep.season != season_no:
                                                 continue
                                             existing = existing_by_number.get(int(ep.episode), {})
-                                            existing_overview = existing.get("overview")
-                                            existing_synopsis = existing.get("synopsis")
                                             episode_row: dict[str, Any] = {
                                                 "show_id": show_id,
                                                 "season_id": season_id_val,
@@ -1655,14 +1653,9 @@ def upsert_candidates_into_supabase(
                                             if ep.title:
                                                 episode_row["title"] = ep.title
                                             if ep.overview:
-                                                if not (
-                                                    isinstance(existing_overview, str) and existing_overview.strip()
-                                                ):
-                                                    episode_row["overview"] = ep.overview
-                                                if not (
-                                                    isinstance(existing_synopsis, str) and existing_synopsis.strip()
-                                                ):
-                                                    episode_row["synopsis"] = ep.overview
+                                                # IMDb is authoritative for canonical episode text when present.
+                                                episode_row["overview"] = ep.overview
+                                                episode_row["synopsis"] = ep.overview
                                             if ep.air_date:
                                                 episode_row["air_date"] = ep.air_date
                                             if ep.imdb_rating is not None:
@@ -1892,6 +1885,7 @@ def upsert_candidates_into_supabase(
 
                                             existing = existing_by_number.get(ep_no, {})
                                             existing_title = existing.get("title")
+                                            existing_overview = existing.get("overview")
                                             existing_synopsis = existing.get("synopsis")
                                             existing_air_date = existing.get("air_date")
 
@@ -1932,12 +1926,20 @@ def upsert_candidates_into_supabase(
                                             }
                                             if title_val:
                                                 episode_row["title"] = title_val
-                                            if isinstance(tmdb_overview, str) and tmdb_overview.strip():
-                                                episode_row["overview"] = tmdb_overview.strip()
+                                            if (
+                                                isinstance(tmdb_overview, str)
+                                                and tmdb_overview.strip()
+                                                and not (
+                                                    isinstance(existing_overview, str)
+                                                    and existing_overview.strip()
+                                                )
+                                            ):
+                                                overview_value = tmdb_overview.strip()
+                                                episode_row["overview"] = overview_value
                                                 if not (
                                                     isinstance(existing_synopsis, str) and existing_synopsis.strip()
                                                 ):
-                                                    episode_row["synopsis"] = tmdb_overview.strip()
+                                                    episode_row["synopsis"] = overview_value
                                             if air_val:
                                                 episode_row["air_date"] = air_val
 

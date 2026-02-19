@@ -125,6 +125,7 @@ class TwitterScraper:
 
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
+    REQUEST_TIMEOUT_SECONDS = (10, 45)
 
     # Required features for GraphQL queries
     FEATURES = {
@@ -241,7 +242,11 @@ class TwitterScraper:
             ),
         }
         try:
-            response = self.session.post(self.GUEST_ACTIVATE_URL, headers=headers)
+            response = self.session.post(
+                self.GUEST_ACTIVATE_URL,
+                headers=headers,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             data = response.json()
             self._guest_token = data.get("guest_token")
@@ -273,7 +278,11 @@ class TwitterScraper:
                     "Chrome/144.0.0.0 Safari/537.36"
                 ),
             }
-            resp = self.session.get(self.MAIN_PAGE_URL, headers=headers)
+            resp = self.session.get(
+                self.MAIN_PAGE_URL,
+                headers=headers,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             resp.raise_for_status()
 
             # Find candidate JS bundles where operation names are defined.
@@ -286,18 +295,34 @@ class TwitterScraper:
                 raise ValueError("Could not find main JS bundle URL")
 
             for js_url in js_urls[:8]:
-                js_resp = self.session.get(js_url, headers=headers)
+                js_resp = self.session.get(
+                    js_url,
+                    headers=headers,
+                    timeout=self.REQUEST_TIMEOUT_SECONDS,
+                )
                 js_resp.raise_for_status()
                 js_text = js_resp.text
 
                 if not self._search_hash:
-                    match = re.search(r'queryId:"([a-zA-Z0-9_-]+)",operationName:"SearchTimeline"', js_text)
+                    match = re.search(
+                        r'queryId:"([a-zA-Z0-9_-]+)",operationName:"SearchTimeline"',
+                        js_text,
+                    ) or re.search(
+                        r'operationName:"SearchTimeline",queryId:"([a-zA-Z0-9_-]+)"',
+                        js_text,
+                    )
                     if match:
                         self._search_hash = match.group(1)
                         logger.info("Discovered SearchTimeline hash from %s", js_url)
 
                 if not self._detail_hash:
-                    match = re.search(r'queryId:"([a-zA-Z0-9_-]+)",operationName:"TweetDetail"', js_text)
+                    match = re.search(
+                        r'queryId:"([a-zA-Z0-9_-]+)",operationName:"TweetDetail"',
+                        js_text,
+                    ) or re.search(
+                        r'operationName:"TweetDetail",queryId:"([a-zA-Z0-9_-]+)"',
+                        js_text,
+                    )
                     if match:
                         self._detail_hash = match.group(1)
                         logger.info("Discovered TweetDetail hash from %s", js_url)
@@ -485,7 +510,7 @@ class TwitterScraper:
         }
 
         try:
-            response = self.session.get(url, headers=headers)
+            response = self.session.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logger.error(f"Syndication request failed for @{username}: {e}")
@@ -720,7 +745,12 @@ class TwitterScraper:
         headers = self._get_headers()
 
         try:
-            response = self.session.get(url, headers=headers, cookies=self.cookies)
+            response = self.session.get(
+                url,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             self._last_graphql_status_code = response.status_code
             return response.json()
@@ -780,10 +810,20 @@ class TwitterScraper:
                 "features": json.dumps(detail_features),
             }
             url = f"{self._tweet_detail_url}?{urllib.parse.urlencode(params)}"
-            return self.session.get(url, headers=headers, cookies=self.cookies)
+            return self.session.get(
+                url,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
 
         try:
             response = _request(features)
+            if response.status_code == 404:
+                # Hashes rotate frequently; force one rediscovery and retry.
+                self._detail_hash = None
+                self._discover_graphql_hashes()
+                response = _request(features)
             if response.status_code == 400:
                 # Twitter frequently adds required flags. Auto-apply once when signaled.
                 missing_flags = self._extract_required_feature_flags(response)

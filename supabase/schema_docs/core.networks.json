@@ -177,6 +177,158 @@
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "wikidata_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "wikipedia_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "wikimedia_logo_file",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "link_enriched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "link_enrichment_source",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_black_key",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_black_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_black_sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_black_content_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_black_bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_black_etag",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_black_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_white_key",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_white_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_white_sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_white_content_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_white_bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_white_etag",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_logo_white_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -225,6 +377,25 @@
     "facebook_id": "example",
     "instagram_id": "example",
     "twitter_id": "example",
-    "tiktok_id": "example"
+    "tiktok_id": "example",
+    "wikidata_id": "example",
+    "wikipedia_url": "example",
+    "wikimedia_logo_file": "example",
+    "link_enriched_at": "1970-01-01T00:00:00Z",
+    "link_enrichment_source": "example",
+    "hosted_logo_black_key": "example",
+    "hosted_logo_black_url": "example",
+    "hosted_logo_black_sha256": "example",
+    "hosted_logo_black_content_type": "example",
+    "hosted_logo_black_bytes": 0,
+    "hosted_logo_black_etag": "example",
+    "hosted_logo_black_at": "1970-01-01T00:00:00Z",
+    "hosted_logo_white_key": "example",
+    "hosted_logo_white_url": "example",
+    "hosted_logo_white_sha256": "example",
+    "hosted_logo_white_content_type": "example",
+    "hosted_logo_white_bytes": 0,
+    "hosted_logo_white_etag": "example",
+    "hosted_logo_white_at": "1970-01-01T00:00:00Z"
   }
 }

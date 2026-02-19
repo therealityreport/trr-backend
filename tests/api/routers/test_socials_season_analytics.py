@@ -172,6 +172,41 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
     assert ingest_mock.call_args.kwargs["sync_strategy"] == "full_refresh"
 
 
+def test_ingest_accepts_comments_only_mode(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-456",
+        "status": "queued",
+        "stages": ["comments"],
+        "queued_or_started_jobs": 1,
+        "summary": {"total_jobs": 1},
+    }
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "sync_strategy": "incremental",
+        "ingest_mode": "comments_only",
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+            response = client.post(
+                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "run-456"
+    assert body["stages"] == ["comments"]
+    assert ingest_mock.call_args.kwargs["ingest_mode"] == "comments_only"
+
+
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")

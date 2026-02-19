@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube")
 SUPPORTED_SCOPES = ("bravo", "creator", "community")
-SUPPORTED_INGEST_MODES = ("posts_only", "posts_and_comments")
+SUPPORTED_INGEST_MODES = ("posts_only", "posts_and_comments", "comments_only")
 SUPPORTED_SYNC_STRATEGIES = ("incremental", "full_refresh")
 JOB_PROGRESS_UPDATE_EVERY = 25
 COMMENT_STALE_RECHECK_INTERVAL = timedelta(hours=24)
@@ -1868,6 +1868,10 @@ def _ingest_instagram(
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                     logger.exception(
                         "[instagram] Failed to fetch comments for post %s (shortcode=%s)",
                         post_db_id,
@@ -1949,6 +1953,10 @@ def _ingest_instagram(
                             _report_progress()
                     except Exception:
                         comment_errors += 1
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
                         logger.exception(
                             "[instagram] Failed to fetch comments for post %s (shortcode=%s)",
                             upserted.get("id"),
@@ -2195,6 +2203,10 @@ def _ingest_tiktok(
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                     logger.exception(
                         "[tiktok] Failed to fetch comments for post %s (video_id=%s)",
                         post_db_id,
@@ -2275,6 +2287,10 @@ def _ingest_tiktok(
                             _report_progress()
                     except Exception:
                         comment_errors += 1
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
                         logger.exception(
                             "[tiktok] Failed to fetch comments for post %s (video_id=%s)",
                             upserted.get("id"),
@@ -2505,6 +2521,10 @@ def _ingest_youtube(
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                     logger.exception(
                         "[youtube] Failed to fetch comments for video %s (video_id=%s)",
                         post_db_id,
@@ -2589,6 +2609,10 @@ def _ingest_youtube(
                             _report_progress()
                     except Exception:
                         comment_errors += 1
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
                         logger.exception(
                             "[youtube] Failed to fetch comments for video %s (video_id=%s)",
                             upserted.get("id"),
@@ -3362,6 +3386,14 @@ def ingest_season(
         resolved_comments = 0
         resolved_replies = 0
         resolved_fetch_replies = False
+    elif normalized_mode == "comments_only":
+        resolved_posts = 0
+
+    stage_plan = (
+        ["posts"]
+        if normalized_mode == "posts_only"
+        else ["comments"] if normalized_mode == "comments_only" else ["posts", "comments"]
+    )
 
     opts = IngestOptions(
         platforms=platform_filter or None,
@@ -3391,7 +3423,7 @@ def ingest_season(
             "season_number": context.season_number,
             "source_scope": source_scope,
             "run_id": None,
-            "stages": ["posts"] if normalized_mode == "posts_only" else ["posts", "comments"],
+            "stages": stage_plan,
             "queued_or_started_jobs": 0,
             "message": "No active targets configured for selected platforms",
         }
@@ -3451,21 +3483,22 @@ def ingest_season(
                 "fetch_replies": opts.fetch_replies,
                 "ingest_mode": opts.ingest_mode,
             }
-            job_ids.append(
-                _create_job(
-                    context,
-                    run_id=run_id,
-                    platform=platform,
-                    source_scope=source_scope,
-                    job_type="posts",
-                    stage="posts",
-                    config={**base_config, "stage": "posts"},
-                    initiated_by=initiated_by,
-                    status=initial_job_status,
-                    priority=100,
+            if normalized_mode != "comments_only":
+                job_ids.append(
+                    _create_job(
+                        context,
+                        run_id=run_id,
+                        platform=platform,
+                        source_scope=source_scope,
+                        job_type="posts",
+                        stage="posts",
+                        config={**base_config, "stage": "posts"},
+                        initiated_by=initiated_by,
+                        status=initial_job_status,
+                        priority=100,
+                    )
                 )
-            )
-            if normalized_mode == "posts_and_comments" and opts.max_comments_per_post > 0:
+            if normalized_mode in {"posts_and_comments", "comments_only"} and opts.max_comments_per_post > 0:
                 job_ids.append(
                     _create_job(
                         context,
@@ -3489,7 +3522,7 @@ def ingest_season(
         "source_scope": source_scope,
         "run_id": run_id,
         "status": "queued" if queue_enabled else "pending",
-        "stages": ["posts"] if normalized_mode == "posts_only" else ["posts", "comments"],
+        "stages": stage_plan,
         "queued_or_started_jobs": len(job_ids),
         "summary": summary,
     }

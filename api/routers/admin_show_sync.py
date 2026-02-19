@@ -8,11 +8,14 @@ This router exposes "one-button" admin actions that wrap existing ingestion/sync
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Literal
 from uuid import UUID
 
@@ -22,6 +25,7 @@ from pydantic import BaseModel, Field
 
 import scripts.sync.sync_episode_appearances as sync_episode_appearances
 import scripts.sync.sync_episodes as sync_episodes
+import scripts.sync.sync_networks_streaming_links as sync_networks_streaming_links
 import scripts.sync.sync_season_episode_images as sync_season_episode_images
 import scripts.sync.sync_seasons as sync_seasons
 import scripts.sync.sync_seasons_episodes as sync_seasons_episodes
@@ -83,6 +87,43 @@ class SyncFromListsResponse(BaseModel):
     updated: int
     skipped: int
     duration_ms: int
+
+
+class SyncNetworksStreamingRequest(BaseModel):
+    force: bool = False
+    skip_s3: bool = False
+    dry_run: bool = False
+    limit: int | None = Field(default=None, ge=1, le=5000)
+    verbose: bool = False
+
+
+class SyncNetworksStreamingStepResult(BaseModel):
+    status: Literal["success", "failed"]
+    duration_ms: int
+    exit_code: int | None = None
+    error: str | None = None
+    metrics: dict[str, int] = Field(default_factory=dict)
+
+
+class SyncNetworksStreamingUnresolvedLogo(BaseModel):
+    type: Literal["network", "streaming"]
+    id: str
+    name: str
+    reason: str
+
+
+class SyncNetworksStreamingResponse(BaseModel):
+    entities_synced: int
+    providers_synced: int
+    links_enriched: int
+    logos_mirrored: int
+    variants_black_mirrored: int
+    variants_white_mirrored: int
+    unresolved_logos_count: int
+    unresolved_logos_truncated: bool
+    unresolved_logos: list[SyncNetworksStreamingUnresolvedLogo] = Field(default_factory=list)
+    failures: int
+    steps: dict[str, SyncNetworksStreamingStepResult]
 
 
 @router.post("/sync-from-lists", response_model=SyncFromListsResponse)
@@ -161,6 +202,187 @@ def sync_from_lists(
         updated=int(result.updated),
         skipped=int(result.skipped),
         duration_ms=duration_ms,
+    )
+
+
+def _extract_metric_int(output: str, key: str) -> int:
+    match = re.search(rf"^{re.escape(key)}=(\d+)\s*$", output, flags=re.MULTILINE)
+    if not match or not match.group(1):
+        return 0
+    return int(match.group(1))
+
+
+def _extract_unresolved_logos(output: str) -> list[SyncNetworksStreamingUnresolvedLogo]:
+    rows: list[SyncNetworksStreamingUnresolvedLogo] = []
+    for line in output.splitlines():
+        text = str(line or "").strip()
+        if not text.startswith("unresolved_logo="):
+            continue
+        payload_raw = text.partition("=")[2].strip()
+        if not payload_raw:
+            continue
+        try:
+            payload = json.loads(payload_raw)
+            if isinstance(payload, dict):
+                rows.append(SyncNetworksStreamingUnresolvedLogo(**payload))
+        except Exception:  # noqa: BLE001
+            continue
+    return rows
+
+
+def _run_script_step_with_metrics(
+    name: str,
+    fn: Callable[[list[str] | None], int],
+    argv: list[str],
+    metric_keys: list[str],
+) -> tuple[SyncNetworksStreamingStepResult, str]:
+    started = time.perf_counter()
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+    try:
+        with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+            code = fn(list(argv))
+    except Exception as exc:  # noqa: BLE001
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        logger.exception("admin sync step failed: %s", name)
+        return (
+            SyncNetworksStreamingStepResult(
+                status="failed",
+                duration_ms=duration_ms,
+                exit_code=None,
+                error=str(exc),
+                metrics=dict.fromkeys(metric_keys, 0),
+            ),
+            "",
+        )
+
+    output = "\n".join(
+        [stdout_buffer.getvalue().strip(), stderr_buffer.getvalue().strip()]
+    ).strip()
+    metrics = {key: _extract_metric_int(output, key) for key in metric_keys}
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    if int(code) == 0:
+        return (
+            SyncNetworksStreamingStepResult(
+                status="success",
+                duration_ms=duration_ms,
+                exit_code=0,
+                metrics=metrics,
+            ),
+            output,
+        )
+    return (
+        SyncNetworksStreamingStepResult(
+            status="failed",
+            duration_ms=duration_ms,
+            exit_code=int(code),
+            error=f"non-zero exit code: {code}",
+            metrics=metrics,
+        ),
+        output,
+    )
+
+
+@router.post("/sync-networks-streaming", response_model=SyncNetworksStreamingResponse)
+def sync_networks_streaming(
+    payload: SyncNetworksStreamingRequest | None = None,
+    _: AdminUser = None,
+) -> SyncNetworksStreamingResponse:
+    payload = payload or SyncNetworksStreamingRequest()
+
+    common_args = ["--all"]
+    if payload.force:
+        common_args.append("--force")
+    if payload.dry_run:
+        common_args.append("--dry-run")
+    if payload.verbose:
+        common_args.append("--verbose")
+    if payload.limit is not None:
+        common_args.extend(["--limit", str(int(payload.limit))])
+
+    entities_args = list(common_args)
+    if payload.skip_s3:
+        entities_args.append("--skip-s3")
+
+    providers_args = list(common_args)
+    if payload.skip_s3:
+        providers_args.append("--skip-s3")
+
+    links_args = list(common_args)
+    if payload.skip_s3:
+        links_args.append("--skip-s3")
+
+    tmdb_entities, _ = _run_script_step_with_metrics(
+        "tmdb_show_entities",
+        sync_tmdb_show_entities.main,
+        entities_args,
+        ["networks_upserted", "production_companies_upserted", "logos_mirrored", "failures"],
+    )
+    tmdb_watch_providers, _ = _run_script_step_with_metrics(
+        "tmdb_watch_providers",
+        sync_tmdb_watch_providers.main,
+        providers_args,
+        ["providers_upserted", "show_watch_providers_upserted", "logos_mirrored", "failures"],
+    )
+    network_streaming_links, network_streaming_links_output = _run_script_step_with_metrics(
+        "network_streaming_links",
+        sync_networks_streaming_links.main,
+        links_args,
+        [
+            "processed",
+            "links_enriched",
+            "wikidata_linked",
+            "wikipedia_linked",
+            "logos_mirrored",
+            "variants_black_mirrored",
+            "variants_white_mirrored",
+            "unresolved_logos",
+            "failures",
+        ],
+    )
+
+    steps = {
+        "tmdb_show_entities": tmdb_entities,
+        "tmdb_watch_providers": tmdb_watch_providers,
+        "network_streaming_links": network_streaming_links,
+    }
+
+    entities_synced = (
+        tmdb_entities.metrics.get("networks_upserted", 0)
+        + tmdb_entities.metrics.get("production_companies_upserted", 0)
+    )
+    providers_synced = tmdb_watch_providers.metrics.get("providers_upserted", 0)
+    links_enriched = network_streaming_links.metrics.get("links_enriched", 0)
+    logos_mirrored = (
+        tmdb_entities.metrics.get("logos_mirrored", 0)
+        + tmdb_watch_providers.metrics.get("logos_mirrored", 0)
+        + network_streaming_links.metrics.get("logos_mirrored", 0)
+    )
+    variants_black_mirrored = network_streaming_links.metrics.get("variants_black_mirrored", 0)
+    variants_white_mirrored = network_streaming_links.metrics.get("variants_white_mirrored", 0)
+    unresolved_logos = _extract_unresolved_logos(network_streaming_links_output)
+    unresolved_logos_count = network_streaming_links.metrics.get("unresolved_logos", len(unresolved_logos))
+    unresolved_cap = 300
+    unresolved_logos_truncated = len(unresolved_logos) > unresolved_cap
+    unresolved_payload = unresolved_logos[:unresolved_cap]
+    failures = (
+        tmdb_entities.metrics.get("failures", 0)
+        + tmdb_watch_providers.metrics.get("failures", 0)
+        + network_streaming_links.metrics.get("failures", 0)
+    )
+
+    return SyncNetworksStreamingResponse(
+        entities_synced=entities_synced,
+        providers_synced=providers_synced,
+        links_enriched=links_enriched,
+        logos_mirrored=logos_mirrored,
+        variants_black_mirrored=variants_black_mirrored,
+        variants_white_mirrored=variants_white_mirrored,
+        unresolved_logos_count=unresolved_logos_count,
+        unresolved_logos_truncated=unresolved_logos_truncated,
+        unresolved_logos=unresolved_payload,
+        failures=failures,
+        steps=steps,
     )
 
 
@@ -403,32 +625,47 @@ def refresh_show_stream(
 
     # Expand targets into concrete steps so the progress bar can update while work runs.
     # Keys are stored in results to match the non-stream endpoint's structure where possible.
-    steps: list[tuple[str, str, Callable[[list[str] | None], int], list[str]]] = []
+    steps: list[tuple[str, str, Callable[[list[str] | None], int], list[str], str | None, str | None]] = []
     for target in ordered:
         if target == "details":
             common = ["--show-id", show_id_str, "--force"]
             if payload.verbose:
                 common.append("--verbose")
 
-            steps.append(("details", "details_sync_shows", sync_shows.main, list(common)))
+            steps.append(("details", "details_sync_shows", sync_shows.main, list(common), "shows", "mixed"))
 
             entity_args = list(common)
             if payload.skip_s3:
                 entity_args.append("--skip-s3")
-            steps.append(("details", "details_tmdb_show_entities", sync_tmdb_show_entities.main, entity_args))
+            steps.append(
+                ("details", "details_tmdb_show_entities", sync_tmdb_show_entities.main, entity_args, "shows", "tmdb")
+            )
 
             watch_args = list(common)
             if payload.skip_s3:
                 watch_args.append("--skip-s3")
-            steps.append(("details", "details_tmdb_watch_providers", sync_tmdb_watch_providers.main, watch_args))
+            steps.append(
+                (
+                    "details",
+                    "details_tmdb_watch_providers",
+                    sync_tmdb_watch_providers.main,
+                    watch_args,
+                    "shows",
+                    "tmdb",
+                )
+            )
             continue
 
         if target == "seasons_episodes":
             common = ["--show-id", show_id_str, "--force"]
             if payload.verbose:
                 common.append("--verbose")
-            steps.append(("seasons_episodes", "seasons_episodes_seasons", sync_seasons.main, list(common)))
-            steps.append(("seasons_episodes", "seasons_episodes_episodes", sync_episodes.main, list(common)))
+            steps.append(
+                ("seasons_episodes", "seasons_episodes_episodes", sync_episodes.main, list(common), "episodes", "imdb")
+            )
+            steps.append(
+                ("seasons_episodes", "seasons_episodes_seasons", sync_seasons.main, list(common), "seasons", "tmdb")
+            )
             continue
 
         if target == "photos":
@@ -437,26 +674,44 @@ def refresh_show_stream(
                 argv.append("--no-s3")
             if payload.verbose:
                 argv.append("--verbose")
-            steps.append(("photos", "photos_show_images", sync_show_images.main, list(argv)))
+            steps.append(("photos", "photos_show_images", sync_show_images.main, list(argv), "media", "mixed"))
 
             argv2 = ["--show-id", show_id_str, "--force"]
             if payload.skip_s3:
                 argv2.append("--no-s3")
             if payload.verbose:
                 argv2.append("--verbose")
-            steps.append(("photos", "photos_season_episode_images", sync_season_episode_images.main, argv2))
+            steps.append(
+                (
+                    "photos",
+                    "photos_season_episode_images",
+                    sync_season_episode_images.main,
+                    argv2,
+                    "media",
+                    "tmdb",
+                )
+            )
             continue
 
         if target == "cast_credits":
             argv = ["--show-id", show_id_str, "--force"]
             if payload.verbose:
                 argv.append("--verbose")
-            steps.append(("cast_credits", "cast_credits_show_cast", sync_show_cast.main, list(argv)))
+            steps.append(("cast_credits", "cast_credits_show_cast", sync_show_cast.main, list(argv), "people", "imdb"))
 
             argv2 = ["--show-id", show_id_str, "--force"]
             if payload.verbose:
                 argv2.append("--verbose")
-            steps.append(("cast_credits", "cast_credits_episode_appearances", sync_episode_appearances.main, argv2))
+            steps.append(
+                (
+                    "cast_credits",
+                    "cast_credits_episode_appearances",
+                    sync_episode_appearances.main,
+                    argv2,
+                    "episodes",
+                    "imdb",
+                )
+            )
             continue
 
         raise HTTPException(status_code=400, detail=f"Unknown refresh target: {target}")
@@ -481,7 +736,7 @@ def refresh_show_stream(
         )
 
         # Run expanded steps sequentially.
-        for target, step_key, fn, argv in steps:
+        for target, step_key, fn, argv, topic, provider in steps:
             step_result = _run_script_step(step_key, fn, argv)
             results[step_key] = step_result
             current += 1
@@ -490,11 +745,16 @@ def refresh_show_stream(
                 "show_id": show_id_str,
                 "target": target,
                 "step": step_key,
+                "stage_key": step_key,
                 "current": current,
                 "total": total_steps,
                 "step_status": step_result.status,
                 "message": f"{step_key.replace('_', ' ')}: {step_result.status}",
             }
+            if topic:
+                payload_data["topic"] = topic
+            if provider:
+                payload_data["provider"] = provider
             if step_result.error:
                 payload_data["error"] = step_result.error
 

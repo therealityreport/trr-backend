@@ -148,6 +148,8 @@ class InstagramScraper:
 
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
+    REQUEST_CONNECT_TIMEOUT_SECONDS = 10
+    REQUEST_READ_TIMEOUT_SECONDS = 45
 
     def __init__(self, cookies: dict | None = None):
         self.cookies = cookies or {}
@@ -156,6 +158,10 @@ class InstagramScraper:
         self.last_retrieval_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self.last_comment_fetch_reason: str | None = None
+        self.request_timeout = (
+            self.REQUEST_CONNECT_TIMEOUT_SECONDS,
+            self.REQUEST_READ_TIMEOUT_SECONDS,
+        )
 
     def _profile_posts_doc_ids(self) -> list[str]:
         override = (os.getenv("INSTAGRAM_PROFILE_POSTS_DOC_ID") or "").strip()
@@ -180,6 +186,12 @@ class InstagramScraper:
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         return session
+
+    def _get(self, url: str, **kwargs: Any) -> requests.Response:
+        return self.session.get(url, timeout=self.request_timeout, **kwargs)
+
+    def _post(self, url: str, **kwargs: Any) -> requests.Response:
+        return self.session.post(url, timeout=self.request_timeout, **kwargs)
 
     def _get_headers(self, referer: str | None = None) -> dict:
         """Get request headers."""
@@ -334,7 +346,7 @@ class InstagramScraper:
         headers = self._get_headers(f"https://www.instagram.com/{username}/")
 
         try:
-            response = self.session.get(url, headers=headers, cookies=self.cookies)
+            response = self._get(url, headers=headers, cookies=self.cookies)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -382,7 +394,7 @@ class InstagramScraper:
         for doc_id in self._profile_posts_doc_ids():
             data["doc_id"] = doc_id
             try:
-                response = self.session.post(self.GRAPHQL_URL, data=data, headers=headers, cookies=self.cookies)
+                response = self._post(self.GRAPHQL_URL, data=data, headers=headers, cookies=self.cookies)
                 response.raise_for_status()
                 payload = response.json()
                 connection = payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
@@ -433,7 +445,7 @@ class InstagramScraper:
         headers = self._get_headers(f"https://www.instagram.com/p/{shortcode}/")
 
         try:
-            response = self.session.get(url, headers=headers, cookies=self.cookies)
+            response = self._get(url, headers=headers, cookies=self.cookies)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -482,7 +494,7 @@ class InstagramScraper:
             headers = self._get_headers(post_url)
 
             try:
-                response = self.session.get(url, params=params, headers=headers, cookies=self.cookies)
+                response = self._get(url, params=params, headers=headers, cookies=self.cookies)
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "")
                 if "text/html" in content_type:
@@ -534,14 +546,19 @@ class InstagramScraper:
 
             logger.info(f"Fetched {len(comments)} comments so far...")
 
-            # Check for more pages
+            # Check for more pages.
             if max_comments and comments_fetched >= max_comments:
                 break
-            if not data.get("has_more_comments", False):
+            has_more = bool(data.get("has_more_comments", False))
+            # Instagram often reports `has_more_comments=false` while still providing
+            # `has_more_headload_comments=true` with a valid `next_min_id`.
+            has_more = has_more or bool(data.get("has_more_headload_comments", False))
+            if not has_more:
                 break
-            cursor = data.get("next_min_id")
-            if not cursor:
+            next_cursor = data.get("next_min_id") or data.get("next_max_id")
+            if not next_cursor or next_cursor == cursor:
                 break
+            cursor = next_cursor
 
         logger.info(f"Total: {len(comments)} comments fetched for {shortcode}")
         return comments
@@ -568,7 +585,7 @@ class InstagramScraper:
             headers = self._get_headers(post_url)
 
             try:
-                response = self.session.get(url, params=params, headers=headers, cookies=self.cookies)
+                response = self._get(url, params=params, headers=headers, cookies=self.cookies)
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "")
                 if "text/html" in content_type:
@@ -652,7 +669,7 @@ class InstagramScraper:
                 urls.append(versions[0].get("url", ""))
 
         # Carousel media
-        carousel = node.get("carousel_media", [])
+        carousel = node.get("carousel_media") or []
         for item in carousel:
             if item.get("image_versions2"):
                 candidates = item["image_versions2"].get("candidates", [])
@@ -673,7 +690,7 @@ class InstagramScraper:
             urls.append(video_url)
 
         # Sidecar (carousel) in GraphQL format
-        sidecar = node.get("edge_sidecar_to_children", {})
+        sidecar = node.get("edge_sidecar_to_children") or {}
         for edge in sidecar.get("edges", []):
             child = edge.get("node", {})
             if child.get("display_url"):

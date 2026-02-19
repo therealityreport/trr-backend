@@ -848,6 +848,26 @@ def test_ingest_season_stores_sync_strategy_and_platform_scope(monkeypatch) -> N
     )
     assert captured_run_configs[0]["platforms"] == "all"
 
+    captured_run_configs.clear()
+    created_job_configs.clear()
+
+    comments_only_payload = social_repo.ingest_season(
+        "season-1",
+        platforms=["instagram"],
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=500,
+        max_comments_per_post=300,
+        max_replies_per_post=200,
+        fetch_replies=True,
+        ingest_mode="comments_only",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 10, tzinfo=UTC),
+        initiated_by="admin@test",
+    )
+    assert comments_only_payload["stages"] == ["comments"]
+    assert len(created_job_configs) == 1
+    assert all(config["stage"] == "comments" for config in created_job_configs)
 
 def test_repository_has_single_pg_upsert_definition() -> None:
     source = inspect.getsource(social_repo)

@@ -64,6 +64,8 @@ from trr_backend.repositories.sync_state import (
 class EpisodicCreditsResult:
     cast_row: CastRow
     credits: Sequence[ImdbEpisodeCredit]
+    seasons_used: tuple[int, ...] = ()
+    season_source: str = "unknown"
     error: str | None = None
 
 
@@ -71,6 +73,7 @@ class EpisodicCreditsResult:
 class EpisodeMeta:
     id: str | None
     air_date: str | None
+    season_number: int | None
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -180,7 +183,11 @@ def _air_year_from_air_date(value: str | None) -> int | None:
 
 def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
     response = (
-        db.schema("core").table("episodes").select("id,imdb_episode_id,air_date").eq("show_id", show_id).execute()
+        db.schema("core")
+        .table("episodes")
+        .select("id,imdb_episode_id,air_date,season_number")
+        .eq("show_id", show_id)
+        .execute()
     )
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error listing episodes for show_id={show_id}: {response.error}")
@@ -196,6 +203,7 @@ def _fetch_episode_index(db, *, show_id: str) -> dict[str, EpisodeMeta]:
         index[imdb_id] = EpisodeMeta(
             id=str(row.get("id") or "").strip() or None,
             air_date=_coerce_air_date(row.get("air_date")),
+            season_number=_coerce_int(row.get("season_number")),
         )
     return index
 
@@ -204,12 +212,31 @@ def _fetch_episodic_credits(
     *,
     series_id: str,
     cast_row: CastRow,
+    season_numbers_from_episodes: Sequence[int] | None,
     extra_headers: dict[str, str] | None,
 ) -> EpisodicCreditsResult:
     job_category_id = cast_row.job_category_id or IMDB_JOB_CATEGORY_SELF
     client = HttpImdbEpisodicClient(extra_headers=extra_headers)
     try:
-        seasons = client.fetch_available_seasons(series_id, cast_row.name_id, job_category_id)
+        seasons = sorted(
+            {
+                int(season_no)
+                for season_no in (season_numbers_from_episodes or ())
+                if isinstance(season_no, int) and season_no > 0
+            }
+        )
+        season_source = "episodes_index"
+        if not seasons:
+            seasons = client.fetch_available_seasons(series_id, cast_row.name_id, job_category_id)
+            season_source = "imdb_available_seasons"
+        if not seasons:
+            return EpisodicCreditsResult(
+                cast_row=cast_row,
+                credits=(),
+                seasons_used=(),
+                season_source=season_source,
+                error="No seasons available for episodic credits fetch.",
+            )
         credits = client.fetch_episode_credits_for_seasons(
             series_id,
             cast_row.name_id,
@@ -219,7 +246,13 @@ def _fetch_episodic_credits(
     except Exception as exc:  # noqa: BLE001
         return EpisodicCreditsResult(cast_row=cast_row, credits=(), error=str(exc))
 
-    return EpisodicCreditsResult(cast_row=cast_row, credits=credits, error=None)
+    return EpisodicCreditsResult(
+        cast_row=cast_row,
+        credits=credits,
+        seasons_used=tuple(seasons),
+        season_source=season_source,
+        error=None,
+    )
 
 
 def _chunk(values: list[str], *, size: int) -> Sequence[list[str]]:
@@ -318,6 +351,16 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: Unable to load episodes for show_id={show_id}: {exc}", file=sys.stderr)
                 episode_index = {}
+            season_numbers_from_episodes = sorted(
+                {
+                    int(meta.season_number)
+                    for meta in episode_index.values()
+                    if isinstance(meta.season_number, int) and meta.season_number > 0
+                }
+            )
+            seasons_used_for_show: set[int] = set(season_numbers_from_episodes)
+            season_sources_used: set[str] = {"episodes_index"} if season_numbers_from_episodes else set()
+            show_occurrences_skipped_missing_episode = 0
 
             cast_rows, source_type, _person_images = fetch_fullcredits_cast_with_fallback(
                 imdb_series_id,
@@ -477,12 +520,17 @@ def main(argv: list[str] | None = None) -> int:
                         _fetch_episodic_credits,
                         series_id=imdb_series_id,
                         cast_row=row,
+                        season_numbers_from_episodes=season_numbers_from_episodes,
                         extra_headers=extra_headers,
                     ): row
                     for row in self_rows
                 }
                 for future in as_completed(futures):
                     result = future.result()
+                    if result.season_source:
+                        season_sources_used.add(result.season_source)
+                    if result.seasons_used:
+                        seasons_used_for_show.update(result.seasons_used)
                     if result.error:
                         failures.append(f"{result.cast_row.name_id}: {result.error}")
                         failed_cast_fetches += 1
@@ -513,6 +561,7 @@ def main(argv: list[str] | None = None) -> int:
                         meta = episode_index.get(imdb_episode_id)
                         if not meta or not meta.id:
                             occurrences_skipped_missing_episode += 1
+                            show_occurrences_skipped_missing_episode += 1
                             continue
 
                         key = (credit_id, meta.id)
@@ -553,6 +602,25 @@ def main(argv: list[str] | None = None) -> int:
                         occurrence_by_key[key] = row
 
             if failed_cast_fetches > 0 and successful_cast_fetches == 0:
+                seasons_used_label = (
+                    ",".join(str(value) for value in sorted(seasons_used_for_show))
+                    if seasons_used_for_show
+                    else "none"
+                )
+                season_sources_label = (
+                    ",".join(sorted(season_sources_used))
+                    if season_sources_used
+                    else "unknown"
+                )
+                print(
+                    "OCCURRENCES diagnostics "
+                    f"show_id={show_id} "
+                    f"seasons_used={seasons_used_label} "
+                    f"seasons_source={season_sources_label} "
+                    f"episodes_indexed={len(episode_index)} "
+                    f"occurrences_skipped_missing_episode={show_occurrences_skipped_missing_episode}",
+                    file=sys.stderr,
+                )
                 fatal_show_failures += 1
                 if not args.dry_run:
                     mark_sync_state_failed(
@@ -581,6 +649,26 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     inserted = insert_credit_occurrences_ignore_conflicts(db, occurrence_rows)
                     occurrences_inserted += len(inserted)
+
+            seasons_used_label = (
+                ",".join(str(value) for value in sorted(seasons_used_for_show))
+                if seasons_used_for_show
+                else "none"
+            )
+            season_sources_label = (
+                ",".join(sorted(season_sources_used))
+                if season_sources_used
+                else "unknown"
+            )
+            print(
+                "OCCURRENCES diagnostics "
+                f"show_id={show_id} "
+                f"seasons_used={seasons_used_label} "
+                f"seasons_source={season_sources_label} "
+                f"episodes_indexed={len(episode_index)} "
+                f"occurrences_skipped_missing_episode={show_occurrences_skipped_missing_episode}",
+                file=sys.stderr,
+            )
 
             if not args.dry_run:
                 mark_sync_state_success(

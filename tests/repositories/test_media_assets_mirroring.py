@@ -281,3 +281,35 @@ def test_fetch_assets_for_mirroring_requires_source_url() -> None:
 
     # Verify not_.is_("source_url", "null") was called
     query_mock.not_.is_.assert_called()
+
+
+def test_update_asset_with_mirror_result_persists_dimensions() -> None:
+    """Test mirror-result updates can persist width/height backfill."""
+    from trr_backend.repositories.media_assets import update_asset_with_mirror_result
+
+    db = MagicMock()
+    mock_response = MagicMock()
+    mock_response.data = [{"id": "asset-1"}]
+    mock_response.error = None
+    db.schema.return_value.table.return_value.update.return_value.eq.return_value.execute.return_value = (
+        mock_response
+    )
+
+    update_asset_with_mirror_result(
+        db,
+        asset_id="asset-1",
+        sha256="abc123",
+        hosted_bucket="bucket",
+        hosted_key="media/ab/abc123.jpg",
+        hosted_url="https://cdn.example.com/media/ab/abc123.jpg",
+        hosted_bytes=1234,
+        hosted_content_type="image/jpeg",
+        hosted_etag="etag-1",
+        width=1000,
+        height=1500,
+    )
+
+    call_args = db.schema.return_value.table.return_value.update.call_args
+    payload = call_args[0][0]
+    assert payload["width"] == 1000
+    assert payload["height"] == 1500

@@ -90,6 +90,10 @@ class RefreshImagesResponse(BaseModel):
     photos_upserted: int
     photos_mirrored: int
     photos_failed: int
+    cast_photos_mirrored: int = 0
+    cast_photos_failed: int = 0
+    media_assets_mirrored: int = 0
+    media_assets_failed: int = 0
     photos_pruned: int
     auto_counts_attempted: int = 0
     auto_counts_succeeded: int = 0
@@ -106,6 +110,12 @@ class RefreshImagesResponse(BaseModel):
     centering_succeeded: int = 0
     centering_failed: int = 0
     centering_skipped_manual: int = 0
+    resize_attempted: int = 0
+    resize_succeeded: int = 0
+    resize_failed: int = 0
+    resize_crop_attempted: int = 0
+    resize_crop_succeeded: int = 0
+    resize_crop_failed: int = 0
     errors: list[str] = Field(default_factory=list)
 
 
@@ -324,7 +334,10 @@ def _fetch_person_media_link_rows(
     assets_resp = (
         db.schema("core")
         .table("media_assets")
-        .select("id, source, source_url, hosted_url, metadata")
+        .select(
+            "id, source, source_url, hosted_url, hosted_sha256, hosted_key, hosted_bucket, "
+            "hosted_content_type, hosted_bytes, hosted_etag, width, height, metadata"
+        )
         .in_("id", asset_ids)
         .execute()
     )
@@ -349,6 +362,14 @@ def _fetch_person_media_link_rows(
                 "source": asset.get("source"),
                 "source_url": asset.get("source_url"),
                 "hosted_url": asset.get("hosted_url"),
+                "hosted_sha256": asset.get("hosted_sha256"),
+                "hosted_key": asset.get("hosted_key"),
+                "hosted_bucket": asset.get("hosted_bucket"),
+                "hosted_content_type": asset.get("hosted_content_type"),
+                "hosted_bytes": asset.get("hosted_bytes"),
+                "hosted_etag": asset.get("hosted_etag"),
+                "width": asset.get("width"),
+                "height": asset.get("height"),
                 "metadata": asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {},
             }
         )
@@ -528,6 +549,7 @@ def _mirror_person_photos(
     imdb_person_id: str | None,
     *,
     force: bool = False,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> tuple[int, int]:
     """Mirror unmirrored photos to S3. Returns (mirrored, failed)."""
     from trr_backend.media.s3_mirror import get_cdn_base_url, mirror_cast_photo_row
@@ -543,7 +565,8 @@ def _mirror_person_photos(
         return 0, 0
 
     mirrored, failed = 0, 0
-    for row in rows:
+    total_rows = len(rows)
+    for idx, row in enumerate(rows, start=1):
         if not row.get("imdb_person_id") and imdb_person_id:
             row["imdb_person_id"] = imdb_person_id
         try:
@@ -554,6 +577,107 @@ def _mirror_person_photos(
         except Exception as exc:
             logger.warning(f"Mirror failed for {row.get('id')}: {exc}")
             failed += 1
+        if progress_cb:
+            progress_cb(idx, total_rows)
+    return mirrored, failed
+
+
+def _mirror_person_media_assets(
+    db: SupabaseAdminClient,
+    person_id: str,
+    *,
+    force: bool = False,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> tuple[int, int]:
+    from trr_backend.media.s3_mirror import mirror_media_asset_row
+    from trr_backend.repositories.media_assets import (
+        update_asset_with_mirror_result,
+        update_ingest_status,
+    )
+
+    rows = _fetch_person_media_link_rows(db, person_id)
+    assets_by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        asset_id = str(row.get("media_asset_id") or "")
+        if not asset_id or asset_id in assets_by_id:
+            continue
+        assets_by_id[asset_id] = row
+
+    unique_assets = list(assets_by_id.values())
+    if not unique_assets:
+        return 0, 0
+
+    mirrored = 0
+    failed = 0
+    total_rows = len(unique_assets)
+    for idx, row in enumerate(unique_assets, start=1):
+        asset_id = str(row.get("media_asset_id") or "")
+        if not asset_id:
+            failed += 1
+            if progress_cb:
+                progress_cb(idx, total_rows)
+            continue
+        try:
+            update_ingest_status(db, asset_id, "in_progress")
+            patch = mirror_media_asset_row(row, force=force)
+            if patch:
+                if set(patch.keys()) == {"hosted_url"}:
+                    db.schema("core").table("media_assets").update({"hosted_url": patch["hosted_url"]}).eq(
+                        "id", asset_id
+                    ).execute()
+                    update_ingest_status(
+                        db,
+                        asset_id,
+                        "hosted",
+                        completed_at=datetime.now(UTC).isoformat(),
+                    )
+                else:
+                    completed_at = str(patch.get("hosted_at") or datetime.now(UTC).isoformat())
+                    update_asset_with_mirror_result(
+                        db,
+                        asset_id=asset_id,
+                        sha256=str(patch.get("sha256") or patch.get("hosted_sha256") or ""),
+                        hosted_bucket=str(patch.get("hosted_bucket") or ""),
+                        hosted_key=str(patch.get("hosted_key") or ""),
+                        hosted_url=str(patch.get("hosted_url") or ""),
+                        hosted_bytes=int(patch.get("hosted_bytes") or 0),
+                        hosted_content_type=(
+                            str(patch.get("hosted_content_type"))
+                            if patch.get("hosted_content_type") is not None
+                            else None
+                        ),
+                        hosted_etag=(
+                            str(patch.get("hosted_etag")) if patch.get("hosted_etag") is not None else None
+                        ),
+                        width=int(patch.get("width")) if patch.get("width") is not None else None,
+                        height=int(patch.get("height")) if patch.get("height") is not None else None,
+                        completed_at=completed_at,
+                        metadata=patch.get("metadata") if isinstance(patch.get("metadata"), dict) else None,
+                    )
+                mirrored += 1
+            else:
+                update_ingest_status(
+                    db,
+                    asset_id,
+                    "hosted",
+                    completed_at=datetime.now(UTC).isoformat(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mirror failed for media asset %s: %s", asset_id, exc)
+            failed += 1
+            try:
+                update_ingest_status(
+                    db,
+                    asset_id,
+                    "failed",
+                    error=str(exc),
+                    failed_at=datetime.now(UTC).isoformat(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if progress_cb:
+            progress_cb(idx, total_rows)
+
     return mirrored, failed
 
 
@@ -774,6 +898,163 @@ def _auto_count_media_links(
         logger.exception("Auto-count media_links setup failed for %s: %s", person_id, exc)
 
     return attempted, succeeded, failed
+
+
+def _resize_person_gallery_images(
+    db: SupabaseAdminClient,
+    person_id: str,
+    sources: list[SourceType],
+    *,
+    force: bool = False,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> tuple[int, int, int, int, int, int]:
+    resize_attempted = 0
+    resize_succeeded = 0
+    resize_failed = 0
+    resize_crop_attempted = 0
+    resize_crop_succeeded = 0
+    resize_crop_failed = 0
+
+    candidate_sources = [s for s in sources if s in ALL_SOURCES]
+    if not candidate_sources:
+        return (
+            resize_attempted,
+            resize_succeeded,
+            resize_failed,
+            resize_crop_attempted,
+            resize_crop_succeeded,
+            resize_crop_failed,
+        )
+
+    try:
+        from trr_backend.media.image_variants import (
+            generate_cast_photo_variants,
+            generate_media_asset_variants,
+        )
+
+        cast_rows = (
+            db.schema("core")
+            .table("cast_photos")
+            .select("id, source, hosted_url, metadata")
+            .eq("person_id", person_id)
+            .in_("source", candidate_sources)
+            .not_.is_("hosted_url", "null")
+            .execute()
+            .data
+            or []
+        )
+        media_rows = _fetch_person_media_link_rows(db, person_id)
+
+        base_jobs: list[dict[str, Any]] = []
+        for row in cast_rows:
+            photo_id = str(row.get("id") or "")
+            if not photo_id:
+                continue
+            base_jobs.append({"origin": "cast_photos", "id": photo_id, "crop": None})
+
+        seen_media_assets: set[str] = set()
+        media_crops_by_asset: dict[str, dict[str, Any]] = {}
+        for row in media_rows:
+            asset_id = str(row.get("media_asset_id") or "")
+            if not asset_id:
+                continue
+            if row.get("hosted_url"):
+                if asset_id not in seen_media_assets:
+                    base_jobs.append({"origin": "media_assets", "id": asset_id, "crop": None})
+                    seen_media_assets.add(asset_id)
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            crop = context.get("thumbnail_crop")
+            if not isinstance(crop, dict):
+                crop = metadata.get("thumbnail_crop") if isinstance(metadata.get("thumbnail_crop"), dict) else None
+            if isinstance(crop, dict):
+                previous = media_crops_by_asset.get(asset_id)
+                if not previous:
+                    media_crops_by_asset[asset_id] = crop
+                else:
+                    prev_mode = str(previous.get("mode") or "").lower()
+                    next_mode = str(crop.get("mode") or "").lower()
+                    if prev_mode != "manual" and next_mode == "manual":
+                        media_crops_by_asset[asset_id] = crop
+
+        crop_jobs: list[dict[str, Any]] = []
+        for row in cast_rows:
+            photo_id = str(row.get("id") or "")
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            crop = metadata.get("thumbnail_crop") if isinstance(metadata.get("thumbnail_crop"), dict) else None
+            if not photo_id or not isinstance(crop, dict):
+                continue
+            crop_jobs.append({"origin": "cast_photos", "id": photo_id, "crop": crop})
+
+        for asset_id, crop in media_crops_by_asset.items():
+            crop_jobs.append({"origin": "media_assets", "id": asset_id, "crop": crop})
+
+        total_ops = len(base_jobs) + len(crop_jobs)
+        processed_ops = 0
+
+        for job in base_jobs:
+            resize_attempted += 1
+            try:
+                if job["origin"] == "cast_photos":
+                    generate_cast_photo_variants(db, photo_id=job["id"], crop=None, force=force)
+                else:
+                    generate_media_asset_variants(db, asset_id=job["id"], crop=None, force=force)
+                resize_succeeded += 1
+            except Exception as exc:  # noqa: BLE001
+                resize_failed += 1
+                logger.warning(
+                    "Resize variants failed origin=%s id=%s error=%s",
+                    job["origin"],
+                    job["id"],
+                    exc,
+                )
+            processed_ops += 1
+            if progress_cb:
+                progress_cb(processed_ops, total_ops)
+
+        for job in crop_jobs:
+            resize_crop_attempted += 1
+            crop_payload = job.get("crop") if isinstance(job.get("crop"), dict) else None
+            try:
+                if crop_payload is None:
+                    raise RuntimeError("No thumbnail_crop payload available")
+                if job["origin"] == "cast_photos":
+                    generate_cast_photo_variants(
+                        db,
+                        photo_id=job["id"],
+                        crop=crop_payload,
+                        force=force,
+                    )
+                else:
+                    generate_media_asset_variants(
+                        db,
+                        asset_id=job["id"],
+                        crop=crop_payload,
+                        force=force,
+                    )
+                resize_crop_succeeded += 1
+            except Exception as exc:  # noqa: BLE001
+                resize_crop_failed += 1
+                logger.warning(
+                    "Crop variants failed origin=%s id=%s error=%s",
+                    job["origin"],
+                    job["id"],
+                    exc,
+                )
+            processed_ops += 1
+            if progress_cb:
+                progress_cb(processed_ops, total_ops)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Resize variants setup failed for %s: %s", person_id, exc)
+
+    return (
+        resize_attempted,
+        resize_succeeded,
+        resize_failed,
+        resize_crop_attempted,
+        resize_crop_succeeded,
+        resize_crop_failed,
+    )
 
 
 def _chunked(values: list[str], size: int = 100) -> list[list[str]]:
@@ -1304,15 +1585,21 @@ def refresh_person_images(
             errors.append(f"Upsert: {exc}")
 
     # 4. Mirror to S3
-    photos_mirrored, photos_failed = 0, 0
+    cast_photos_mirrored, cast_photos_failed = 0, 0
+    media_assets_mirrored, media_assets_failed = 0, 0
     if not request.skip_mirror:
         try:
-            photos_mirrored, photos_failed = _mirror_person_photos(
+            cast_photos_mirrored, cast_photos_failed = _mirror_person_photos(
                 db, person_id_str, imdb_person_id, force=request.force_mirror
+            )
+            media_assets_mirrored, media_assets_failed = _mirror_person_media_assets(
+                db, person_id_str, force=request.force_mirror
             )
         except Exception as exc:
             logger.exception(f"Mirror error for {person_id}")
             errors.append(f"Mirror: {exc}")
+    photos_mirrored = cast_photos_mirrored + media_assets_mirrored
+    photos_failed = cast_photos_failed + media_assets_failed
 
     # 4.5 Auto-count people for newly upserted TMDb/Fandom photos (only when no manual tags)
     auto_counts_attempted_cast, auto_counts_succeeded_cast, auto_counts_failed_cast = _auto_count_cast_photos(
@@ -1373,6 +1660,20 @@ def refresh_person_images(
         )
     )
 
+    (
+        resize_attempted,
+        resize_succeeded,
+        resize_failed,
+        resize_crop_attempted,
+        resize_crop_succeeded,
+        resize_crop_failed,
+    ) = _resize_person_gallery_images(
+        db,
+        person_id_str,
+        sources,
+        force=False,
+    )
+
     # 5. Prune orphaned S3 objects
     photos_pruned = 0
     if not request.skip_mirror and not request.skip_prune:
@@ -1389,6 +1690,10 @@ def refresh_person_images(
         photos_upserted=photos_upserted,
         photos_mirrored=photos_mirrored,
         photos_failed=photos_failed,
+        cast_photos_mirrored=cast_photos_mirrored,
+        cast_photos_failed=cast_photos_failed,
+        media_assets_mirrored=media_assets_mirrored,
+        media_assets_failed=media_assets_failed,
         photos_pruned=photos_pruned,
         auto_counts_attempted=auto_counts_attempted,
         auto_counts_succeeded=auto_counts_succeeded,
@@ -1405,6 +1710,12 @@ def refresh_person_images(
         centering_succeeded=centering_succeeded,
         centering_failed=centering_failed,
         centering_skipped_manual=centering_skipped_manual,
+        resize_attempted=resize_attempted,
+        resize_succeeded=resize_succeeded,
+        resize_failed=resize_failed,
+        resize_crop_attempted=resize_crop_attempted,
+        resize_crop_succeeded=resize_crop_succeeded,
+        resize_crop_failed=resize_crop_failed,
         errors=errors,
     )
 
@@ -1423,12 +1734,7 @@ async def refresh_person_images_stream(
         fetch_imdb_cast_photos,
         fetch_tmdb_cast_photos,
     )
-    from trr_backend.media.s3_mirror import mirror_cast_photo_row
-    from trr_backend.repositories.cast_photos import (
-        fetch_cast_photos_missing_hosted,
-        update_cast_photo_hosted_fields,
-        upsert_cast_photos,
-    )
+    from trr_backend.repositories.cast_photos import upsert_cast_photos
 
     request = request or RefreshImagesRequest()
     person_id_str = str(person_id)
@@ -1656,43 +1962,59 @@ async def refresh_person_images_stream(
             yield progress({"stage": "upserting", "message": "No photos to upsert.", "current": 0, "total": 0})
 
         # 4. Mirror
-        photos_mirrored, photos_failed = 0, 0
+        cast_photos_mirrored, cast_photos_failed = 0, 0
+        media_assets_mirrored, media_assets_failed = 0, 0
         if not request.skip_mirror:
             try:
-                from trr_backend.media.s3_mirror import get_cdn_base_url
-
-                cdn_url = None if request.force_mirror else get_cdn_base_url()
-                # When force_mirror=True, include photos that already have hosted_url so they get re-uploaded
-                rows = fetch_cast_photos_missing_hosted(
-                    db, person_ids=[person_id_str], cdn_base_url=cdn_url, include_hosted=request.force_mirror
-                )
-                total_rows = len(rows)
                 yield progress(
                     {
                         "stage": "mirroring",
-                        "message": "Mirroring to S3...",
+                        "message": "Mirroring cast photos...",
                         "current": 0,
-                        "total": total_rows,
+                        "total": 2,
                     }
                 )
-                for idx, row in enumerate(rows, start=1):
-                    if not row.get("imdb_person_id") and imdb_person_id:
-                        row["imdb_person_id"] = imdb_person_id
-                    try:
-                        patch = mirror_cast_photo_row(row, force=request.force_mirror)
-                        if patch:
-                            update_cast_photo_hosted_fields(db, str(row["id"]), patch)
-                            photos_mirrored += 1
-                    except Exception:
-                        photos_failed += 1
-                    if idx <= 20 or idx % 5 == 0 or idx == total_rows:
-                        data = {
-                            "stage": "mirroring",
-                            "message": "Mirroring to S3...",
-                            "current": idx,
-                            "total": total_rows,
-                        }
-                        yield progress(data)
+                cast_photos_mirrored, cast_photos_failed = _mirror_person_photos(
+                    db,
+                    person_id_str,
+                    imdb_person_id,
+                    force=request.force_mirror,
+                )
+                yield progress(
+                    {
+                        "stage": "mirroring",
+                        "message": (
+                            f"Mirrored cast photos ({cast_photos_mirrored} hosted, {cast_photos_failed} failed)."
+                        ),
+                        "current": 1,
+                        "total": 2,
+                    }
+                )
+
+                yield progress(
+                    {
+                        "stage": "mirroring",
+                        "message": "Mirroring media assets...",
+                        "current": 1,
+                        "total": 2,
+                    }
+                )
+                media_assets_mirrored, media_assets_failed = _mirror_person_media_assets(
+                    db,
+                    person_id_str,
+                    force=request.force_mirror,
+                )
+                yield progress(
+                    {
+                        "stage": "mirroring",
+                        "message": (
+                            "Mirrored media assets "
+                            f"({media_assets_mirrored} hosted, {media_assets_failed} failed)."
+                        ),
+                        "current": 2,
+                        "total": 2,
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"Mirror: {exc}")
                 yield progress(
@@ -1705,6 +2027,8 @@ async def refresh_person_images_stream(
                 )
         else:
             yield progress({"stage": "mirroring", "message": "Skipping S3 mirroring.", "current": 0, "total": 0})
+        photos_mirrored = cast_photos_mirrored + media_assets_mirrored
+        photos_failed = cast_photos_failed + media_assets_failed
 
         # 5. Prune
         photos_pruned = 0
@@ -2112,6 +2436,50 @@ async def refresh_person_images_stream(
         except Exception as exc:  # noqa: BLE001
             errors.append(f"Centering/Cropping: {exc}")
 
+        # 5.8 Resize/variant generation stage (best-effort for cast + media)
+        resize_attempted = 0
+        resize_succeeded = 0
+        resize_failed = 0
+        resize_crop_attempted = 0
+        resize_crop_succeeded = 0
+        resize_crop_failed = 0
+        try:
+            yield progress(
+                {
+                    "stage": "resizing",
+                    "message": "Generating resized variants...",
+                    "current": 0,
+                    "total": 1,
+                }
+            )
+            (
+                resize_attempted,
+                resize_succeeded,
+                resize_failed,
+                resize_crop_attempted,
+                resize_crop_succeeded,
+                resize_crop_failed,
+            ) = _resize_person_gallery_images(
+                db,
+                person_id_str,
+                sources,
+                force=False,
+            )
+            yield progress(
+                {
+                    "stage": "resizing",
+                    "message": (
+                        "Variant generation complete "
+                        f"({resize_succeeded}/{resize_attempted} base, "
+                        f"{resize_crop_succeeded}/{resize_crop_attempted} crop)."
+                    ),
+                    "current": 1,
+                    "total": 1,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Resizing: {exc}")
+
         # 6. Complete
         complete_data = {
             "run_id": run_id,
@@ -2120,6 +2488,10 @@ async def refresh_person_images_stream(
             "photos_upserted": photos_upserted,
             "photos_mirrored": photos_mirrored,
             "photos_failed": photos_failed,
+            "cast_photos_mirrored": cast_photos_mirrored,
+            "cast_photos_failed": cast_photos_failed,
+            "media_assets_mirrored": media_assets_mirrored,
+            "media_assets_failed": media_assets_failed,
             "photos_pruned": photos_pruned,
             "episode_metadata_tagged": episode_metadata_tagged,
             "show_context_tagged": show_context_tagged,
@@ -2136,6 +2508,12 @@ async def refresh_person_images_stream(
             "centering_succeeded": centering_succeeded,
             "centering_failed": centering_failed,
             "centering_skipped_manual": centering_skipped_manual,
+            "resize_attempted": resize_attempted,
+            "resize_succeeded": resize_succeeded,
+            "resize_failed": resize_failed,
+            "resize_crop_attempted": resize_crop_attempted,
+            "resize_crop_succeeded": resize_crop_succeeded,
+            "resize_crop_failed": resize_crop_failed,
             "errors": errors,
         }
         yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"

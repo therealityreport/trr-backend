@@ -58,7 +58,17 @@ PYTHONPATH=. python scripts/sync/resolve_tmdb_ids_via_find.py --all --verbose
 PYTHONPATH=. python scripts/backfill/backfill_tmdb_show_details.py --all --verbose
 PYTHONPATH=. python scripts/sync/sync_tmdb_show_entities.py --all --verbose
 PYTHONPATH=. python scripts/sync/sync_tmdb_watch_providers.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --verbose
 ```
+
+`sync_networks_streaming_links.py` notes:
+- Processes only names currently used by the full shows inventory:
+  - networks from `core.shows.networks`
+  - streaming providers from `core.show_watch_providers` (`US`, `flatrate|ads`) plus fallback names from `core.shows.streaming_providers`.
+- Mirrors missing base logos and generates black/white transparent variants (`hosted_logo_black_*`, `hosted_logo_white_*`).
+- Prints both machine-readable counters and unresolved logo rows:
+  - `unresolved_logos=<count>`
+  - `unresolved_logo={\"type\":\"network|streaming\",\"id\":\"...\",\"name\":\"...\",\"reason\":\"...\"}`
 
 Or run the composite wrapper:
 

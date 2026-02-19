@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -51,6 +52,65 @@ def test_build_episode_image_s3_key_structure() -> None:
 def test_build_logo_s3_key_structure() -> None:
     key = s3_mirror.build_logo_s3_key("networks", 123, "abc123", ".png")
     assert key == "images/logos/networks/123/abc123.png"
+
+
+def test_build_logo_variant_s3_key_structure() -> None:
+    key = s3_mirror.build_logo_variant_s3_key("watch-providers", 531, "black", "abc123", ".png")
+    assert key == "images/logos/watch-providers/531/black/abc123.png"
+
+
+def test_build_monochrome_logo_variants_preserves_transparency() -> None:
+    from PIL import Image
+
+    image = Image.new("RGBA", (6, 6), (0, 0, 0, 0))
+    for y in range(2, 4):
+        for x in range(2, 4):
+            image.putpixel((x, y), (12, 34, 56, 255))
+
+    raw = io.BytesIO()
+    image.save(raw, format="PNG")
+
+    black_payload, white_payload = s3_mirror._build_monochrome_logo_variants(raw.getvalue(), "image/png")
+    black = Image.open(io.BytesIO(black_payload[0])).convert("RGBA")
+    white = Image.open(io.BytesIO(white_payload[0])).convert("RGBA")
+
+    assert black.getpixel((0, 0))[3] == 0
+    assert white.getpixel((0, 0))[3] == 0
+    assert black.getpixel((2, 2)) == (0, 0, 0, 255)
+    assert white.getpixel((2, 2)) == (255, 255, 255, 255)
+
+
+def test_apply_logo_variant_upload_skips_upload_when_sha_matches_without_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    data = b"same-bytes"
+    sha = s3_mirror._sha256_bytes(data)
+    key = s3_mirror.build_logo_variant_s3_key("networks", 10, "black", sha, ".png")
+    url = s3_mirror.build_hosted_url(key)
+    head_mock = MagicMock()
+    monkeypatch.setattr(s3_mirror, "_head_object", head_mock)
+
+    patch, mirrored = s3_mirror._apply_logo_variant_upload(
+        row={
+            "hosted_logo_black_key": key,
+            "hosted_logo_black_url": url,
+            "hosted_logo_black_sha256": sha,
+        },
+        kind="networks",
+        entity_id=10,
+        variant="black",
+        data=data,
+        content_type="image/png",
+        ext=".png",
+        force=False,
+        s3_client=MagicMock(),
+    )
+
+    assert patch == {}
+    assert mirrored == 0
+    head_mock.assert_not_called()
 
 
 def test_get_person_s3_prefix() -> None:
@@ -253,6 +313,131 @@ def test_mirror_tmdb_logo_skips_when_already_hosted(monkeypatch: pytest.MonkeyPa
 
     result = s3_mirror.mirror_tmdb_logo_row(row, kind="networks")
     assert result is None
+
+
+def test_mirror_external_logo_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    fake_s3 = MagicMock()
+    fake_s3.head_object.return_value = {
+        "ContentType": "image/png",
+        "ContentLength": 500,
+        "ETag": '"etag-external-logo"',
+    }
+
+    monkeypatch.setattr(s3_mirror, "download_image", lambda *args, **kwargs: (b"\x89PNG\r\n\x1a\nrest", "image/png"))
+    monkeypatch.setattr(
+        s3_mirror,
+        "upload_bytes_to_s3",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("upload called")),
+    )
+
+    row = {"provider_id": 531}
+
+    result = s3_mirror.mirror_external_logo_row(
+        row,
+        kind="watch-providers",
+        source_url="https://upload.wikimedia.org/file.png",
+        id_field="provider_id",
+        s3_client=fake_s3,
+    )
+    assert result is not None
+    assert result["hosted_logo_bytes"] == 500
+    assert result["hosted_logo_etag"] == "etag-external-logo"
+    assert result["hosted_logo_url"].startswith("https://cdn.example.com/")
+    assert result["logo_path"].endswith(".png")
+
+
+def test_mirror_external_logo_skips_when_already_hosted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    row = {
+        "id": 777,
+        "hosted_logo_url": "https://cdn.example.com/images/logos/networks/777/existing.png",
+    }
+
+    result = s3_mirror.mirror_external_logo_row(
+        row,
+        kind="networks",
+        source_url="https://upload.wikimedia.org/file.png",
+    )
+    assert result is None
+
+
+def test_mirror_logo_monochrome_variants_row_generates_black_and_white(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image
+
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    img = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    for y in range(2, 6):
+        for x in range(2, 6):
+            img.putpixel((x, y), (10, 20, 30, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    png = buf.getvalue()
+
+    monkeypatch.setattr(s3_mirror, "download_image", lambda *args, **kwargs: (png, "image/png"))
+    monkeypatch.setattr(s3_mirror, "_head_object", lambda *args, **kwargs: None)
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", lambda *args, **kwargs: ("etag", 123))
+
+    result = s3_mirror.mirror_logo_monochrome_variants_row(
+        {"id": 1},
+        kind="networks",
+        source_url="https://example.com/logo.png",
+        s3_client=MagicMock(),
+    )
+
+    assert result is not None
+    assert result.black_mirrored == 1
+    assert result.white_mirrored == 1
+    assert result.patch["hosted_logo_black_url"].startswith("https://cdn.example.com/")
+    assert result.patch["hosted_logo_white_url"].startswith("https://cdn.example.com/")
+    assert result.patch["hosted_logo_black_key"].startswith("images/logos/networks/1/black/")
+    assert result.patch["hosted_logo_white_key"].startswith("images/logos/networks/1/white/")
+
+
+def test_mirror_logo_monochrome_variants_row_skips_when_existing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    result = s3_mirror.mirror_logo_monochrome_variants_row(
+        {
+            "id": 1,
+            "hosted_logo_black_url": "https://cdn.example.com/black.png",
+            "hosted_logo_white_url": "https://cdn.example.com/white.png",
+        },
+        kind="networks",
+        source_url="https://example.com/logo.png",
+    )
+    assert result is None
+
+
+def test_mirror_logo_monochrome_variants_row_raises_on_transparency_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setattr(s3_mirror, "download_image", lambda *args, **kwargs: (b"not-an-image", "image/png"))
+    monkeypatch.setattr(
+        s3_mirror,
+        "_build_monochrome_logo_variants",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("transparent_extraction_failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="transparent_extraction_failed"):
+        s3_mirror.mirror_logo_monochrome_variants_row(
+            {"id": 1},
+            kind="networks",
+            source_url="https://example.com/logo.png",
+            s3_client=MagicMock(),
+        )
 
 
 # ---------------------------------------------------------------------------

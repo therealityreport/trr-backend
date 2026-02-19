@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -158,13 +159,21 @@ class TestRefreshPersonImages:
                             return_value=(1, 0),
                         ):
                             with patch(
-                                "api.routers.admin_person_images._prune_person_s3_objects",
-                                return_value=0,
+                                "api.routers.admin_person_images._mirror_person_media_assets",
+                                return_value=(2, 1),
                             ):
-                                response = client.post(
-                                    f"/api/v1/admin/person/{person_id}/refresh-images",
-                                    headers={"Authorization": f"Bearer {token}"},
-                                )
+                                with patch(
+                                    "api.routers.admin_person_images._prune_person_s3_objects",
+                                    return_value=0,
+                                ):
+                                    with patch(
+                                        "api.routers.admin_person_images._resize_person_gallery_images",
+                                        return_value=(3, 2, 1, 1, 1, 0),
+                                    ):
+                                        response = client.post(
+                                            f"/api/v1/admin/person/{person_id}/refresh-images",
+                                            headers={"Authorization": f"Bearer {token}"},
+                                        )
 
         assert response.status_code == 200
         data = response.json()
@@ -172,8 +181,13 @@ class TestRefreshPersonImages:
         assert data["person_name"] == "Test Person"
         assert data["photos_fetched"] == 1
         assert data["photos_upserted"] == 1
-        assert data["photos_mirrored"] == 1
+        assert data["photos_mirrored"] == 3
+        assert data["photos_failed"] == 1
+        assert data["cast_photos_mirrored"] == 1
+        assert data["media_assets_mirrored"] == 2
         assert data["text_overlay_unknown"] == 0
+        assert data["resize_attempted"] == 3
+        assert data["resize_crop_attempted"] == 1
         assert "text_overlay_failure_reasons" in data
         assert "episode_metadata_tagged" in data
         assert "show_context_tagged" in data
@@ -216,6 +230,66 @@ class TestRefreshPersonImages:
 
         assert response.status_code == 200
         mock_mirror.assert_not_called()
+
+    def test_stream_emits_resizing_stage_and_complete_counters(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        person_data = {"id": person_id, "full_name": None, "external_ids": {}}
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "trr_backend.repositories.cast_tmdb.get_cast_tmdb_by_person_id",
+                return_value=None,
+            ):
+                with patch("api.routers.admin_person_images._refresh_tmdb_profile", return_value=None):
+                    with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
+                        with patch(
+                            "api.routers.admin_person_images._resize_person_gallery_images",
+                            return_value=(4, 3, 1, 2, 2, 0),
+                        ):
+                            with patch(
+                                "trr_backend.clients.screenalytics.is_screenalytics_configured",
+                                return_value=False,
+                            ):
+                                with patch(
+                                    "trr_backend.vision.text_overlay.is_text_overlay_detection_configured",
+                                    return_value=False,
+                                ):
+                                    response = client.post(
+                                        f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                                        json={"skip_mirror": True},
+                                        headers={"Authorization": f"Bearer {token}"},
+                                    )
+
+        assert response.status_code == 200
+        payload = response.text
+        assert "event: progress" in payload
+        assert '"stage": "resizing"' in payload or '"stage":"resizing"' in payload
+
+        normalized_payload = payload.replace("\r\n", "\n")
+        assert "event: complete" in normalized_payload
+        complete_index = normalized_payload.rfind("event: complete")
+        assert complete_index >= 0
+        data_index = normalized_payload.find("data:", complete_index)
+        assert data_index >= 0
+        json_start = normalized_payload.find("{", data_index)
+        assert json_start >= 0
+        json_end = normalized_payload.find("\n\n", json_start)
+        if json_end == -1:
+            json_end = len(normalized_payload)
+        complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+        assert complete_data["resize_attempted"] == 4
+        assert complete_data["resize_succeeded"] == 3
+        assert complete_data["resize_crop_attempted"] == 2
 
 
 class TestUpdateFacebankSeed:
