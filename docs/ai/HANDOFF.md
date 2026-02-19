@@ -1578,3 +1578,25 @@ Continuation (same session, 2026-02-18) — Health Center pipeline orchestration
   - Added tests for stream order/metadata and precedence regression coverage.
 - Validation:
   - `pytest -q tests/api/routers/test_admin_show_sync.py tests/ingestion/test_show_importer_episode_precedence.py` (`11 passed`)
+
+Continuation (same session, 2026-02-19) — Google News ingestion + unified show news validation:
+- Files (already present on current branch; validated in-session):
+  - `api/routers/admin_show_news.py`
+  - `trr_backend/scraping/google_news_parser.py`
+  - `supabase/migrations/0129_add_google_news_source.sql`
+  - `tests/api/routers/test_admin_show_news.py`
+  - `tests/scraping/test_google_news_parser.py`
+  - `api/main.py` (router registration)
+- Validation:
+  - `./.venv/bin/python -m ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
+  - `./.venv/bin/python -m pytest -q tests/scraping/test_google_news_parser.py tests/api/routers/test_admin_show_news.py` (`7 passed`)
+
+Continuation (same session, 2026-02-19) — CI fix for TMDb season enrichment overview precedence:
+- Files:
+  - `trr_backend/ingestion/show_importer.py`
+- Changes:
+  - Restored TMDb season enrichment behavior to write TMDb `overview` when present, even when IMDb overview already exists, while preserving existing title/air_date fallback logic.
+  - Kept synopsis backfill conditional on missing synopsis.
+- Validation:
+  - `pytest -q tests/integrations/tmdb/test_tmdb_season_enrichment.py::test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters` (`1 passed`)
+  - `ruff check trr_backend/ingestion/show_importer.py tests/integrations/tmdb/test_tmdb_season_enrichment.py` (pass)
