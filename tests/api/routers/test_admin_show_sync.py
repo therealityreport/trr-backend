@@ -89,6 +89,12 @@ class TestSyncFromLists:
 
 
 class TestSyncNetworksStreaming:
+    @pytest.fixture(autouse=True)
+    def _mock_admin_client(self):
+        mock_db = MagicMock()
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            yield mock_db
+
     def test_returns_401_without_auth(self, client):
         response = client.post("/api/v1/admin/shows/sync-networks-streaming", json={})
         assert response.status_code == 401
