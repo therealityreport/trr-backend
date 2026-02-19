@@ -4,6 +4,35 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
 
 ## Latest Update (2026-02-19)
 
+- February 19, 2026: Implemented Bravo cast-only URL validation with commit-time N/A persistence for missing Bravo person pages.
+  - Files:
+    - `trr_backend/scraping/bravo_parser.py`
+    - `api/routers/admin_show_bravo.py`
+    - `tests/scraping/test_bravo_parser.py`
+    - `tests/api/routers/test_admin_show_bravo.py`
+  - Changes:
+    - Added additive parser output `person_candidate_results` in `parse_bravo_show_bundle(...)` with per-candidate status:
+      - `ok` for parsed person pages
+      - `missing` for Bravo “Page Not Found” profiles
+      - `error` for transient/request failures
+    - Updated parser candidate ordering to prioritize explicit `person_url_candidates` ahead of show-discovered people URLs.
+    - Added Bravo profile eligibility filtering in `import-bravo` preview/commit:
+      - include show-cast candidate URLs only when person has no non-rejected `bravo_profile` link
+      - skip already N/A-marked people (`status='rejected'` + `metadata.bravo_probe_state='na'`)
+    - Added commit-time persistence of missing candidates as N/A `core.entity_links` rows:
+      - `entity_type='person'`, `link_kind='bravo_profile'`, `status='rejected'`
+      - metadata markers: `bravo_probe_state=na`, `bravo_probe_reason=missing`, `bravo_probe_checked_at`, `bravo_probe_source=bravo_import_commit`
+    - Added additive Bravo probe counters in commit response `counts`:
+      - `bravo_candidates_tested`
+      - `bravo_candidates_valid`
+      - `bravo_candidates_missing`
+      - `bravo_na_marked`
+    - Added parser `max_people` routing override (`max(40, len(person_url_candidates))`) so larger cast candidate lists are not truncated by default.
+  - Validation:
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scraping/test_bravo_parser.py -q` (`7 passed`)
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py -q` (`17 passed`)
+    - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/scraping/bravo_parser.py /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scraping/test_bravo_parser.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py` (pass)
+
 - February 19, 2026: Expanded streaming inclusion scope to all watch-provider availability rows and fixed completion upsert array serialization.
   - Files:
     - `scripts/sync/sync_networks_streaming_links.py`
@@ -2124,3 +2153,61 @@ Continuation (same session, 2026-02-19) — Instagram permalink metadata enrichm
 - Validation:
   - `ruff check trr_backend/socials/instagram/permalink_metadata.py trr_backend/repositories/social_season_analytics.py scripts/socials/backfill_instagram_metadata_and_media.py tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py` (pass)
   - `pytest -q tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py -k 'instagram or analytics_includes_weekly_platform_engagement'` (`12 passed`)
+
+Continuation (same session, 2026-02-19) — Bravo cast-only sync path + canonical cast URL probing:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/scraping/bravo_parser.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scraping/test_bravo_parser.py`
+- Changes:
+  - Extended Bravo preview/commit request models to accept `person_url_candidates`; commit also supports `cast_only` mode.
+  - Added cast-name-derived canonical URL generation (`https://www.bravotv.com/people/{slug}`) in router and merged candidates into parser inputs.
+  - Updated parser to merge/normalize candidate person URLs and only return valid, successfully parsed person URLs in `discovered_person_urls` when people parsing is enabled.
+  - Added not-found detection for Bravo person pages (including "Page Not Found" fallback pages) so invalid people URLs are skipped.
+  - Updated commit behavior for `cast_only` mode to skip show-copy persistence, pending-link suggestions, cast-role suggestion sync, cast-matrix sync, and show-image import handling.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (`21 passed`)
+
+Continuation (same session, 2026-02-19) — Sync by Fandom backend foundation (person + season, multi-wiki, AI cleanup):
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/fandom_community_allowlist.txt`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0133_fandom_sync_expansion.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_fandom_sync.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/main.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/fandom_discovery.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/openai_fandom_cleanup.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/ingestion/fandom_person_scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/ingestion/fandom_season_scraper.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/season_fandom.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/schema_docs/core.cast_fandom.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/schema_docs/core.season_fandom.md` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/schema_docs/INDEX.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/fandom/test_fandom_discovery.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/ingestion/test_fandom_person_scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_fandom_sync.py` (new)
+- Changes:
+  - Expanded allowlisted fandom communities to include `realitytv-girl.fandom.com` and `my-the-jinxer.fandom.com`.
+  - Added migration `0133_fandom_sync_expansion.sql`:
+    - extends `core.cast_fandom` with dynamic/AI/citation/conflict/source-variant fields.
+    - creates `core.season_fandom` with uniqueness on `(season_id, source)` and supporting indexes/grants.
+  - Added multi-community Fandom candidate discovery with allowlist enforcement and AllPages traversal:
+    - MediaWiki `list=allpages` continuation support.
+    - HTML `Special:AllPages` fallback paging support.
+  - Added season page parser with generic section extraction and canonical section normalization.
+  - Expanded person parser to emit:
+    - `dynamic_sections`
+    - `bio_card`
+    - `casting_summary`
+  - Added OpenAI cleanup integration (`OPENAI_API_KEY`, configurable model via `OPENAI_FANDOM_MODEL`) with deterministic fallback.
+  - Added new admin APIs:
+    - `GET /api/v1/admin/person/{person_id}/fandom`
+    - `POST /api/v1/admin/person/{person_id}/import-fandom/preview`
+    - `POST /api/v1/admin/person/{person_id}/import-fandom/commit`
+    - `GET /api/v1/admin/shows/{show_id}/seasons/{season_number}/fandom`
+    - `POST /api/v1/admin/shows/{show_id}/seasons/{season_number}/import-fandom/preview`
+    - `POST /api/v1/admin/shows/{show_id}/seasons/{season_number}/import-fandom/commit`
+  - Added season_fandom repository helpers and registered the new router in `api/main.py`.
+- Validation:
+  - `ruff check api/routers/admin_fandom_sync.py trr_backend/integrations/fandom_discovery.py trr_backend/integrations/openai_fandom_cleanup.py trr_backend/ingestion/fandom_person_scraper.py trr_backend/ingestion/fandom_season_scraper.py trr_backend/repositories/season_fandom.py tests/api/routers/test_admin_fandom_sync.py tests/integrations/fandom/test_fandom_discovery.py tests/ingestion/test_fandom_person_scraper.py` (pass)
+  - `pytest -q tests/integrations/fandom/test_fandom_discovery.py tests/ingestion/test_fandom_person_scraper.py tests/api/routers/test_admin_fandom_sync.py` (`8 passed`)

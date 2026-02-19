@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import psycopg2
@@ -14,8 +13,8 @@ from psycopg2.extras import RealDictCursor, execute_values
 from trr_backend.db.connection import resolve_database_url
 
 if TYPE_CHECKING:
-    from psycopg2.extensions import connection as PgConnection
-    from psycopg2.extensions import cursor as PgCursor
+    from psycopg2.extensions import connection as connection_type
+    from psycopg2.extensions import cursor as cursor_type
 
 
 def _sslmode_for_url(url: str) -> str | None:
@@ -45,7 +44,7 @@ def db_connection():
 
 
 @contextmanager
-def db_cursor(*, conn: PgConnection | None = None):
+def db_cursor(*, conn: connection_type | None = None):
     """Yield a RealDict cursor, optionally reusing an existing connection."""
     if conn is not None:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -58,7 +57,7 @@ def db_cursor(*, conn: PgConnection | None = None):
 
 
 def fetch_all_with_cursor(
-    cur: PgCursor,
+    cur: cursor_type,
     query: str,
     params: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -68,7 +67,7 @@ def fetch_all_with_cursor(
 
 
 def fetch_one_with_cursor(
-    cur: PgCursor,
+    cur: cursor_type,
     query: str,
     params: Iterable[Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -101,7 +100,7 @@ def execute_values_returning(
     query: str,
     rows: list[tuple[Any, ...]],
     *,
-    conn: PgConnection | None = None,
+    conn: connection_type | None = None,
 ) -> list[dict[str, Any]]:
     if not rows:
         return []
@@ -115,7 +114,7 @@ def execute_values_no_return(
     query: str,
     rows: list[tuple[Any, ...]],
     *,
-    conn: PgConnection | None = None,
+    conn: connection_type | None = None,
 ) -> None:
     if not rows:
         return
