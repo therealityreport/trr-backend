@@ -122,6 +122,105 @@ def test_google_news_sync_persists_google_snapshot(
     assert upsert_mock.call_args.kwargs["source_id"] == "google_news"
 
 
+def test_google_news_sync_bypasses_stale_guard_when_snapshot_missing_images(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+    fresh_snapshot = {
+        "show_id": show_id,
+        "source_id": "google_news",
+        "variant": "default",
+        "status": "success",
+        "fetched_at": datetime.now(tz=UTC).isoformat(),
+        "payload": {
+            "normalized": {
+                "news": [
+                    {
+                        "headline": "Old item",
+                        "article_url": "https://example.com/old-item",
+                        "image_url": "https://images.example.com/old-item.jpg",
+                        "published_at": "2026-02-15T10:00:00Z",
+                    }
+                ]
+            }
+        },
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_news._show_exists", return_value=True):
+            with patch(
+                "api.routers.admin_show_news._resolve_google_news_link",
+                return_value={
+                    "url": "https://news.google.com/topics/topic-1?ceid=US:en&oc=3",
+                    "status": "approved",
+                },
+            ):
+                with patch("api.routers.admin_show_news._fetch_show_snapshot", return_value=fresh_snapshot):
+                    with patch("api.routers.admin_show_news._ensure_google_source"):
+                        with patch(
+                            "api.routers.admin_show_news._show_name_and_aliases",
+                            return_value=("The Real Housewives of Salt Lake City", ["RHOSLC"]),
+                        ):
+                            with patch("api.routers.admin_show_news._build_show_cast_index", return_value=[]):
+                                with patch("api.routers.admin_show_news._load_season_windows", return_value={}):
+                                    with patch(
+                                        "api.routers.admin_show_news.fetch_google_news",
+                                        return_value={
+                                            "items": [
+                                                {
+                                                    "headline": "Fresh item",
+                                                    "article_url": "https://example.com/fresh",
+                                                    "image_url": "https://images.example.com/fresh.jpg",
+                                                    "published_at": "2026-02-16T10:00:00Z",
+                                                    "publisher_name": "People",
+                                                    "publisher_domain": "people.com",
+                                                    "feed_rank": 0,
+                                                }
+                                            ],
+                                            "resolved_feed_url": "https://news.google.com/rss/topics/topic-1",
+                                            "fallback_used": False,
+                                            "attempted_feeds": ["https://news.google.com/rss/topics/topic-1"],
+                                            "errors": [],
+                                        },
+                                    ) as fetch_mock:
+                                        with patch(
+                                            "api.routers.admin_show_news._sync_google_news_featured_images",
+                                            return_value={
+                                                "attempted": 1,
+                                                "imported": 1,
+                                                "skipped": 0,
+                                                "mirrored": 1,
+                                                "linked_items": 1,
+                                                "errors": [],
+                                            },
+                                        ):
+                                            with patch(
+                                                "api.routers.admin_show_news._upsert_show_snapshot",
+                                                return_value={
+                                                    "show_id": show_id,
+                                                    "source_id": "google_news",
+                                                    "variant": "default",
+                                                    "fetched_at": "2026-02-16T10:00:00Z",
+                                                    "payload_sha256": "next-sha",
+                                                },
+                                            ):
+                                                response = client.post(
+                                                    f"/api/v1/admin/shows/{show_id}/google-news/sync",
+                                                    headers={"Authorization": f"Bearer {token}"},
+                                                    json={},
+                                                )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["synced"] is True
+    assert payload["stale_guard_skipped"] is False
+    assert fetch_mock.called
+
+
 def test_unified_news_applies_source_topic_and_season_filters(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

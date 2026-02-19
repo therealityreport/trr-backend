@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
 import urllib.request
 from functools import lru_cache
 from typing import Any, Literal
@@ -19,6 +20,12 @@ from trr_backend.ingestion.show_cast_matrix_scraper import (
     is_missing_fandom_page,
     is_missing_wikipedia_page,
     try_fetch_html,
+)
+from trr_backend.integrations.fandom import (
+    is_allowlisted_fandom_domain,
+    load_fandom_community_allowlist,
+    search_allowlisted_fandom_wikis,
+    search_real_housewives_wiki,
 )
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-links"])
@@ -115,6 +122,131 @@ def _upsert_link(
 def _show_exists(show_id: str) -> bool:
     row = pg.fetch_one("SELECT id FROM core.shows WHERE id = %s", [show_id])
     return bool(row)
+
+
+_IMDB_PERSON_ID_RE = re.compile(r"nm\d+")
+_TMDB_PERSON_ID_RE = re.compile(r"\d+")
+_IMDB_MISSING_PATTERNS = (
+    "404 error",
+    "requested url was not found",
+    "no results found for",
+    "page not found",
+)
+_TMDB_MISSING_PATTERNS = (
+    "oops, we can't find that page",
+    "the page you requested could not be found",
+    "page not found",
+)
+_BRAVO_MISSING_PATTERNS = (
+    "page not found",
+    "we couldn't find this page",
+    "oops",
+)
+
+
+def _extract_imdb_person_id(value: str | None) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    if _IMDB_PERSON_ID_RE.fullmatch(candidate):
+        return candidate
+    parsed = urlparse(candidate)
+    if parsed.scheme and parsed.netloc:
+        if "imdb.com" not in parsed.netloc.lower():
+            return None
+        path = unquote(parsed.path or "")
+        match = re.search(r"/name/(nm\d+)", path, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extract_tmdb_person_id(value: Any) -> str | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        normalized = str(int(value))
+        return normalized if _TMDB_PERSON_ID_RE.fullmatch(normalized) else None
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    if _TMDB_PERSON_ID_RE.fullmatch(candidate):
+        return candidate
+    parsed = urlparse(candidate)
+    if parsed.scheme and parsed.netloc:
+        if "themoviedb.org" not in parsed.netloc.lower():
+            return None
+        path = unquote(parsed.path or "")
+        match = re.search(r"/person/(\d+)", path, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extract_bravo_person_slug(value: str | None) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    parsed = urlparse(candidate)
+    if parsed.scheme and parsed.netloc:
+        if "bravotv.com" not in parsed.netloc.lower():
+            return None
+        path = unquote(parsed.path or "").strip()
+        match = re.search(r"/people/([a-z0-9-]+)", path, flags=re.IGNORECASE)
+        return match.group(1).lower() if match else None
+    slug = _slug(candidate)
+    return slug if slug else None
+
+
+def _fetch_html_with_status(url: str, *, timeout: int = 20) -> tuple[int | None, str | None, str | None, str | None]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "user-agent": "TRR-Backend/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read() or b""
+            charset = response.headers.get_content_charset() or "utf-8"
+            html = raw.decode(charset, errors="replace")
+            return int(response.getcode() or 200), html, str(response.geturl() or url), None
+    except urllib.error.HTTPError as exc:
+        raw = exc.read() or b""
+        charset = exc.headers.get_content_charset() if exc.headers else None
+        html = raw.decode(charset or "utf-8", errors="replace")
+        return int(exc.code), html or None, str(exc.geturl() or url), None
+    except Exception as exc:  # noqa: BLE001
+        return None, None, None, str(exc)
+
+
+def _is_missing_imdb_person_page(html: str, resolved_url: str, imdb_id: str) -> bool:
+    path = unquote(urlparse(resolved_url).path or "")
+    match = re.search(r"/name/(nm\d+)", path, flags=re.IGNORECASE)
+    if not match:
+        return True
+    if match.group(1).lower() != imdb_id.lower():
+        return True
+    lowered = (html or "").casefold()
+    return any(marker in lowered for marker in _IMDB_MISSING_PATTERNS)
+
+
+def _is_missing_tmdb_person_page(html: str, resolved_url: str, tmdb_id: str) -> bool:
+    path = unquote(urlparse(resolved_url).path or "")
+    match = re.search(r"/person/(\d+)", path, flags=re.IGNORECASE)
+    if not match:
+        return True
+    if match.group(1) != tmdb_id:
+        return True
+    lowered = (html or "").casefold()
+    return any(marker in lowered for marker in _TMDB_MISSING_PATTERNS)
+
+
+def _is_missing_bravo_person_page(html: str, resolved_url: str) -> bool:
+    path = unquote(urlparse(resolved_url).path or "").strip().lower()
+    if not path.startswith("/people/"):
+        return True
+    lowered = (html or "").casefold()
+    return any(marker in lowered for marker in _BRAVO_MISSING_PATTERNS)
 
 
 @lru_cache(maxsize=256)
@@ -226,6 +358,15 @@ def _extract_person_page_name_candidates(html: str, resolved_url: str) -> set[st
         if normalized:
             candidates.add(normalized)
 
+    og_title = soup.select_one('meta[property="og:title"]')
+    if og_title is not None:
+        og_title_text = str(og_title.get("content") or "").strip()
+        head = re.split(r"\s+[-|]\s+", og_title_text, maxsplit=1)[0].strip()
+        head = re.sub(r"\s*\(.*?\)\s*$", "", head).strip()
+        normalized = _normalized_person_name(head)
+        if normalized:
+            candidates.add(normalized)
+
     return candidates
 
 
@@ -319,8 +460,80 @@ def _validate_person_knowledge_url(
     candidate = str(url or "").strip()
     if not candidate:
         return None, "invalid"
+    normalized_kind = str(kind or "").strip().lower()
+    if not normalized_kind:
+        return None, "invalid"
 
-    if kind == "wikidata":
+    if normalized_kind == "imdb":
+        imdb_id = _extract_imdb_person_id(candidate)
+        if not imdb_id:
+            return None, "invalid"
+        canonical_url = f"https://www.imdb.com/name/{imdb_id}/"
+        status_code, html, final_url, _ = _fetch_html_with_status(canonical_url)
+        if status_code is None:
+            return None, "fetch_error"
+        if status_code in {404, 410}:
+            return None, "invalid"
+        if status_code >= 500:
+            return None, "fetch_error"
+        if status_code >= 400:
+            return None, "invalid"
+        if not html:
+            return None, "invalid"
+        resolved = final_url or canonical_url
+        if _is_missing_imdb_person_page(html, resolved, imdb_id):
+            return None, "invalid"
+        if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
+            return None, "invalid"
+        return canonical_url, "valid"
+
+    if normalized_kind == "tmdb":
+        tmdb_id = _extract_tmdb_person_id(candidate)
+        if not tmdb_id:
+            return None, "invalid"
+        canonical_url = f"https://www.themoviedb.org/person/{tmdb_id}"
+        status_code, html, final_url, _ = _fetch_html_with_status(canonical_url)
+        if status_code is None:
+            return None, "fetch_error"
+        if status_code in {404, 410}:
+            return None, "invalid"
+        if status_code >= 500:
+            return None, "fetch_error"
+        if status_code >= 400:
+            return None, "invalid"
+        if not html:
+            return None, "invalid"
+        resolved = final_url or canonical_url
+        if _is_missing_tmdb_person_page(html, resolved, tmdb_id):
+            return None, "invalid"
+        if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
+            return None, "invalid"
+        return canonical_url, "valid"
+
+    if normalized_kind == "bravo_profile":
+        bravo_slug = _extract_bravo_person_slug(candidate)
+        if not bravo_slug:
+            return None, "invalid"
+        canonical_url = f"https://www.bravotv.com/people/{bravo_slug}"
+        status_code, html, final_url, _ = _fetch_html_with_status(canonical_url)
+        if status_code is None:
+            return None, "fetch_error"
+        if status_code in {404, 410}:
+            return None, "invalid"
+        if status_code >= 500:
+            return None, "fetch_error"
+        if status_code >= 400:
+            return None, "invalid"
+        if not html:
+            return None, "invalid"
+        resolved = final_url or canonical_url
+        if _is_missing_bravo_person_page(html, resolved):
+            return None, "invalid"
+        if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
+            return None, "invalid"
+        return canonical_url, "valid"
+
+    if normalized_kind == "wikidata":
         item_id = _extract_wikidata_item_id(candidate)
         if not item_id:
             return None, "invalid"
@@ -335,7 +548,7 @@ def _validate_person_knowledge_url(
         ):
             return None, "invalid"
         return f"https://www.wikidata.org/wiki/{item_id}", "valid"
-    if kind == "wikipedia":
+    if normalized_kind == "wikipedia":
         summary, summary_fetch_error = _fetch_wikipedia_page_summary(candidate)
         if not summary_fetch_error:
             if not summary:
@@ -344,13 +557,24 @@ def _validate_person_knowledge_url(
                 return None, "invalid"
             return str(summary.get("url") or candidate), "valid"
 
+    if normalized_kind in {"fandom", "wikia"} and not is_allowlisted_fandom_domain(
+        candidate,
+        allowlist=load_fandom_community_allowlist(),
+    ):
+        return None, "invalid"
+
     html, final_url, error = try_fetch_html(candidate)
     if not html:
         return (None, "fetch_error") if error else (None, "invalid")
     resolved = final_url or candidate
-    if kind == "wikipedia" and is_missing_wikipedia_page(html, resolved):
+    if normalized_kind == "wikipedia" and is_missing_wikipedia_page(html, resolved):
         return None, "invalid"
-    if kind == "fandom" and is_missing_fandom_page(html, resolved):
+    if normalized_kind in {"fandom", "wikia"} and is_missing_fandom_page(html, resolved):
+        return None, "invalid"
+    if normalized_kind in {"fandom", "wikia"} and not is_allowlisted_fandom_domain(
+        resolved,
+        allowlist=load_fandom_community_allowlist(),
+    ):
         return None, "invalid"
     if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
         return None, "invalid"
@@ -598,6 +822,80 @@ def _discover_season_links(show_id: str) -> list[dict[str, Any]]:
     return found
 
 
+def _resolve_person_external_identifier(
+    external_ids: dict[str, Any],
+    *,
+    keys: tuple[str, ...],
+    fallback_value: Any,
+    extractor: Any,
+) -> tuple[str | None, str | None]:
+    for key in keys:
+        value = external_ids.get(key)
+        extracted = extractor(value)
+        if extracted:
+            return str(extracted), "core.people.external_ids"
+    fallback = extractor(fallback_value)
+    if fallback:
+        return str(fallback), "core.cast_tmdb"
+    return None, None
+
+
+def _build_person_link_row(
+    *,
+    person_id: str,
+    link_kind: str,
+    label: str,
+    url: str,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "entity_type": "person",
+        "entity_id": person_id,
+        "season_number": 0,
+        "link_group": "knowledge" if link_kind in {"wikidata", "wikipedia", "fandom", "imdb", "tmdb"} else "official",
+        "link_kind": link_kind,
+        "label": label,
+        "url": url,
+        "source": source,
+        "status": "approved",
+        "confidence": 0.95,
+    }
+
+
+def _discover_fandom_candidates_for_person(
+    *,
+    name: str,
+    seeded_fandom_url: str | None,
+    is_bravo_show: bool,
+) -> list[str]:
+    candidates: list[str] = []
+    if seeded_fandom_url:
+        candidates.append(seeded_fandom_url)
+    if not is_bravo_show or not name:
+        return candidates
+
+    primary = search_real_housewives_wiki(name)
+    if primary:
+        candidates.append(primary)
+    candidates.extend(
+        search_allowlisted_fandom_wikis(
+            name,
+            allowlist=load_fandom_community_allowlist(),
+            max_results=5,
+        )
+    )
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        cleaned = str(candidate or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+    return deduped
+
+
 def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
     show = pg.fetch_one("SELECT networks FROM core.shows WHERE id = %s", [show_id]) or {}
     networks = [str(value).strip().lower() for value in (show.get("networks") or []) if isinstance(value, str)]
@@ -621,10 +919,18 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
 
     rows = pg.fetch_all(
         """
-        SELECT DISTINCT p.id, p.full_name, p.external_ids, cf.source_url AS fandom_url
+        SELECT DISTINCT
+          p.id,
+          p.full_name,
+          p.external_ids,
+          cf.source_url AS fandom_url,
+          ct.imdb_id AS cast_tmdb_imdb_id,
+          ct.tmdb_id AS cast_tmdb_tmdb_id,
+          ct.wikidata_id AS cast_tmdb_wikidata_id
         FROM core.v_show_cast sc
         JOIN core.people p ON p.id = sc.person_id
         LEFT JOIN core.cast_fandom cf ON cf.person_id = p.id AND cf.source = 'fandom'
+        LEFT JOIN core.cast_tmdb ct ON ct.person_id = p.id
         WHERE sc.show_id = %s
         """,
         [show_id],
@@ -634,31 +940,78 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
         person_id = str(row.get("id"))
         name = str(row.get("full_name") or "").strip()
         fandom_url = str(row.get("fandom_url") or "").strip()
-        has_fandom_profile = bool(fandom_url)
         external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
-        wikidata = str(external_ids.get("wikidata") or external_ids.get("wikidata_id") or "").strip()
-        if wikidata:
+        imdb_id, imdb_source = _resolve_person_external_identifier(
+            external_ids,
+            keys=("imdb", "imdb_id"),
+            fallback_value=row.get("cast_tmdb_imdb_id"),
+            extractor=_extract_imdb_person_id,
+        )
+        tmdb_id, tmdb_source = _resolve_person_external_identifier(
+            external_ids,
+            keys=("tmdb", "tmdb_id"),
+            fallback_value=row.get("cast_tmdb_tmdb_id"),
+            extractor=_extract_tmdb_person_id,
+        )
+        wikidata_id, wikidata_source = _resolve_person_external_identifier(
+            external_ids,
+            keys=("wikidata", "wikidata_id"),
+            fallback_value=row.get("cast_tmdb_wikidata_id"),
+            extractor=_extract_wikidata_item_id,
+        )
+
+        if imdb_id and name:
+            imdb_url = _validated_person_knowledge_url(
+                f"https://www.imdb.com/name/{imdb_id}/",
+                kind="imdb",
+                expected_name=name,
+            )
+            if imdb_url and imdb_source:
+                found.append(
+                    _build_person_link_row(
+                        person_id=person_id,
+                        link_kind="imdb",
+                        label=f"{name} IMDb",
+                        url=imdb_url,
+                        source=imdb_source,
+                    )
+                )
+
+        if tmdb_id and name:
+            tmdb_url = _validated_person_knowledge_url(
+                f"https://www.themoviedb.org/person/{tmdb_id}",
+                kind="tmdb",
+                expected_name=name,
+            )
+            if tmdb_url and tmdb_source:
+                found.append(
+                    _build_person_link_row(
+                        person_id=person_id,
+                        link_kind="tmdb",
+                        label=f"{name} TMDb",
+                        url=tmdb_url,
+                        source=tmdb_source,
+                    )
+                )
+
+        if wikidata_id:
             wikidata_url = _validated_person_knowledge_url(
-                f"https://www.wikidata.org/wiki/{wikidata}",
+                f"https://www.wikidata.org/wiki/{wikidata_id}",
                 kind="wikidata",
                 expected_name=name if name else None,
             )
-            if wikidata_url:
+            if wikidata_url and wikidata_source:
                 found.append(
-                    {
-                        "entity_type": "person",
-                        "entity_id": person_id,
-                        "season_number": 0,
-                        "link_group": "knowledge",
-                        "link_kind": "wikidata",
-                        "label": f"{name} Wikidata" if name else "Wikidata",
-                        "url": wikidata_url,
-                        "source": "core.people.external_ids",
-                        "status": "approved",
-                        "confidence": 0.9,
-                    }
+                    _build_person_link_row(
+                        person_id=person_id,
+                        link_kind="wikidata",
+                        label=f"{name} Wikidata" if name else "Wikidata",
+                        url=wikidata_url,
+                        source=wikidata_source,
+                    )
                 )
-        if has_fandom_profile and name:
+
+        if name:
             wikipedia_url = _validated_person_knowledge_url(
                 f"https://en.wikipedia.org/wiki/{quote(name.replace(' ', '_'))}",
                 kind="wikipedia",
@@ -666,55 +1019,60 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
             )
             if wikipedia_url:
                 found.append(
-                    {
-                        "entity_type": "person",
-                        "entity_id": person_id,
-                        "season_number": 0,
-                        "link_group": "knowledge",
-                        "link_kind": "wikipedia",
-                        "label": f"{name} Wikipedia",
-                        "url": wikipedia_url,
-                        "source": "derived_validated",
-                        "status": "approved",
-                        "confidence": 0.9,
-                    }
+                    _build_person_link_row(
+                        person_id=person_id,
+                        link_kind="wikipedia",
+                        label=f"{name} Wikipedia",
+                        url=wikipedia_url,
+                        source="derived_validated",
+                    )
                 )
-        if has_fandom_profile:
+
+        fandom_candidates = _discover_fandom_candidates_for_person(
+            name=name,
+            seeded_fandom_url=fandom_url if fandom_url else None,
+            is_bravo_show=is_bravo_show,
+        )
+        for fandom_candidate in fandom_candidates:
+            if not is_allowlisted_fandom_domain(
+                fandom_candidate,
+                allowlist=load_fandom_community_allowlist(),
+            ):
+                continue
             validated_fandom_url = _validated_person_knowledge_url(
-                fandom_url,
+                fandom_candidate,
                 kind="fandom",
                 expected_name=name if name else None,
             )
             if validated_fandom_url:
                 found.append(
-                    {
-                        "entity_type": "person",
-                        "entity_id": person_id,
-                        "season_number": 0,
-                        "link_group": "knowledge",
-                        "link_kind": "fandom",
-                        "label": f"{name} Fandom" if name else "Fandom",
-                        "url": validated_fandom_url,
-                        "source": "core.cast_fandom",
-                        "status": "approved",
-                        "confidence": 0.9,
-                    }
+                    _build_person_link_row(
+                        person_id=person_id,
+                        link_kind="fandom",
+                        label=f"{name} Fandom" if name else "Fandom",
+                        url=validated_fandom_url,
+                        source="core.cast_fandom" if fandom_candidate == fandom_url else "fandom_search",
+                    )
                 )
+                break
         if is_bravo_show and person_id in housewife_friend_ids and name:
             slug = _slug(name)
             if slug:
-                found.append(
-                    {
-                        "entity_type": "person",
-                        "entity_id": person_id,
-                        "season_number": 0,
-                        "link_group": "official",
-                        "link_kind": "bravo_profile",
-                        "label": f"{name} Bravo profile",
-                        "url": f"https://www.bravotv.com/people/{slug}",
-                        "source": "cast_matrix_sync",
-                    }
+                bravo_profile_url = _validated_person_knowledge_url(
+                    f"https://www.bravotv.com/people/{slug}",
+                    kind="bravo_profile",
+                    expected_name=name,
                 )
+                if bravo_profile_url:
+                    found.append(
+                        _build_person_link_row(
+                            person_id=person_id,
+                            link_kind="bravo_profile",
+                            label=f"{name} Bravo profile",
+                            url=bravo_profile_url,
+                            source="cast_matrix_sync",
+                        )
+                    )
     return found
 
 
@@ -740,6 +1098,7 @@ def _load_show_cast_names_by_person_id(show_id: str) -> dict[str, str]:
 
 
 def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
+    supported_link_kinds = {"wikipedia", "wikidata", "fandom", "wikia", "imdb", "tmdb", "bravo_profile"}
     cast_people = _load_show_cast_names_by_person_id(show_id)
     links = pg.fetch_all(
         """
@@ -752,10 +1111,9 @@ def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
         FROM core.entity_links
         WHERE show_id = %s
           AND entity_type = 'person'
-          AND link_group = 'knowledge'
           AND link_kind = ANY(%s::text[])
         """,
-        [show_id, ["wikipedia", "fandom", "wikidata"]],
+        [show_id, sorted(supported_link_kinds)],
     )
 
     invalid_rows: list[dict[str, Any]] = []
@@ -765,7 +1123,7 @@ def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
         person_id = str(row.get("person_id") or "").strip()
         link_kind = str(row.get("link_kind") or "").strip().lower()
         url = str(row.get("url") or "").strip()
-        if not link_id or not person_id or link_kind not in {"wikipedia", "fandom", "wikidata"} or not url:
+        if not link_id or not person_id or link_kind not in supported_link_kinds or not url:
             continue
 
         expected_name = cast_people.get(person_id)

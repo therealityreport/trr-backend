@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Clean invalid person knowledge links (Wikipedia/Fandom/Wikidata) for a show.
+Clean invalid person source links for a show.
 
 Default mode is dry-run. Use --apply to delete invalid rows.
 """
@@ -19,7 +19,7 @@ from trr_backend.utils.env import load_env
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="cleanup_invalid_person_knowledge_links",
-        description="Validate and optionally delete invalid person knowledge links for a show.",
+        description="Validate and optionally delete invalid person source links for a show.",
     )
     parser.add_argument("--show-id", required=True, help="Show UUID.")
     parser.add_argument("--dry-run", action="store_true", help="Preview only (default unless --apply is set).")

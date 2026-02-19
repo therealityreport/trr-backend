@@ -231,6 +231,81 @@ class TestRefreshPersonImages:
         assert response.status_code == 200
         mock_mirror.assert_not_called()
 
+    def test_bypasses_show_source_policy_when_disabled(self, client, monkeypatch):
+        """enforce_show_source_policy=False should preserve requested sources unchanged."""
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Test Person",
+            "external_ids": {"imdb": "nm12345678"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "trr_backend.repositories.cast_tmdb.get_cast_tmdb_by_person_id",
+                return_value=None,
+            ):
+                with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
+                    with patch(
+                        "trr_backend.ingestion.cast_photo_sources.fetch_all_cast_photos",
+                        return_value=[],
+                    ) as mock_fetch_all:
+                        with patch(
+                            "trr_backend.repositories.cast_photos.upsert_cast_photos",
+                            return_value=[],
+                        ):
+                            with patch(
+                                "api.routers.admin_person_images._auto_count_cast_photos",
+                                return_value=(0, 0, 0),
+                            ):
+                                with patch(
+                                    "api.routers.admin_person_images._auto_count_media_links",
+                                    return_value=(0, 0, 0),
+                                ):
+                                    with patch(
+                                        "api.routers.admin_person_images._detect_text_overlay_cast_photos",
+                                        return_value=(0, 0, 0, 0),
+                                    ):
+                                        with patch(
+                                            "api.routers.admin_person_images._detect_text_overlay_media_links",
+                                            return_value=(0, 0, 0, 0),
+                                        ):
+                                            with patch(
+                                                "api.routers.admin_person_images._recenter_person_gallery_images",
+                                                return_value=(0, 0, 0, 0),
+                                            ):
+                                                with patch(
+                                                    "api.routers.admin_person_images._resize_person_gallery_images",
+                                                    return_value=(0, 0, 0, 0, 0, 0),
+                                                ):
+                                                    with patch(
+                                                        "api.routers.admin_person_images._apply_show_source_policy"
+                                                    ) as mock_policy:
+                                                        response = client.post(
+                                                            f"/api/v1/admin/person/{person_id}/refresh-images",
+                                                            json={
+                                                                "skip_mirror": True,
+                                                                "sources": ["imdb", "fandom"],
+                                                                "enforce_show_source_policy": False,
+                                                            },
+                                                            headers={"Authorization": f"Bearer {token}"},
+                                                        )
+
+        assert response.status_code == 200
+        mock_policy.assert_not_called()
+        assert mock_fetch_all.call_count == 1
+        assert mock_fetch_all.call_args.kwargs["sources"] == ["imdb", "fandom"]
+
     def test_stream_emits_resizing_stage_and_complete_counters(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         person_id = str(uuid4())
@@ -290,6 +365,117 @@ class TestRefreshPersonImages:
         assert complete_data["resize_attempted"] == 4
         assert complete_data["resize_succeeded"] == 3
         assert complete_data["resize_crop_attempted"] == 2
+        assert complete_data["text_overlay_configured"] is False
+        assert complete_data["text_overlay_candidates"] == 0
+        assert complete_data["text_overlay_skipped_reason"] == "not_configured"
+        assert complete_data["live_counts"] == {
+            "synced": complete_data["photos_upserted"],
+            "mirrored": complete_data["photos_mirrored"],
+            "counted": complete_data["auto_counts_succeeded"],
+            "cropped": complete_data["centering_succeeded"],
+            "id_text": complete_data["text_overlay_succeeded"],
+            "resized": complete_data["resize_succeeded"],
+        }
+
+    def test_stream_skips_imdb_when_source_already_fully_mirrored(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Test Person",
+            "external_ids": {"imdb": "nm1234567"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_person_images._refresh_tmdb_profile", return_value=None):
+                with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
+                    with patch("api.routers.admin_person_images._get_known_source_total", return_value=3):
+                        with patch("api.routers.admin_person_images._count_mirrored_cast_photos", return_value=3):
+                            with patch(
+                                "trr_backend.ingestion.cast_photo_sources.fetch_imdb_cast_photos",
+                                return_value=[],
+                            ) as imdb_fetch_mock:
+                                response = client.post(
+                                    f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                                    json={"sources": ["imdb"], "skip_mirror": True, "force_mirror": False},
+                                    headers={"Authorization": f"Bearer {token}"},
+                                )
+
+        assert response.status_code == 200
+        payload = response.text
+        assert "already_mirrored" in payload
+        assert '"sources_skipped": 1' in payload or '"sources_skipped":1' in payload
+        imdb_fetch_mock.assert_not_called()
+
+    def test_reprocess_stream_includes_text_overlay_skip_reason_fields(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images._auto_count_cast_photos",
+                return_value=(0, 0, 0),
+            ):
+                with patch(
+                    "api.routers.admin_person_images._auto_count_media_links",
+                    return_value=(0, 0, 0),
+                ):
+                    with patch(
+                        "trr_backend.vision.text_overlay.is_text_overlay_detection_configured",
+                        return_value=False,
+                    ):
+                        with patch(
+                            "api.routers.admin_person_images._recenter_person_gallery_images",
+                            return_value=(0, 0, 0, 0),
+                        ):
+                            response = client.post(
+                                f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                                headers={"Authorization": f"Bearer {token}"},
+                            )
+
+        assert response.status_code == 200
+        normalized_payload = response.text.replace("\r\n", "\n")
+        complete_index = normalized_payload.rfind("event: complete")
+        assert complete_index >= 0
+        data_index = normalized_payload.find("data:", complete_index)
+        assert data_index >= 0
+        json_start = normalized_payload.find("{", data_index)
+        assert json_start >= 0
+        json_end = normalized_payload.find("\n\n", json_start)
+        if json_end == -1:
+            json_end = len(normalized_payload)
+        complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+
+        assert complete_data["text_overlay_configured"] is False
+        assert complete_data["text_overlay_candidates"] == 0
+        assert complete_data["text_overlay_skipped_reason"] == "not_configured"
+        assert complete_data["live_counts"] == {
+            "synced": 0,
+            "mirrored": 0,
+            "counted": complete_data["auto_counts_succeeded"],
+            "cropped": complete_data["centering_succeeded"],
+            "id_text": complete_data["text_overlay_succeeded"],
+            "resized": 0,
+        }
 
 
 class TestUpdateFacebankSeed:

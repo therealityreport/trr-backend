@@ -5,14 +5,36 @@ import argparse
 import json
 import re
 import sys
+import time
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
 from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.integrations.brandfetch import (
+    BrandfetchAuthError,
+    BrandfetchNotFoundError,
+    BrandfetchRequestError,
+    fetch_brandfetch_logo_candidates,
+    normalize_domain,
+)
+from trr_backend.integrations.imdb.graphql_operations import fetch_hero_watch_box
+from trr_backend.integrations.logopedia import (
+    LogopediaNoFilesError,
+    LogopediaRequestError,
+    fetch_logopedia_logo_candidates,
+)
+from trr_backend.integrations.tmdb.client import (
+    TmdbClientError,
+    fetch_network_alternative_names,
+    fetch_network_details,
+    resolve_api_key,
+    resolve_bearer_token,
+)
 from trr_backend.media.s3_mirror import (
     MonochromeLogoMirrorResult,
     get_s3_client,
@@ -25,16 +47,69 @@ WIKIDATA_SEARCH_URL = "https://www.wikidata.org/w/api.php"
 WIKIDATA_ENTITY_URL = "https://www.wikidata.org/wiki/Special:EntityData/{item_id}.json"
 WIKIDATA_ITEM_RE = re.compile(r"^Q\d+$", re.IGNORECASE)
 LOGO_CLAIM_IDS = ("P154", "P2910")
+DEFAULT_SOURCE_PRIORITY = ["override", "tmdb", "wikimedia", "official", "catalog"]
 REQUEST_HEADERS = {
     "accept": "application/json",
     "user-agent": "TRR-Backend/1.0",
 }
-COMMON_FIELDS = (
-    "hosted_logo_url,hosted_logo_key,hosted_logo_sha256,"
-    "hosted_logo_black_url,hosted_logo_black_key,hosted_logo_black_sha256,"
-    "hosted_logo_white_url,hosted_logo_white_key,hosted_logo_white_sha256,"
-    "wikidata_id,wikipedia_url,wikimedia_logo_file"
+STREAMING_SUFFIX_PATTERNS = (
+    r"\s+amazon channel$",
+    r"\s+apple tv channel$",
+    r"\s+roku premium channel$",
+    r"\s+channel$",
 )
+STREAMING_TIER_PATTERNS = (
+    r"\s+premium plus$",
+    r"\s+premium$",
+    r"\s+basic with ads$",
+    r"\s+standard with ads$",
+    r"\s+free with ads$",
+    r"\s+with ads$",
+    r"\s+essential$",
+    r"\s+plus$",
+)
+KNOWN_METADATA_ALIASES: dict[str, list[str]] = {
+    "apple tv store": ["Apple TV"],
+    "peacock premium": ["Peacock"],
+    "peacock premium plus": ["Peacock"],
+    "amazon prime video with ads": ["Prime Video", "Amazon Prime Video"],
+    "amazon prime video free with ads": ["Prime Video", "Amazon Prime Video"],
+    "fandango at home free": ["Fandango at Home", "Vudu"],
+    "plex channel": ["Plex"],
+    "spectrum on demand": ["Spectrum"],
+    "netflix standard with ads": ["Netflix"],
+    "netflix kids": ["Netflix"],
+    "paramount plus premium": ["Paramount+"],
+    "paramount plus essential": ["Paramount+"],
+    "paramount plus basic with ads": ["Paramount+"],
+    "paramount plus apple tv channel": ["Paramount+"],
+    "paramount+ amazon channel": ["Paramount+"],
+    "paramount+ mtv amazon channel": ["Paramount+"],
+    "paramount+ originals amazon channel": ["Paramount+"],
+    "paramount+ roku premium channel": ["Paramount+"],
+    "amc+ amazon channel": ["AMC+"],
+    "amc plus apple tv channel": ["AMC+"],
+    "amc+ roku premium channel": ["AMC+"],
+    "allblk amazon channel": ["ALLBLK"],
+    "allblk apple tv channel": ["ALLBLK"],
+    "hayu amazon channel": ["Hayu"],
+    "outtv amazon channel": ["OUTtv"],
+    "outtv apple tv channel": ["OUTtv"],
+    "crave amazon channel": ["Crave"],
+    "hbo max amazon channel": ["HBO Max"],
+    "hbo max  amazon channel": ["HBO Max"],
+    "itvx premium": ["ITVX"],
+    "lionsgate play amazon channel": ["Lionsgate Play"],
+    "lionsgate play apple tv channel": ["Lionsgate Play"],
+    "stacktv amazon channel": ["StackTV"],
+    "teletoon+ amazon channel": ["TELETOON+"],
+    "mtv plus amazon channel": ["MTV+"],
+    "mtv hits amazon channel": ["MTV Hits"],
+    "tv2 skyshowtime": ["SkyShowtime", "TV 2 Play"],
+    "universal+ amazon channel": ["Universal+"],
+    "wow fiction amazon channel": ["WOW"],
+    "xumo play": ["Xumo"],
+}
 
 
 @dataclass
@@ -43,6 +118,48 @@ class UnresolvedLogo:
     id: str
     name: str
     reason: str
+
+
+@dataclass
+class AttemptRecord:
+    source: str
+    attempt_url: str | None
+    outcome: str
+    failure_reason: str | None
+    duration_ms: int
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class InventoryEntity:
+    entity_type: str
+    entity_key: str
+    display_name: str
+    available_show_count: int
+    added_show_count: int
+
+
+@dataclass
+class OverrideConfig:
+    id: str
+    entity_type: str
+    entity_key: str
+    display_name_override: str | None
+    wikidata_id_override: str | None
+    wikipedia_url_override: str | None
+    aliases_override: list[str]
+    source_priority_override: list[str]
+    logo_source_urls_by_source: dict[str, list[str]]
+
+
+@dataclass
+class SyncRunContext:
+    tmdb_api_key: str | None
+    tmdb_bearer_token: str | None
+    tmdb_network_ids_by_key: dict[str, set[int]] = field(default_factory=dict)
+    tmdb_network_hints_by_id: dict[int, dict[str, Any]] = field(default_factory=dict)
+    provider_imdb_ids_by_provider_id: dict[int, list[str]] = field(default_factory=dict)
+    imdb_watch_box_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -56,6 +173,10 @@ class SyncSummary:
     variants_white_mirrored: int = 0
     failures: int = 0
     unresolved_logos: list[UnresolvedLogo] = field(default_factory=list)
+    completion_total: int = 0
+    completion_resolved: int = 0
+    completion_unresolved: int = 0
+    completion_percent: float = 0.0
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -63,14 +184,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         prog="sync_networks_streaming_links",
         description=(
             "Enrich used core.networks/core.watch_providers rows with Wikidata + Wikipedia links, "
-            "mirror missing logo assets from Wikimedia, and generate black/white transparent variants."
+            "mirror missing logo assets from multiple sources, and generate black/white transparent variants."
         ),
     )
     parser.add_argument("--all", action="store_true", help="Accepted for CLI parity. Script processes all used rows.")
     parser.add_argument("--force", action="store_true", help="Re-enrich rows and force logo/variant re-mirror.")
     parser.add_argument("--dry-run", action="store_true", help="Resolve + print intended updates without writing.")
     parser.add_argument("--skip-s3", action="store_true", help="Skip logo and variant mirroring.")
-    parser.add_argument("--limit", type=int, default=None, help="Optional per-table processing cap.")
+    parser.add_argument("--unresolved-only", action="store_true", help="Process only unresolved completion rows.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional per-type processing cap.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
     return parser.parse_args(argv)
 
@@ -85,6 +207,63 @@ def _normalize_text(value: Any) -> str:
 
 def _name_key(value: Any) -> str:
     return _normalize_text(value).casefold()
+
+
+def _sanitize_name_variant(name: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s&+.-]", " ", name)).strip()
+
+
+def _extract_json_list_strings(value: Any) -> list[str]:
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+        return out
+    return []
+
+
+def _to_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _iter_rows_paged(query, *, page_size: int = 1000):
+    start = 0
+    while True:
+        response = query.range(start, start + page_size - 1).execute()
+        if hasattr(response, "error") and response.error:
+            raise RuntimeError(f"Supabase paging error: {response.error}")
+        rows = response.data or []
+        if not isinstance(rows, list) or not rows:
+            break
+        for row in rows:
+            if isinstance(row, dict):
+                yield row
+        if len(rows) < page_size:
+            break
+        start += page_size
+
+
+def _to_pg_text_array_literal(values: list[str]) -> str:
+    escaped: list[str] = []
+    for item in values:
+        text = _normalize_text(item)
+        if not text:
+            continue
+        value = text.replace("\\", "\\\\").replace('"', '\\"')
+        escaped.append(f'"{value}"')
+    return "{" + ",".join(escaped) + "}"
 
 
 def _score_search_result(name: str, candidate: dict[str, Any]) -> int:
@@ -206,16 +385,124 @@ def _extract_enwiki_url(entity: dict[str, Any]) -> str | None:
     sitelinks = entity.get("sitelinks")
     if not isinstance(sitelinks, dict):
         return None
+
+    def _wiki_url(site_key: str, title_value: Any) -> str | None:
+        title = _normalize_text(title_value)
+        if not title:
+            return None
+        if not site_key.endswith("wiki"):
+            return None
+        lang = site_key[:-4].replace("_", "-")
+        if not lang or lang == "commons":
+            return None
+        return f"https://{lang}.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
+
     enwiki = sitelinks.get("enwiki")
-    if not isinstance(enwiki, dict):
-        return None
-    title = _normalize_text(enwiki.get("title"))
-    if not title:
-        return None
-    return f"https://en.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
+    if isinstance(enwiki, dict):
+        preferred = _wiki_url("enwiki", enwiki.get("title"))
+        if preferred:
+            return preferred
+
+    # Fallback to any available Wikipedia sitelink when enwiki does not exist.
+    fallback_order = ("simplewiki", "dewiki", "frwiki", "eswiki", "itwiki")
+    for site_key in fallback_order:
+        row = sitelinks.get(site_key)
+        if not isinstance(row, dict):
+            continue
+        url = _wiki_url(site_key, row.get("title"))
+        if url:
+            return url
+
+    for site_key, row in sitelinks.items():
+        if not isinstance(row, dict):
+            continue
+        url = _wiki_url(_normalize_text(site_key), row.get("title"))
+        if url:
+            return url
+    return None
 
 
-def _resolve_entity_metadata(name: str, existing_wikidata_id: str | None) -> dict[str, str | None]:
+def _derive_metadata_aliases(entity_type: str, display_name: str) -> list[str]:
+    aliases: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        text = _normalize_text(re.sub(r"\s+", " ", value))
+        key = text.casefold()
+        if not text or key in seen:
+            return
+        seen.add(key)
+        aliases.append(text)
+
+    add(display_name)
+    key = _name_key(display_name)
+    for alias in KNOWN_METADATA_ALIASES.get(key, []):
+        add(alias)
+
+    if entity_type != "streaming":
+        return aliases
+
+    base = _normalize_text(display_name)
+    add(base.replace("+", " plus "))
+    add(base.replace("+", " "))
+    add(base.replace("plus", "+"))
+
+    work = base
+    changed = True
+    while changed:
+        changed = False
+        for pattern in (*STREAMING_SUFFIX_PATTERNS, *STREAMING_TIER_PATTERNS):
+            stripped = re.sub(pattern, "", work, flags=re.IGNORECASE).strip()
+            if stripped and stripped != work:
+                add(stripped)
+                work = stripped
+                changed = True
+
+    if "amazon channel" in _name_key(base):
+        add(re.sub(r"\s+amazon channel$", "", base, flags=re.IGNORECASE).strip())
+    if "apple tv channel" in _name_key(base):
+        add(re.sub(r"\s+apple tv channel$", "", base, flags=re.IGNORECASE).strip())
+    if "roku premium channel" in _name_key(base):
+        add(re.sub(r"\s+roku premium channel$", "", base, flags=re.IGNORECASE).strip())
+
+    # Partner-suffixed variants frequently resolve via root brand names.
+    add(re.sub(r"\s+(mtv|originals|hits|fiction|one)$", "", work, flags=re.IGNORECASE).strip())
+    add(re.sub(r"\s+tv$", "", work, flags=re.IGNORECASE).strip())
+    add(re.sub(r"\s+play$", "", work, flags=re.IGNORECASE).strip())
+
+    return aliases
+
+
+def _expand_lookup_candidates(name: str, aliases: list[str]) -> list[str]:
+    raw: list[str] = [name, *aliases]
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for entry in raw:
+        text = _normalize_text(entry)
+        if not text:
+            continue
+        variants = {
+            text,
+            text.replace("&", "and"),
+            text.replace(" and ", " & "),
+            _sanitize_name_variant(text),
+        }
+        for variant in variants:
+            normalized = _normalize_text(variant)
+            key = normalized.casefold()
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(normalized)
+    return candidates
+
+
+def _resolve_entity_metadata(
+    name: str,
+    existing_wikidata_id: str | None,
+    aliases: list[str] | None = None,
+) -> dict[str, str | None]:
+    aliases = aliases or []
     wikidata_id = _normalize_text(existing_wikidata_id).upper() or None
     entity = None
 
@@ -226,15 +513,20 @@ def _resolve_entity_metadata(name: str, existing_wikidata_id: str | None) -> dic
             entity = None
 
     if entity is None:
-        found_id = _search_wikidata_item(name)
-        if not found_id:
-            return {
-                "wikidata_id": None,
-                "wikipedia_url": None,
-                "wikimedia_logo_file": None,
-            }
-        wikidata_id = found_id
-        entity = _fetch_wikidata_entity(found_id)
+        for candidate in _expand_lookup_candidates(name, aliases):
+            found_id = _search_wikidata_item(candidate)
+            if not found_id:
+                continue
+            wikidata_id = found_id
+            entity = _fetch_wikidata_entity(found_id)
+            break
+
+    if not wikidata_id and entity is None:
+        return {
+            "wikidata_id": None,
+            "wikipedia_url": None,
+            "wikimedia_logo_file": None,
+        }
 
     if not isinstance(entity, dict):
         return {
@@ -250,122 +542,350 @@ def _resolve_entity_metadata(name: str, existing_wikidata_id: str | None) -> dic
     }
 
 
-def _iter_rows_paged(query, *, page_size: int = 1000):
-    start = 0
-    while True:
-        response = query.range(start, start + page_size - 1).execute()
-        if hasattr(response, "error") and response.error:
-            raise RuntimeError(f"Supabase paging error: {response.error}")
-        rows = response.data or []
-        if not isinstance(rows, list) or not rows:
-            break
-        for row in rows:
-            if isinstance(row, dict):
-                yield row
-        if len(rows) < page_size:
-            break
-        start += page_size
-
-
-def _collect_used_network_keys(db) -> set[str]:
-    keys: set[str] = set()
-    query = db.schema("core").table("shows").select("networks").order("id")
+def _collect_added_show_ids(db) -> set[str]:
+    show_ids: set[str] = set()
+    query = db.schema("admin").table("covered_shows").select("trr_show_id").order("trr_show_id")
     for row in _iter_rows_paged(query):
+        value = _normalize_text(row.get("trr_show_id"))
+        if value:
+            show_ids.add(value)
+    return show_ids
+
+
+def _build_network_inventory(db, *, added_show_ids: set[str]) -> dict[str, InventoryEntity]:
+    by_key: dict[str, dict[str, Any]] = {}
+    query = db.schema("core").table("shows").select("id,networks").order("id")
+    for row in _iter_rows_paged(query):
+        show_id = _normalize_text(row.get("id"))
+        is_added = bool(show_id and show_id in added_show_ids)
         values = row.get("networks")
         if not isinstance(values, list):
             continue
         for value in values:
-            key = _name_key(value)
-            if key:
-                keys.add(key)
-    return keys
+            display = _normalize_text(value)
+            key = _name_key(display)
+            if not key:
+                continue
+            bucket = by_key.setdefault(
+                key,
+                {
+                    "display_name": display,
+                    "show_ids": set(),
+                    "added_show_ids": set(),
+                },
+            )
+            bucket["show_ids"].add(show_id)
+            if is_added:
+                bucket["added_show_ids"].add(show_id)
+
+    inventory: dict[str, InventoryEntity] = {}
+    for key, value in by_key.items():
+        inventory[key] = InventoryEntity(
+            entity_type="network",
+            entity_key=key,
+            display_name=str(value["display_name"]),
+            available_show_count=len(value["show_ids"]),
+            added_show_count=len(value["added_show_ids"]),
+        )
+    return inventory
 
 
-def _collect_primary_provider_keys(db) -> set[str]:
-    keys: set[str] = set()
+def _load_provider_names_by_id(db) -> dict[int, str]:
+    by_id: dict[int, str] = {}
+    query = db.schema("core").table("watch_providers").select("provider_id,provider_name").order("provider_id")
+    for row in _iter_rows_paged(query):
+        provider_id = row.get("provider_id")
+        name = _normalize_text(row.get("provider_name"))
+        if isinstance(provider_id, int) and name:
+            by_id[provider_id] = name
+    return by_id
+
+
+def _build_provider_primary_rows(db) -> dict[str, dict[str, Any]]:
+    by_key: dict[str, dict[str, Any]] = {}
+    provider_names_by_id = _load_provider_names_by_id(db)
     query = (
         db.schema("core")
         .table("show_watch_providers")
-        .select("provider:watch_providers(provider_name)")
-        .eq("region", "US")
-        .in_("offer_type", ["flatrate", "ads"])
+        .select("show_id,provider_id")
         .order("show_id")
     )
     for row in _iter_rows_paged(query):
-        provider = row.get("provider")
-        if isinstance(provider, dict):
-            key = _name_key(provider.get("provider_name"))
-            if key:
-                keys.add(key)
+        show_id = _normalize_text(row.get("show_id"))
+        provider_id = row.get("provider_id")
+        if not isinstance(provider_id, int):
             continue
-        if isinstance(provider, list):
-            for entry in provider:
-                if not isinstance(entry, dict):
-                    continue
-                key = _name_key(entry.get("provider_name"))
-                if key:
-                    keys.add(key)
-    return keys
+        display = _normalize_text(provider_names_by_id.get(provider_id))
+        key = _name_key(display)
+        if not key:
+            continue
+        bucket = by_key.setdefault(
+            key,
+            {
+                "display_name": display,
+                "show_ids": set(),
+            },
+        )
+        bucket["show_ids"].add(show_id)
+    return by_key
 
 
-def _collect_fallback_provider_keys(db, *, primary_keys: set[str]) -> set[str]:
-    keys: set[str] = set()
-    query = db.schema("core").table("shows").select("streaming_providers").order("id")
+def _build_provider_inventory(db, *, added_show_ids: set[str]) -> dict[str, InventoryEntity]:
+    primary = _build_provider_primary_rows(db)
+    by_key: dict[str, dict[str, Any]] = {
+        key: {
+            "display_name": value["display_name"],
+            "show_ids": set(value["show_ids"]),
+            "added_show_ids": {show_id for show_id in value["show_ids"] if show_id in added_show_ids},
+        }
+        for key, value in primary.items()
+    }
+
+    query = db.schema("core").table("shows").select("id,streaming_providers").order("id")
     for row in _iter_rows_paged(query):
+        show_id = _normalize_text(row.get("id"))
+        is_added = bool(show_id and show_id in added_show_ids)
         values = row.get("streaming_providers")
         if not isinstance(values, list):
             continue
         for value in values:
+            display = _normalize_text(value)
+            key = _name_key(display)
+            if not key or key in primary:
+                continue
+            bucket = by_key.setdefault(
+                key,
+                {
+                    "display_name": display,
+                    "show_ids": set(),
+                    "added_show_ids": set(),
+                },
+            )
+            bucket["show_ids"].add(show_id)
+            if is_added:
+                bucket["added_show_ids"].add(show_id)
+
+    inventory: dict[str, InventoryEntity] = {}
+    for key, value in by_key.items():
+        inventory[key] = InventoryEntity(
+            entity_type="streaming",
+            entity_key=key,
+            display_name=str(value["display_name"]),
+            available_show_count=len(value["show_ids"]),
+            added_show_count=len(value["added_show_ids"]),
+        )
+    return inventory
+
+
+def _load_used_inventory(db) -> dict[tuple[str, str], InventoryEntity]:
+    added_show_ids = _collect_added_show_ids(db)
+    inventory: dict[tuple[str, str], InventoryEntity] = {}
+
+    networks = _build_network_inventory(db, added_show_ids=added_show_ids)
+    for key, entity in networks.items():
+        inventory[("network", key)] = entity
+
+    providers = _build_provider_inventory(db, added_show_ids=added_show_ids)
+    for key, entity in providers.items():
+        inventory[("streaming", key)] = entity
+
+    return inventory
+
+
+def _extract_domain_from_value(value: str | None) -> str | None:
+    text = _normalize_text(value)
+    if not text:
+        return None
+    parsed = urlparse(text if "://" in text else f"https://{text}")
+    host = _normalize_text(parsed.netloc or parsed.path).lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or "." not in host:
+        return None
+    return host
+
+
+def _heuristic_domains_for_name(name: str) -> list[str]:
+    slug = re.sub(r"[^a-z0-9]+", "", _name_key(name))
+    if not slug:
+        return []
+    candidates = [f"{slug}.com", f"{slug}tv.com"]
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in candidates:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _logopedia_title_slug(name: str) -> str:
+    return quote(_normalize_text(name).replace(" ", "_"), safe="()_-")
+
+
+def _collect_tmdb_network_ids_by_key(db) -> dict[str, set[int]]:
+    by_key: dict[str, set[int]] = defaultdict(set)
+    query = db.schema("core").table("shows").select("networks,tmdb_network_ids").order("id")
+    for row in _iter_rows_paged(query):
+        networks = row.get("networks")
+        ids = [value for value in (row.get("tmdb_network_ids") or []) if isinstance(value, int)]
+        if not isinstance(networks, list) or not ids:
+            continue
+        for value in networks:
             key = _name_key(value)
-            if key and key not in primary_keys:
-                keys.add(key)
-    return keys
+            if not key:
+                continue
+            by_key[key].update(ids)
+    return dict(by_key)
 
 
-def _collect_used_provider_keys(db) -> set[str]:
-    primary_keys = _collect_primary_provider_keys(db)
-    fallback_keys = _collect_fallback_provider_keys(db, primary_keys=primary_keys)
-    return primary_keys | fallback_keys
+def _load_provider_imdb_ids_by_provider_id(db, *, max_ids_per_provider: int = 3) -> dict[int, list[str]]:
+    by_show_id: dict[str, str] = {}
+    show_query = db.schema("core").table("shows").select("id,imdb_id").order("id")
+    for row in _iter_rows_paged(show_query):
+        show_id = _normalize_text(row.get("id"))
+        imdb_id = _normalize_text(row.get("imdb_id"))
+        if show_id and imdb_id.startswith("tt"):
+            by_show_id[show_id] = imdb_id
+
+    by_provider: dict[int, list[str]] = defaultdict(list)
+    query = (
+        db.schema("core")
+        .table("show_watch_providers")
+        .select("show_id,provider_id")
+        .order("provider_id")
+    )
+    for row in _iter_rows_paged(query):
+        provider_id = row.get("provider_id")
+        show_id = _normalize_text(row.get("show_id"))
+        imdb_id = by_show_id.get(show_id)
+        if not isinstance(provider_id, int) or not imdb_id:
+            continue
+        bucket = by_provider[provider_id]
+        if imdb_id in bucket:
+            continue
+        if len(bucket) >= max_ids_per_provider:
+            continue
+        bucket.append(imdb_id)
+    return dict(by_provider)
 
 
-def _list_rows(
-    db,
-    *,
-    table: str,
-    id_field: str,
-    name_field: str,
-    used_name_keys: set[str],
-    limit: int | None,
-) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    query = db.schema("core").table(table).select(f"{id_field},{name_field},{COMMON_FIELDS}").order(name_field)
+def _build_sync_context(db) -> SyncRunContext:
+    return SyncRunContext(
+        tmdb_api_key=resolve_api_key(),
+        tmdb_bearer_token=resolve_bearer_token(),
+        tmdb_network_ids_by_key=_collect_tmdb_network_ids_by_key(db),
+        provider_imdb_ids_by_provider_id=_load_provider_imdb_ids_by_provider_id(db),
+    )
+
+
+def _load_dimension_lookup(db, *, table: str, id_field: str, name_field: str) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    query = db.schema("core").table(table).select("*").order(name_field)
     for row in _iter_rows_paged(query):
         name = _normalize_text(row.get(name_field))
-        if not name:
+        key = _name_key(name)
+        if not key or key in lookup:
             continue
-        if _name_key(name) not in used_name_keys:
-            continue
-        selected.append({**row, "_name": name})
-        if limit is not None and limit > 0 and len(selected) >= limit:
-            break
-    return selected
+        lookup[key] = row
+    return lookup
 
 
-def _update_row(
-    db,
-    *,
-    table: str,
-    id_field: str,
-    entity_id: Any,
-    patch: dict[str, Any],
-) -> None:
-    response = db.schema("core").table(table).update(patch).eq(id_field, entity_id).execute()
-    if hasattr(response, "error") and response.error:
-        raise RuntimeError(f"Supabase error updating {table}: {response.error}")
+def _parse_logo_override_map(raw: Any) -> dict[str, list[str]]:
+    source_map: dict[str, list[str]] = defaultdict(list)
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                source_map["override"].append(item.strip())
+                continue
+            if not isinstance(item, dict):
+                continue
+            url = _normalize_text(item.get("url"))
+            if not url:
+                continue
+            source = _normalize_text(item.get("source")).lower() or "override"
+            source_map[source].append(url)
+    elif isinstance(raw, dict):
+        for source, value in raw.items():
+            source_name = _normalize_text(source).lower() or "override"
+            if isinstance(value, str) and value.strip():
+                source_map[source_name].append(value.strip())
+                continue
+            if isinstance(value, list):
+                for entry in value:
+                    if isinstance(entry, str) and entry.strip():
+                        source_map[source_name].append(entry.strip())
+    return dict(source_map)
+
+
+def _load_overrides(db) -> dict[tuple[str, str], OverrideConfig]:
+    overrides: dict[tuple[str, str], OverrideConfig] = {}
+    query = (
+        db.schema("admin")
+        .table("network_streaming_overrides")
+        .select("*")
+        .eq("is_active", True)
+        .order("updated_at", desc=True)
+    )
+    for row in _iter_rows_paged(query):
+        entity_type = _normalize_text(row.get("entity_type"))
+        entity_key = _name_key(row.get("entity_key"))
+        if entity_type not in {"network", "streaming"} or not entity_key:
+            continue
+        key = (entity_type, entity_key)
+        if key in overrides:
+            continue
+        overrides[key] = OverrideConfig(
+            id=_normalize_text(row.get("id")),
+            entity_type=entity_type,
+            entity_key=entity_key,
+            display_name_override=_normalize_text(row.get("display_name_override")) or None,
+            wikidata_id_override=_normalize_text(row.get("wikidata_id_override")) or None,
+            wikipedia_url_override=_normalize_text(row.get("wikipedia_url_override")) or None,
+            aliases_override=_extract_json_list_strings(row.get("aliases_override")),
+            source_priority_override=[
+                _normalize_text(item).lower()
+                for item in _extract_json_list_strings(row.get("source_priority_override"))
+                if _normalize_text(item)
+            ],
+            logo_source_urls_by_source=_parse_logo_override_map(row.get("logo_source_urls_override")),
+        )
+    return overrides
+
+
+def _load_unresolved_keys(db, *, used_keys: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    unresolved: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str]] = set()
+    query = (
+        db.schema("admin")
+        .table("network_streaming_completion")
+        .select("entity_type,entity_key,resolution_status")
+        .order("updated_at", desc=True)
+    )
+    for row in _iter_rows_paged(query):
+        entity_type = _normalize_text(row.get("entity_type"))
+        entity_key = _name_key(row.get("entity_key"))
+        pair = (entity_type, entity_key)
+        if pair not in used_keys:
+            continue
+        seen.add(pair)
+        if _normalize_text(row.get("resolution_status")) != "resolved":
+            unresolved.add(pair)
+    unresolved.update(used_keys - seen)
+    return unresolved
 
 
 def _reason_from_exception(exc: Exception) -> str:
     text = _normalize_text(str(exc)).lower()
+    if "brandfetch_auth_missing" in text:
+        return "brandfetch_auth_missing"
+    if "brandfetch_not_found" in text:
+        return "brandfetch_not_found"
+    if "logopedia_no_files" in text:
+        return "logopedia_no_files"
+    if "imdb_provider_not_found" in text:
+        return "imdb_provider_not_found"
     if "logo_decode_failed" in text:
         return "logo_decode_failed"
     if "transparent_extraction_failed" in text:
@@ -375,178 +895,970 @@ def _reason_from_exception(exc: Exception) -> str:
     return "download_failed"
 
 
-def _record_unresolved(summary: SyncSummary, *, row_type: str, entity_id: Any, name: str, reason: str) -> None:
-    summary.unresolved_logos.append(
-        UnresolvedLogo(
-            type=row_type,
-            id=str(entity_id),
-            name=name,
-            reason=reason,
-        )
+def _update_core_row(db, *, table: str, id_field: str, entity_id: Any, patch: dict[str, Any]) -> None:
+    response = db.schema("core").table(table).update(patch).eq(id_field, entity_id).execute()
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error updating {table}: {response.error}")
+
+
+def _upsert_completion(db, row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    source_priority = payload.get("source_priority")
+    if isinstance(source_priority, list):
+        payload["source_priority"] = _to_pg_text_array_literal(source_priority)
+    response = (
+        db.schema("admin")
+        .table("network_streaming_completion")
+        .upsert(payload, on_conflict="entity_type,entity_key")
+        .execute()
     )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error upserting completion row: {response.error}")
+    rows = response.data or []
+    if isinstance(rows, list) and rows:
+        return rows[0]
+    return payload
 
 
-def _sync_table(
+def _insert_attempts(
     db,
     *,
-    table: str,
-    id_field: str,
-    name_field: str,
-    row_type: str,
-    logo_kind: str,
-    used_name_keys: set[str],
+    completion_id: str,
+    run_id: str,
+    entity_type: str,
+    entity_key: str,
+    attempts: list[AttemptRecord],
+) -> None:
+    if not attempts:
+        return
+    payload = [
+        {
+            "completion_id": completion_id,
+            "run_id": run_id,
+            "entity_type": entity_type,
+            "entity_key": entity_key,
+            "source": attempt.source,
+            "attempt_url": attempt.attempt_url,
+            "outcome": attempt.outcome,
+            "failure_reason": attempt.failure_reason,
+            "duration_ms": attempt.duration_ms,
+            "details": attempt.details,
+        }
+        for attempt in attempts
+    ]
+    response = db.schema("admin").table("network_streaming_completion_attempts").insert(payload).execute()
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error inserting completion attempts: {response.error}")
+
+
+def _source_priority(override: OverrideConfig | None) -> list[str]:
+    if override and override.source_priority_override:
+        seen: set[str] = set()
+        out: list[str] = []
+        for source in override.source_priority_override:
+            name = _normalize_text(source).lower()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append(name)
+        if out:
+            return out
+    return list(DEFAULT_SOURCE_PRIORITY)
+
+
+def _merge_source_urls(by_source: dict[str, list[str]], source: str, urls: list[str]) -> None:
+    bucket = by_source.setdefault(source, [])
+    for url in urls:
+        text = _normalize_text(url)
+        if not text or text in bucket:
+            continue
+        bucket.append(text)
+
+
+def _tmdb_name_match(name_key: str, candidate: str) -> bool:
+    candidate_key = _name_key(candidate)
+    if not candidate_key:
+        return False
+    if candidate_key == name_key:
+        return True
+    # handle punctuation/ampersand variants
+    variant = _name_key(_sanitize_name_variant(candidate))
+    return bool(variant and variant == name_key)
+
+
+def _resolve_tmdb_network_hints(
+    *,
+    entity: InventoryEntity,
+    core_row: dict[str, Any],
+    context: SyncRunContext | None,
+    aliases: list[str],
+) -> dict[str, Any]:
+    if entity.entity_type != "network" or context is None:
+        return {"aliases": [], "official_urls": [], "tmdb_logo_urls": []}
+    if not (context.tmdb_api_key or context.tmdb_bearer_token):
+        return {"aliases": [], "official_urls": [], "tmdb_logo_urls": []}
+
+    candidate_ids: set[int] = set()
+    row_id = core_row.get("id")
+    if isinstance(row_id, int):
+        candidate_ids.add(row_id)
+    candidate_ids.update(context.tmdb_network_ids_by_key.get(entity.entity_key, set()))
+
+    aliases_out: list[str] = []
+    official_urls: list[str] = []
+    tmdb_logo_urls: list[str] = []
+    seen_aliases: set[str] = set()
+    seen_urls: set[str] = set()
+
+    for network_id in sorted(candidate_ids):
+        cached = context.tmdb_network_hints_by_id.get(network_id)
+        if cached is None:
+            try:
+                details = fetch_network_details(
+                    network_id,
+                    api_key=context.tmdb_api_key,
+                    bearer_token=context.tmdb_bearer_token,
+                )
+                alt = fetch_network_alternative_names(
+                    network_id,
+                    api_key=context.tmdb_api_key,
+                    bearer_token=context.tmdb_bearer_token,
+                )
+                names: list[str] = []
+                details_name = _normalize_text(details.get("name"))
+                if details_name:
+                    names.append(details_name)
+                for alias_row in alt.get("results") or []:
+                    if not isinstance(alias_row, dict):
+                        continue
+                    alias_name = _normalize_text(alias_row.get("name"))
+                    if alias_name:
+                        names.append(alias_name)
+                homepage = _normalize_text(details.get("homepage"))
+                logo_path = _normalize_text(details.get("logo_path"))
+                logo_url = ""
+                if logo_path:
+                    if logo_path.startswith("http://") or logo_path.startswith("https://"):
+                        logo_url = logo_path
+                    else:
+                        normalized_logo_path = logo_path if logo_path.startswith("/") else f"/{logo_path}"
+                        logo_url = f"https://image.tmdb.org/t/p/original{normalized_logo_path}"
+                cached = {
+                    "names": names,
+                    "homepage": homepage,
+                    "logo_url": logo_url,
+                }
+            except (TmdbClientError, RuntimeError, requests.RequestException):
+                cached = {"names": [], "homepage": "", "logo_url": ""}
+            context.tmdb_network_hints_by_id[network_id] = cached
+
+        names = [value for value in cached.get("names") or [] if isinstance(value, str)]
+        matches = any(_tmdb_name_match(entity.entity_key, name) for name in names)
+        if not matches and aliases:
+            alias_keys = {_name_key(alias) for alias in aliases if _normalize_text(alias)}
+            matches = any(_name_key(name) in alias_keys for name in names)
+        if not matches:
+            continue
+
+        for name in names:
+            clean = _normalize_text(name)
+            if not clean:
+                continue
+            key = clean.casefold()
+            if key in seen_aliases:
+                continue
+            seen_aliases.add(key)
+            aliases_out.append(clean)
+
+        homepage = _normalize_text(cached.get("homepage"))
+        if homepage and homepage not in seen_urls:
+            seen_urls.add(homepage)
+            official_urls.append(homepage)
+        logo_url = _normalize_text(cached.get("logo_url"))
+        if logo_url and logo_url not in seen_urls:
+            seen_urls.add(logo_url)
+            tmdb_logo_urls.append(logo_url)
+
+    return {
+        "aliases": aliases_out,
+        "official_urls": official_urls,
+        "tmdb_logo_urls": tmdb_logo_urls,
+    }
+
+
+def _extract_provider_logo_candidates_from_watch_box(
+    payload: dict[str, Any],
+    *,
+    entity_key: str,
+    display_name: str,
+) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    target = entity_key.casefold()
+    target_name = display_name.casefold()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            provider = node.get("provider")
+            provider_id = ""
+            provider_ref = ""
+            logo_url = ""
+            if isinstance(provider, dict):
+                provider_id = _normalize_text(provider.get("id")).casefold()
+                provider_ref = _normalize_text(provider.get("refTagFragment")).casefold()
+                logos = provider.get("logos")
+                if isinstance(logos, dict):
+                    slate = logos.get("slate")
+                    if isinstance(slate, dict):
+                        logo_url = _normalize_text(slate.get("url"))
+            title_text = ""
+            title_node = node.get("title")
+            if isinstance(title_node, dict):
+                title_text = _normalize_text(title_node.get("value")).casefold()
+            link_text = _normalize_text(node.get("link")).casefold()
+
+            matches = any(
+                [
+                    bool(target and target in provider_id),
+                    bool(target and target in provider_ref),
+                    bool(target_name and target_name in title_text),
+                    bool(target and target in link_text),
+                ]
+            )
+            if matches and logo_url and logo_url not in seen:
+                seen.add(logo_url)
+                candidates.append(logo_url)
+
+            for value in node.values():
+                walk(value)
+            return
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return candidates
+
+
+def _collect_external_logo_candidates(
+    *,
+    entity: InventoryEntity,
+    display_name: str,
+    core_row: dict[str, Any],
+    override: OverrideConfig | None,
+    context: SyncRunContext | None,
+    tmdb_hints: dict[str, Any],
+) -> tuple[dict[str, list[str]], list[AttemptRecord], str | None]:
+    by_source: dict[str, list[str]] = defaultdict(list)
+    attempts: list[AttemptRecord] = []
+    unresolved_reason: str | None = None
+
+    # Brandfetch candidate domains
+    domains: list[str] = []
+    hint_urls = (tmdb_hints or {}).get("official_urls") or []
+    homepage = _normalize_text(hint_urls[0] if hint_urls else "")
+    homepage_domain = normalize_domain(homepage)
+    if homepage_domain:
+        domains.append(homepage_domain)
+
+    if override:
+        for urls in override.logo_source_urls_by_source.values():
+            for url in urls:
+                domain = normalize_domain(url)
+                if domain:
+                    domains.append(domain)
+
+    domains.extend(_heuristic_domains_for_name(display_name))
+    domain_seen: set[str] = set()
+    ordered_domains: list[str] = []
+    for domain in domains:
+        if not domain or domain in domain_seen:
+            continue
+        domain_seen.add(domain)
+        ordered_domains.append(domain)
+
+    for domain in ordered_domains:
+        started = time.perf_counter()
+        try:
+            urls = fetch_brandfetch_logo_candidates(domain)
+            _merge_source_urls(by_source, "official", urls[:8])
+            attempts.append(
+                AttemptRecord(
+                    source="official",
+                    attempt_url=f"https://{domain}",
+                    outcome="success",
+                    failure_reason=None,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    details={"provider": "brandfetch", "candidate_count": len(urls)},
+                )
+            )
+            if urls:
+                break
+        except BrandfetchAuthError:
+            reason = "brandfetch_auth_missing"
+            unresolved_reason = unresolved_reason or reason
+            attempts.append(
+                AttemptRecord(
+                    source="official",
+                    attempt_url=f"https://{domain}",
+                    outcome="failed",
+                    failure_reason=reason,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    details={"provider": "brandfetch"},
+                )
+            )
+            break
+        except BrandfetchNotFoundError:
+            reason = "brandfetch_not_found"
+            unresolved_reason = unresolved_reason or reason
+            attempts.append(
+                AttemptRecord(
+                    source="official",
+                    attempt_url=f"https://{domain}",
+                    outcome="failed",
+                    failure_reason=reason,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    details={"provider": "brandfetch"},
+                )
+            )
+        except BrandfetchRequestError as exc:
+            reason = _reason_from_exception(exc)
+            unresolved_reason = unresolved_reason or reason
+            attempts.append(
+                AttemptRecord(
+                    source="official",
+                    attempt_url=f"https://{domain}",
+                    outcome="failed",
+                    failure_reason=reason,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    details={"provider": "brandfetch", "error": str(exc)},
+                )
+            )
+
+    aliases = (tmdb_hints or {}).get("aliases") or []
+    try:
+        logopedia_urls = fetch_logopedia_logo_candidates(display_name, aliases=aliases)
+        _merge_source_urls(by_source, "catalog", logopedia_urls[:12])
+        attempts.append(
+            AttemptRecord(
+                source="catalog",
+                attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
+                outcome="success",
+                failure_reason=None,
+                duration_ms=0,
+                details={"provider": "logopedia", "candidate_count": len(logopedia_urls)},
+            )
+        )
+    except LogopediaNoFilesError:
+        unresolved_reason = unresolved_reason or "logopedia_no_files"
+        attempts.append(
+            AttemptRecord(
+                source="catalog",
+                attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
+                outcome="failed",
+                failure_reason="logopedia_no_files",
+                duration_ms=0,
+                details={"provider": "logopedia"},
+            )
+        )
+    except LogopediaRequestError as exc:
+        reason = _reason_from_exception(exc)
+        unresolved_reason = unresolved_reason or reason
+        attempts.append(
+            AttemptRecord(
+                source="catalog",
+                attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
+                outcome="failed",
+                failure_reason=reason,
+                duration_ms=0,
+                details={"provider": "logopedia", "error": str(exc)},
+            )
+        )
+
+    # IMDb fallback for streaming providers.
+    if entity.entity_type == "streaming" and context is not None:
+        provider_id = core_row.get("provider_id")
+        imdb_ids = context.provider_imdb_ids_by_provider_id.get(provider_id, []) if isinstance(provider_id, int) else []
+        imdb_candidates: list[str] = []
+        for imdb_id in imdb_ids:
+            if imdb_id not in context.imdb_watch_box_cache:
+                try:
+                    payload = fetch_hero_watch_box(imdb_id)
+                    context.imdb_watch_box_cache[imdb_id] = payload if isinstance(payload, dict) else {}
+                except Exception:  # noqa: BLE001
+                    context.imdb_watch_box_cache[imdb_id] = {}
+            payload = context.imdb_watch_box_cache.get(imdb_id) or {}
+            urls = _extract_provider_logo_candidates_from_watch_box(
+                payload,
+                entity_key=entity.entity_key,
+                display_name=display_name,
+            )
+            imdb_candidates.extend(urls)
+            if urls:
+                break
+
+        if imdb_candidates:
+            _merge_source_urls(by_source, "catalog", imdb_candidates)
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url="https://www.imdb.com/",
+                    outcome="success",
+                    failure_reason=None,
+                    duration_ms=0,
+                    details={"provider": "imdb_watch_box", "candidate_count": len(imdb_candidates)},
+                )
+            )
+        else:
+            unresolved_reason = unresolved_reason or "imdb_provider_not_found"
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url="https://www.imdb.com/",
+                    outcome="failed",
+                    failure_reason="imdb_provider_not_found",
+                    duration_ms=0,
+                    details={"provider": "imdb_watch_box"},
+                )
+            )
+
+    return dict(by_source), attempts, unresolved_reason
+
+
+def _tmdb_logo_candidate(row: dict[str, Any]) -> list[str]:
+    path = _normalize_text(row.get("tmdb_logo_path"))
+    if not path:
+        return []
+    if path.startswith("http://") or path.startswith("https://"):
+        return [path]
+    if not path.startswith("/"):
+        path = "/" + path
+    return [f"https://image.tmdb.org/t/p/original{path}"]
+
+
+def _detect_base_logo_format(
+    *,
+    wikimedia_logo_file: str,
+    logo_source_url: str,
+    hosted_logo_url: str,
+) -> str:
+    values = [wikimedia_logo_file, logo_source_url, hosted_logo_url]
+    for value in values:
+        lowered = _normalize_text(value).lower()
+        if not lowered:
+            continue
+        if ".svg" in lowered:
+            return "svg"
+        if ".png" in lowered or lowered.endswith(".jpg") or lowered.endswith(".jpeg") or lowered.endswith(".webp"):
+            return "png"
+    return "unknown"
+
+
+def _build_logo_candidates(
+    *,
+    override: OverrideConfig | None,
+    core_row: dict[str, Any] | None,
+    wikimedia_logo_file: str,
+    extra_by_source: dict[str, list[str]] | None = None,
+    extra_tmdb_logo_urls: list[str] | None = None,
+) -> dict[str, list[str]]:
+    by_source: dict[str, list[str]] = defaultdict(list)
+
+    if override:
+        for source, urls in override.logo_source_urls_by_source.items():
+            _merge_source_urls(by_source, source, urls)
+
+    if extra_by_source:
+        for source, urls in extra_by_source.items():
+            _merge_source_urls(by_source, source, urls)
+
+    row = core_row or {}
+    _merge_source_urls(by_source, "tmdb", _tmdb_logo_candidate(row))
+    if extra_tmdb_logo_urls:
+        _merge_source_urls(by_source, "tmdb", extra_tmdb_logo_urls)
+
+    _merge_source_urls(by_source, "wikimedia", _commons_file_urls(wikimedia_logo_file))
+
+    return dict(by_source)
+
+
+def _build_resolution_status(
+    *,
+    wikidata_id: str,
+    wikipedia_url: str,
+    hosted_logo_url: str,
+    hosted_logo_black_url: str,
+    hosted_logo_white_url: str,
+    base_logo_format: str,
+    reason: str | None,
+) -> tuple[str, str | None]:
+    complete = all(
+        [
+            bool(wikidata_id),
+            bool(wikipedia_url),
+            bool(hosted_logo_url),
+            bool(hosted_logo_black_url),
+            bool(hosted_logo_white_url),
+            base_logo_format in {"png", "svg"},
+        ]
+    )
+    if complete:
+        return "resolved", None
+
+    if reason in {
+        "download_failed",
+        "logo_decode_failed",
+        "transparent_extraction_failed",
+        "s3_upload_failed",
+        "missing_dimension_row",
+    }:
+        return "failed", reason
+
+    return "manual_required", reason or "incomplete_metadata"
+
+
+def _process_entity(
+    db,
+    *,
+    entity: InventoryEntity,
+    core_row: dict[str, Any] | None,
+    override: OverrideConfig | None,
+    run_id: str,
     args: argparse.Namespace,
     summary: SyncSummary,
     s3_client,
+    context: SyncRunContext | None = None,
 ) -> None:
-    rows = _list_rows(
-        db,
-        table=table,
-        id_field=id_field,
-        name_field=name_field,
-        used_name_keys=used_name_keys,
-        limit=args.limit,
+    summary.processed += 1
+    attempts: list[AttemptRecord] = []
+
+    row_table = "networks" if entity.entity_type == "network" else "watch_providers"
+    id_field = "id" if entity.entity_type == "network" else "provider_id"
+    row_type = entity.entity_type
+    logo_kind = "networks" if entity.entity_type == "network" else "watch-providers"
+
+    core_row = dict(core_row or {})
+    entity_id_value = _normalize_text(core_row.get(id_field)) or ""
+    display_name = (
+        override.display_name_override
+        if override and override.display_name_override
+        else entity.display_name
     )
 
-    for row in rows:
-        summary.processed += 1
-        entity_id = row.get(id_field)
-        name = _normalize_text(row.get("_name"))
-        if entity_id is None or not name:
-            continue
+    patch: dict[str, Any] = {}
+    unresolved_reason: str | None = None
 
-        unresolved_reason: str | None = None
-        try:
-            metadata = _resolve_entity_metadata(name, row.get("wikidata_id"))
+    try:
+        override_aliases = override.aliases_override if override else []
+        generated_aliases = _derive_metadata_aliases(entity.entity_type, display_name)
+        tmdb_hints = _resolve_tmdb_network_hints(
+            entity=entity,
+            core_row=core_row,
+            context=context,
+            aliases=[*override_aliases, *generated_aliases],
+        )
+        aliases = [
+            *override_aliases,
+            *generated_aliases,
+            *[alias for alias in (tmdb_hints.get("aliases") or []) if isinstance(alias, str)],
+        ]
+        metadata = _resolve_entity_metadata(display_name, core_row.get("wikidata_id"), aliases)
 
-            patch: dict[str, Any] = {}
-            wikidata_id = _normalize_text(metadata.get("wikidata_id"))
-            wikipedia_url = _normalize_text(metadata.get("wikipedia_url"))
-            wikimedia_logo_file = _normalize_text(metadata.get("wikimedia_logo_file"))
+        wikidata_id = _normalize_text(override.wikidata_id_override if override else "") or _normalize_text(
+            metadata.get("wikidata_id")
+        )
+        wikipedia_url = _normalize_text(override.wikipedia_url_override if override else "") or _normalize_text(
+            metadata.get("wikipedia_url")
+        )
+        wikimedia_logo_file = _normalize_text(metadata.get("wikimedia_logo_file"))
 
-            existing_wikidata = _normalize_text(row.get("wikidata_id"))
-            existing_wikipedia = _normalize_text(row.get("wikipedia_url"))
-            existing_logo_file = _normalize_text(row.get("wikimedia_logo_file"))
+        existing_wikidata = _normalize_text(core_row.get("wikidata_id"))
+        existing_wikipedia = _normalize_text(core_row.get("wikipedia_url"))
+        existing_logo_file = _normalize_text(core_row.get("wikimedia_logo_file"))
 
-            if wikidata_id and (args.force or not existing_wikidata):
-                if wikidata_id != existing_wikidata:
-                    patch["wikidata_id"] = wikidata_id
-                if not existing_wikidata:
-                    summary.wikidata_linked += 1
+        if wikidata_id and (args.force or not existing_wikidata):
+            if wikidata_id != existing_wikidata:
+                patch["wikidata_id"] = wikidata_id
+            if not existing_wikidata:
+                summary.wikidata_linked += 1
 
-            if wikipedia_url and (args.force or not existing_wikipedia):
-                if wikipedia_url != existing_wikipedia:
-                    patch["wikipedia_url"] = wikipedia_url
-                if not existing_wikipedia:
-                    summary.wikipedia_linked += 1
+        if wikipedia_url and (args.force or not existing_wikipedia):
+            if wikipedia_url != existing_wikipedia:
+                patch["wikipedia_url"] = wikipedia_url
+            if not existing_wikipedia:
+                summary.wikipedia_linked += 1
 
-            if wikimedia_logo_file and (args.force or not existing_logo_file):
-                if wikimedia_logo_file != existing_logo_file:
-                    patch["wikimedia_logo_file"] = wikimedia_logo_file
+        if wikimedia_logo_file and (args.force or not existing_logo_file):
+            if wikimedia_logo_file != existing_logo_file:
+                patch["wikimedia_logo_file"] = wikimedia_logo_file
 
-            if patch:
-                patch["link_enriched_at"] = _now_iso()
-                patch["link_enrichment_source"] = "wikidata"
-                summary.links_enriched += 1
+        if patch:
+            patch["link_enriched_at"] = _now_iso()
+            patch["link_enrichment_source"] = "wikidata"
+            summary.links_enriched += 1
 
-            commons_file = _normalize_text(patch.get("wikimedia_logo_file")) or existing_logo_file
-            commons_urls = _commons_file_urls(commons_file)
+        merged_row = {**core_row, **patch}
+        has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
+        external_candidates: dict[str, list[str]] = {}
+        external_attempts: list[AttemptRecord] = []
+        external_reason: str | None = None
+        if (args.force or not has_base_logo) and not args.skip_s3:
+            external_candidates, external_attempts, external_reason = _collect_external_logo_candidates(
+                entity=entity,
+                display_name=display_name,
+                core_row=merged_row,
+                override=override,
+                context=context,
+                tmdb_hints=tmdb_hints,
+            )
+            attempts.extend(external_attempts)
 
-            has_hosted_logo = bool(_normalize_text(row.get("hosted_logo_url")))
-            should_try_logo = (args.force or not has_hosted_logo) and bool(commons_urls)
+        source_priority = _source_priority(override)
+        candidates = _build_logo_candidates(
+            override=override,
+            core_row=merged_row,
+            wikimedia_logo_file=_normalize_text(merged_row.get("wikimedia_logo_file")) or wikimedia_logo_file,
+            extra_by_source=external_candidates,
+            extra_tmdb_logo_urls=[url for url in (tmdb_hints.get("tmdb_logo_urls") or []) if isinstance(url, str)],
+        )
 
-            if not has_hosted_logo and not commons_urls:
-                unresolved_reason = "no_wikidata_match" if not (wikidata_id or existing_wikidata) else "no_logo_claim"
+        selected_logo_source = ""
+        selected_logo_url = ""
 
-            if not args.skip_s3 and not args.dry_run and should_try_logo:
-                last_error: Exception | None = None
-                for candidate_url in commons_urls:
+        if not core_row:
+            unresolved_reason = "missing_dimension_row"
+
+        if not args.skip_s3 and not args.dry_run and core_row:
+            for source_name in source_priority:
+                urls = candidates.get(source_name, [])
+                if not urls:
+                    if source_name in {"official", "catalog", "override", "tmdb", "wikimedia"}:
+                        attempts.append(
+                            AttemptRecord(
+                                source=source_name,
+                                attempt_url=None,
+                                outcome="skipped",
+                                failure_reason="no_candidate_url",
+                                duration_ms=0,
+                            )
+                        )
+                    continue
+                for candidate_url in urls:
+                    started = time.perf_counter()
                     try:
                         logo_patch = mirror_external_logo_row(
-                            row,
+                            {**merged_row, **patch},
                             kind=logo_kind,
                             id_field=id_field,
                             source_url=candidate_url,
                             force=bool(args.force),
                             s3_client=s3_client,
+                            source=source_name,
                         )
+                        duration_ms = int((time.perf_counter() - started) * 1000)
                         if logo_patch:
-                            summary.logos_mirrored += 1
                             patch.update(logo_patch)
-                        last_error = None
+                            summary.logos_mirrored += 1
+                            merged_row = {**merged_row, **logo_patch}
+                            has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
+                        else:
+                            has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
+                        attempts.append(
+                            AttemptRecord(
+                                source=source_name,
+                                attempt_url=candidate_url,
+                                outcome="success",
+                                failure_reason=None,
+                                duration_ms=duration_ms,
+                            )
+                        )
+                        selected_logo_source = source_name
+                        selected_logo_url = candidate_url
                         break
                     except Exception as exc:  # noqa: BLE001
-                        last_error = exc
-                if last_error is not None and unresolved_reason is None:
-                    unresolved_reason = _reason_from_exception(last_error)
-
-            hosted_logo_url = _normalize_text(patch.get("hosted_logo_url")) or _normalize_text(
-                row.get("hosted_logo_url")
-            )
-            has_base_logo = bool(hosted_logo_url)
-            if (args.force or not has_hosted_logo) and not has_base_logo and unresolved_reason is None:
-                unresolved_reason = "download_failed"
-
-            if not args.skip_s3 and not args.dry_run:
-                source_url = hosted_logo_url or (commons_urls[0] if commons_urls else "")
-                if source_url:
-                    merged_row = {**row, **patch}
-                    try:
-                        variant_result = mirror_logo_monochrome_variants_row(
-                            merged_row,
-                            kind=logo_kind,
-                            id_field=id_field,
-                            source_url=source_url,
-                            force=bool(args.force),
-                            s3_client=s3_client,
-                            source="wikimedia",
+                        duration_ms = int((time.perf_counter() - started) * 1000)
+                        attempts.append(
+                            AttemptRecord(
+                                source=source_name,
+                                attempt_url=candidate_url,
+                                outcome="failed",
+                                failure_reason=_reason_from_exception(exc),
+                                duration_ms=duration_ms,
+                                details={"error": str(exc)},
+                            )
                         )
-                        if isinstance(variant_result, MonochromeLogoMirrorResult):
-                            patch.update(variant_result.patch)
-                            summary.variants_black_mirrored += int(variant_result.black_mirrored)
-                            summary.variants_white_mirrored += int(variant_result.white_mirrored)
-                    except Exception as exc:  # noqa: BLE001
-                        if unresolved_reason is None:
-                            unresolved_reason = _reason_from_exception(exc)
-                elif unresolved_reason is None:
-                    unresolved_reason = "no_logo_claim"
+                        unresolved_reason = _reason_from_exception(exc)
+                        continue
+                if has_base_logo:
+                    break
 
-            if patch:
-                if args.verbose:
-                    print(f"UPDATE {table} {id_field}={entity_id} keys={sorted(patch.keys())}")
-                if not args.dry_run:
-                    _update_row(db, table=table, id_field=id_field, entity_id=entity_id, patch=patch)
+        if not has_base_logo:
+            if not (_normalize_text(wikidata_id) or _normalize_text(existing_wikidata)):
+                unresolved_reason = unresolved_reason or "no_wikidata_match"
+            elif not any(
+                [
+                    candidates.get("wikimedia"),
+                    candidates.get("tmdb"),
+                    candidates.get("override"),
+                    candidates.get("official"),
+                    candidates.get("catalog"),
+                ]
+            ):
+                unresolved_reason = unresolved_reason or external_reason or "no_logo_claim"
+            else:
+                unresolved_reason = unresolved_reason or external_reason or "download_failed"
 
-            final_black = _normalize_text(patch.get("hosted_logo_black_url")) or _normalize_text(
-                row.get("hosted_logo_black_url")
-            )
-            final_white = _normalize_text(patch.get("hosted_logo_white_url")) or _normalize_text(
-                row.get("hosted_logo_white_url")
-            )
-            if not args.skip_s3 and not args.dry_run and (args.force or not (final_black and final_white)):
-                if not (final_black and final_white) and unresolved_reason is None:
-                    unresolved_reason = "transparent_extraction_failed"
+        merged_row = {**core_row, **patch}
+        base_logo_url = _normalize_text(merged_row.get("hosted_logo_url"))
+        variant_source_url = base_logo_url or selected_logo_url
 
-            if unresolved_reason:
-                _record_unresolved(
-                    summary,
-                    row_type=row_type,
-                    entity_id=entity_id,
-                    name=name,
-                    reason=unresolved_reason,
+        if not args.skip_s3 and not args.dry_run and core_row:
+            existing_black = _normalize_text(merged_row.get("hosted_logo_black_url"))
+            existing_white = _normalize_text(merged_row.get("hosted_logo_white_url"))
+            if variant_source_url and (args.force or not (existing_black and existing_white)):
+                started = time.perf_counter()
+                try:
+                    variant_result = mirror_logo_monochrome_variants_row(
+                        {**merged_row, **patch},
+                        kind=logo_kind,
+                        id_field=id_field,
+                        source_url=variant_source_url,
+                        force=bool(args.force),
+                        s3_client=s3_client,
+                        source=selected_logo_source or "wikimedia",
+                    )
+                    duration_ms = int((time.perf_counter() - started) * 1000)
+                    if isinstance(variant_result, MonochromeLogoMirrorResult):
+                        patch.update(variant_result.patch)
+                        summary.variants_black_mirrored += int(variant_result.black_mirrored)
+                        summary.variants_white_mirrored += int(variant_result.white_mirrored)
+                    attempts.append(
+                        AttemptRecord(
+                            source="variant",
+                            attempt_url=variant_source_url,
+                            outcome="success",
+                            failure_reason=None,
+                            duration_ms=duration_ms,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    duration_ms = int((time.perf_counter() - started) * 1000)
+                    attempts.append(
+                        AttemptRecord(
+                            source="variant",
+                            attempt_url=variant_source_url,
+                            outcome="failed",
+                            failure_reason=_reason_from_exception(exc),
+                            duration_ms=duration_ms,
+                            details={"error": str(exc)},
+                        )
+                    )
+                    unresolved_reason = unresolved_reason or _reason_from_exception(exc)
+            elif not variant_source_url:
+                attempts.append(
+                    AttemptRecord(
+                        source="variant",
+                        attempt_url=None,
+                        outcome="skipped",
+                        failure_reason="no_source_url",
+                        duration_ms=0,
+                    )
                 )
-        except Exception as exc:  # noqa: BLE001
-            summary.failures += 1
-            reason = _reason_from_exception(exc)
-            _record_unresolved(
-                summary,
-                row_type=row_type,
-                entity_id=entity_id,
-                name=name,
+
+        if patch and core_row and not args.dry_run:
+            _update_core_row(db, table=row_table, id_field=id_field, entity_id=core_row.get(id_field), patch=patch)
+
+        merged_row = {**core_row, **patch}
+        final_wikidata = _normalize_text(merged_row.get("wikidata_id")) or wikidata_id
+        final_wikipedia = _normalize_text(merged_row.get("wikipedia_url")) or wikipedia_url
+        final_logo_url = _normalize_text(merged_row.get("hosted_logo_url"))
+        final_logo_black = _normalize_text(merged_row.get("hosted_logo_black_url"))
+        final_logo_white = _normalize_text(merged_row.get("hosted_logo_white_url"))
+        final_logo_file = _normalize_text(merged_row.get("wikimedia_logo_file"))
+        base_logo_format = _detect_base_logo_format(
+            wikimedia_logo_file=final_logo_file,
+            logo_source_url=selected_logo_url,
+            hosted_logo_url=final_logo_url,
+        )
+        resolution_status, resolution_reason = _build_resolution_status(
+            wikidata_id=final_wikidata,
+            wikipedia_url=final_wikipedia,
+            hosted_logo_url=final_logo_url,
+            hosted_logo_black_url=final_logo_black,
+            hosted_logo_white_url=final_logo_white,
+            base_logo_format=base_logo_format,
+            reason=unresolved_reason,
+        )
+
+        completion_payload = {
+            "entity_type": entity.entity_type,
+            "entity_key": entity.entity_key,
+            "entity_id": entity_id_value or None,
+            "display_name": display_name,
+            "available_show_count": int(entity.available_show_count),
+            "added_show_count": int(entity.added_show_count),
+            "wikidata_id": final_wikidata or None,
+            "wikipedia_url": final_wikipedia or None,
+            "hosted_logo_url": final_logo_url or None,
+            "hosted_logo_black_url": final_logo_black or None,
+            "hosted_logo_white_url": final_logo_white or None,
+            "base_logo_format": base_logo_format,
+            "resolution_status": resolution_status,
+            "resolution_reason": resolution_reason,
+            "source_priority": source_priority,
+            "last_run_id": run_id,
+            "last_attempt_at": _now_iso(),
+            "updated_at": _now_iso(),
+        }
+
+        completion_row = completion_payload
+        if not args.dry_run:
+            completion_row = _upsert_completion(db, completion_payload)
+            completion_id = _normalize_text(completion_row.get("id"))
+            if completion_id:
+                _insert_attempts(
+                    db,
+                    completion_id=completion_id,
+                    run_id=run_id,
+                    entity_type=entity.entity_type,
+                    entity_key=entity.entity_key,
+                    attempts=attempts,
+                )
+
+        if resolution_status != "resolved":
+            summary.unresolved_logos.append(
+                UnresolvedLogo(
+                    type=row_type,
+                    id=entity_id_value or entity.entity_key,
+                    name=display_name,
+                    reason=resolution_reason or "incomplete_metadata",
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        summary.failures += 1
+        reason = _reason_from_exception(exc)
+        summary.unresolved_logos.append(
+            UnresolvedLogo(
+                type=row_type,
+                id=entity_id_value or entity.entity_key,
+                name=display_name,
                 reason=reason,
             )
-            if args.verbose:
-                print(f"ERROR {table} {id_field}={entity_id}: {exc}", file=sys.stderr)
+        )
+        try:
+            if not args.dry_run:
+                completion_payload = {
+                    "entity_type": entity.entity_type,
+                    "entity_key": entity.entity_key,
+                    "entity_id": entity_id_value or None,
+                    "display_name": display_name,
+                    "available_show_count": int(entity.available_show_count),
+                    "added_show_count": int(entity.added_show_count),
+                    "base_logo_format": "unknown",
+                    "resolution_status": "failed",
+                    "resolution_reason": reason,
+                    "source_priority": _source_priority(override),
+                    "last_run_id": run_id,
+                    "last_attempt_at": _now_iso(),
+                    "updated_at": _now_iso(),
+                }
+                completion_row = _upsert_completion(db, completion_payload)
+                completion_id = _normalize_text(completion_row.get("id"))
+                if completion_id:
+                    _insert_attempts(
+                        db,
+                        completion_id=completion_id,
+                        run_id=run_id,
+                        entity_type=entity.entity_type,
+                        entity_key=entity.entity_key,
+                        attempts=attempts,
+                    )
+        except Exception:
+            summary.failures += 1
+
+        if args.verbose:
+            print(f"ERROR {row_table} {id_field}={entity_id_value or '<missing>'}: {exc}", file=sys.stderr)
+
+
+def _refresh_completion_snapshot(
+    db,
+    *,
+    inventory: dict[tuple[str, str], InventoryEntity],
+    summary: SyncSummary,
+) -> None:
+    completion_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    query = db.schema("admin").table("network_streaming_completion").select("*").order("updated_at", desc=True)
+    for row in _iter_rows_paged(query):
+        entity_type = _normalize_text(row.get("entity_type"))
+        entity_key = _name_key(row.get("entity_key"))
+        key = (entity_type, entity_key)
+        if key not in inventory or key in completion_rows:
+            continue
+        completion_rows[key] = row
+
+    unresolved: list[UnresolvedLogo] = []
+    resolved_count = 0
+    for key, entity in inventory.items():
+        row = completion_rows.get(key)
+        if not row:
+            unresolved.append(
+                UnresolvedLogo(
+                    type=entity.entity_type,
+                    id=entity.entity_key,
+                    name=entity.display_name,
+                    reason="missing_completion_row",
+                )
+            )
+            continue
+        status = _normalize_text(row.get("resolution_status"))
+        if status == "resolved":
+            resolved_count += 1
+            continue
+        unresolved.append(
+            UnresolvedLogo(
+                type=entity.entity_type,
+                id=_normalize_text(row.get("entity_id")) or entity.entity_key,
+                name=_normalize_text(row.get("display_name")) or entity.display_name,
+                reason=_normalize_text(row.get("resolution_reason")) or "incomplete_metadata",
+            )
+        )
+
+    summary.completion_total = len(inventory)
+    summary.completion_resolved = resolved_count
+    summary.completion_unresolved = len(unresolved)
+    summary.completion_percent = (
+        round((resolved_count / len(inventory)) * 100.0, 2)
+        if inventory
+        else 100.0
+    )
+    summary.unresolved_logos = unresolved
+
+
+def _select_entities(
+    inventory: dict[tuple[str, str], InventoryEntity],
+    *,
+    unresolved_only: bool,
+    unresolved_keys: set[tuple[str, str]],
+    limit: int | None,
+) -> list[InventoryEntity]:
+    rows = [
+        inventory[key]
+        for key in sorted(inventory.keys(), key=lambda item: (item[0], inventory[item].display_name.casefold()))
+        if not unresolved_only or key in unresolved_keys
+    ]
+
+    if limit is None or limit <= 0:
+        return rows
+
+    by_type: dict[str, int] = defaultdict(int)
+    selected: list[InventoryEntity] = []
+    for row in rows:
+        current = by_type[row.entity_type]
+        if current >= limit:
+            continue
+        by_type[row.entity_type] = current + 1
+        selected.append(row)
+    return selected
 
 
 def run_sync(args: argparse.Namespace) -> SyncSummary:
@@ -554,34 +1866,55 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
     db = create_supabase_admin_client()
     summary = SyncSummary()
     s3_client = None if args.skip_s3 or args.dry_run else get_s3_client()
+    run_id = f"network-streaming-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    context = _build_sync_context(db)
 
-    used_network_keys = _collect_used_network_keys(db)
-    used_provider_keys = _collect_used_provider_keys(db)
-
-    _sync_table(
-        db,
-        table="networks",
-        id_field="id",
-        name_field="name",
-        row_type="network",
-        logo_kind="networks",
-        used_name_keys=used_network_keys,
-        args=args,
-        summary=summary,
-        s3_client=s3_client,
-    )
-    _sync_table(
+    inventory = _load_used_inventory(db)
+    network_lookup = _load_dimension_lookup(db, table="networks", id_field="id", name_field="name")
+    provider_lookup = _load_dimension_lookup(
         db,
         table="watch_providers",
         id_field="provider_id",
         name_field="provider_name",
-        row_type="streaming",
-        logo_kind="watch-providers",
-        used_name_keys=used_provider_keys,
-        args=args,
-        summary=summary,
-        s3_client=s3_client,
     )
+    overrides = _load_overrides(db)
+
+    unresolved_keys = _load_unresolved_keys(db, used_keys=set(inventory.keys())) if args.unresolved_only else set()
+    entities = _select_entities(
+        inventory,
+        unresolved_only=bool(args.unresolved_only),
+        unresolved_keys=unresolved_keys,
+        limit=args.limit,
+    )
+
+    for entity in entities:
+        pair = (entity.entity_type, entity.entity_key)
+        core_row = (
+            network_lookup.get(entity.entity_key)
+            if entity.entity_type == "network"
+            else provider_lookup.get(entity.entity_key)
+        )
+        override = overrides.get(pair)
+        _process_entity(
+            db,
+            entity=entity,
+            core_row=core_row,
+            override=override,
+            run_id=run_id,
+            args=args,
+            summary=summary,
+            s3_client=s3_client,
+            context=context,
+        )
+
+    if not args.dry_run:
+        _refresh_completion_snapshot(db, inventory=inventory, summary=summary)
+    else:
+        summary.completion_total = len(inventory)
+        summary.completion_resolved = 0
+        summary.completion_unresolved = len(inventory)
+        summary.completion_percent = 0.0
+
     return summary
 
 
@@ -599,10 +1932,14 @@ def main(argv: list[str] | None = None) -> int:
         "logos_mirrored",
         "variants_black_mirrored",
         "variants_white_mirrored",
+        "completion_total",
+        "completion_resolved",
+        "completion_unresolved",
         "failures",
     ):
         print(f"{key}={summary_dict[key]}")
 
+    print(f"completion_percent={summary.completion_percent:.2f}")
     print(f"unresolved_logos={len(summary.unresolved_logos)}")
     print("Unresolved Logos")
     for item in summary.unresolved_logos:

@@ -183,3 +183,41 @@ def test_content_type_rejects_unsupported_value(client, monkeypatch):
         )
 
     assert response.status_code == 400
+
+
+def test_content_type_accepts_profile_picture_alias_and_sets_profile_context(client, monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    asset_id = str(uuid4())
+    mock_db = MagicMock()
+
+    fetch_resp = MagicMock()
+    fetch_resp.data = [{"id": asset_id, "metadata": {}, "context_type": "other"}]
+    fetch_resp.error = None
+    (
+        mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value.execute
+    ).return_value = fetch_resp
+
+    update_resp = MagicMock()
+    update_resp.data = [{"id": asset_id}]
+    update_resp.error = None
+    (
+        mock_db.schema.return_value.table.return_value.update.return_value.eq.return_value.execute
+    ).return_value = update_resp
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        response = client.post(
+            "/api/v1/admin/assets/content-type",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "origin": "cast_photos",
+                "asset_id": asset_id,
+                "content_type": "profile_picture",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["content_type"] == "PROFILE PICTURE"
+    assert body["context_type"] == "profile_picture"

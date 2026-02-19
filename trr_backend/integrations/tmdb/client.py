@@ -349,6 +349,38 @@ def fetch_tv_watch_providers(
     return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)
 
 
+def fetch_network_details(
+    network_id: int,
+    *,
+    api_key: str | None = None,
+    bearer_token: str | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch TMDb network details from `/3/network/{id}`.
+    """
+
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/network/{int(network_id)}"
+    return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)
+
+
+def fetch_network_alternative_names(
+    network_id: int,
+    *,
+    api_key: str | None = None,
+    bearer_token: str | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch TMDb network alternative names from `/3/network/{id}/alternative_names`.
+    """
+
+    session = session or requests.Session()
+    url = f"{TMDB_API_BASE_URL}/network/{int(network_id)}/alternative_names"
+    return _request_tmdb_json(session, url, api_key=api_key, bearer_token=bearer_token)
+
+
 def fetch_tv_images(
     tv_id: int,
     *,

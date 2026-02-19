@@ -1102,6 +1102,15 @@ def _persist_pending_links_from_bravo_sync(
         parsed = urlparse(url)
         if not url or not parsed.scheme.startswith("http"):
             continue
+        row_status = str(row.get("status") or "").strip().lower()
+        status = row_status if row_status in {"pending", "approved", "rejected"} else "pending"
+        confidence_raw = row.get("confidence")
+        if isinstance(confidence_raw, (int, float)):
+            confidence = float(confidence_raw)
+        else:
+            confidence = 0.95 if status == "approved" else (
+                0.75 if str(row.get("link_group") or "") == "cast_announcements" else 0.65
+            )
         admin_show_links._upsert_link(
             db,
             show_id=show_id,
@@ -1112,8 +1121,8 @@ def _persist_pending_links_from_bravo_sync(
             url=url,
             label=(str(row.get("label")) if row.get("label") else None),
             season_number=int(row.get("season_number") or 0),
-            status="pending",
-            confidence=0.75 if str(row.get("link_group") or "") == "cast_announcements" else 0.65,
+            status=status,
+            confidence=confidence,
             source=(str(row.get("source")) if row.get("source") else "bravo_sync"),
             discovered_by="bravo_sync",
             metadata=(row.get("metadata") if isinstance(row.get("metadata"), dict) else {}),

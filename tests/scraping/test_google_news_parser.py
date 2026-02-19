@@ -70,6 +70,35 @@ def test_parse_rss_items_extracts_title_link_source_and_pubdate() -> None:
     assert item["feed_rank"] == 0
 
 
+def test_parse_rss_items_extracts_image_from_description_html() -> None:
+    xml = """
+    <rss version="2.0">
+      <channel>
+        <item>
+          <title>RHOSLC News</title>
+          <link>https://example.com/story-22</link>
+          <pubDate>Wed, 12 Feb 2026 09:00:00 -0500</pubDate>
+          <source url="https://people.com">People</source>
+          <description><![CDATA[
+            <div>
+              <a href="https://example.com/story-22">
+                <img src="https://cdn.example.com/news-22.jpg" />
+              </a>
+              <font>Summary text</font>
+            </div>
+          ]]></description>
+        </item>
+      </channel>
+    </rss>
+    """
+
+    items = google_news_parser.parse_rss_items(xml)
+
+    assert len(items) == 1
+    assert items[0]["image_url"] == "https://cdn.example.com/news-22.jpg"
+    assert items[0]["summary"] == "Summary text"
+
+
 def test_fetch_google_news_falls_back_to_search_rss_when_topic_has_no_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

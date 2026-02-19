@@ -93,6 +93,26 @@ class TestSyncNetworksStreaming:
         response = client.post("/api/v1/admin/shows/sync-networks-streaming", json={})
         assert response.status_code == 401
 
+    def test_returns_missing_columns_and_skips_sync_when_schema_incomplete(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+
+        with patch(
+            "api.routers.admin_show_sync._schema_preflight_missing_columns",
+            return_value=[{"table": "core.networks", "column": "wikidata_id"}],
+        ):
+            response = client.post(
+                "/api/v1/admin/shows/sync-networks-streaming",
+                headers={"Authorization": f"Bearer {token}"},
+                json={},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["completion_gate_passed"] is False
+        assert payload["missing_columns"] == [{"table": "core.networks", "column": "wikidata_id"}]
+        assert payload["steps"] == {}
+
     def test_runs_three_steps_and_aggregates_metrics(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         token = _make_admin_token("test-secret")
@@ -123,20 +143,31 @@ class TestSyncNetworksStreaming:
             print("logos_mirrored=4")
             print("variants_black_mirrored=3")
             print("variants_white_mirrored=2")
+            print("completion_total=40")
+            print("completion_resolved=39")
+            print("completion_unresolved=1")
+            print("completion_percent=97.50")
             print("unresolved_logos=2")
             print('unresolved_logo={"type":"network","id":"77","name":"Bravo","reason":"no_logo_claim"}')
             print('unresolved_logo={"type":"streaming","id":"531","name":"Peacock","reason":"download_failed"}')
             print("failures=2")
             return 0
 
-        with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=fake_entities):
-            with patch("api.routers.admin_show_sync.sync_tmdb_watch_providers.main", side_effect=fake_providers):
-                with patch("api.routers.admin_show_sync.sync_networks_streaming_links.main", side_effect=fake_links):
-                    response = client.post(
-                        "/api/v1/admin/shows/sync-networks-streaming",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json={"skip_s3": True, "force": True, "limit": 50},
-                    )
+        with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
+            with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=fake_entities):
+                with patch(
+                    "api.routers.admin_show_sync.sync_tmdb_watch_providers.main",
+                    side_effect=fake_providers,
+                ):
+                    with patch(
+                        "api.routers.admin_show_sync.sync_networks_streaming_links.main",
+                        side_effect=fake_links,
+                    ):
+                        response = client.post(
+                            "/api/v1/admin/shows/sync-networks-streaming",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={"skip_s3": True, "force": True, "limit": 50},
+                        )
 
         assert response.status_code == 200
         payload = response.json()
@@ -146,13 +177,19 @@ class TestSyncNetworksStreaming:
         assert payload["logos_mirrored"] == 9
         assert payload["variants_black_mirrored"] == 3
         assert payload["variants_white_mirrored"] == 2
+        assert payload["completion_total"] == 40
+        assert payload["completion_resolved"] == 39
+        assert payload["completion_unresolved"] == 1
+        assert payload["completion_percent"] == 97.5
+        assert payload["completion_gate_passed"] is False
+        assert payload["missing_columns"] == []
         assert payload["unresolved_logos_count"] == 2
         assert payload["unresolved_logos_truncated"] is False
         assert payload["unresolved_logos"] == [
             {"type": "network", "id": "77", "name": "Bravo", "reason": "no_logo_claim"},
             {"type": "streaming", "id": "531", "name": "Peacock", "reason": "download_failed"},
         ]
-        assert payload["failures"] == 3
+        assert payload["failures"] == 4
         assert payload["steps"]["tmdb_show_entities"]["status"] == "success"
         assert payload["steps"]["tmdb_watch_providers"]["status"] == "success"
         assert payload["steps"]["network_streaming_links"]["status"] == "success"
@@ -218,6 +255,9 @@ class TestSyncNetworksStreaming:
                         "logos_mirrored": 0,
                         "variants_black_mirrored": 0,
                         "variants_white_mirrored": 0,
+                        "completion_total": 350,
+                        "completion_resolved": 0,
+                        "completion_unresolved": 350,
                         "unresolved_logos": 350,
                         "failures": 0,
                     },
@@ -226,18 +266,20 @@ class TestSyncNetworksStreaming:
             ),
         ]
 
-        with patch("api.routers.admin_show_sync._run_script_step_with_metrics", side_effect=step_results):
-            response = client.post(
-                "/api/v1/admin/shows/sync-networks-streaming",
-                headers={"Authorization": f"Bearer {token}"},
-                json={},
-            )
+        with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
+            with patch("api.routers.admin_show_sync._run_script_step_with_metrics", side_effect=step_results):
+                response = client.post(
+                    "/api/v1/admin/shows/sync-networks-streaming",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={},
+                )
 
         assert response.status_code == 200
         payload = response.json()
         assert payload["unresolved_logos_count"] == 350
         assert payload["unresolved_logos_truncated"] is True
         assert len(payload["unresolved_logos"]) == 300
+        assert payload["completion_gate_passed"] is False
 
     def test_marks_step_failed_when_script_returns_non_zero(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
@@ -256,23 +298,102 @@ class TestSyncNetworksStreaming:
         def ok_links(argv):
             print("links_enriched=1")
             print("logos_mirrored=0")
+            print("completion_total=2")
+            print("completion_resolved=2")
+            print("completion_unresolved=0")
+            print("completion_percent=100.00")
             print("failures=0")
             return 0
 
-        with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=bad_entities):
-            with patch("api.routers.admin_show_sync.sync_tmdb_watch_providers.main", side_effect=ok_providers):
-                with patch("api.routers.admin_show_sync.sync_networks_streaming_links.main", side_effect=ok_links):
-                    response = client.post(
-                        "/api/v1/admin/shows/sync-networks-streaming",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json={},
-                    )
+        with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
+            with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=bad_entities):
+                with patch("api.routers.admin_show_sync.sync_tmdb_watch_providers.main", side_effect=ok_providers):
+                    with patch("api.routers.admin_show_sync.sync_networks_streaming_links.main", side_effect=ok_links):
+                        response = client.post(
+                            "/api/v1/admin/shows/sync-networks-streaming",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={},
+                        )
 
         assert response.status_code == 200
         payload = response.json()
         assert payload["steps"]["tmdb_show_entities"]["status"] == "failed"
         assert payload["steps"]["tmdb_show_entities"]["exit_code"] == 2
         assert payload["failures"] == 4
+
+
+class TestNetworksStreamingOverrides:
+    def test_create_override_upserts_row(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+
+        mock_db = MagicMock()
+        upsert_query = mock_db.schema.return_value.table.return_value.upsert.return_value
+        upsert_response = MagicMock()
+        upsert_response.error = None
+        upsert_response.data = [
+            {
+                "id": str(uuid4()),
+                "entity_type": "network",
+                "entity_key": "bravo",
+                "display_name_override": "Bravo",
+                "wikidata_id_override": "Q1519874",
+                "wikipedia_url_override": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+                "logo_source_urls_override": [],
+                "source_priority_override": ["override", "tmdb", "wikimedia"],
+                "aliases_override": ["Bravo TV"],
+                "notes": "manual seed",
+                "is_active": True,
+                "updated_by": "admin@example.com",
+                "updated_at": "2026-02-19T00:00:00+00:00",
+                "created_at": "2026-02-19T00:00:00+00:00",
+            }
+        ]
+        upsert_query.execute.return_value = upsert_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.post(
+                "/api/v1/admin/shows/networks-streaming/overrides",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "entity_type": "network",
+                    "entity_key": "Bravo",
+                    "display_name_override": "Bravo",
+                    "wikidata_id_override": "Q1519874",
+                    "wikipedia_url_override": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+                    "source_priority_override": ["override", "tmdb", "wikimedia"],
+                    "aliases_override": ["Bravo TV"],
+                    "is_active": True,
+                },
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["entity_type"] == "network"
+        assert payload["entity_key"] == "bravo"
+        assert payload["is_active"] is True
+
+    def test_delete_override_returns_404_for_missing_row(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+        override_id = str(uuid4())
+
+        mock_db = MagicMock()
+        delete_query = (
+            mock_db.schema.return_value.table.return_value.delete.return_value.eq.return_value
+        )
+        delete_response = MagicMock()
+        delete_response.error = None
+        delete_response.data = []
+        delete_query.execute.return_value = delete_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.delete(
+                f"/api/v1/admin/shows/networks-streaming/overrides/{override_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 404
 
 
 class TestRefreshShow:
@@ -476,3 +597,53 @@ class TestRefreshShowPhotosStream:
             )
 
         assert response.status_code == 404
+
+    def test_season_scoped_refresh_uses_episode_appearances_only_for_cast_discovery(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+        show_id = str(uuid4())
+
+        mock_db = MagicMock()
+        query = MagicMock()
+        query.select.return_value = query
+        query.eq.return_value = query
+        query.in_.return_value = query
+        query.order.return_value = query
+        query.limit.return_value = query
+
+        show_resp = MagicMock()
+        show_resp.error = None
+        show_resp.data = [
+            {
+                "id": show_id,
+                "name": "The Real Housewives of Test",
+                "imdb_id": None,
+                "tmdb_id": None,
+                "external_ids": {},
+            }
+        ]
+        appearances_resp = MagicMock()
+        appearances_resp.error = None
+        appearances_resp.data = []
+        query.execute.side_effect = [show_resp, appearances_resp]
+
+        mock_db.schema.return_value.table.return_value = query
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.post(
+                f"/api/v1/admin/shows/{show_id}/refresh-photos/stream",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "season_number": 6,
+                    "skip_s3": True,
+                    "skip_auto_count": True,
+                    "skip_word_detection": True,
+                },
+            )
+
+        assert response.status_code == 200
+        table_calls = [str(call.args[0]) for call in mock_db.schema.return_value.table.call_args_list]
+        assert "episode_appearances" in table_calls
+        assert "show_cast" not in table_calls
+        assert '"season_number": 6' in response.text or '"season_number":6' in response.text
+        assert '"live_counts"' in response.text
