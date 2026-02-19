@@ -724,6 +724,138 @@ def _parse_trivia(article_root: BeautifulSoup) -> list[str] | None:
     return items or None
 
 
+_SECTION_CANONICAL_MAP: dict[str, str] = {
+    "casting": "Casting",
+    "cast": "Casting",
+    "biography": "Biography",
+    "bio": "Biography",
+    "taglines": "Taglines",
+    "reunion seating": "Reunion Seating",
+    "reunion": "Reunion Seating",
+}
+
+
+def _canonicalize_section_title(title: str | None) -> str:
+    normalized = _normalize_text(title) or ""
+    key = normalized.casefold()
+    for token, canonical in _SECTION_CANONICAL_MAP.items():
+        if token in key:
+            return canonical
+    return normalized
+
+
+def _extract_section_table_rows(table_node: BeautifulSoup) -> list[dict[str, str | None]]:
+    rows = table_node.find_all("tr")
+    if not rows:
+        return []
+    headers = [_normalize_text(cell.get_text(" ", strip=True)) or "" for cell in rows[0].find_all(["th", "td"])]
+    out: list[dict[str, str | None]] = []
+    for row in rows[1:]:
+        cells = [_normalize_text(cell.get_text(" ", strip=True)) for cell in row.find_all(["th", "td"])]
+        if not cells:
+            continue
+        if headers and len(headers) == len(cells):
+            out.append(dict(zip(headers, cells, strict=False)))
+            continue
+        fallback = {f"col_{idx + 1}": value for idx, value in enumerate(cells)}
+        out.append(fallback)
+    return out
+
+
+def _extract_dynamic_sections(article_root: BeautifulSoup) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    for heading in article_root.find_all(["h2", "h3", "h4"]):
+        heading_title = _normalize_text(heading.get_text(" ", strip=True))
+        if not heading_title:
+            continue
+
+        paragraphs: list[str] = []
+        bullets: list[str] = []
+        table_rows: list[dict[str, str | None]] = []
+
+        for sibling in heading.next_siblings:
+            sibling_name = getattr(sibling, "name", None)
+            if sibling_name in {"h2", "h3", "h4"}:
+                break
+            if sibling_name == "p":
+                text = _normalize_text(sibling.get_text(" ", strip=True))
+                if text:
+                    paragraphs.append(text)
+                continue
+            if sibling_name in {"ul", "ol"}:
+                for item in sibling.find_all("li"):
+                    text = _normalize_text(item.get_text(" ", strip=True))
+                    if text:
+                        bullets.append(text)
+                continue
+            if sibling_name == "table":
+                table_rows.extend(_extract_section_table_rows(sibling))
+
+        if not paragraphs and not bullets and not table_rows:
+            continue
+
+        sections.append(
+            {
+                "title": heading_title,
+                "canonical_title": _canonicalize_section_title(heading_title),
+                "paragraphs": paragraphs,
+                "bullets": bullets,
+                "table_rows": table_rows,
+            }
+        )
+    return sections
+
+
+def _build_bio_card(
+    *,
+    cast_fandom: dict[str, Any],
+) -> dict[str, Any] | None:
+    general = {
+        "full_name": cast_fandom.get("full_name"),
+        "birthdate": cast_fandom.get("birthdate_display"),
+        "gender": cast_fandom.get("gender"),
+        "resides_in": cast_fandom.get("resides_in"),
+    }
+    appearance = {
+        "hair_color": cast_fandom.get("hair_color"),
+        "eye_color": cast_fandom.get("eye_color"),
+        "height": cast_fandom.get("height_display"),
+        "weight": cast_fandom.get("weight_display"),
+    }
+    relationships = {
+        "romances": cast_fandom.get("romances"),
+        "family": cast_fandom.get("family"),
+        "friends": cast_fandom.get("friends"),
+        "enemies": cast_fandom.get("enemies"),
+    }
+    production = {
+        "installment": cast_fandom.get("installment"),
+        "main_seasons_display": cast_fandom.get("main_seasons_display"),
+    }
+    card = {
+        "general": {k: v for k, v in general.items() if v},
+        "appearance": {k: v for k, v in appearance.items() if v},
+        "relationships": {k: v for k, v in relationships.items() if v},
+        "production": {k: v for k, v in production.items() if v},
+    }
+    if any(card.values()):
+        return card
+    return None
+
+
+def _infer_casting_summary(sections: list[dict[str, Any]], summary: str | None) -> str | None:
+    for section in sections:
+        canonical = str(section.get("canonical_title") or "")
+        if canonical != "Casting":
+            continue
+        paragraphs = section.get("paragraphs")
+        if isinstance(paragraphs, list):
+            text = " ".join(str(item).strip() for item in paragraphs if str(item).strip())
+            if text:
+                return text
+    return summary
+
+
 def _collect_article_images(
     article_root: BeautifulSoup,
     *,
@@ -786,6 +918,8 @@ def parse_fandom_person_html(html: str, *, source_url: str) -> tuple[dict[str, A
 
     trivia = _parse_trivia(article_root)
 
+    dynamic_sections = _extract_dynamic_sections(article_root)
+
     cast_fandom = {
         "source": "fandom",
         "source_url": source_url,
@@ -796,9 +930,12 @@ def parse_fandom_person_html(html: str, *, source_url: str) -> tuple[dict[str, A
         "taglines": taglines or None,
         "reunion_seating": reunion_seating or None,
         "trivia": trivia,
+        "dynamic_sections": dynamic_sections or None,
         "infobox_raw": infobox_raw or None,
         "raw_html_sha256": hashlib.sha256((html or "").encode("utf-8")).hexdigest() if html else None,
     }
     cast_fandom.update({k: v for k, v in infobox_fields.items() if v is not None})
+    cast_fandom["bio_card"] = _build_bio_card(cast_fandom=cast_fandom)
+    cast_fandom["casting_summary"] = _infer_casting_summary(dynamic_sections, summary)
 
     return cast_fandom, photos

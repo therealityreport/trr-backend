@@ -74,13 +74,14 @@ from api.routers import (  # noqa: E402
     admin_asset_flags,
     admin_cast,
     admin_cast_photos,
+    admin_fandom_sync,
     admin_image_counts,
     admin_media_assets,
     admin_person_images,
-    admin_show_bravo,
-    admin_show_news,
     admin_scrape,
+    admin_show_bravo,
     admin_show_links,
+    admin_show_news,
     admin_show_roles,
     admin_show_sync,
     discussions,
@@ -104,6 +105,7 @@ app.include_router(admin_asset_flags.router, prefix="/api/v1")
 app.include_router(admin_asset_batch_jobs.router, prefix="/api/v1")
 app.include_router(admin_cast.router, prefix="/api/v1")
 app.include_router(admin_cast_photos.router, prefix="/api/v1")
+app.include_router(admin_fandom_sync.router, prefix="/api/v1")
 app.include_router(admin_image_counts.router, prefix="/api/v1")
 app.include_router(admin_media_assets.router, prefix="/api/v1")
 app.include_router(admin_show_links.router, prefix="/api/v1")

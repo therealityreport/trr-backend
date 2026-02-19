@@ -31,6 +31,14 @@
 | taglines | jsonb | YES |  | NO | NEVER |
 | reunion_seating | jsonb | YES |  | NO | NEVER |
 | trivia | jsonb | YES |  | NO | NEVER |
+| dynamic_sections | jsonb | YES |  | NO | NEVER |
+| bio_card | jsonb | YES |  | NO | NEVER |
+| casting_summary | text | YES |  | NO | NEVER |
+| citations | jsonb | YES |  | NO | NEVER |
+| conflicts | jsonb | YES |  | NO | NEVER |
+| source_variants | jsonb | YES |  | NO | NEVER |
+| ai_model | text | YES |  | NO | NEVER |
+| ai_generated_at | timestamp with time zone | YES |  | NO | NEVER |
 | infobox_raw | jsonb | YES |  | NO | NEVER |
 | raw_html_sha256 | text | YES |  | NO | NEVER |
 

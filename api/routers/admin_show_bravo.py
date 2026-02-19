@@ -24,6 +24,14 @@ router = APIRouter(prefix="/admin/shows", tags=["admin-show-bravo"])
 
 _BRAVO_SOURCE_ID = "bravo"
 _BRAVO_VARIANT = "default"
+_BRAVO_PEOPLE_BASE_URL = "https://www.bravotv.com/people"
+_BRAVO_PROBE_STATE_KEY = "bravo_probe_state"
+_BRAVO_PROBE_STATE_NA = "na"
+_BRAVO_PROBE_REASON_KEY = "bravo_probe_reason"
+_BRAVO_PROBE_REASON_MISSING = "missing"
+_BRAVO_PROBE_CHECKED_AT_KEY = "bravo_probe_checked_at"
+_BRAVO_PROBE_SOURCE_KEY = "bravo_probe_source"
+_BRAVO_PROBE_SOURCE_VALUE = "bravo_import_commit"
 _CAST_ANNOUNCEMENT_RE = re.compile(
     r"\b(cast|friend\s*[- ]?of|full\s*[- ]?time|housewife|joins|joined|returning|returns)\b",
     re.IGNORECASE,
@@ -35,6 +43,7 @@ class BravoPreviewRequest(BaseModel):
     include_people: bool = True
     include_videos: bool = True
     include_news: bool = True
+    person_url_candidates: list[HttpUrl] = Field(default_factory=list)
     season_number: int | None = Field(default=None, ge=1, le=200)
 
 
@@ -63,6 +72,8 @@ class BravoCommitRequest(BaseModel):
     description_override: str | None = None
     airs_override: str | None = None
     person_url_mappings: dict[str, UUID] | None = None
+    person_url_candidates: list[HttpUrl] = Field(default_factory=list)
+    cast_only: bool = False
     season_number: int | None = Field(default=None, ge=1, le=200)
     sync_cast_matrix: bool = True
 
@@ -219,6 +230,226 @@ def _build_show_cast_index(db: SupabaseAdminClient, show_id: str) -> list[dict[s
         seen.add(person_id)
         out.append({"person_id": person_id, "person_name": person_name})
     return out
+
+
+def _build_cast_candidate_person_urls(show_cast: list[dict[str, str]]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for row in show_cast:
+        slug = _slugify(row.get("person_name"))
+        if not slug:
+            continue
+        url = f"{_BRAVO_PEOPLE_BASE_URL}/{slug}"
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _merge_person_url_candidates(*groups: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for raw in group:
+            value = str(raw).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _normalize_person_url(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    path = parsed.path.rstrip("/")
+    if not path:
+        path = "/"
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+
+def _is_bravo_profile_na_marker(status: str, metadata: dict[str, Any] | None) -> bool:
+    if status != "rejected":
+        return False
+    probe_state = str((metadata or {}).get(_BRAVO_PROBE_STATE_KEY) or "").strip().lower()
+    return probe_state == _BRAVO_PROBE_STATE_NA
+
+
+def _load_bravo_profile_link_state_by_person_id(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    cast_person_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not cast_person_ids:
+        return {}
+    response = (
+        db.schema("core")
+        .table("entity_links")
+        .select("entity_id, url, status, metadata")
+        .eq("show_id", show_id)
+        .eq("entity_type", "person")
+        .eq("link_kind", "bravo_profile")
+        .in_("entity_id", cast_person_ids)
+        .limit(5000)
+        .execute()
+    )
+    if getattr(response, "error", None):
+        return {}
+
+    by_person_id: dict[str, dict[str, Any]] = {}
+    for row in response.data or []:
+        person_id = str(row.get("entity_id") or "").strip()
+        if not person_id:
+            continue
+        status = str(row.get("status") or "pending").strip().lower()
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        normalized_url = _normalize_person_url(str(row.get("url") or ""))
+        state = by_person_id.setdefault(
+            person_id,
+            {
+                "has_non_rejected": False,
+                "has_na": False,
+                "url_keys": set(),
+            },
+        )
+        if status != "rejected":
+            state["has_non_rejected"] = True
+        if _is_bravo_profile_na_marker(status, metadata):
+            state["has_na"] = True
+        if normalized_url:
+            state["url_keys"].add(normalized_url)
+    return by_person_id
+
+
+def _build_cast_person_url_lookup(show_cast: list[dict[str, str]]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for row in show_cast:
+        person_id = str(row.get("person_id") or "").strip()
+        if not person_id:
+            continue
+        slug = _slugify(row.get("person_name"))
+        if not slug:
+            continue
+        normalized_url = _normalize_person_url(f"{_BRAVO_PEOPLE_BASE_URL}/{slug}")
+        if normalized_url and normalized_url not in lookup:
+            lookup[normalized_url] = person_id
+    return lookup
+
+
+def _filter_explicit_person_url_candidates(
+    explicit_candidate_urls: list[str],
+    *,
+    cast_url_lookup: dict[str, str],
+    link_state_by_person_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for raw_url in explicit_candidate_urls:
+        value = str(raw_url).strip()
+        normalized = _normalize_person_url(value)
+        if not value or not normalized or normalized in seen:
+            continue
+        person_id = cast_url_lookup.get(normalized)
+        if person_id:
+            state = link_state_by_person_id.get(person_id) or {}
+            if bool(state.get("has_non_rejected")) or bool(state.get("has_na")):
+                continue
+        seen.add(normalized)
+        filtered.append(value)
+    return filtered
+
+
+def _build_eligible_cast_candidate_person_urls(
+    show_cast: list[dict[str, str]],
+    *,
+    link_state_by_person_id: dict[str, dict[str, Any]],
+) -> tuple[list[str], dict[str, str]]:
+    urls: list[str] = []
+    url_to_person_id: dict[str, str] = {}
+    seen: set[str] = set()
+    for row in show_cast:
+        person_id = str(row.get("person_id") or "").strip()
+        if not person_id:
+            continue
+        state = link_state_by_person_id.get(person_id) or {}
+        if bool(state.get("has_non_rejected")) or bool(state.get("has_na")):
+            continue
+        slug = _slugify(row.get("person_name"))
+        if not slug:
+            continue
+        url = f"{_BRAVO_PEOPLE_BASE_URL}/{slug}"
+        normalized = _normalize_person_url(url)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(url)
+        url_to_person_id[normalized] = person_id
+    return urls, url_to_person_id
+
+
+def _persist_missing_bravo_profile_markers(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    actor: str,
+    missing_candidate_urls: list[str],
+    candidate_url_to_person_id: dict[str, str],
+    cast_person_name_by_id: dict[str, str],
+    link_state_by_person_id: dict[str, dict[str, Any]],
+) -> int:
+    from api.routers import admin_show_links
+
+    marked = 0
+    seen_urls: set[str] = set()
+    for raw_url in missing_candidate_urls:
+        normalized_url = _normalize_person_url(raw_url)
+        if not normalized_url or normalized_url in seen_urls:
+            continue
+        seen_urls.add(normalized_url)
+
+        person_id = candidate_url_to_person_id.get(normalized_url)
+        if not person_id:
+            continue
+
+        state = link_state_by_person_id.get(person_id) or {}
+        if bool(state.get("has_na")):
+            continue
+
+        person_name = cast_person_name_by_id.get(person_id, "").strip()
+        metadata = {
+            _BRAVO_PROBE_STATE_KEY: _BRAVO_PROBE_STATE_NA,
+            _BRAVO_PROBE_REASON_KEY: _BRAVO_PROBE_REASON_MISSING,
+            _BRAVO_PROBE_CHECKED_AT_KEY: _to_iso_now(),
+            _BRAVO_PROBE_SOURCE_KEY: _BRAVO_PROBE_SOURCE_VALUE,
+        }
+        admin_show_links._upsert_link(
+            db,
+            show_id=show_id,
+            entity_type="person",
+            entity_id=person_id,
+            link_group="official",
+            link_kind="bravo_profile",
+            url=normalized_url,
+            label=f"{person_name} Bravo profile (N/A)" if person_name else "Bravo profile (N/A)",
+            season_number=0,
+            status="rejected",
+            confidence=0.95,
+            source=_BRAVO_PROBE_SOURCE_VALUE,
+            discovered_by=_BRAVO_PROBE_SOURCE_VALUE,
+            metadata=metadata,
+            actor=actor,
+        )
+        marked += 1
+        state["has_na"] = True
+        link_state_by_person_id[person_id] = state
+
+    return marked
 
 
 def _resolve_person_url_map(
@@ -1239,12 +1470,38 @@ def preview_bravo_import(
     if not _show_exists(db, show_id_str):
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
     _assert_show_sync_ready_for_bravo(db, show_id_str)
+    show_cast = _build_show_cast_index(db, show_id_str)
+    cast_person_ids = sorted({str(row.get("person_id") or "").strip() for row in show_cast if row.get("person_id")})
+    cast_person_name_by_id = {
+        str(row.get("person_id") or "").strip(): str(row.get("person_name") or "").strip()
+        for row in show_cast
+        if row.get("person_id")
+    }
+    link_state_by_person_id = _load_bravo_profile_link_state_by_person_id(
+        db,
+        show_id=show_id_str,
+        cast_person_ids=cast_person_ids,
+    )
+    cast_url_lookup = _build_cast_person_url_lookup(show_cast)
+    cast_candidate_urls, _eligible_url_to_person_id = _build_eligible_cast_candidate_person_urls(
+        show_cast,
+        link_state_by_person_id=link_state_by_person_id,
+    )
+    explicit_candidate_urls = [str(url) for url in payload.person_url_candidates]
+    filtered_explicit_candidate_urls = _filter_explicit_person_url_candidates(
+        explicit_candidate_urls,
+        cast_url_lookup=cast_url_lookup,
+        link_state_by_person_id=link_state_by_person_id,
+    )
+    person_url_candidates = _merge_person_url_candidates(filtered_explicit_candidate_urls, cast_candidate_urls)
 
     bundle = parse_bravo_show_bundle(
         str(payload.show_url),
         include_people=payload.include_people,
         include_videos=payload.include_videos,
         include_news=payload.include_news,
+        person_url_candidates=person_url_candidates,
+        max_people=max(40, len(person_url_candidates)),
     )
     bundle = _filter_bundle_by_season(bundle, payload.season_number)
 
@@ -1255,6 +1512,13 @@ def preview_bravo_import(
         "news": bundle.get("news") or [],
         "image_candidates": bundle.get("image_candidates") or [],
         "discovered_person_urls": bundle.get("discovered_person_urls") or [],
+        "person_candidate_results": bundle.get("person_candidate_results") or [],
+        "skipped_existing_bravo_profiles": sum(
+            1 for state in link_state_by_person_id.values() if bool(state.get("has_non_rejected"))
+        ),
+        "skipped_na_profiles": sum(1 for state in link_state_by_person_id.values() if bool(state.get("has_na"))),
+        "cast_candidate_urls_tested": person_url_candidates,
+        "cast_candidate_person_names": cast_person_name_by_id,
     }
 
 
@@ -1269,14 +1533,59 @@ def commit_bravo_import(
     if not _show_exists(db, show_id_str):
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
     _assert_show_sync_ready_for_bravo(db, show_id_str)
+    show_cast = _build_show_cast_index(db, show_id_str)
+    cast_person_ids = sorted({str(row.get("person_id") or "").strip() for row in show_cast if row.get("person_id")})
+    cast_person_name_by_id = {
+        str(row.get("person_id") or "").strip(): str(row.get("person_name") or "").strip()
+        for row in show_cast
+        if row.get("person_id")
+    }
+    link_state_by_person_id = _load_bravo_profile_link_state_by_person_id(
+        db,
+        show_id=show_id_str,
+        cast_person_ids=cast_person_ids,
+    )
+    cast_url_lookup = _build_cast_person_url_lookup(show_cast)
+    cast_candidate_urls, eligible_candidate_url_to_person_id = _build_eligible_cast_candidate_person_urls(
+        show_cast,
+        link_state_by_person_id=link_state_by_person_id,
+    )
+    explicit_candidate_urls = [str(url) for url in payload.person_url_candidates]
+    filtered_explicit_candidate_urls = _filter_explicit_person_url_candidates(
+        explicit_candidate_urls,
+        cast_url_lookup=cast_url_lookup,
+        link_state_by_person_id=link_state_by_person_id,
+    )
+    person_url_candidates = _merge_person_url_candidates(filtered_explicit_candidate_urls, cast_candidate_urls)
 
     bundle = parse_bravo_show_bundle(
         str(payload.show_url),
         include_people=True,
-        include_videos=True,
-        include_news=True,
+        include_videos=not payload.cast_only,
+        include_news=not payload.cast_only,
+        person_url_candidates=person_url_candidates,
+        max_people=max(40, len(person_url_candidates)),
     )
     bundle = _filter_bundle_by_season(bundle, payload.season_number)
+    person_candidate_results = (
+        bundle.get("person_candidate_results") if isinstance(bundle.get("person_candidate_results"), list) else []
+    )
+    bravo_candidates_tested = len(person_candidate_results)
+    bravo_candidates_valid = sum(
+        1
+        for result in person_candidate_results
+        if isinstance(result, dict) and str(result.get("status") or "").strip().lower() == "ok"
+    )
+    bravo_candidates_missing = sum(
+        1
+        for result in person_candidate_results
+        if isinstance(result, dict) and str(result.get("status") or "").strip().lower() == "missing"
+    )
+    missing_candidate_urls = [
+        str(result.get("url") or "").strip()
+        for result in person_candidate_results
+        if isinstance(result, dict) and str(result.get("status") or "").strip().lower() == "missing"
+    ]
     season_id: str | None = None
     if payload.season_number is not None:
         season_id = _resolve_season_id(
@@ -1290,7 +1599,6 @@ def commit_bravo_import(
                 detail=f"Season {payload.season_number} was not found for show {show_id_str}",
             )
 
-    show_cast = _build_show_cast_index(db, show_id_str)
     explicit_map = {k: str(v) for k, v in (payload.person_url_mappings or {}).items()}
     person_url_map = _resolve_person_url_map(
         [str(url) for url in bundle.get("discovered_person_urls") or []],
@@ -1347,6 +1655,7 @@ def commit_bravo_import(
         "variant": _BRAVO_VARIANT,
         "show_id": show_id_str,
         "show_url": str(payload.show_url),
+        "cast_only": payload.cast_only,
         "fetched_at": _to_iso_now(),
         "normalized": {
             **normalized,
@@ -1362,37 +1671,54 @@ def commit_bravo_import(
     }
 
     show_snapshot = _upsert_show_snapshot(db, show_id=show_id_str, payload=show_payload)
-    if season_id:
-        # Bravo copy is typically season-current marketing text; for season-targeted sync
-        # persist it to the selected season overview instead of overwriting global show copy.
-        _persist_season_overview(
-            db,
-            show_id=show_id_str,
-            season_id=season_id,
-            overview=show_description,
-        )
-    else:
-        _persist_show_description(db, show_id_str, show_description)
+    if not payload.cast_only:
+        if season_id:
+            # Bravo copy is typically season-current marketing text; for season-targeted sync
+            # persist it to the selected season overview instead of overwriting global show copy.
+            _persist_season_overview(
+                db,
+                show_id=show_id_str,
+                season_id=season_id,
+                overview=show_description,
+            )
+        else:
+            _persist_show_description(db, show_id_str, show_description)
     actor = str(
         (admin_user or {}).get("email")
         or (admin_user or {}).get("id")
         or "admin"
     )
-    discovered_links = _persist_pending_links_from_bravo_sync(
+    bravo_na_marked = _persist_missing_bravo_profile_markers(
         db,
         show_id=show_id_str,
         actor=actor,
+        missing_candidate_urls=missing_candidate_urls,
+        candidate_url_to_person_id=eligible_candidate_url_to_person_id,
+        cast_person_name_by_id=cast_person_name_by_id,
+        link_state_by_person_id=link_state_by_person_id,
     )
-    role_suggestion_stats = _persist_cast_role_suggestions_from_bravo_sync(
-        db,
-        show_id=show_id_str,
-        normalized_bundle=normalized,
-        fallback_season_number=payload.season_number,
-        actor=actor,
-    )
+    discovered_links = 0
+    role_suggestion_stats = {
+        "role_suggestions": 0,
+        "role_assignments": 0,
+        "announcement_people": 0,
+    }
+    if not payload.cast_only:
+        discovered_links = _persist_pending_links_from_bravo_sync(
+            db,
+            show_id=show_id_str,
+            actor=actor,
+        )
+        role_suggestion_stats = _persist_cast_role_suggestions_from_bravo_sync(
+            db,
+            show_id=show_id_str,
+            normalized_bundle=normalized,
+            fallback_season_number=payload.season_number,
+            actor=actor,
+        )
     cast_matrix_sync: dict[str, Any] | None = None
     cast_matrix_sync_error: str | None = None
-    if payload.sync_cast_matrix:
+    if payload.sync_cast_matrix and not payload.cast_only:
         try:
             from api.routers.admin_show_roles import CastMatrixSyncRequest, sync_cast_matrix_for_show
 
@@ -1498,31 +1824,32 @@ def commit_bravo_import(
     image_import_errors: list[str] = []
 
     selected_show_images: list[dict[str, str]] = []
-    seen_urls: set[str] = set()
-    if payload.selected_show_images:
-        for selected in payload.selected_show_images:
-            selected_url = str(selected.url).strip()
-            if not selected_url or selected_url in seen_urls:
-                continue
-            seen_urls.add(selected_url)
-            selected_show_images.append(
-                {
-                    "url": selected_url,
-                    "kind": selected.kind,
-                }
-            )
-    elif payload.selected_show_image_urls:
-        for selected_url in payload.selected_show_image_urls:
-            normalized_url = str(selected_url).strip()
-            if not normalized_url or normalized_url in seen_urls:
-                continue
-            seen_urls.add(normalized_url)
-            selected_show_images.append(
-                {
-                    "url": normalized_url,
-                    "kind": "promo",
-                }
-            )
+    if not payload.cast_only:
+        seen_urls: set[str] = set()
+        if payload.selected_show_images:
+            for selected in payload.selected_show_images:
+                selected_url = str(selected.url).strip()
+                if not selected_url or selected_url in seen_urls:
+                    continue
+                seen_urls.add(selected_url)
+                selected_show_images.append(
+                    {
+                        "url": selected_url,
+                        "kind": selected.kind,
+                    }
+                )
+        elif payload.selected_show_image_urls:
+            for selected_url in payload.selected_show_image_urls:
+                normalized_url = str(selected_url).strip()
+                if not normalized_url or normalized_url in seen_urls:
+                    continue
+                seen_urls.add(normalized_url)
+                selected_show_images.append(
+                    {
+                        "url": normalized_url,
+                        "kind": "promo",
+                    }
+                )
 
     if selected_show_images:
         try:
@@ -1583,8 +1910,13 @@ def commit_bravo_import(
             "cast_matrix_bravo_links": int(
                 ((cast_matrix_sync or {}).get("counts") or {}).get("bravo_links_upserted", 0)
             ),
+            "bravo_candidates_tested": bravo_candidates_tested,
+            "bravo_candidates_valid": bravo_candidates_valid,
+            "bravo_candidates_missing": bravo_candidates_missing,
+            "bravo_na_marked": bravo_na_marked,
         },
         "unmatched_person_urls": unmatched_people,
+        "person_candidate_results": person_candidate_results,
         "image_import_errors": image_import_errors,
         "person_image_import_errors": person_image_import_errors,
     }

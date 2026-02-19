@@ -72,6 +72,156 @@ def test_preview_bravo_import_returns_expected_shape(client: TestClient, monkeyp
     assert len(payload["image_candidates"]) == 1
 
 
+def test_preview_bravo_import_includes_cast_candidate_urls(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch(
+                    "api.routers.admin_show_bravo._build_show_cast_index",
+                    return_value=[{"person_id": str(uuid4()), "person_name": "Brooks Marks"}],
+                ):
+                    with patch(
+                        "api.routers.admin_show_bravo.parse_bravo_show_bundle",
+                        return_value={
+                            "show": {"title": "The Real Housewives of Salt Lake City"},
+                            "people": [],
+                            "videos": [],
+                            "news": [],
+                            "image_candidates": [],
+                            "discovered_person_urls": [],
+                        },
+                    ) as parse_mock:
+                        response = client.post(
+                            f"/api/v1/admin/shows/{show_id}/import-bravo/preview",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={
+                                "show_url": "https://www.bravotv.com/the-real-housewives-of-salt-lake-city",
+                                "person_url_candidates": ["https://www.bravotv.com/people/andy-cohen"],
+                            },
+                        )
+
+    assert response.status_code == 200
+    called_candidates = parse_mock.call_args.kwargs.get("person_url_candidates")
+    assert called_candidates is not None
+    assert "https://www.bravotv.com/people/andy-cohen" in called_candidates
+    assert "https://www.bravotv.com/people/brooks-marks" in called_candidates
+
+
+def test_preview_bravo_import_skips_existing_and_na_bravo_profiles(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    lisa_id = str(uuid4())
+    andy_id = str(uuid4())
+    john_id = str(uuid4())
+    mock_db = MagicMock()
+
+    cast_rows = [
+        {"person_id": lisa_id, "person_name": "Lisa Barlow"},
+        {"person_id": andy_id, "person_name": "Andy Cohen"},
+        {"person_id": john_id, "person_name": "John Barlow"},
+    ]
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch("api.routers.admin_show_bravo._build_show_cast_index", return_value=cast_rows):
+                    with patch(
+                        "api.routers.admin_show_bravo._load_bravo_profile_link_state_by_person_id",
+                        return_value={
+                            lisa_id: {"has_non_rejected": True, "has_na": False},
+                            john_id: {"has_non_rejected": False, "has_na": True},
+                        },
+                    ):
+                        with patch(
+                            "api.routers.admin_show_bravo.parse_bravo_show_bundle",
+                            return_value={
+                                "show": {"title": "The Real Housewives of Salt Lake City"},
+                                "people": [],
+                                "videos": [],
+                                "news": [],
+                                "image_candidates": [],
+                                "discovered_person_urls": [],
+                                "person_candidate_results": [],
+                            },
+                        ) as parse_mock:
+                            response = client.post(
+                                f"/api/v1/admin/shows/{show_id}/import-bravo/preview",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={
+                                    "show_url": "https://www.bravotv.com/the-real-housewives-of-salt-lake-city",
+                                    "person_url_candidates": [
+                                        "https://www.bravotv.com/people/lisa-barlow",
+                                        "https://www.bravotv.com/people/andy-cohen",
+                                        "https://www.bravotv.com/people/john-barlow",
+                                    ],
+                                },
+                            )
+
+    assert response.status_code == 200
+    called_candidates = parse_mock.call_args.kwargs.get("person_url_candidates")
+    assert called_candidates == ["https://www.bravotv.com/people/andy-cohen"]
+
+
+def test_preview_bravo_import_sets_max_people_to_candidate_count_over_default(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+    cast_rows = [
+        {"person_id": str(uuid4()), "person_name": f"Cast Member {index}"}
+        for index in range(1, 56)
+    ]
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch("api.routers.admin_show_bravo._build_show_cast_index", return_value=cast_rows):
+                    with patch(
+                        "api.routers.admin_show_bravo._load_bravo_profile_link_state_by_person_id",
+                        return_value={},
+                    ):
+                        with patch(
+                            "api.routers.admin_show_bravo.parse_bravo_show_bundle",
+                            return_value={
+                                "show": {"title": "The Real Housewives of Salt Lake City"},
+                                "people": [],
+                                "videos": [],
+                                "news": [],
+                                "image_candidates": [],
+                                "discovered_person_urls": [],
+                                "person_candidate_results": [],
+                            },
+                        ) as parse_mock:
+                            response = client.post(
+                                f"/api/v1/admin/shows/{show_id}/import-bravo/preview",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"show_url": "https://www.bravotv.com/the-real-housewives-of-salt-lake-city"},
+                            )
+
+    assert response.status_code == 200
+    called_candidates = parse_mock.call_args.kwargs.get("person_url_candidates") or []
+    assert len(called_candidates) == 55
+    assert parse_mock.call_args.kwargs.get("max_people") == 55
+
+
 def test_commit_bravo_import_returns_snapshot_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")
@@ -150,6 +300,177 @@ def test_commit_bravo_import_returns_snapshot_metadata(client: TestClient, monke
     assert payload["show_snapshot"]["source_id"] == "bravo"
     assert len(payload["person_snapshots"]) == 1
     assert payload["counts"]["people_updated"] == 1
+
+
+def test_commit_bravo_import_cast_only_skips_show_side_effects(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+
+    bundle = {
+        "show": {
+            "canonical_url": "https://www.bravotv.com/the-valley",
+            "title": "The Valley",
+            "description": "Bravo description",
+            "airs_text": "Tuesdays 9/8c",
+        },
+        "videos": [{"title": "Clip", "clip_url": "https://www.bravotv.com/v/1"}],
+        "news": [{"headline": "Headline", "article_url": "https://www.bravotv.com/n/1"}],
+        "people": [],
+        "image_candidates": [],
+        "discovered_person_urls": [],
+        "raw": {},
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch("api.routers.admin_show_bravo._build_show_cast_index", return_value=[]):
+                    with patch(
+                        "api.routers.admin_show_bravo.parse_bravo_show_bundle",
+                        return_value=bundle,
+                    ) as parse_mock:
+                        with patch(
+                            "api.routers.admin_show_bravo._upsert_show_snapshot",
+                            return_value={"show_id": show_id, "source_id": "bravo", "variant": "default"},
+                        ):
+                            with patch("api.routers.admin_show_bravo._persist_show_description") as persist_show_mock:
+                                with patch(
+                                    "api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync"
+                                ) as pending_links_mock:
+                                    with patch(
+                                        "api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync"
+                                    ) as role_suggestions_mock:
+                                        response = client.post(
+                                            f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
+                                            headers={"Authorization": f"Bearer {token}"},
+                                            json={
+                                                "show_url": "https://www.bravotv.com/the-valley",
+                                                "cast_only": True,
+                                                "person_url_candidates": [
+                                                    "https://www.bravotv.com/people/andy-cohen"
+                                                ],
+                                            },
+                                        )
+
+    assert response.status_code == 200
+    assert parse_mock.call_args.kwargs.get("include_videos") is False
+    assert parse_mock.call_args.kwargs.get("include_news") is False
+    assert parse_mock.call_args.kwargs.get("person_url_candidates") == [
+        "https://www.bravotv.com/people/andy-cohen"
+    ]
+    persist_show_mock.assert_not_called()
+    pending_links_mock.assert_not_called()
+    role_suggestions_mock.assert_not_called()
+
+
+def test_commit_bravo_import_marks_missing_candidates_as_na(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    andy_id = str(uuid4())
+    mock_db = MagicMock()
+    andy_url = "https://www.bravotv.com/people/andy-cohen"
+    missing_url = "https://www.bravotv.com/people/john-barlow"
+
+    bundle = {
+        "show": {
+            "canonical_url": "https://www.bravotv.com/the-valley",
+            "title": "The Valley",
+            "description": "Bravo description",
+            "airs_text": "Tuesdays 9/8c",
+        },
+        "videos": [],
+        "news": [],
+        "people": [
+            {
+                "canonical_url": andy_url,
+                "name": "Andy Cohen",
+                "bio": "Bio",
+                "hero_image_url": None,
+                "social_links": {},
+                "videos": [],
+                "news": [],
+            }
+        ],
+        "image_candidates": [],
+        "discovered_person_urls": [andy_url],
+        "person_candidate_results": [
+            {"url": andy_url, "status": "ok"},
+            {"url": missing_url, "status": "missing"},
+        ],
+        "raw": {},
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch(
+                    "api.routers.admin_show_bravo._build_show_cast_index",
+                    return_value=[
+                        {"person_id": andy_id, "person_name": "Andy Cohen"},
+                        {"person_id": str(uuid4()), "person_name": "John Barlow"},
+                    ],
+                ):
+                    with patch(
+                        "api.routers.admin_show_bravo._load_bravo_profile_link_state_by_person_id",
+                        return_value={},
+                    ):
+                        with patch("api.routers.admin_show_bravo.parse_bravo_show_bundle", return_value=bundle):
+                            with patch(
+                                "api.routers.admin_show_bravo._upsert_show_snapshot",
+                                return_value={"show_id": show_id, "source_id": "bravo", "variant": "default"},
+                            ):
+                                with patch("api.routers.admin_show_bravo._persist_show_description"):
+                                    with patch(
+                                        "api.routers.admin_show_bravo._upsert_person_snapshot",
+                                        return_value={
+                                            "person_id": andy_id,
+                                            "source_id": "bravo",
+                                            "variant": "default",
+                                        },
+                                    ):
+                                        with patch("api.routers.admin_show_bravo._persist_person_profile"):
+                                            with patch(
+                                                "api.routers.admin_show_bravo._persist_pending_links_from_bravo_sync"
+                                            ) as pending_links_mock:
+                                                with patch(
+                                                    "api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync"
+                                                ) as role_suggestions_mock:
+                                                    with patch(
+                                                        "api.routers.admin_show_links._upsert_link"
+                                                    ) as upsert_link_mock:
+                                                        response = client.post(
+                                                            f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
+                                                            headers={"Authorization": f"Bearer {token}"},
+                                                            json={
+                                                                "show_url": "https://www.bravotv.com/the-valley",
+                                                                "cast_only": True,
+                                                            },
+                                                        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["counts"]["bravo_candidates_tested"] == 2
+    assert payload["counts"]["bravo_candidates_valid"] == 1
+    assert payload["counts"]["bravo_candidates_missing"] == 1
+    assert payload["counts"]["bravo_na_marked"] == 1
+    assert upsert_link_mock.call_count == 1
+    metadata = upsert_link_mock.call_args.kwargs["metadata"]
+    assert metadata["bravo_probe_state"] == "na"
+    assert metadata["bravo_probe_reason"] == "missing"
+    assert upsert_link_mock.call_args.kwargs["status"] == "rejected"
+    pending_links_mock.assert_not_called()
+    role_suggestions_mock.assert_not_called()
 
 
 def test_persist_pending_links_from_bravo_sync_respects_discovered_status_and_confidence() -> None:

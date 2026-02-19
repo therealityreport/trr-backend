@@ -34,6 +34,9 @@ def test_fandom_person_parsing_infobox_taglines_reunion_images() -> None:
 
     assert payload.get("summary")
     assert payload.get("infobox_raw")
+    assert payload.get("dynamic_sections")
+    assert payload.get("bio_card")
+    assert payload.get("casting_summary")
 
     canonical_urls = [photo.get("image_url_canonical") for photo in photos]
     canonical_urls = [url for url in canonical_urls if url]
@@ -64,3 +67,4 @@ def test_fandom_person_parsing_live_infobox_family_and_main_seasons_variant() ->
     assert family[0]["relation"] == "Son"
     assert family[1]["name"] == "Henry Barlow"
     assert family[1]["relation"] == "Son"
+    assert isinstance(payload.get("bio_card"), dict)

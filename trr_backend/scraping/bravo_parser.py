@@ -76,6 +76,10 @@ _SHOW_TOKEN_STOPWORDS = {
     "episodes",
     "season",
 }
+_PEOPLE_NOT_FOUND_MESSAGE_RE = re.compile(
+    r"sorry\s+we\s+couldn[’']?t\s+find\s+what\s+you\s+were\s+looking\s+for",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -380,6 +384,23 @@ def _collect_person_urls(soup: BeautifulSoup, base_url: str) -> list[str]:
             continue
         urls.add(resolved)
     return sorted(urls)
+
+
+def _merge_person_urls(*groups: Iterable[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for raw_url in group:
+            if not isinstance(raw_url, str):
+                continue
+            normalized = _canonicalize_url(raw_url)
+            if not _looks_like_person_url(normalized):
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(normalized)
+    return merged
 
 
 def _derive_season_number(*parts: str | None) -> int | None:
@@ -753,6 +774,23 @@ def _extract_airs_text(soup: BeautifulSoup) -> str | None:
     return candidates[0][1]
 
 
+def _is_missing_person_page(
+    soup: BeautifulSoup,
+    *,
+    page_title: str | None,
+) -> bool:
+    lowered_title = (page_title or "").lower()
+    if "page not found" in lowered_title:
+        return True
+
+    hero = _extract_text(soup.find("h1"))
+    if isinstance(hero, str) and "page not found" in hero.lower():
+        return True
+
+    body_text = soup.get_text(" ", strip=True)
+    return bool(_PEOPLE_NOT_FOUND_MESSAGE_RE.search(body_text))
+
+
 def _extract_social_links(soup: BeautifulSoup, base_url: str) -> dict[str, str]:
     social: dict[str, str] = {}
 
@@ -904,6 +942,9 @@ def parse_person_page(person_url: str) -> dict[str, Any]:
         _meta_content(soup, name="description"),
     )
 
+    if _is_missing_person_page(soup, page_title=title):
+        raise requests.RequestException(f"Bravo person page not found: {person_url}")
+
     if not bio:
         for node in soup.select("main p, article p, section p"):
             text = _extract_text(node)
@@ -933,35 +974,77 @@ def parse_person_page(person_url: str) -> dict[str, Any]:
     }
 
 
+def _candidate_result(url: str, *, status: str, error: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "url": _canonicalize_url(url),
+        "status": status,
+    }
+    if error:
+        result["error"] = error
+    return result
+
+
 def parse_bravo_show_bundle(
     show_url: str,
     *,
     include_people: bool = True,
     include_videos: bool = True,
     include_news: bool = True,
+    person_url_candidates: list[str] | None = None,
     max_people: int = 40,
 ) -> dict[str, Any]:
     show = parse_show_page(show_url)
     discovered_person_urls = list(show.get("person_urls") or [])
+    candidate_person_urls = _merge_person_urls(
+        person_url_candidates or [],
+        discovered_person_urls,
+    )
 
     videos = parse_show_videos(show["canonical_url"]) if include_videos else []
     news = (
         parse_show_news(
             show["canonical_url"],
             show_title=show.get("title"),
-            person_urls=discovered_person_urls,
+            person_urls=candidate_person_urls,
         )
         if include_news
         else []
     )
 
     people: list[dict[str, Any]] = []
+    person_candidate_results: list[dict[str, Any]] = []
     if include_people:
-        for person_url in discovered_person_urls[:max_people]:
+        for person_url in candidate_person_urls[:max_people]:
             try:
-                people.append(parse_person_page(person_url))
-            except requests.RequestException:
+                person = parse_person_page(person_url)
+                people.append(person)
+                person_candidate_results.append(
+                    _candidate_result(
+                        str(person.get("canonical_url") or person_url),
+                        status="ok",
+                    )
+                )
+            except requests.RequestException as exc:
+                error_text = str(exc).strip()
+                if "not found" in error_text.lower():
+                    person_candidate_results.append(_candidate_result(person_url, status="missing"))
+                else:
+                    person_candidate_results.append(
+                        _candidate_result(person_url, status="error", error=error_text or "request_failed")
+                    )
                 continue
+
+    resolved_person_urls = _merge_person_urls(
+        [
+            str(person.get("canonical_url") or "").strip()
+            for person in people
+            if isinstance(person, dict)
+        ]
+    )
+    if include_people:
+        discovered_person_urls = resolved_person_urls
+    else:
+        discovered_person_urls = candidate_person_urls
 
     return {
         "show": {
@@ -972,6 +1055,7 @@ def parse_bravo_show_bundle(
         },
         "image_candidates": show.get("image_candidates") or [],
         "discovered_person_urls": discovered_person_urls,
+        "person_candidate_results": person_candidate_results,
         "videos": videos,
         "news": news,
         "people": people,

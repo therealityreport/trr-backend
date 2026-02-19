@@ -237,3 +237,68 @@ def test_parse_show_page_image_candidates_exclude_video_and_news_cards(
     assert "https://www.bravotv.com/images/show-poster.jpg" in image_urls
     assert "https://www.bravotv.com/images/video-thumb.jpg" not in image_urls
     assert "https://www.bravotv.com/images/news-thumb.jpg" not in image_urls
+
+
+def test_parse_bravo_show_bundle_includes_candidate_people_and_skips_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    show_url = "https://www.bravotv.com/the-real-housewives-of-salt-lake-city"
+    valid_person_url = "https://www.bravotv.com/people/andy-cohen"
+    invalid_person_url = "https://www.bravotv.com/people/john-barlow"
+
+    monkeypatch.setattr(
+        bravo_parser.requests,
+        "get",
+        _mock_get_factory(
+            {
+                show_url: """
+                    <html>
+                      <head>
+                        <meta property=\"og:title\" content=\"The Real Housewives of Salt Lake City\" />
+                        <meta property=\"og:description\" content=\"Description\" />
+                      </head>
+                      <body></body>
+                    </html>
+                """,
+                valid_person_url: """
+                    <html>
+                      <head>
+                        <meta property=\"og:title\" content=\"Andy Cohen\" />
+                        <meta property=\"og:description\" content=\"Bio\" />
+                        <meta property=\"og:image\" content=\"/images/andy.jpg\" />
+                      </head>
+                      <body>
+                        <h1>Andy Cohen</h1>
+                      </body>
+                    </html>
+                """,
+                invalid_person_url: """
+                    <html>
+                      <head>
+                        <title>Page Not Found</title>
+                      </head>
+                      <body>
+                        <h1>Page Not Found</h1>
+                        <p>Sorry we couldn’t find what you were looking for.</p>
+                      </body>
+                    </html>
+                """,
+            }
+        ),
+    )
+
+    bundle = bravo_parser.parse_bravo_show_bundle(
+        show_url,
+        include_videos=False,
+        include_news=False,
+        include_people=True,
+        person_url_candidates=[valid_person_url, invalid_person_url],
+    )
+
+    assert [person["canonical_url"] for person in bundle["people"]] == [valid_person_url]
+    assert bundle["discovered_person_urls"] == [valid_person_url]
+    results = bundle["person_candidate_results"]
+    assert len(results) == 2
+    status_by_url = {row["url"]: row["status"] for row in results}
+    assert status_by_url[valid_person_url] == "ok"
+    assert status_by_url[invalid_person_url] == "missing"

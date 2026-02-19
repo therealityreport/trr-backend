@@ -25,6 +25,7 @@
 - [core.person_source_latest](core.person_source_latest.md) ([diagram](diagrams/core.person_source_latest.mermaid.md))
 - [core.production_companies](core.production_companies.md) ([diagram](diagrams/core.production_companies.mermaid.md))
 - [core.season_external_ids](core.season_external_ids.md) ([diagram](diagrams/core.season_external_ids.mermaid.md))
+- [core.season_fandom](core.season_fandom.md)
 - [core.season_images](core.season_images.md) ([diagram](diagrams/core.season_images.mermaid.md))
 - [core.season_source_history](core.season_source_history.md) ([diagram](diagrams/core.season_source_history.mermaid.md))
 - [core.season_source_latest](core.season_source_latest.md) ([diagram](diagrams/core.season_source_latest.mermaid.md))
