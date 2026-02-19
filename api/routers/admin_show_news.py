@@ -38,6 +38,7 @@ _TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 _SEASON_WORD_RE = re.compile(r"\bseason\s*0*(\d{1,3})\b", re.IGNORECASE)
 _SEASON_SHORT_RE = re.compile(r"\bs(?:\s*|[-_]?)(\d{1,2})(?:\b|e\d{1,2}\b)", re.IGNORECASE)
+_GOOGLE_NEWS_IMAGE_CAPTION = "Google News featured image"
 
 
 class GoogleNewsSyncRequest(BaseModel):
@@ -423,23 +424,56 @@ def _normalize_google_news_items(
             continue
         summary = str(raw.get("summary") or "").strip() or None
         text_for_inference = f"{headline or ''} {summary or ''}".strip()
+        raw_person_tags = raw.get("person_tags")
+        person_tags = (
+            raw_person_tags
+            if isinstance(raw_person_tags, list)
+            else _infer_person_tags(text_for_inference, cast_index)
+        )
+        raw_topic_tags = raw.get("topic_tags")
+        topic_tags = (
+            [str(tag).strip() for tag in raw_topic_tags if str(tag).strip()]
+            if isinstance(raw_topic_tags, list)
+            else _infer_topic_tags(text_for_inference)
+        )
+        raw_season_matches = raw.get("season_matches")
+        season_matches = (
+            raw_season_matches
+            if isinstance(raw_season_matches, list)
+            else _infer_season_matches(
+                text=text_for_inference,
+                published_at=(str(raw.get("published_at") or "").strip() or None),
+                season_windows=season_windows,
+            )
+        )
+        published_at = str(raw.get("published_at") or "").strip() or None
+        image_url = str(raw.get("image_url") or "").strip() or None
+        original_image_url = str(raw.get("original_image_url") or "").strip() or image_url
+        hosted_image_url = str(raw.get("hosted_image_url") or "").strip() or None
+        media_asset_id = str(raw.get("media_asset_id") or "").strip() or None
+        feed_rank_raw = raw.get("feed_rank")
+        try:
+            feed_rank = int(feed_rank_raw)
+        except (TypeError, ValueError):
+            feed_rank = 0
         normalized.append(
             {
                 "source_id": _GOOGLE_SOURCE_ID,
                 "headline": headline,
                 "article_url": article_url,
-                "image_url": (str(raw.get("image_url") or "").strip() or None),
-                "published_at": (str(raw.get("published_at") or "").strip() or None),
+                "summary": summary,
+                "image_url": image_url,
+                "original_image_url": original_image_url,
+                "hosted_image_url": hosted_image_url,
+                "media_asset_id": media_asset_id,
+                "featured_image_synced": bool(raw.get("featured_image_synced")) or bool(hosted_image_url),
+                "published_at": published_at,
                 "publisher_name": (str(raw.get("publisher_name") or "").strip() or None),
                 "publisher_domain": (str(raw.get("publisher_domain") or "").strip() or None),
-                "person_tags": _infer_person_tags(text_for_inference, cast_index),
-                "topic_tags": _infer_topic_tags(text_for_inference),
-                "season_matches": _infer_season_matches(
-                    text=text_for_inference,
-                    published_at=(str(raw.get("published_at") or "").strip() or None),
-                    season_windows=season_windows,
-                ),
-                "feed_rank": int(raw.get("feed_rank") or 0),
+                "person_tags": person_tags,
+                "topic_tags": topic_tags,
+                "season_matches": season_matches,
+                "feed_rank": feed_rank,
             }
         )
     return normalized
@@ -573,12 +607,98 @@ def _is_snapshot_fresh(snapshot: dict[str, Any] | None) -> bool:
     return age <= timedelta(minutes=_STALE_WINDOW_MINUTES)
 
 
+def _sync_google_news_featured_images(
+    *,
+    db: SupabaseAdminClient,
+    admin_user: AdminUser,
+    show_id: str,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    # Reuse the Bravo media import path so Google featured images are mirrored to S3/Supabase too.
+    from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
+
+    indexed_by_image_url: dict[str, list[tuple[int, str]]] = {}
+    for index, item in enumerate(items):
+        article_url = str(item.get("article_url") or "").strip()
+        image_url = str(item.get("image_url") or "").strip()
+        if not article_url or not image_url:
+            continue
+        item["original_image_url"] = str(item.get("original_image_url") or image_url).strip()
+        item["featured_image_synced"] = bool(item.get("featured_image_synced"))
+        indexed_by_image_url.setdefault(image_url, []).append((index, article_url))
+
+    imported = 0
+    skipped = 0
+    mirrored = 0
+    linked_items = 0
+    errors: list[str] = []
+
+    for image_index, (image_url, references) in enumerate(indexed_by_image_url.items(), start=1):
+        source_item = items[references[0][0]]
+        source_article_url = references[0][1]
+        headline = str(source_item.get("headline") or "").strip()
+        caption = (
+            f"{_GOOGLE_NEWS_IMAGE_CAPTION}: {headline[:120]}" if headline else _GOOGLE_NEWS_IMAGE_CAPTION
+        )
+        try:
+            import_request = ImportRequest(
+                entity_type="show",
+                show_id=UUID(show_id),
+                source_url=source_article_url,
+                images=[
+                    ImportImageItem(
+                        candidate_id=f"google-news-featured-{image_index}",
+                        url=image_url,
+                        caption=caption,
+                        kind="promo",
+                        context_section="google_news",
+                        context_type="featured_image",
+                        source_logo="google_news",
+                        asset_name=_GOOGLE_NEWS_IMAGE_CAPTION,
+                    )
+                ],
+            )
+            import_result = import_images(import_request, db, admin_user)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{source_article_url}: {exc}")
+            continue
+
+        imported += int(import_result.imported)
+        skipped += int(import_result.skipped_duplicates)
+        for error in import_result.errors:
+            errors.append(f"{source_article_url}: {error}")
+
+        first_asset = import_result.assets[0] if import_result.assets else None
+        hosted_url = str(first_asset.hosted_url).strip() if first_asset and first_asset.hosted_url else ""
+        if not hosted_url:
+            continue
+        media_asset_id = str(first_asset.id).strip() if first_asset and first_asset.id else None
+        mirrored += 1
+        for item_index, _article_url in references:
+            item = items[item_index]
+            item["original_image_url"] = str(item.get("original_image_url") or image_url).strip()
+            item["hosted_image_url"] = hosted_url
+            item["image_url"] = hosted_url
+            item["media_asset_id"] = media_asset_id
+            item["featured_image_synced"] = True
+            linked_items += 1
+
+    return {
+        "attempted": len(indexed_by_image_url),
+        "imported": imported,
+        "skipped": skipped,
+        "mirrored": mirrored,
+        "linked_items": linked_items,
+        "errors": errors,
+    }
+
+
 @router.post("/{show_id}/google-news/sync")
 def sync_google_news(
     show_id: UUID,
     payload: GoogleNewsSyncRequest,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    admin_user: AdminUser = None,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -643,6 +763,12 @@ def sync_google_news(
         cast_index=cast_index,
         season_windows=season_windows,
     )
+    image_sync = _sync_google_news_featured_images(
+        db=db,
+        admin_user=admin_user,
+        show_id=show_id_str,
+        items=normalized_items,
+    )
     snapshot_payload = {
         "show": {
             "show_id": show_id_str,
@@ -659,6 +785,14 @@ def sync_google_news(
                 else []
             ),
             "errors": parse_result.get("errors") if isinstance(parse_result.get("errors"), list) else [],
+            "featured_images_added": int(parse_result.get("featured_images_added") or 0),
+            "featured_images_probed": int(parse_result.get("featured_images_probed") or 0),
+            "featured_image_errors": (
+                parse_result.get("featured_image_errors")
+                if isinstance(parse_result.get("featured_image_errors"), list)
+                else []
+            ),
+            "image_sync": image_sync,
         },
         "normalized": {
             "news": normalized_items,
@@ -677,6 +811,7 @@ def sync_google_news(
         "stale_guard_skipped": False,
         "count": len(normalized_items),
         "fallback_used": bool(parse_result.get("fallback_used")),
+        "image_sync": image_sync,
         "snapshot": snapshot,
     }
 

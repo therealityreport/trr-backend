@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.routers import admin_show_news
 
 
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
@@ -284,3 +286,42 @@ def test_unified_news_sorting_supports_trending_and_latest(
     latest_urls = [item["article_url"] for item in latest_payload["news"]]
     assert latest_urls[0] == "https://www.bravotv.com/newest"
     assert latest_payload["news"][0]["trending_rank"] is None
+
+
+def test_google_news_featured_image_sync_imports_to_media_pipeline() -> None:
+    show_id = str(uuid4())
+    image_url = "https://images.example.com/story-1.jpg"
+    hosted_url = "https://cdn.trr.example.com/media/story-1.jpg"
+    items = [
+        {
+            "headline": "RHOSLC headline",
+            "article_url": "https://example.com/story-1",
+            "image_url": image_url,
+        }
+    ]
+    mock_db = MagicMock()
+    admin_user = {"email": "admin@example.com"}
+
+    with patch(
+        "api.routers.admin_scrape.import_images",
+        return_value=SimpleNamespace(
+            imported=1,
+            skipped_duplicates=0,
+            errors=[],
+            assets=[SimpleNamespace(id=str(uuid4()), hosted_url=hosted_url)],
+        ),
+    ) as import_images_mock:
+        sync_result = admin_show_news._sync_google_news_featured_images(
+            db=mock_db,
+            admin_user=admin_user,
+            show_id=show_id,
+            items=items,
+        )
+
+    assert import_images_mock.called
+    assert sync_result["attempted"] == 1
+    assert sync_result["mirrored"] == 1
+    assert items[0]["original_image_url"] == image_url
+    assert items[0]["hosted_image_url"] == hosted_url
+    assert items[0]["image_url"] == hosted_url
+    assert items[0]["featured_image_synced"] is True

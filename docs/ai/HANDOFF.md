@@ -1628,3 +1628,15 @@ Continuation (same session, 2026-02-19) — CI fix for TMDb season enrichment ov
 - Validation:
   - `pytest -q tests/integrations/tmdb/test_tmdb_season_enrichment.py::test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters tests/ingestion/test_show_importer_episode_precedence.py::test_imdb_episode_fields_take_precedence_and_tmdb_fills_provider_fields` (`2 passed`)
   - `ruff check trr_backend/ingestion/show_importer.py tests/integrations/tmdb/test_tmdb_season_enrichment.py tests/ingestion/test_show_importer_episode_precedence.py` (pass)
+
+Continuation (same session, 2026-02-19) — Google News parser/router refinements:
+- Files:
+  - `api/routers/admin_show_news.py`
+  - `trr_backend/scraping/google_news_parser.py`
+  - `tests/api/routers/test_admin_show_news.py`
+  - `tests/scraping/test_google_news_parser.py`
+- Changes:
+  - Included pending parser and admin router refinements for show news ingestion plus updated regression coverage.
+- Validation:
+  - `ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (`9 passed`)

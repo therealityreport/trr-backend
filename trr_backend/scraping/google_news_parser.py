@@ -9,9 +9,10 @@ from collections.abc import Sequence
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import quote_plus, urlencode, urlparse, urlunparse
+from urllib.parse import quote_plus, urlencode, urljoin, urlparse, urlunparse
 
 import requests
+from bs4 import BeautifulSoup, Tag
 
 _DEFAULT_HEADERS = {
     "accept": "application/rss+xml,application/xml;q=0.9,text/xml;q=0.8,*/*;q=0.5",
@@ -21,6 +22,22 @@ _DEFAULT_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     ),
 }
+
+
+def _http_url(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("//"):
+        cleaned = f"https:{cleaned}"
+    parsed = urlparse(cleaned)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return None
+    if not parsed.netloc:
+        return None
+    return cleaned
 
 
 def _local_name(tag: str) -> str:
@@ -77,6 +94,84 @@ def _image_url_from_item(item: ET.Element) -> str | None:
     return None
 
 
+def _meta_content(soup: BeautifulSoup, *, property_name: str | None = None, name: str | None = None) -> str | None:
+    attrs: dict[str, str] = {}
+    if property_name:
+        attrs["property"] = property_name
+    if name:
+        attrs["name"] = name
+    if not attrs:
+        return None
+    tag = soup.find("meta", attrs=attrs)
+    if isinstance(tag, Tag):
+        content = tag.get("content")
+        return str(content).strip() if isinstance(content, str) and content.strip() else None
+    return None
+
+
+def _extract_featured_image_from_html(html_text: str, *, page_url: str) -> str | None:
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    candidates = [
+        _meta_content(soup, property_name="og:image:secure_url"),
+        _meta_content(soup, property_name="og:image"),
+        _meta_content(soup, name="twitter:image"),
+        _meta_content(soup, name="twitter:image:src"),
+    ]
+    image_link = soup.find("link", attrs={"rel": "image_src"})
+    if isinstance(image_link, Tag):
+        href = image_link.get("href")
+        if isinstance(href, str) and href.strip():
+            candidates.append(href.strip())
+    for raw in candidates:
+        if not raw:
+            continue
+        absolute = _http_url(urljoin(page_url, raw))
+        if absolute:
+            return absolute
+    return None
+
+
+def _resolve_featured_image(article_url: str, *, timeout: float) -> str | None:
+    response = requests.get(article_url, headers=_DEFAULT_HEADERS, timeout=timeout, allow_redirects=True)
+    response.raise_for_status()
+    page_url = str(response.url or article_url)
+    return _extract_featured_image_from_html(response.text, page_url=page_url)
+
+
+def _enrich_items_with_featured_images(
+    items: list[dict[str, Any]],
+    *,
+    timeout: float,
+    max_probes: int = 15,
+) -> tuple[int, int, list[str]]:
+    if max_probes <= 0:
+        return (0, 0, [])
+    filled = 0
+    probes = 0
+    errors: list[str] = []
+    for item in items:
+        if probes >= max_probes:
+            break
+        image_url = _http_url(str(item.get("image_url") or "").strip() or None)
+        if image_url:
+            item["image_url"] = image_url
+            continue
+        article_url = _http_url(str(item.get("article_url") or "").strip() or None)
+        if not article_url:
+            continue
+        probes += 1
+        try:
+            resolved = _resolve_featured_image(article_url, timeout=timeout)
+        except requests.RequestException as exc:
+            errors.append(f"{article_url}: {exc}")
+            continue
+        if not resolved:
+            continue
+        item["image_url"] = resolved
+        filled += 1
+    return (filled, probes, errors)
+
+
 def parse_rss_items(xml_text: str) -> list[dict[str, Any]]:
     payload = (xml_text or "").strip()
     if not payload:
@@ -121,7 +216,7 @@ def parse_rss_items(xml_text: str) -> list[dict[str, Any]]:
                 "publisher_url": source_url,
                 "publisher_domain": publisher_domain,
                 "summary": description,
-                "image_url": _image_url_from_item(item),
+                "image_url": _http_url(_image_url_from_item(item)),
                 "feed_rank": index,
             }
         )
@@ -221,12 +316,19 @@ def fetch_google_news(
             errors.append(f"{candidate}: {exc}")
             continue
         if items:
+            featured_images_added, featured_images_probed, featured_image_errors = _enrich_items_with_featured_images(
+                items,
+                timeout=timeout,
+            )
             return {
                 "items": items,
                 "resolved_feed_url": candidate,
                 "fallback_used": False,
                 "attempted_feeds": attempted_feeds,
                 "errors": errors,
+                "featured_images_added": featured_images_added,
+                "featured_images_probed": featured_images_probed,
+                "featured_image_errors": featured_image_errors,
             }
 
     fallback_url = build_search_rss_url(show_name, show_aliases)
@@ -236,6 +338,10 @@ def fetch_google_news(
     except (ET.ParseError, requests.RequestException) as exc:
         errors.append(f"{fallback_url}: {exc}")
         raise RuntimeError("Failed to fetch Google News RSS feed") from exc
+    featured_images_added, featured_images_probed, featured_image_errors = _enrich_items_with_featured_images(
+        fallback_items,
+        timeout=timeout,
+    )
 
     return {
         "items": fallback_items,
@@ -243,4 +349,7 @@ def fetch_google_news(
         "fallback_used": True,
         "attempted_feeds": attempted_feeds,
         "errors": errors,
+        "featured_images_added": featured_images_added,
+        "featured_images_probed": featured_images_probed,
+        "featured_image_errors": featured_image_errors,
     }

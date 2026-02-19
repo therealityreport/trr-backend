@@ -114,3 +114,50 @@ def test_fetch_google_news_falls_back_to_search_rss_when_topic_has_no_items(
     assert len(result["items"]) == 1
     assert result["items"][0]["headline"] == "RHOSLC Season 6 Rumors"
 
+
+def test_fetch_google_news_backfills_featured_image_from_article_meta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    topic_url = "https://news.google.com/topics/CAAqKAgKIiJDQkFTRXdvTkwyY3ZNVEZvYlhBeGVtUndNQklDWlc0b0FBUAE?ceid=US:en&oc=3"
+    candidate = google_news_parser.topic_url_to_rss_candidates(topic_url)[0]
+    article_url = "https://example.com/story-9"
+
+    monkeypatch.setattr(
+        google_news_parser.requests,
+        "get",
+        _mock_get_factory(
+            {
+                candidate: f"""
+                    <rss version="2.0">
+                      <channel>
+                        <item>
+                          <title>RHOSLC Behind the Scenes</title>
+                          <link>{article_url}</link>
+                          <pubDate>Thu, 13 Feb 2026 10:15:00 +0000</pubDate>
+                          <source url="https://people.com">People</source>
+                          <description><![CDATA[<p>Cast insight</p>]]></description>
+                        </item>
+                      </channel>
+                    </rss>
+                """,
+                article_url: """
+                    <html>
+                      <head>
+                        <meta property="og:image" content="https://cdn.example.com/featured-9.jpg" />
+                      </head>
+                    </html>
+                """,
+            }
+        ),
+    )
+
+    result = google_news_parser.fetch_google_news(
+        topic_url=topic_url,
+        show_name="The Real Housewives of Salt Lake City",
+        show_aliases=["RHOSLC"],
+    )
+
+    assert result["fallback_used"] is False
+    assert result["featured_images_added"] == 1
+    assert result["featured_images_probed"] == 1
+    assert result["items"][0]["image_url"] == "https://cdn.example.com/featured-9.jpg"
