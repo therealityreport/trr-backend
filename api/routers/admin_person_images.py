@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import unicodedata
 from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime
@@ -75,6 +76,13 @@ class RefreshImagesRequest(BaseModel):
     show_name: str | None = Field(
         default=None,
         description="Optional show name to tag all fetched photos with show_id/show_name for filtering.",
+    )
+    enforce_show_source_policy: bool = Field(
+        default=True,
+        description=(
+            "Apply show-based source restrictions (e.g., disabling Fandom for non-Real Housewives context). "
+            "Set false to always use requested sources."
+        ),
     )
 
 
@@ -185,6 +193,16 @@ def _apply_show_source_policy(
     return filtered_sources, fandom_skipped
 
 
+def _resolve_refresh_sources(
+    db: SupabaseAdminClient,
+    request: RefreshImagesRequest,
+) -> tuple[list[SourceType], bool]:
+    requested_sources = list(request.sources or ALL_SOURCES)
+    if not request.enforce_show_source_policy:
+        return requested_sources, False
+    return _apply_show_source_policy(db, request.show_id, requested_sources)
+
+
 def _extract_imdb_id(external_ids: dict | None) -> str | None:
     """Extract IMDb person ID from external_ids."""
     if not external_ids:
@@ -203,6 +221,54 @@ def _get_tmdb_id(db: SupabaseAdminClient, person_id: str, external_ids: dict | N
         tmdb_id = external_ids.get("tmdb_id") or external_ids.get("tmdb")
         if tmdb_id:
             return int(tmdb_id)
+    return None
+
+
+def _count_mirrored_cast_photos(db: SupabaseAdminClient, person_id: str, source: str) -> int:
+    try:
+        response = (
+            db.schema("core")
+            .table("cast_photos")
+            .select("id", count="exact")
+            .eq("person_id", person_id)
+            .eq("source", source)
+            .not_.is_("hosted_url", "null")
+            .execute()
+        )
+        if hasattr(response, "count") and response.count is not None:
+            return int(response.count)
+        data = response.data or []
+        return len(data) if isinstance(data, list) else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _get_known_source_total(
+    source: SourceType,
+    imdb_person_id: str | None,
+    tmdb_person_id: int | None,
+) -> int | None:
+    if source == "imdb" and imdb_person_id:
+        try:
+            from trr_backend.integrations.imdb.person_gallery import (
+                fetch_imdb_person_mediaindex_html,
+                parse_imdb_person_mediaindex_images,
+            )
+
+            html = fetch_imdb_person_mediaindex_html(imdb_person_id, session=None)
+            images = parse_imdb_person_mediaindex_images(html, imdb_person_id)
+            return len(images) if isinstance(images, list) else None
+        except Exception:  # noqa: BLE001
+            return None
+    if source == "tmdb" and tmdb_person_id:
+        try:
+            from trr_backend.integrations.tmdb.client import fetch_person_images
+
+            payload = fetch_person_images(int(tmdb_person_id), session=None)
+            profiles = payload.get("profiles") if isinstance(payload, dict) else None
+            return len(profiles) if isinstance(profiles, list) else None
+        except Exception:  # noqa: BLE001
+            return None
     return None
 
 
@@ -1412,6 +1478,7 @@ def _detect_text_overlay_media_links(
     db: SupabaseAdminClient,
     person_id: str,
     *,
+    asset_ids: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
     reason_counts: dict[str, int] | None = None,
 ) -> tuple[int, int, int, int]:
@@ -1434,9 +1501,12 @@ def _detect_text_overlay_media_links(
         rows = _fetch_person_media_link_rows(db, person_id)
         to_process: list[str] = []
         seen_asset_ids: set[str] = set()
+        allowed_asset_ids = set(asset_ids or [])
         for row in rows:
             asset_id = str(row.get("media_asset_id") or "")
             if not asset_id or asset_id in seen_asset_ids:
+                continue
+            if allowed_asset_ids and asset_id not in allowed_asset_ids:
                 continue
             seen_asset_ids.add(asset_id)
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
@@ -1507,8 +1577,7 @@ def refresh_person_images(
     imdb_person_id = _extract_imdb_id(external_ids)
     tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
     person_name = person.get("full_name")
-    requested_sources = request.sources or ALL_SOURCES
-    sources, fandom_skipped = _apply_show_source_policy(db, request.show_id, list(requested_sources))
+    sources, fandom_skipped = _resolve_refresh_sources(db, request)
     errors: list[str] = []
     if fandom_skipped:
         errors.append("Fandom sources skipped for non-Real Housewives show context.")
@@ -1747,9 +1816,31 @@ async def refresh_person_images_stream(
         episode_metadata_tagged = 0
         show_context_tagged = 0
         metadata_enrichment_failed = 0
+        photos_upserted = 0
+        photos_mirrored = 0
+        cast_photos_mirrored = 0
+        media_assets_mirrored = 0
+        auto_counts_succeeded = 0
+        text_overlay_succeeded = 0
+        centering_succeeded = 0
+        resize_succeeded = 0
+
+        def build_live_counts() -> dict[str, int]:
+            return {
+                "synced": int(photos_upserted),
+                "mirrored": int(photos_mirrored),
+                "counted": int(auto_counts_succeeded),
+                "cropped": int(centering_succeeded),
+                "id_text": int(text_overlay_succeeded),
+                "resized": int(resize_succeeded),
+            }
 
         def progress(payload: dict[str, Any]) -> str:
-            return f"event: progress\ndata: {json.dumps({'run_id': run_id, **payload})}\n\n"
+            return (
+                "event: progress\ndata: "
+                + json.dumps({"run_id": run_id, "live_counts": build_live_counts(), **payload})
+                + "\n\n"
+            )
 
         def error_event(*, stage: str, error: str, detail: str | None = None) -> str:
             payload: dict[str, Any] = {"run_id": run_id, "stage": stage, "error": error}
@@ -1768,10 +1859,7 @@ async def refresh_person_images_stream(
             imdb_person_id = _extract_imdb_id(external_ids)
             tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
             person_name = person.get("full_name")
-            requested_sources = request.sources or ALL_SOURCES
-            sources, fandom_skipped = _apply_show_source_policy(
-                db, request.show_id, list(requested_sources)
-            )
+            sources, fandom_skipped = _resolve_refresh_sources(db, request)
             if fandom_skipped:
                 errors.append("Fandom sources skipped for non-Real Housewives show context.")
         except Exception as exc:  # noqa: BLE001
@@ -1814,18 +1902,75 @@ async def refresh_person_images_stream(
 
         total_sources = len(fetch_steps)
         processed_sources = 0
+        source_skip_details: list[dict[str, Any]] = []
         photos: list[dict[str, Any]] = []
 
         for stage, label in fetch_steps:
+            source_name: SourceType | None = None
+            if stage == "sync_imdb":
+                source_name = "imdb"
+            elif stage == "sync_tmdb":
+                source_name = "tmdb"
+            elif stage == "sync_fandom":
+                source_name = "fandom"
+            elif stage == "sync_fandom_gallery":
+                source_name = "fandom-gallery"
+
+            source_total = (
+                _get_known_source_total(source_name, imdb_person_id, tmdb_person_id)
+                if source_name in {"imdb", "tmdb"}
+                else None
+            )
+            mirrored_count = (
+                _count_mirrored_cast_photos(db, person_id_str, source_name)
+                if source_name and source_total is not None
+                else None
+            )
+            if (
+                source_name
+                and source_total is not None
+                and mirrored_count is not None
+                and mirrored_count >= source_total
+                and not request.force_mirror
+            ):
+                processed_sources += 1
+                source_skip_details.append(
+                    {
+                        "source": source_name,
+                        "reason": "already_mirrored",
+                        "source_total": source_total,
+                        "mirrored_count": mirrored_count,
+                    }
+                )
+                yield progress(
+                    {
+                        "stage": stage,
+                        "message": f"Skipping {label} (already mirrored {mirrored_count}/{source_total}).",
+                        "current": processed_sources,
+                        "total": total_sources,
+                        "source": source_name,
+                        "skip_reason": "already_mirrored",
+                        "source_total": source_total,
+                        "mirrored_count": mirrored_count,
+                    }
+                )
+                continue
+
             yield progress(
                 {
                     "stage": stage,
                     "message": f"Syncing {label}...",
                     "current": processed_sources,
                     "total": total_sources,
+                    "source": source_name,
+                    "source_total": source_total,
+                    "mirrored_count": mirrored_count,
+                    "heartbeat": True,
+                    "elapsed_ms": 0,
                 }
             )
             rows: list[dict[str, Any]] = []
+            stage_started_at = time.perf_counter()
             try:
                 if stage == "sync_imdb":
                     rows = fetch_imdb_cast_photos(
@@ -1864,12 +2009,17 @@ async def refresh_person_images_stream(
                 rows = []
             photos.extend(rows)
             processed_sources += 1
+            elapsed_ms = int((time.perf_counter() - stage_started_at) * 1000)
             yield progress(
                 {
                     "stage": stage,
                     "message": f"Synced {label} ({len(rows)} photos).",
                     "current": processed_sources,
                     "total": total_sources,
+                    "source": source_name,
+                    "source_total": source_total,
+                    "mirrored_count": mirrored_count,
+                    "elapsed_ms": elapsed_ms,
                 }
             )
 
@@ -1927,7 +2077,6 @@ async def refresh_person_images_stream(
         )
 
         # 3. Upsert
-        photos_upserted = 0
         if photos:
             yield progress(
                 {
@@ -2206,6 +2355,9 @@ async def refresh_person_images_stream(
         text_overlay_succeeded = 0
         text_overlay_unknown = 0
         text_overlay_failed = 0
+        text_overlay_configured = False
+        text_overlay_candidates = 0
+        text_overlay_skipped_reason: str | None = None
         try:
             from trr_backend.vision.text_overlay import (
                 TextOverlayDetectionError,
@@ -2215,7 +2367,8 @@ async def refresh_person_images_stream(
                 is_text_overlay_detection_configured,
             )
 
-            if is_text_overlay_detection_configured():
+            text_overlay_configured = is_text_overlay_detection_configured()
+            if text_overlay_configured:
                 cast_rows = (
                     db.schema("core")
                     .table("cast_photos")
@@ -2249,49 +2402,62 @@ async def refresh_person_images_stream(
                     to_process.append({"origin": "media_links", "id": asset_id})
 
                 total_text = len(to_process)
-                yield progress(
-                    {
-                        "stage": "word_id",
-                        "message": "Detecting words/text overlays...",
-                        "current": 0,
-                        "total": total_text,
-                    }
-                )
-                for idx, item in enumerate(to_process, start=1):
-                    text_overlay_attempted += 1
-                    try:
-                        if item["origin"] == "cast_photos":
-                            result = detect_and_update_cast_photo_text_overlay(db, item["id"], force=False)
-                        else:
-                            result = detect_and_update_media_asset_text_overlay(db, item["id"], force=False)
-                        if result.status == "unknown":
-                            text_overlay_unknown += 1
-                            reason = result.reason_code or "gemini_request_failed"
+                text_overlay_candidates = total_text
+                if total_text == 0:
+                    text_overlay_skipped_reason = "no_pending_images"
+                    yield progress(
+                        {
+                            "stage": "word_id",
+                            "message": "Text overlay already up to date (no pending images).",
+                            "current": 0,
+                            "total": 0,
+                        }
+                    )
+                else:
+                    yield progress(
+                        {
+                            "stage": "word_id",
+                            "message": "Detecting words/text overlays...",
+                            "current": 0,
+                            "total": total_text,
+                        }
+                    )
+                    for idx, item in enumerate(to_process, start=1):
+                        text_overlay_attempted += 1
+                        try:
+                            if item["origin"] == "cast_photos":
+                                result = detect_and_update_cast_photo_text_overlay(db, item["id"], force=False)
+                            else:
+                                result = detect_and_update_media_asset_text_overlay(db, item["id"], force=False)
+                            if result.status == "unknown":
+                                text_overlay_unknown += 1
+                                reason = result.reason_code or "gemini_request_failed"
+                                text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
+                            else:
+                                text_overlay_succeeded += 1
+                        except TextOverlayDetectionError as exc:
+                            text_overlay_failed += 1
+                            reason = classify_text_overlay_failure_reason(exc)
                             text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
-                        else:
-                            text_overlay_succeeded += 1
-                    except TextOverlayDetectionError as exc:
-                        text_overlay_failed += 1
-                        reason = classify_text_overlay_failure_reason(exc)
-                        text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
-                        errors.append(f"Word ID {item['id']}: {exc}")
-                    except Exception as exc:  # noqa: BLE001
-                        text_overlay_failed += 1
-                        text_overlay_reason_counts["gemini_request_failed"] = (
-                            text_overlay_reason_counts.get("gemini_request_failed", 0) + 1
-                        )
-                        errors.append(f"Word ID {item['id']}: {exc}")
+                            errors.append(f"Word ID {item['id']}: {exc}")
+                        except Exception as exc:  # noqa: BLE001
+                            text_overlay_failed += 1
+                            text_overlay_reason_counts["gemini_request_failed"] = (
+                                text_overlay_reason_counts.get("gemini_request_failed", 0) + 1
+                            )
+                            errors.append(f"Word ID {item['id']}: {exc}")
 
-                    if idx <= 20 or idx % 5 == 0 or idx == total_text:
-                        yield progress(
-                            {
-                                "stage": "word_id",
-                                "message": "Detecting words/text overlays...",
-                                "current": idx,
-                                "total": total_text,
-                            }
-                        )
+                        if idx <= 20 or idx % 5 == 0 or idx == total_text:
+                            yield progress(
+                                {
+                                    "stage": "word_id",
+                                    "message": "Detecting words/text overlays...",
+                                    "current": idx,
+                                    "total": total_text,
+                                }
+                            )
             else:
+                text_overlay_skipped_reason = "not_configured"
                 yield progress(
                     {
                         "stage": "word_id",
@@ -2504,6 +2670,9 @@ async def refresh_person_images_stream(
             "text_overlay_unknown": text_overlay_unknown,
             "text_overlay_failed": text_overlay_failed,
             "text_overlay_failure_reasons": text_overlay_reason_counts,
+            "text_overlay_configured": text_overlay_configured,
+            "text_overlay_candidates": text_overlay_candidates,
+            "text_overlay_skipped_reason": text_overlay_skipped_reason,
             "centering_attempted": centering_attempted,
             "centering_succeeded": centering_succeeded,
             "centering_failed": centering_failed,
@@ -2514,6 +2683,9 @@ async def refresh_person_images_stream(
             "resize_crop_attempted": resize_crop_attempted,
             "resize_crop_succeeded": resize_crop_succeeded,
             "resize_crop_failed": resize_crop_failed,
+            "sources_skipped": len(source_skip_details),
+            "source_skip_details": source_skip_details,
+            "live_counts": build_live_counts(),
             "errors": errors,
         }
         yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"
@@ -2542,9 +2714,26 @@ async def reprocess_person_images_stream(
     async def event_generator() -> AsyncGenerator[str, None]:
         errors: list[str] = []
         text_overlay_reason_counts: dict[str, int] = dict.fromkeys(TEXT_OVERLAY_FAILURE_REASONS, 0)
+        auto_counts_succeeded = 0
+        text_overlay_succeeded = 0
+        c_succeeded = 0
+
+        def build_live_counts() -> dict[str, int]:
+            return {
+                "synced": 0,
+                "mirrored": 0,
+                "counted": int(auto_counts_succeeded),
+                "cropped": int(c_succeeded),
+                "id_text": int(text_overlay_succeeded),
+                "resized": 0,
+            }
 
         def progress(payload: dict[str, Any]) -> str:
-            return f"event: progress\ndata: {json.dumps({'run_id': run_id, **payload})}\n\n"
+            return (
+                "event: progress\ndata: "
+                + json.dumps({"run_id": run_id, "live_counts": build_live_counts(), **payload})
+                + "\n\n"
+            )
 
         def error_event(*, stage: str, error: str, detail: str | None = None) -> str:
             payload: dict[str, Any] = {"run_id": run_id, "stage": stage, "error": error}
@@ -2595,43 +2784,123 @@ async def reprocess_person_images_stream(
         )
 
         # ---------- Word ID / text overlay (cast_photos + media_links) ----------
-        yield progress(
-            {
-                "stage": "word_id",
-                "message": "Detecting words/text overlays...",
-                "current": None,
-                "total": None,
-            }
-        )
+        text_overlay_attempted = 0
+        text_overlay_succeeded = 0
+        text_overlay_unknown = 0
+        text_overlay_failed = 0
+        text_overlay_configured = False
+        text_overlay_candidates = 0
+        text_overlay_skipped_reason: str | None = None
 
-        to_cast, ts_cast, tu_cast, tf_cast = _detect_text_overlay_cast_photos(
-            db,
-            person_id_str,
-            sources,
-            reason_counts=text_overlay_reason_counts,
-        )
-        to_media, ts_media, tu_media, tf_media = _detect_text_overlay_media_links(
-            db,
-            person_id_str,
-            reason_counts=text_overlay_reason_counts,
-        )
-        text_overlay_attempted = to_cast + to_media
-        text_overlay_succeeded = ts_cast + ts_media
-        text_overlay_unknown = tu_cast + tu_media
-        text_overlay_failed = tf_cast + tf_media
+        cast_candidate_ids: list[str] = []
+        media_candidate_ids: list[str] = []
 
-        yield progress(
-            {
-                "stage": "word_id",
-                "message": (
-                    "Text detection done "
-                    f"({text_overlay_succeeded} succeeded, {text_overlay_unknown} "
-                    f"unknown, {text_overlay_failed} failed)."
-                ),
-                "current": text_overlay_attempted,
-                "total": text_overlay_attempted,
-            }
-        )
+        try:
+            from trr_backend.vision.text_overlay import is_text_overlay_detection_configured
+
+            text_overlay_configured = is_text_overlay_detection_configured()
+        except Exception:
+            text_overlay_configured = False
+
+        if text_overlay_configured:
+            try:
+                cast_rows = (
+                    db.schema("core")
+                    .table("cast_photos")
+                    .select("id, metadata, source")
+                    .eq("person_id", person_id_str)
+                    .in_("source", [s for s in sources if s in ALL_SOURCES])
+                    .execute()
+                    .data
+                    or []
+                )
+                for row in cast_rows:
+                    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    if "has_text_overlay" in metadata:
+                        continue
+                    row_id = row.get("id")
+                    if row_id:
+                        cast_candidate_ids.append(str(row_id))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Word ID candidate cast lookup: {exc}")
+
+            try:
+                media_rows = _fetch_person_media_link_rows(db, person_id_str)
+                seen_asset_ids: set[str] = set()
+                for row in media_rows:
+                    asset_id = str(row.get("media_asset_id") or "")
+                    if not asset_id or asset_id in seen_asset_ids:
+                        continue
+                    seen_asset_ids.add(asset_id)
+                    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    if "has_text_overlay" in metadata:
+                        continue
+                    media_candidate_ids.append(asset_id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Word ID candidate media lookup: {exc}")
+
+            text_overlay_candidates = len(cast_candidate_ids) + len(media_candidate_ids)
+
+            if text_overlay_candidates == 0:
+                text_overlay_skipped_reason = "no_pending_images"
+                yield progress(
+                    {
+                        "stage": "word_id",
+                        "message": "Text overlay already up to date (no pending images).",
+                        "current": 0,
+                        "total": 0,
+                    }
+                )
+            else:
+                yield progress(
+                    {
+                        "stage": "word_id",
+                        "message": "Detecting words/text overlays...",
+                        "current": 0,
+                        "total": text_overlay_candidates,
+                    }
+                )
+
+                to_cast, ts_cast, tu_cast, tf_cast = _detect_text_overlay_cast_photos(
+                    db,
+                    person_id_str,
+                    sources,
+                    photo_ids=cast_candidate_ids,
+                    reason_counts=text_overlay_reason_counts,
+                )
+                to_media, ts_media, tu_media, tf_media = _detect_text_overlay_media_links(
+                    db,
+                    person_id_str,
+                    asset_ids=media_candidate_ids,
+                    reason_counts=text_overlay_reason_counts,
+                )
+                text_overlay_attempted = to_cast + to_media
+                text_overlay_succeeded = ts_cast + ts_media
+                text_overlay_unknown = tu_cast + tu_media
+                text_overlay_failed = tf_cast + tf_media
+
+                yield progress(
+                    {
+                        "stage": "word_id",
+                        "message": (
+                            "Text detection done "
+                            f"({text_overlay_succeeded} succeeded, {text_overlay_unknown} "
+                            f"unknown, {text_overlay_failed} failed)."
+                        ),
+                        "current": text_overlay_attempted,
+                        "total": text_overlay_candidates,
+                    }
+                )
+        else:
+            text_overlay_skipped_reason = "not_configured"
+            yield progress(
+                {
+                    "stage": "word_id",
+                    "message": "Skipping word detection (not configured).",
+                    "current": 0,
+                    "total": 0,
+                }
+            )
 
         # ---------- Centering / cropping ----------
         yield progress(
@@ -2671,10 +2940,14 @@ async def reprocess_person_images_stream(
             "text_overlay_unknown": text_overlay_unknown,
             "text_overlay_failed": text_overlay_failed,
             "text_overlay_failure_reasons": text_overlay_reason_counts,
+            "text_overlay_configured": text_overlay_configured,
+            "text_overlay_candidates": text_overlay_candidates,
+            "text_overlay_skipped_reason": text_overlay_skipped_reason,
             "centering_attempted": c_attempted,
             "centering_succeeded": c_succeeded,
             "centering_failed": c_failed,
             "centering_skipped_manual": c_skipped,
+            "live_counts": build_live_counts(),
             "errors": errors,
         }
         yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"

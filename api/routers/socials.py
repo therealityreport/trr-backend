@@ -13,9 +13,10 @@ Provides endpoints to:
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
@@ -27,6 +28,29 @@ from api.auth import AdminUser
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
+
+
+def _env_truthy(name: str) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _is_local_or_dev_runtime() -> bool:
+    runtime_markers = [
+        os.getenv("APP_ENV"),
+        os.getenv("ENV"),
+        os.getenv("ENVIRONMENT"),
+        os.getenv("TRR_ENV"),
+        os.getenv("TRR_ENVIRONMENT"),
+    ]
+    normalized = {str(value or "").strip().lower() for value in runtime_markers if str(value or "").strip()}
+    if normalized & {"local", "dev", "development", "test"}:
+        return True
+
+    if _env_truthy("TRR_LOCAL_DEV") or _env_truthy("SOCIAL_ALLOW_INLINE_DEV_FALLBACK"):
+        return True
+
+    return False
 
 
 # Request/Response Models
@@ -775,6 +799,7 @@ class SeasonSocialIngestRequest(BaseModel):
     ingest_mode: Literal["posts_only", "posts_and_comments", "comments_only"] = Field(default="posts_and_comments")
     date_start: datetime | None = None
     date_end: datetime | None = None
+    allow_inline_dev_fallback: bool = Field(default=False)
 
 
 class PostCommentRefreshRequest(BaseModel):
@@ -830,6 +855,8 @@ async def ingest_season_social(
     user: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import (
+        SocialWorkerUnavailableError,
+        assert_worker_available_when_queue_enabled,
         execute_run,
         ingest_season,
         is_queue_enabled,
@@ -839,6 +866,37 @@ async def ingest_season_social(
     email = user.get("email") if user else None
 
     try:
+        queue_enabled = is_queue_enabled()
+        execution_mode: Literal["queue", "inline_fallback", "inline_default"] = (
+            "queue" if queue_enabled else "inline_default"
+        )
+        warnings: list[str] = []
+        worker_health: dict[str, Any] | None = None
+        if queue_enabled:
+            try:
+                worker_health = assert_worker_available_when_queue_enabled()
+            except SocialWorkerUnavailableError as exc:
+                worker_health = exc.worker_health
+                if payload.allow_inline_dev_fallback and _is_local_or_dev_runtime():
+                    queue_enabled = False
+                    execution_mode = "inline_fallback"
+                    warnings.append(
+                        "No healthy social ingest worker heartbeat detected; using inline dev fallback execution."
+                    )
+                    logger.warning(
+                        "Falling back to inline social ingest execution in dev/local runtime: season=%s",
+                        sid,
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": "SOCIAL_WORKER_UNAVAILABLE",
+                            "message": str(exc),
+                            "worker_health": worker_health,
+                        },
+                    ) from exc
+
         run_payload = ingest_season(
             sid,
             platforms=payload.platforms,
@@ -855,7 +913,6 @@ async def ingest_season_social(
         )
 
         run_id = str(run_payload.get("run_id") or "")
-        queue_enabled = is_queue_enabled()
         if run_id and not queue_enabled:
 
             def _run_sync() -> None:
@@ -881,19 +938,45 @@ async def ingest_season_social(
 
             background_tasks.add_task(_run_sync)
 
-        return {
-            "status": run_payload.get("status") or ("queued" if queue_enabled else "started"),
+        status_value = str(run_payload.get("status") or "").strip().lower()
+        if not status_value:
+            status_value = "queued" if execution_mode == "queue" else "started"
+        elif execution_mode != "queue" and status_value in {"queued", "pending"}:
+            status_value = "started"
+
+        response_payload: dict[str, Any] = {
+            "status": status_value,
             "season_id": sid,
             "run_id": run_payload.get("run_id"),
             "stages": run_payload.get("stages") or [],
             "queued_or_started_jobs": run_payload.get("queued_or_started_jobs") or 0,
             "summary": run_payload.get("summary") or {},
+            "execution_mode": execution_mode,
             "message": "Ingest run enqueued. Poll /ingest/jobs with run_id for stage progress.",
         }
+        if warnings:
+            response_payload["warnings"] = warnings
+        if execution_mode == "inline_fallback" and worker_health is not None:
+            response_payload["worker_health"] = worker_health
+        return response_payload
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to enqueue social ingest: season=%s", sid)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/ingest/worker-health")
+async def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
+    from trr_backend.repositories.social_season_analytics import get_worker_health, is_queue_enabled
+
+    try:
+        health = get_worker_health()
+        return {"queue_enabled": is_queue_enabled(), **health}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch social ingest worker health")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

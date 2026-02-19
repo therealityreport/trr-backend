@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
@@ -34,6 +34,7 @@ class ScrapeConfig:
     date_end: datetime | None = None
     delay_seconds: float = 2.0
     max_pages: int | None = None  # None = no limit
+    no_match_page_limit: int | None = None  # None = use scraper default/env
 
     # Metadata for tracking
     show_id: int | None = None
@@ -150,6 +151,7 @@ class InstagramScraper:
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_CONNECT_TIMEOUT_SECONDS = 10
     REQUEST_READ_TIMEOUT_SECONDS = 45
+    DEFAULT_NO_MATCH_PAGE_LIMIT = 40
 
     def __init__(self, cookies: dict | None = None):
         self.cookies = cookies or {}
@@ -186,6 +188,26 @@ class InstagramScraper:
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         return session
+
+    def _resolve_no_match_page_limit(self, config: ScrapeConfig) -> int:
+        if config.no_match_page_limit is not None:
+            try:
+                return max(0, int(config.no_match_page_limit))
+            except (TypeError, ValueError):
+                return 0
+
+        raw = (os.getenv("SOCIAL_INSTAGRAM_NO_MATCH_PAGE_LIMIT") or "").strip() or (
+            os.getenv("SOCIAL_NO_MATCH_PAGE_LIMIT") or ""
+        ).strip()
+        if raw:
+            try:
+                return max(0, int(raw))
+            except ValueError:
+                return 0
+
+        if config.date_start or config.date_end:
+            return self.DEFAULT_NO_MATCH_PAGE_LIMIT
+        return 0
 
     def _get(self, url: str, **kwargs: Any) -> requests.Response:
         return self.session.get(url, timeout=self.request_timeout, **kwargs)
@@ -700,7 +722,34 @@ class InstagramScraper:
 
         return urls
 
-    def scrape(self, config: ScrapeConfig) -> list[InstagramPost]:
+    def _emit_progress(
+        self,
+        progress_cb: Callable[[dict[str, Any]], None] | None,
+        *,
+        phase: str,
+        pages_scanned: int,
+        posts_checked: int,
+        matched_posts: int,
+    ) -> None:
+        if not progress_cb:
+            return
+        try:
+            progress_cb(
+                {
+                    "phase": phase,
+                    "pages_scanned": max(0, int(pages_scanned)),
+                    "posts_checked": max(0, int(posts_checked)),
+                    "matched_posts": max(0, int(matched_posts)),
+                }
+            )
+        except Exception:
+            logger.debug("Instagram scrape progress callback raised", exc_info=True)
+
+    def scrape(
+        self,
+        config: ScrapeConfig,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[InstagramPost]:
         """
         Scrape posts from an Instagram profile with filtering.
 
@@ -719,7 +768,7 @@ class InstagramScraper:
         # Determine scrape mode
         has_auth = bool(self.cookies.get("sessionid"))
         if has_auth:
-            posts = self._scrape_graphql(config)
+            posts = self._scrape_graphql(config, progress_cb=progress_cb)
             # If the very first authenticated page fails, degrade gracefully to profile-info mode.
             if not posts and self.last_retrieval_meta.get("initial_page_failed"):
                 fallback_reason = self.last_retrieval_meta.get("fallback_reason") or "graphql_initial_page_failed"
@@ -728,14 +777,19 @@ class InstagramScraper:
                     config.username,
                     fallback_reason,
                 )
-                posts = self._scrape_profile_info(config)
+                posts = self._scrape_profile_info(config, progress_cb=progress_cb)
                 self.last_retrieval_meta["retrieval_mode"] = "profile_info_fallback"
                 self.last_retrieval_meta["fallback_reason"] = fallback_reason
                 self.last_retrieval_meta["first_page_count"] = len(posts)
             return posts
-        return self._scrape_profile_info(config)
+        return self._scrape_profile_info(config, progress_cb=progress_cb)
 
-    def _scrape_profile_info(self, config: ScrapeConfig) -> list[InstagramPost]:
+    def _scrape_profile_info(
+        self,
+        config: ScrapeConfig,
+        *,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[InstagramPost]:
         """Scrape using public profile info API (limited results)."""
         logger.info("Using profile info API (unauthenticated, limited to ~12 posts)")
 
@@ -744,7 +798,9 @@ class InstagramScraper:
             return []
 
         posts = []
+        posts_checked = 0
         for node, _ in self._iter_posts_from_profile_info(data):
+            posts_checked += 1
             timestamp = self._extract_timestamp(node)
 
             # Check date range
@@ -760,6 +816,13 @@ class InstagramScraper:
                 post = self._parse_post_node(node, config)
                 posts.append(post)
                 logger.info(f"Found: {post.shortcode} ({post.date_time})")
+            self._emit_progress(
+                progress_cb,
+                phase="scrape_profile_page",
+                pages_scanned=1,
+                posts_checked=posts_checked,
+                matched_posts=len(posts),
+            )
 
         logger.info(f"Scrape complete: {len(posts)} posts found")
         self.last_retrieval_meta = {
@@ -770,7 +833,12 @@ class InstagramScraper:
         }
         return posts
 
-    def _scrape_graphql(self, config: ScrapeConfig) -> list[InstagramPost]:
+    def _scrape_graphql(
+        self,
+        config: ScrapeConfig,
+        *,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[InstagramPost]:
         """Scrape using GraphQL API with full pagination."""
         logger.info("Using GraphQL API (authenticated, full pagination)")
 
@@ -781,11 +849,15 @@ class InstagramScraper:
         reached_date_limit = False
         initial_page_failed = False
         failure_reason: str | None = None
+        stop_reason: str | None = None
+        no_match_pages = 0
+        no_match_page_limit = self._resolve_no_match_page_limit(config)
 
         while not reached_date_limit:
             page_num += 1
             if config.max_pages and page_num > config.max_pages:
                 logger.info(f"Reached max pages limit ({config.max_pages})")
+                stop_reason = "max_pages_reached"
                 break
 
             logger.info(f"Fetching page {page_num}...")
@@ -794,10 +866,12 @@ class InstagramScraper:
                 if page_num == 1:
                     initial_page_failed = True
                     failure_reason = "graphql_empty_or_error"
+                stop_reason = "graphql_empty_or_error"
                 break
 
             page_info = {}
             posts_on_page = 0
+            page_matches = 0
 
             for node, pi in self._iter_posts_from_graphql(data):
                 page_info = pi
@@ -810,6 +884,7 @@ class InstagramScraper:
                 in_range = config.is_in_date_range(timestamp)
                 if in_range is None:  # Before range
                     reached_date_limit = True
+                    stop_reason = "date_start_reached"
                     break
                 if in_range is False:  # After range
                     continue
@@ -819,20 +894,44 @@ class InstagramScraper:
                 if config.matches_hashtags(caption):
                     post = self._parse_post_node(node, config)
                     posts.append(post)
+                    page_matches += 1
                     logger.info(
                         f"Found #{len(posts)}: {post.shortcode} ({post.date_time}) "
                         f"- {post.post_type} - {post.likes:,} likes"
                     )
 
+            self._emit_progress(
+                progress_cb,
+                phase="scrape_graphql_page",
+                pages_scanned=page_num,
+                posts_checked=posts_checked,
+                matched_posts=len(posts),
+            )
+
             if posts_on_page == 0:
                 logger.info("No more posts found")
+                stop_reason = "no_more_posts"
                 break
+
+            if no_match_page_limit > 0 and page_matches == 0 and (config.date_start or config.date_end):
+                no_match_pages += 1
+                if no_match_pages >= no_match_page_limit:
+                    logger.info(
+                        "Stopping GraphQL crawl after %d consecutive no-match pages (limit=%d)",
+                        no_match_pages,
+                        no_match_page_limit,
+                    )
+                    stop_reason = "no_match_page_limit_reached"
+                    break
+            elif page_matches > 0:
+                no_match_pages = 0
 
             # Get next page
             has_next = page_info.get("has_next_page", False)
             cursor = page_info.get("end_cursor")
             if not has_next or not cursor:
                 logger.info("No more pages available")
+                stop_reason = "no_more_pages"
                 break
 
             logger.info(f"Page {page_num}: checked {posts_on_page} posts, {len(posts)} matches total")
@@ -845,6 +944,9 @@ class InstagramScraper:
             "initial_page_failed": initial_page_failed,
             "pages_scanned": page_num,
             "posts_checked": posts_checked,
+            "stop_reason": stop_reason,
+            "no_match_pages": no_match_pages,
+            "no_match_page_limit": no_match_page_limit,
         }
         return posts
 

@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import logging
+import mimetypes
 import os
 import re
 from collections import Counter, defaultdict
@@ -13,7 +14,10 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
+
+import requests
 
 from trr_backend.db import pg
 
@@ -23,9 +27,13 @@ SUPPORTED_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube")
 SUPPORTED_SCOPES = ("bravo", "creator", "community")
 SUPPORTED_INGEST_MODES = ("posts_only", "posts_and_comments", "comments_only")
 SUPPORTED_SYNC_STRATEGIES = ("incremental", "full_refresh")
-JOB_PROGRESS_UPDATE_EVERY = 25
+JOB_PROGRESS_MIN_DELTA = 5
+JOB_PROGRESS_MAX_INTERVAL_SECONDS = 3
 COMMENT_STALE_RECHECK_INTERVAL = timedelta(hours=24)
 QUIET_POST_FORCE_RECHECK_AGE = timedelta(days=14)
+SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT = 180
+SOCIAL_WORKER_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 15
+SOCIAL_JOB_STALE_SECONDS_DEFAULT = 300
 
 POSITIVE_WORDS = {
     "amazing",
@@ -260,6 +268,14 @@ class SentimentRuleResult:
     ambiguous: bool
 
 
+class SocialWorkerUnavailableError(ValueError):
+    """Raised when queue mode is enabled but no healthy social worker is active."""
+
+    def __init__(self, message: str, *, worker_health: dict[str, Any]):
+        super().__init__(message)
+        self.worker_health = worker_health
+
+
 # ---------------------------------------------------------------------------
 # General helpers
 # ---------------------------------------------------------------------------
@@ -278,6 +294,200 @@ def _env_truthy(name: str, *, default: bool = False) -> bool:
 
 def is_queue_enabled() -> bool:
     return _env_truthy("SOCIAL_QUEUE_ENABLED", default=False)
+
+
+def _resolve_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return max(minimum, default)
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return max(minimum, default)
+
+
+def _normalize_worker_stage(stage: str | None) -> str:
+    value = (stage or "").strip().lower()
+    if not value:
+        return "any"
+    if value in {"posts", "comments", "any"}:
+        return value
+    return "any"
+
+
+def _normalize_worker_status(status: str | None) -> str:
+    value = (status or "").strip().lower()
+    if value in {"starting", "idle", "working", "stopped"}:
+        return value
+    return "idle"
+
+
+def _worker_heartbeat_schema_ready() -> bool:
+    return _relation_exists("social.scrape_workers")
+
+
+def update_worker_heartbeat(
+    worker_id: str,
+    *,
+    stage: str | None,
+    status: str,
+    run_id: str | None = None,
+    current_job_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not _worker_heartbeat_schema_ready():
+        return None
+
+    row = pg.fetch_one(
+        """
+        insert into social.scrape_workers (
+          worker_id,
+          stage,
+          status,
+          run_id,
+          current_job_id,
+          metadata,
+          started_at,
+          last_seen_at,
+          updated_at
+        )
+        values (
+          %s,
+          %s,
+          %s,
+          %s,
+          %s,
+          %s::jsonb,
+          now(),
+          now(),
+          now()
+        )
+        on conflict (worker_id)
+        do update set
+          stage = excluded.stage,
+          status = excluded.status,
+          run_id = excluded.run_id,
+          current_job_id = excluded.current_job_id,
+          metadata = excluded.metadata,
+          last_seen_at = now(),
+          updated_at = now()
+        returning
+          worker_id,
+          stage,
+          status,
+          run_id::text as run_id,
+          current_job_id::text as current_job_id,
+          metadata,
+          started_at,
+          last_seen_at,
+          updated_at
+        """,
+        [
+            worker_id,
+            _normalize_worker_stage(stage),
+            _normalize_worker_status(status),
+            run_id,
+            current_job_id,
+            json.dumps(metadata or {}),
+        ],
+    )
+    return row
+
+
+def mark_worker_stopped(
+    worker_id: str,
+    *,
+    stage: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    return update_worker_heartbeat(
+        worker_id,
+        stage=stage,
+        status="stopped",
+        run_id=None,
+        current_job_id=None,
+        metadata=metadata,
+    )
+
+
+def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, Any]:
+    stale_seconds = stale_after_seconds or _resolve_positive_int_env(
+        "SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS",
+        SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT,
+        minimum=5,
+    )
+    payload: dict[str, Any] = {
+        "healthy": False,
+        "healthy_workers": 0,
+        "active_workers": 0,
+        "total_workers": 0,
+        "stale_after_seconds": stale_seconds,
+        "workers": [],
+        "reason": None,
+    }
+
+    if not _worker_heartbeat_schema_ready():
+        payload["reason"] = "worker_heartbeat_schema_missing"
+        return payload
+
+    workers = pg.fetch_all(
+        """
+        select
+          worker_id,
+          stage,
+          status,
+          run_id::text as run_id,
+          current_job_id::text as current_job_id,
+          metadata,
+          started_at,
+          last_seen_at,
+          updated_at,
+          (
+            status in ('starting', 'idle', 'working')
+            and last_seen_at >= now() - (%s * interval '1 second')
+          ) as is_healthy
+        from social.scrape_workers
+        order by last_seen_at desc
+        limit 100
+        """,
+        [stale_seconds],
+    )
+    healthy_workers = sum(1 for worker in workers if bool(worker.get("is_healthy")))
+    active_workers = sum(1 for worker in workers if str(worker.get("status") or "") != "stopped")
+    payload.update(
+        {
+            "healthy": healthy_workers > 0,
+            "healthy_workers": healthy_workers,
+            "active_workers": active_workers,
+            "total_workers": len(workers),
+            "workers": workers,
+            "reason": None if healthy_workers > 0 else "no_healthy_workers",
+        }
+    )
+    return payload
+
+
+def assert_worker_available_when_queue_enabled() -> dict[str, Any]:
+    if not is_queue_enabled():
+        return {
+            "healthy": True,
+            "healthy_workers": 0,
+            "active_workers": 0,
+            "total_workers": 0,
+            "workers": [],
+            "reason": "queue_disabled",
+        }
+
+    health = get_worker_health()
+    if bool(health.get("healthy")):
+        return health
+
+    reason = str(health.get("reason") or "no_healthy_workers")
+    if reason == "worker_heartbeat_schema_missing":
+        message = "Social worker heartbeat schema is missing. Apply migration 0130 before enabling queue mode."
+    else:
+        message = "No healthy social ingest workers are reporting heartbeats."
+    raise SocialWorkerUnavailableError(message, worker_health=health)
 
 
 def _resolve_depth_defaults(
@@ -358,6 +568,31 @@ def _column_exists(schema: str, table: str, column: str) -> bool:
     result = bool(row.get("exists"))
     _column_exists_cache[key] = result
     return result
+
+
+def _instagram_posts_has_column(column: str) -> bool:
+    """Best-effort schema guard for additive instagram_posts columns."""
+    try:
+        return _column_exists("social", "instagram_posts", column)
+    except Exception:
+        # Fall back to existing behavior if schema introspection is unavailable.
+        return True
+
+
+def _instagram_posts_thumbnail_expr(alias: str = "p") -> str:
+    return f"coalesce(nullif(to_jsonb({alias}) ->> 'hosted_thumbnail_url', ''), {alias}.thumbnail_url)"
+
+
+def _instagram_posts_json_array_expr(alias: str, key: str) -> str:
+    return f"coalesce(to_jsonb({alias}) -> '{key}', '[]'::jsonb)"
+
+
+def _instagram_posts_json_text_expr(alias: str, key: str) -> str:
+    return f"(to_jsonb({alias}) ->> '{key}')"
+
+
+def _instagram_posts_duration_expr(alias: str = "p") -> str:
+    return f"nullif(to_jsonb({alias}) ->> 'duration_seconds', '')::integer"
 
 
 def _assert_social_queue_schema_ready() -> None:
@@ -467,7 +702,7 @@ def _youtube_video_matches_show_terms(
     """Apply strict show matching for YouTube ingestion.
 
     Rules:
-    - Match if show terms appear in title.
+    - Match if show terms appear in title or description.
     - Match if configured show hashtags appear in description with ``#`` prefix.
     - Exclude known cross-show promos by title pattern.
     """
@@ -492,11 +727,31 @@ def _youtube_video_matches_show_terms(
     if title_match:
         return True
 
-    description_lower = str(description or "").lower()
-    if not description_lower:
+    description_text = str(description or "")
+    if not description_text:
         return False
 
-    return any(f"#{tag}" in description_lower for tag in show_hashtags)
+    description_lower = description_text.lower()
+    if any(f"#{tag}" in description_lower for tag in show_hashtags):
+        return True
+
+    return _text_contains_any_term(text=description_text, hashtags=show_hashtags, keywords=show_keywords)
+
+
+def _youtube_filter_sample(
+    *,
+    reason: str,
+    title: str | None,
+    video_id: str | None,
+) -> dict[str, str]:
+    payload: dict[str, str] = {"reason": reason}
+    cleaned_title = str(title or "").strip()
+    cleaned_video_id = str(video_id or "").strip()
+    if cleaned_title:
+        payload["title"] = cleaned_title
+    if cleaned_video_id:
+        payload["video_id"] = cleaned_video_id
+    return payload
 
 
 def _build_twitter_or_query(*, hashtags: list[str], keywords: list[str]) -> str:
@@ -977,6 +1232,62 @@ def put_targets(
 # ---------------------------------------------------------------------------
 
 
+def _touch_worker_heartbeat_for_job(
+    *,
+    job_id: str,
+    status: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    if not _worker_heartbeat_schema_ready():
+        return
+    pg.fetch_one(
+        """
+        update social.scrape_workers as w
+        set
+          stage = coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type, w.stage),
+          status = %s,
+          run_id = coalesce(j.run_id, w.run_id),
+          current_job_id = j.id,
+          metadata = coalesce(w.metadata, '{}'::jsonb) || %s::jsonb,
+          last_seen_at = now(),
+          updated_at = now()
+        from social.scrape_jobs as j
+        where j.id = %s::uuid
+          and j.worker_id is not null
+          and w.worker_id = j.worker_id
+        returning w.worker_id
+        """,
+        [_normalize_worker_status(status), json.dumps(metadata or {}), job_id],
+    )
+
+
+def _clear_worker_heartbeat_for_job(
+    *,
+    job_id: str,
+    status: str = "idle",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    if not _worker_heartbeat_schema_ready():
+        return
+    pg.fetch_one(
+        """
+        update social.scrape_workers as w
+        set
+          status = %s,
+          current_job_id = null,
+          metadata = coalesce(w.metadata, '{}'::jsonb) || %s::jsonb,
+          last_seen_at = now(),
+          updated_at = now()
+        from social.scrape_jobs as j
+        where j.id = %s::uuid
+          and j.worker_id is not null
+          and w.worker_id = j.worker_id
+        returning w.worker_id
+        """,
+        [_normalize_worker_status(status), json.dumps(metadata or {}), job_id],
+    )
+
+
 def _create_job(
     context: SeasonContext,
     *,
@@ -1071,6 +1382,11 @@ def _touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> None:
         """,
         [worker_id, job_id],
     )
+    _touch_worker_heartbeat_for_job(
+        job_id=job_id,
+        status="working",
+        metadata={"source": "job_heartbeat"},
+    )
 
 
 def _update_job_progress(
@@ -1091,6 +1407,11 @@ def _update_job_progress(
         returning id::text
         """,
         [items_found, json.dumps(metadata or {}), job_id],
+    )
+    _touch_worker_heartbeat_for_job(
+        job_id=job_id,
+        status="working",
+        metadata={"source": "job_progress"},
     )
 
 
@@ -1136,6 +1457,18 @@ def _finish_job(
             job_id,
         ],
     )
+    if is_terminal:
+        _clear_worker_heartbeat_for_job(
+            job_id=job_id,
+            status="idle",
+            metadata={"source": "job_finish", "job_status": status},
+        )
+    else:
+        _touch_worker_heartbeat_for_job(
+            job_id=job_id,
+            status="working",
+            metadata={"source": "job_finish", "job_status": status},
+        )
 
 
 def _create_run(
@@ -1285,6 +1618,179 @@ def _finalize_run_status(run_id: str) -> dict[str, Any]:
     return summary
 
 
+def _normalize_non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _new_job_progress_state() -> dict[str, Any]:
+    return {
+        "last_items_found": -1,
+        "last_progress_at": None,
+    }
+
+
+def _build_progress_activity_payload(activity: dict[str, Any] | None, *, now: datetime) -> dict[str, Any]:
+    payload: dict[str, Any] = {"last_progress_at": _iso(now)}
+    if not activity:
+        return payload
+    if activity.get("phase"):
+        payload["phase"] = str(activity.get("phase"))
+    for field in ("pages_scanned", "posts_checked", "matched_posts"):
+        if field in activity and activity.get(field) is not None:
+            payload[field] = _normalize_non_negative_int(activity.get(field))
+    return payload
+
+
+def _emit_job_progress(
+    *,
+    job_id: str,
+    stage: str,
+    platform: str,
+    account: str,
+    scraped_posts: int,
+    scraped_comments: int,
+    posts_upserted: int,
+    comments_upserted: int,
+    activity: dict[str, Any] | None,
+    progress_state: dict[str, Any],
+    force: bool = False,
+) -> bool:
+    now = _now_utc()
+    scraped_posts_value = _normalize_non_negative_int(scraped_posts)
+    scraped_comments_value = _normalize_non_negative_int(scraped_comments)
+    items_found = scraped_posts_value + scraped_comments_value
+    last_items_found = _normalize_non_negative_int(progress_state.get("last_items_found"))
+    last_progress_at = _coerce_dt(progress_state.get("last_progress_at"))
+    elapsed_seconds = (
+        float("inf")
+        if last_progress_at is None
+        else (
+            now - (last_progress_at if last_progress_at.tzinfo else last_progress_at.replace(tzinfo=UTC))
+        ).total_seconds()
+    )
+    delta = abs(items_found - last_items_found)
+    if not force:
+        if delta < JOB_PROGRESS_MIN_DELTA and elapsed_seconds < JOB_PROGRESS_MAX_INTERVAL_SECONDS:
+            return False
+
+    metadata = {
+        "stage": stage,
+        "platform": platform,
+        "account": account,
+        "stage_counters": {
+            "posts": scraped_posts_value,
+            "comments": scraped_comments_value,
+        },
+        "persist_counters": {
+            "posts_upserted": _normalize_non_negative_int(posts_upserted),
+            "comments_upserted": _normalize_non_negative_int(comments_upserted),
+        },
+        "activity": _build_progress_activity_payload(activity, now=now),
+    }
+    _update_job_progress(job_id, items_found=items_found, metadata=metadata)
+    progress_state["last_items_found"] = items_found
+    progress_state["last_progress_at"] = now
+    return True
+
+
+def _resolve_social_job_stale_seconds() -> int:
+    return _resolve_positive_int_env(
+        "SOCIAL_JOB_STALE_SECONDS",
+        SOCIAL_JOB_STALE_SECONDS_DEFAULT,
+        minimum=30,
+    )
+
+
+def recover_stale_running_jobs(
+    *,
+    run_id: str | None = None,
+    stage: str | None = None,
+    stale_after_seconds: int | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    stale_seconds = max(30, stale_after_seconds or _resolve_social_job_stale_seconds())
+    stale_limit = max(1, min(int(limit), 250))
+    recovered_rows = pg.fetch_all(
+        """
+        with stale_jobs as (
+          select j.id
+          from social.scrape_jobs j
+          where j.status = 'running'
+            and coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at) <
+              now() - (%s * interval '1 second')
+            and (%s::uuid is null or j.run_id = %s::uuid)
+            and (
+              %s::text is null
+              or coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s::text
+            )
+          order by coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at) asc
+          for update skip locked
+          limit %s
+        )
+        update social.scrape_jobs as j
+        set
+          status = case
+            when j.attempt_count < j.max_attempts then 'retrying'
+            else 'failed'
+          end,
+          completed_at = case
+            when j.attempt_count < j.max_attempts then j.completed_at
+            else now()
+          end,
+          available_at = case
+            when j.attempt_count < j.max_attempts
+              then now() + (
+                greatest(5, least(300, 5 * (2 ^ greatest(0, j.attempt_count - 1))))
+                * interval '1 second'
+              )
+            else j.available_at
+          end,
+          error_message = format(
+            'stale_heartbeat_timeout: no heartbeat for >= %%s seconds',
+            %s
+          ),
+          heartbeat_at = now(),
+          last_error_code = 'stale_heartbeat_timeout',
+          last_error_class = 'HeartbeatTimeout',
+          metadata = coalesce(j.metadata, '{}'::jsonb) || jsonb_build_object(
+            'error_code', 'stale_heartbeat_timeout',
+            'error_class', 'HeartbeatTimeout',
+            'retryable', (j.attempt_count < j.max_attempts),
+            'stale_heartbeat_timeout_seconds', %s,
+            'stale_recovered_at', now()
+          )
+        from stale_jobs
+        where j.id = stale_jobs.id
+        returning
+          j.id::text as id,
+          j.run_id::text as run_id,
+          j.platform,
+          j.status,
+          j.attempt_count,
+          j.max_attempts
+        """,
+        [stale_seconds, run_id, run_id, stage, stage, stale_limit, stale_seconds, stale_seconds],
+    )
+    if not recovered_rows:
+        return []
+
+    for row in recovered_rows:
+        if row.get("id"):
+            _clear_worker_heartbeat_for_job(
+                job_id=str(row.get("id")),
+                status="idle",
+                metadata={"source": "stale_recovery", "job_status": row.get("status")},
+            )
+
+    affected_run_ids = sorted({str(row.get("run_id") or "") for row in recovered_rows if row.get("run_id")})
+    for stale_run_id in affected_run_ids:
+        _finalize_run_status(stale_run_id)
+    return recovered_rows
+
+
 def _parse_platform_time(ts: Any) -> datetime | None:
     """Parse a platform timestamp (unix int/float or ISO string) to UTC datetime."""
     if isinstance(ts, int):
@@ -1297,6 +1803,269 @@ def _parse_platform_time(ts: Any) -> datetime | None:
 # Backwards-compatible aliases
 _parse_instagram_time = _parse_platform_time
 _parse_tiktok_time = _parse_platform_time
+
+
+def _as_text_list(value: Any, *, prefix: str = "", strip_prefix: str | None = None) -> list[str]:
+    items: list[Any]
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        items = parsed if isinstance(parsed, list) else []
+    else:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if strip_prefix and text.startswith(strip_prefix):
+            text = text[len(strip_prefix) :].strip()
+        if prefix and not text.startswith(prefix):
+            text = f"{prefix}{text}"
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def _extract_shortcode_from_permalink(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/" not in text:
+        return text
+    parsed = urlparse(text)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) >= 2 and segments[0] in {"p", "reel", "tv"}:
+        return segments[1]
+    return text
+
+
+def _parse_instagram_caption_hashtags(text: str | None) -> list[str]:
+    if not text:
+        return []
+    return _normalize_unique_terms([tag.lstrip("#") for tag in re.findall(r"(?<![\w.])#([A-Za-z0-9_]+)", text)])
+
+
+def _parse_instagram_caption_mentions(text: str | None) -> list[str]:
+    if not text:
+        return []
+    mentions = [f"@{mention}" for mention in re.findall(r"(?<![\w.])@([A-Za-z0-9_.]+)", text)]
+    return _normalize_unique_terms(mentions)
+
+
+def _extract_media_item_from_post_info(post_info: Any) -> dict[str, Any] | None:
+    if not isinstance(post_info, dict):
+        return None
+    items = post_info.get("items")
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return items[0]
+    data = post_info.get("data")
+    if isinstance(data, dict):
+        nested_items = data.get("items")
+        if isinstance(nested_items, list) and nested_items and isinstance(nested_items[0], dict):
+            return nested_items[0]
+    return None
+
+
+def _enrich_instagram_post_from_permalink(
+    *,
+    post: Any,
+    scraper: Any,
+    now_utc: datetime,
+) -> None:
+    from trr_backend.socials.instagram import fetch_permalink_metadata, parse_permalink_metadata
+
+    shortcode = str(getattr(post, "shortcode", "") or "").strip()
+    if not shortcode:
+        post.metadata_source = None
+        post.metadata_scraped_at = now_utc
+        post.metadata_error = "missing_shortcode"
+        return
+
+    errors: list[str] = []
+    metadata = None
+
+    try:
+        metadata = fetch_permalink_metadata(
+            shortcode,
+            session=getattr(scraper, "session", None),
+            cookies=getattr(scraper, "cookies", None),
+        )
+        if metadata is not None:
+            post.metadata_source = "permalink_html"
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"permalink_html:{exc}")
+
+    if metadata is None:
+        try:
+            post_info = scraper.fetch_post_info(shortcode, delay=0.0)
+            media_item = _extract_media_item_from_post_info(post_info)
+            if media_item:
+                metadata = parse_permalink_metadata(media_item)
+                post.metadata_source = "media_info_fallback"
+            else:
+                errors.append("media_info_fallback:item_not_found")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"media_info_fallback:{exc}")
+
+    caption = str(getattr(post, "caption", "") or "")
+    profile_tags = _as_text_list(getattr(post, "profile_tags", []))
+    hashtags = _parse_instagram_caption_hashtags(caption)
+    mentions = _parse_instagram_caption_mentions(caption)
+    collaborators: list[str] = []
+    duration_seconds = None
+    raw_post_type = str(getattr(post, "post_type", "") or "").strip().lower()
+    if raw_post_type in {"reel", "carousel", "post"}:
+        post_format = raw_post_type
+    elif raw_post_type in {"video", "image"}:
+        post_format = "post"
+    else:
+        post_format = "post"
+
+    if metadata is not None:
+        if metadata.taken_at is not None:
+            post.taken_at = metadata.taken_at
+        profile_tags = metadata.profile_tags or profile_tags
+        collaborators = metadata.collaborators or []
+        hashtags = metadata.hashtags or hashtags
+        mentions = metadata.mentions or mentions
+        duration_seconds = metadata.duration_seconds
+        post_format = metadata.post_format or post_format
+        if metadata.thumbnail_url and not str(getattr(post, "thumbnail_url", "") or "").strip():
+            post.thumbnail_url = metadata.thumbnail_url
+        if metadata.media_urls and not list(getattr(post, "media_urls", []) or []):
+            post.media_urls = metadata.media_urls
+
+    post.post_format = post_format
+    post.profile_tags = profile_tags
+    post.collaborators = collaborators
+    post.hashtags = hashtags
+    post.mentions = mentions
+    post.duration_seconds = duration_seconds
+    post.metadata_scraped_at = now_utc
+    post.metadata_error = "; ".join(errors)[:1500] if errors and metadata is None else None
+
+
+def _infer_extension_from_media_url(url: str, content_type: str | None) -> str:
+    parsed = urlparse(url)
+    suffix = Path(parsed.path).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".m4v", ".webm"}:
+        return suffix
+    guessed = mimetypes.guess_extension((content_type or "").split(";", 1)[0].strip().lower())
+    if guessed:
+        return guessed
+    return ".bin"
+
+
+def _mirror_instagram_media_to_s3(
+    context: SeasonContext,
+    *,
+    post: Any,
+    week_index: int | None,
+) -> tuple[str | None, list[str], str | None, str | None]:
+    from trr_backend.media.s3_mirror import (
+        build_hosted_url,
+        get_s3_bucket,
+        get_s3_client,
+        get_s3_prefix,
+        upload_bytes_to_s3,
+    )
+
+    source_media_urls = [
+        str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url or "").strip()
+    ]
+    source_media_urls = _normalize_unique_terms(source_media_urls)
+    source_thumbnail_url = str(getattr(post, "thumbnail_url", "") or "").strip() or (
+        source_media_urls[0] if source_media_urls else ""
+    )
+    if not source_thumbnail_url and not source_media_urls:
+        return None, [], "pending", None
+
+    try:
+        s3_client = get_s3_client()
+        bucket = get_s3_bucket()
+        prefix = get_s3_prefix()
+    except Exception as exc:  # noqa: BLE001
+        return None, [], "failed", f"s3_setup_failed:{exc}"
+
+    shortcode = _extract_shortcode_from_permalink(str(getattr(post, "shortcode", "") or ""))
+    if not shortcode:
+        shortcode = "unknown"
+    week_part = f"week-{week_index}" if week_index is not None else "week-unknown"
+    key_root = (
+        f"social/instagram/{context.show_id}/{context.season_number}/{week_part}/{shortcode}"
+    ).strip("/")
+    if prefix:
+        key_root = f"{prefix.strip('/')}/{key_root}"
+
+    errors: list[str] = []
+    hosted_thumbnail_url: str | None = None
+    hosted_media_urls: list[str] = []
+    mirrored_count = 0
+
+    def _download_and_upload(source_url: str, *, object_name: str) -> str:
+        response = requests.get(
+            source_url,
+            timeout=(10, 60),
+            headers={
+                "user-agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "accept": "*/*",
+            },
+        )
+        response.raise_for_status()
+        data = response.content or b""
+        if not data:
+            raise RuntimeError("empty_response_body")
+        content_type = response.headers.get("Content-Type") or "application/octet-stream"
+        ext = _infer_extension_from_media_url(source_url, content_type)
+        key = f"{key_root}/{object_name}{ext}"
+        upload_bytes_to_s3(
+            s3_client,
+            bucket=bucket,
+            key=key,
+            data=data,
+            content_type=content_type.split(";", 1)[0].strip() or "application/octet-stream",
+        )
+        return build_hosted_url(key)
+
+    if source_thumbnail_url:
+        try:
+            hosted_thumbnail_url = _download_and_upload(source_thumbnail_url, object_name="thumbnail")
+            mirrored_count += 1
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"thumbnail:{exc}")
+
+    for idx, media_url in enumerate(source_media_urls):
+        try:
+            hosted_url = _download_and_upload(media_url, object_name=f"media-{idx + 1:02d}")
+            hosted_media_urls.append(hosted_url)
+            mirrored_count += 1
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"media[{idx}]:{exc}")
+
+    source_count = len(source_media_urls) + (1 if source_thumbnail_url else 0)
+    if source_count == 0:
+        status = "pending"
+    elif mirrored_count == source_count:
+        status = "mirrored"
+    elif mirrored_count > 0:
+        status = "partial"
+    else:
+        status = "failed"
+    error_text = "; ".join(errors)[:1500] if errors else None
+    return hosted_thumbnail_url, hosted_media_urls, status, error_text
 
 
 def _count_stored_comments(post_ids: list[str], platform: str) -> dict[str, int]:
@@ -1319,6 +2088,95 @@ def _count_stored_comments(post_ids: list[str], platform: str) -> dict[str, int]
         post_ids,
     )
     return {str(r["pid"]): int(r["cnt"]) for r in rows}
+
+
+def _youtube_effective_comment_count(*, reported_count: int | None, saved_count: int | None) -> int:
+    return max(_normalize_non_negative_int(reported_count), _normalize_non_negative_int(saved_count))
+
+
+def _sync_youtube_video_comment_counts(
+    video_db_ids: list[str],
+    *,
+    conn: Any | None = None,
+) -> int:
+    """Sync youtube_videos.comments_count to at least the saved comments total."""
+    ids = sorted({str(value).strip() for value in video_db_ids if str(value).strip()})
+    if not ids:
+        return 0
+
+    placeholders = ",".join(["%s"] * len(ids))
+    params: list[Any] = [*ids, *ids]
+    sql = f"""
+        with comment_counts as (
+          select
+            c.video_id::text as video_id,
+            count(*)::int as saved_count
+          from social.youtube_comments c
+          where c.video_id in ({placeholders})
+          group by c.video_id
+        ),
+        updated as (
+          update social.youtube_videos v
+          set comments_count = greatest(
+            coalesce(v.comments_count, 0),
+            coalesce(cc.saved_count, 0)
+          )
+          from comment_counts cc
+          where v.id::text = cc.video_id
+            and v.id in ({placeholders})
+          returning v.id::text as id
+        )
+        select id
+        from updated
+    """
+    with pg.db_cursor(conn=conn) as cur:
+        rows = pg.fetch_all_with_cursor(cur, sql, params)
+    return len(rows)
+
+
+def backfill_youtube_comment_counts_for_season(
+    season_id: str,
+    *,
+    source_account: str | None = None,
+    date_start: datetime | None = None,
+    date_end: datetime | None = None,
+) -> dict[str, Any]:
+    """Backfill youtube video comments_count from saved comments for an optional season scope."""
+    conditions = ["v.season_id = %s"]
+    params: list[Any] = [season_id]
+
+    normalized_account = str(source_account or "").strip().lower().lstrip("@")
+    if normalized_account:
+        conditions.append(
+            "ltrim(lower(coalesce(nullif(v.source_account, ''), nullif(v.channel_title, ''), '')), '@') = %s"
+        )
+        params.append(normalized_account)
+    if date_start:
+        conditions.append("v.published_at >= %s")
+        params.append(date_start)
+    if date_end:
+        conditions.append("v.published_at <= %s")
+        params.append(date_end)
+
+    where = " and ".join(conditions)
+    rows = pg.fetch_all(
+        f"""
+        select v.id::text as id
+        from social.youtube_videos v
+        where {where}
+        """,
+        params,
+    )
+    video_ids = [str(row.get("id") or "") for row in rows if str(row.get("id") or "").strip()]
+    synced = _sync_youtube_video_comment_counts(video_ids)
+    return {
+        "season_id": season_id,
+        "source_account": normalized_account or None,
+        "date_start": _iso(date_start),
+        "date_end": _iso(date_end),
+        "videos_scanned": len(video_ids),
+        "youtube_comment_count_backfilled": synced,
+    }
 
 
 def _count_stored_replies(tweet_ids: list[str]) -> dict[str, int]:
@@ -1604,6 +2462,46 @@ def _load_existing_posts(
     return pg.fetch_all(sql, params)
 
 
+def _post_identity_from_row(platform: str, row: dict[str, Any]) -> str:
+    normalized_platform = (platform or "").strip().lower()
+    if normalized_platform == "instagram":
+        return str(row.get("shortcode") or "")
+    if normalized_platform == "tiktok":
+        return str(row.get("video_id") or "")
+    if normalized_platform == "youtube":
+        return str(row.get("video_id") or "")
+    if normalized_platform == "twitter":
+        return str(row.get("tweet_id") or "")
+    return ""
+
+
+def _build_existing_post_lookup(platform: str, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    normalized_platform = (platform or "").strip().lower()
+    lookup: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if normalized_platform == "twitter" and bool(row.get("is_reply")):
+            continue
+        identity = _post_identity_from_row(normalized_platform, row)
+        if identity:
+            lookup[identity] = row
+    return lookup
+
+
+def _expected_comment_count_for_platform(
+    platform: str,
+    row_or_post: dict[str, Any],
+    *,
+    snapshot: CommentLifecycleSnapshot | None = None,
+) -> int:
+    normalized_platform = (platform or "").strip().lower()
+    if normalized_platform == "twitter":
+        return _normalize_non_negative_int(row_or_post.get("replies_count"))
+    expected = _normalize_non_negative_int(row_or_post.get("comments_count"))
+    if normalized_platform == "youtube" and expected <= 0 and snapshot is not None:
+        return _normalize_non_negative_int(snapshot.active_count)
+    return expected
+
+
 def _pg_upsert(
     table: str,
     payload: dict[str, Any],
@@ -1640,6 +2538,18 @@ def _pg_upsert(
         return pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
 
 
+def _new_comment_persist_stats() -> dict[str, int]:
+    return {"comments_fetched": 0, "comments_upserted": 0, "comments_skipped_missing_id": 0}
+
+
+def _comment_stats_payload(stats: dict[str, int]) -> dict[str, int]:
+    return {
+        "comments_fetched": int(stats.get("comments_fetched") or 0),
+        "comments_upserted": int(stats.get("comments_upserted") or 0),
+        "comments_skipped_missing_id": int(stats.get("comments_skipped_missing_id") or 0),
+    }
+
+
 def _upsert_instagram_post(
     context: SeasonContext,
     *,
@@ -1651,6 +2561,19 @@ def _upsert_instagram_post(
     posted_at = _parse_instagram_time(getattr(post, "taken_at", None))
     media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
     thumbnail_url = str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None)
+    profile_tags = _as_text_list(getattr(post, "profile_tags", []))
+    collaborators = _as_text_list(getattr(post, "collaborators", []))
+    hashtags = _as_text_list(getattr(post, "hashtags", []), strip_prefix="#")
+    mentions = _as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@")
+    hosted_media_urls = [str(url).strip() for url in (getattr(post, "hosted_media_urls", []) or []) if str(url).strip()]
+    hosted_thumbnail_url = str(getattr(post, "hosted_thumbnail_url", "") or "").strip() or None
+    metadata_scraped_at = _coerce_dt(getattr(post, "metadata_scraped_at", None))
+    duration_seconds = getattr(post, "duration_seconds", None)
+    try:
+        duration_seconds = int(duration_seconds) if duration_seconds is not None else None
+    except (TypeError, ValueError):
+        duration_seconds = None
+
     payload = {
         "shortcode": getattr(post, "shortcode", ""),
         "media_id": getattr(post, "pk", None),
@@ -1671,6 +2594,26 @@ def _upsert_instagram_post(
         "job_id": job_id,
         "source_account": account,
     }
+
+    optional_payload = {
+        "post_format": getattr(post, "post_format", None),
+        "profile_tags": profile_tags,
+        "collaborators": collaborators,
+        "hashtags": hashtags,
+        "mentions": mentions,
+        "duration_seconds": duration_seconds,
+        "metadata_source": getattr(post, "metadata_source", None),
+        "metadata_scraped_at": metadata_scraped_at,
+        "metadata_error": getattr(post, "metadata_error", None),
+        "hosted_thumbnail_url": hosted_thumbnail_url,
+        "hosted_media_urls": hosted_media_urls,
+        "media_mirror_status": getattr(post, "media_mirror_status", None),
+        "media_mirror_error": getattr(post, "media_mirror_error", None),
+    }
+    for key, value in optional_payload.items():
+        if _instagram_posts_has_column(key):
+            payload[key] = value
+
     return _pg_upsert("instagram_posts", payload, conflict_col="shortcode", conn=conn)
 
 
@@ -1684,12 +2627,37 @@ def _upsert_instagram_comment_tree(
     comment: Any,
     parent_comment_db_id: str | None = None,
     observed_comment_ids: set[str] | None = None,
+    persist_stats: dict[str, int] | None = None,
     conn: Any | None = None,
 ) -> int:
+    if persist_stats is not None:
+        persist_stats["comments_fetched"] = int(persist_stats.get("comments_fetched") or 0) + 1
+
     created_at = _parse_instagram_time(getattr(comment, "created_at", None))
     comment_external_id = str(getattr(comment, "comment_id", "") or "")
     if observed_comment_ids is not None and comment_external_id:
         observed_comment_ids.add(comment_external_id)
+    if not comment_external_id.strip():
+        if persist_stats is not None:
+            persist_stats["comments_skipped_missing_id"] = (
+                int(persist_stats.get("comments_skipped_missing_id") or 0) + 1
+            )
+        total = 0
+        for reply in getattr(comment, "replies", []) or []:
+            total += _upsert_instagram_comment_tree(
+                context,
+                job_id=job_id,
+                run_id=run_id,
+                account=account,
+                post_id=post_id,
+                comment=reply,
+                parent_comment_db_id=parent_comment_db_id,
+                observed_comment_ids=observed_comment_ids,
+                persist_stats=persist_stats,
+                conn=conn,
+            )
+        return total
+
     payload = {
         "comment_id": comment_external_id,
         "post_id": post_id,
@@ -1715,8 +2683,10 @@ def _upsert_instagram_comment_tree(
         payload["last_seen_run_id"] = run_id
     row = _pg_upsert("instagram_comments", payload, conflict_col="comment_id", conn=conn)
     comment_db_id = (row or {}).get("id")
+    if persist_stats is not None and row:
+        persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
 
-    total = 1
+    total = 1 if row else 0
     for reply in getattr(comment, "replies", []) or []:
         total += _upsert_instagram_comment_tree(
             context,
@@ -1727,6 +2697,7 @@ def _upsert_instagram_comment_tree(
             comment=reply,
             parent_comment_db_id=comment_db_id,
             observed_comment_ids=observed_comment_ids,
+            persist_stats=persist_stats,
             conn=conn,
         )
     return total
@@ -1761,47 +2732,41 @@ def _ingest_instagram(
     scraper = InstagramScraper(cookies=cookies)
 
     retrieval_meta: dict[str, Any] = {"instagram_authenticated": instagram_authenticated}
-    post_count = 0
-    comment_count = 0
+    matched_post_count = 0
+    scraped_post_count = 0
+    scraped_comment_count = 0
     comment_errors = 0
     comment_fail_reasons: set[str] = set()
     comment_refresh_reasons: Counter[str] = Counter()
     missing_marked = 0
     incomplete_comment_fetches = 0
+    comment_stats = _new_comment_persist_stats()
     skipped_keyword = 0
     total_scraped = 0
-    last_progress_total = 0
+    progress_state = _new_job_progress_state()
+    activity: dict[str, Any] = {
+        "phase": f"{stage}_start",
+        "pages_scanned": 0,
+        "posts_checked": 0,
+        "matched_posts": 0,
+    }
 
-    def _report_progress(*, force: bool = False) -> None:
-        nonlocal last_progress_total
-        total_items = post_count + comment_count
-        if not force:
-            if total_items == 0:
-                return
-            if (total_items - last_progress_total) < JOB_PROGRESS_UPDATE_EVERY:
-                return
-        last_progress_total = total_items
-        _update_job_progress(
-            job_id,
-            items_found=total_items,
-            metadata={
-                "stage": stage,
-                "platform": "instagram",
-                "account": account,
-                "stage_counters": {"posts": post_count, "comments": comment_count},
-            },
+    def _flush_progress(*, force: bool = False) -> None:
+        _emit_job_progress(
+            job_id=job_id,
+            stage=stage,
+            platform="instagram",
+            account=account,
+            scraped_posts=scraped_post_count,
+            scraped_comments=scraped_comment_count,
+            posts_upserted=matched_post_count,
+            comments_upserted=int(comment_stats.get("comments_upserted") or 0),
+            activity=activity,
+            progress_state=progress_state,
+            force=force,
         )
 
-    _update_job_progress(
-        job_id,
-        items_found=0,
-        metadata={
-            "stage": stage,
-            "platform": "instagram",
-            "account": account,
-            "stage_counters": {"posts": 0, "comments": 0},
-        },
-    )
+    _flush_progress(force=True)
 
     if stage == "comments":
         # Comment-only stage: read existing posts from DB instead of re-scraping
@@ -1834,9 +2799,14 @@ def _ingest_instagram(
                 if not decision.should_refresh:
                     skipped_synced += 1
                     continue
-                post_count += 1
-                if post_count % 10 == 0:
+                matched_post_count += 1
+                scraped_post_count += 1
+                activity["phase"] = "comments_fetch"
+                activity["posts_checked"] = scraped_post_count
+                activity["matched_posts"] = matched_post_count
+                if matched_post_count % 10 == 0:
                     _touch_job_heartbeat(job_id)
+                _flush_progress()
                 fetch_failed = False
                 comments: list[Any] = []
                 fail_reason = ""
@@ -1854,7 +2824,7 @@ def _ingest_instagram(
                         if not comments:
                             comment_errors += 1
                     for comment in comments:
-                        comment_count += _upsert_instagram_comment_tree(
+                        _upsert_instagram_comment_tree(
                             context,
                             job_id=job_id,
                             run_id=run_id,
@@ -1862,9 +2832,11 @@ def _ingest_instagram(
                             post_id=post_db_id,
                             comment=comment,
                             observed_comment_ids=observed_comment_ids,
+                            persist_stats=comment_stats,
                             conn=conn,
                         )
-                        _report_progress()
+                        scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                        _flush_progress()
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
@@ -1908,24 +2880,125 @@ def _ingest_instagram(
             season_number=context.season_number,
         )
         logger.info("[instagram] Scraping account=%s date_range=%s..%s", account, opts.date_start, opts.date_end)
-        posts = scraper.scrape(config)
-        retrieval_meta.update(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
+        post_limit = opts.max_posts_per_target if opts.max_posts_per_target > 0 else None
 
+        def _on_scrape_progress(payload: dict[str, Any]) -> None:
+            nonlocal scraped_post_count
+            activity["phase"] = str(payload.get("phase") or "scrape_posts")
+            activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
+            activity["posts_checked"] = _normalize_non_negative_int(payload.get("posts_checked"))
+            if payload.get("matched_posts") is not None:
+                activity["matched_posts"] = _normalize_non_negative_int(payload.get("matched_posts"))
+            scraped_post_count = max(scraped_post_count, _normalize_non_negative_int(payload.get("posts_checked")))
+            _flush_progress()
+
+        posts = scraper.scrape(config, progress_cb=_on_scrape_progress)
+        retrieval_meta.update(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
+        try:
+            instagram_week_windows, _ = _resolve_week_windows(
+                context,
+                timezone="America/New_York",
+                source_scope=opts.source_scope,
+                now_utc=_now_utc(),
+            )
+        except Exception:  # noqa: BLE001
+            instagram_week_windows = []
+
+        existing_post_lookup: dict[str, dict[str, Any]] = {}
+        snapshots: dict[str, CommentLifecycleSnapshot] = {}
+        if opts.sync_strategy == "incremental" and opts.max_comments_per_post > 0:
+            existing_rows = _load_existing_posts("instagram", context, account, opts.date_start, opts.date_end)
+            existing_post_lookup = _build_existing_post_lookup("instagram", existing_rows)
+            snapshots = _load_comment_lifecycle_snapshots(
+                [str(row.get("id")) for row in existing_post_lookup.values() if row.get("id")],
+                platform="instagram",
+            )
+
+        skipped_synced = 0
         with pg.db_connection() as conn:
             for post in posts:
                 total_scraped += 1
+                scraped_post_count = max(scraped_post_count, total_scraped)
+                activity["phase"] = "posts_filter"
+                activity["posts_checked"] = scraped_post_count
                 caption = str(getattr(post, "caption", "") or "")
                 if not _text_contains_any_term(text=caption, hashtags=hashtags, keywords=keywords):
                     skipped_keyword += 1
+                    _flush_progress()
                     continue
-                if post_count >= opts.max_posts_per_target:
+                if post_limit and matched_post_count >= post_limit:
                     break
+
+                existing_row = existing_post_lookup.get(str(getattr(post, "shortcode", "") or ""))
+                if existing_row and opts.max_comments_per_post > 0:
+                    expected_comment_count = _expected_comment_count_for_platform(
+                        "instagram",
+                        {"comments_count": int(getattr(post, "comments", 0) or 0)},
+                    )
+                    decision = _decide_comment_refresh(
+                        sync_strategy=opts.sync_strategy,
+                        expected_count=expected_comment_count,
+                        snapshot=snapshots.get(str(existing_row.get("id") or "")),
+                        post_published_at=_coerce_dt(existing_row.get("posted_at")),
+                    )
+                    comment_refresh_reasons[decision.reason] += 1
+                    if not decision.should_refresh:
+                        skipped_synced += 1
+                        activity["phase"] = "posts_skip_up_to_date"
+                        _flush_progress()
+                        continue
+
+                now_utc = _now_utc()
+                try:
+                    _enrich_instagram_post_from_permalink(post=post, scraper=scraper, now_utc=now_utc)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[instagram] Metadata enrichment failed for shortcode=%s",
+                        getattr(post, "shortcode", "?"),
+                    )
+                    post.metadata_source = None
+                    post.metadata_scraped_at = now_utc
+                    post.metadata_error = "metadata_enrichment_exception"
+
+                post_week_index = None
+                post_ts = _parse_instagram_time(getattr(post, "taken_at", None))
+                if post_ts and instagram_week_windows:
+                    window = _week_for_timestamp(post_ts, windows=instagram_week_windows, timezone="America/New_York")
+                    post_week_index = window.week_index if window else None
+
+                try:
+                    hosted_thumbnail_url, hosted_media_urls, mirror_status, mirror_error = (
+                        _mirror_instagram_media_to_s3(
+                            context,
+                            post=post,
+                            week_index=post_week_index,
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[instagram] Media mirror failed for shortcode=%s",
+                        getattr(post, "shortcode", "?"),
+                    )
+                    hosted_thumbnail_url, hosted_media_urls, mirror_status, mirror_error = (
+                        None,
+                        [],
+                        "failed",
+                        "media_mirror_exception",
+                    )
+
+                post.hosted_thumbnail_url = hosted_thumbnail_url
+                post.hosted_media_urls = hosted_media_urls
+                post.media_mirror_status = mirror_status
+                post.media_mirror_error = mirror_error
 
                 upserted = _upsert_instagram_post(context, job_id=job_id, account=account, post=post, conn=conn)
                 if not upserted:
+                    _flush_progress()
                     continue
-                post_count += 1
-                _report_progress()
+                matched_post_count += 1
+                activity["phase"] = "posts_upsert"
+                activity["matched_posts"] = matched_post_count
+                _flush_progress()
 
                 if opts.max_comments_per_post > 0:
                     try:
@@ -1941,16 +3014,19 @@ def _ingest_instagram(
                             if not comments:
                                 comment_errors += 1
                         for comment in comments:
-                            comment_count += _upsert_instagram_comment_tree(
+                            _upsert_instagram_comment_tree(
                                 context,
                                 job_id=job_id,
                                 run_id=run_id,
                                 account=account,
                                 post_id=str(upserted["id"]),
                                 comment=comment,
+                                persist_stats=comment_stats,
                                 conn=conn,
                             )
-                            _report_progress()
+                            scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                            activity["phase"] = "comments_fetch"
+                            _flush_progress()
                     except Exception:
                         comment_errors += 1
                         try:
@@ -1963,8 +3039,12 @@ def _ingest_instagram(
                             getattr(post, "shortcode", "?"),
                         )
 
-    _report_progress(force=True)
+    activity["phase"] = f"{stage}_end"
+    activity["matched_posts"] = matched_post_count
+    _flush_progress(force=True)
 
+    if skipped_synced:
+        logger.info("[instagram] Skipped %d posts already up-to-date", skipped_synced)
     if comment_errors:
         retrieval_meta["comment_errors"] = comment_errors
     if comment_fail_reasons:
@@ -1975,18 +3055,25 @@ def _ingest_instagram(
         retrieval_meta["comments_marked_missing"] = missing_marked
     if incomplete_comment_fetches:
         retrieval_meta["incomplete_comment_fetches"] = incomplete_comment_fetches
+    retrieval_meta["comment_stats"] = _comment_stats_payload(comment_stats)
+    retrieval_meta["scrape_counters"] = {"posts": scraped_post_count, "comments": scraped_comment_count}
+    retrieval_meta["persist_counters"] = {
+        "posts_upserted": matched_post_count,
+        "comments_upserted": int(comment_stats.get("comments_upserted") or 0),
+    }
+    retrieval_meta["activity"] = _build_progress_activity_payload(activity, now=_now_utc())
     if scraper.comments_auth_failed:
         retrieval_meta["comments_auth_failed"] = True
     logger.info(
         "[instagram] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d comment_errors=%d auth_failed=%s",
         total_scraped,
-        post_count,
+        matched_post_count,
         skipped_keyword,
-        comment_count,
+        scraped_comment_count,
         comment_errors,
         scraper.comments_auth_failed,
     )
-    return post_count, comment_count, retrieval_meta
+    return scraped_post_count, scraped_comment_count, retrieval_meta
 
 
 def _upsert_tiktok_post(
@@ -2034,12 +3121,36 @@ def _upsert_tiktok_comment_tree(
     comment: Any,
     parent_comment_db_id: str | None = None,
     observed_comment_ids: set[str] | None = None,
+    persist_stats: dict[str, int] | None = None,
     conn: Any | None = None,
 ) -> int:
+    if persist_stats is not None:
+        persist_stats["comments_fetched"] = int(persist_stats.get("comments_fetched") or 0) + 1
+
     created_at = _parse_tiktok_time(getattr(comment, "created_at", None))
     comment_external_id = str(getattr(comment, "comment_id", "") or "")
     if observed_comment_ids is not None and comment_external_id:
         observed_comment_ids.add(comment_external_id)
+    if not comment_external_id.strip():
+        if persist_stats is not None:
+            persist_stats["comments_skipped_missing_id"] = (
+                int(persist_stats.get("comments_skipped_missing_id") or 0) + 1
+            )
+        total = 0
+        for reply in getattr(comment, "replies", []) or []:
+            total += _upsert_tiktok_comment_tree(
+                context,
+                job_id=job_id,
+                run_id=run_id,
+                account=account,
+                post_id=post_id,
+                comment=reply,
+                parent_comment_db_id=parent_comment_db_id,
+                observed_comment_ids=observed_comment_ids,
+                persist_stats=persist_stats,
+                conn=conn,
+            )
+        return total
     payload = {
         "comment_id": comment_external_id,
         "post_id": post_id,
@@ -2066,8 +3177,10 @@ def _upsert_tiktok_comment_tree(
         payload["last_seen_run_id"] = run_id
     row = _pg_upsert("tiktok_comments", payload, conflict_col="comment_id", conn=conn)
     comment_db_id = (row or {}).get("id")
+    if persist_stats is not None and row:
+        persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
 
-    total = 1
+    total = 1 if row else 0
     for reply in getattr(comment, "replies", []) or []:
         total += _upsert_tiktok_comment_tree(
             context,
@@ -2078,6 +3191,7 @@ def _upsert_tiktok_comment_tree(
             comment=reply,
             parent_comment_db_id=comment_db_id,
             observed_comment_ids=observed_comment_ids,
+            persist_stats=persist_stats,
             conn=conn,
         )
     return total
@@ -2100,47 +3214,41 @@ def _ingest_tiktok(
     scraper = TikTokScraper(cookies=tiktok_cookies)
 
     retrieval_meta: dict[str, Any] = {}
-    post_count = 0
-    comment_count = 0
+    matched_post_count = 0
+    scraped_post_count = 0
+    scraped_comment_count = 0
     comment_errors = 0
     comment_fail_reasons: set[str] = set()
     comment_refresh_reasons: Counter[str] = Counter()
     missing_marked = 0
     incomplete_comment_fetches = 0
+    comment_stats = _new_comment_persist_stats()
     skipped_keyword = 0
     total_scraped = 0
-    last_progress_total = 0
+    progress_state = _new_job_progress_state()
+    activity: dict[str, Any] = {
+        "phase": f"{stage}_start",
+        "pages_scanned": 0,
+        "posts_checked": 0,
+        "matched_posts": 0,
+    }
 
-    def _report_progress(*, force: bool = False) -> None:
-        nonlocal last_progress_total
-        total_items = post_count + comment_count
-        if not force:
-            if total_items == 0:
-                return
-            if (total_items - last_progress_total) < JOB_PROGRESS_UPDATE_EVERY:
-                return
-        last_progress_total = total_items
-        _update_job_progress(
-            job_id,
-            items_found=total_items,
-            metadata={
-                "stage": stage,
-                "platform": "tiktok",
-                "account": account,
-                "stage_counters": {"posts": post_count, "comments": comment_count},
-            },
+    def _flush_progress(*, force: bool = False) -> None:
+        _emit_job_progress(
+            job_id=job_id,
+            stage=stage,
+            platform="tiktok",
+            account=account,
+            scraped_posts=scraped_post_count,
+            scraped_comments=scraped_comment_count,
+            posts_upserted=matched_post_count,
+            comments_upserted=int(comment_stats.get("comments_upserted") or 0),
+            activity=activity,
+            progress_state=progress_state,
+            force=force,
         )
 
-    _update_job_progress(
-        job_id,
-        items_found=0,
-        metadata={
-            "stage": stage,
-            "platform": "tiktok",
-            "account": account,
-            "stage_counters": {"posts": 0, "comments": 0},
-        },
-    )
+    _flush_progress(force=True)
 
     if stage == "comments":
         existing_posts = _load_existing_posts("tiktok", context, account, opts.date_start, opts.date_end)
@@ -2168,9 +3276,14 @@ def _ingest_tiktok(
                 if not decision.should_refresh:
                     skipped_synced += 1
                     continue
-                post_count += 1
-                if post_count % 10 == 0:
+                matched_post_count += 1
+                scraped_post_count += 1
+                activity["phase"] = "comments_fetch"
+                activity["posts_checked"] = scraped_post_count
+                activity["matched_posts"] = matched_post_count
+                if matched_post_count % 10 == 0:
                     _touch_job_heartbeat(job_id)
+                _flush_progress()
                 fetch_failed = False
                 comments: list[Any] = []
                 fail_reason = ""
@@ -2189,7 +3302,7 @@ def _ingest_tiktok(
                         if not comments:
                             comment_errors += 1
                     for comment in comments:
-                        comment_count += _upsert_tiktok_comment_tree(
+                        _upsert_tiktok_comment_tree(
                             context,
                             job_id=job_id,
                             run_id=run_id,
@@ -2197,9 +3310,11 @@ def _ingest_tiktok(
                             post_id=post_db_id,
                             comment=comment,
                             observed_comment_ids=observed_comment_ids,
+                            persist_stats=comment_stats,
                             conn=conn,
                         )
-                        _report_progress()
+                        scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                        _flush_progress()
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
@@ -2241,24 +3356,73 @@ def _ingest_tiktok(
             season_number=context.season_number,
         )
         logger.info("[tiktok] Scraping account=%s date_range=%s..%s", account, opts.date_start, opts.date_end)
-        posts = scraper.scrape(config)
+        post_limit = opts.max_posts_per_target if opts.max_posts_per_target > 0 else None
+
+        def _on_scrape_progress(payload: dict[str, Any]) -> None:
+            nonlocal scraped_post_count
+            activity["phase"] = str(payload.get("phase") or "scrape_posts")
+            activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
+            activity["posts_checked"] = _normalize_non_negative_int(payload.get("posts_checked"))
+            if payload.get("matched_posts") is not None:
+                activity["matched_posts"] = _normalize_non_negative_int(payload.get("matched_posts"))
+            scraped_post_count = max(scraped_post_count, _normalize_non_negative_int(payload.get("posts_checked")))
+            _flush_progress()
+
+        posts = scraper.scrape(config, progress_cb=_on_scrape_progress)
         retrieval_meta.update(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
 
+        existing_post_lookup: dict[str, dict[str, Any]] = {}
+        snapshots: dict[str, CommentLifecycleSnapshot] = {}
+        if opts.sync_strategy == "incremental" and opts.max_comments_per_post > 0:
+            existing_rows = _load_existing_posts("tiktok", context, account, opts.date_start, opts.date_end)
+            existing_post_lookup = _build_existing_post_lookup("tiktok", existing_rows)
+            snapshots = _load_comment_lifecycle_snapshots(
+                [str(row.get("id")) for row in existing_post_lookup.values() if row.get("id")],
+                platform="tiktok",
+            )
+
+        skipped_synced = 0
         with pg.db_connection() as conn:
             for post in posts:
                 total_scraped += 1
+                scraped_post_count = max(scraped_post_count, total_scraped)
+                activity["phase"] = "posts_filter"
+                activity["posts_checked"] = scraped_post_count
                 description = str(getattr(post, "description", "") or "")
                 if not _text_contains_any_term(text=description, hashtags=hashtags, keywords=keywords):
                     skipped_keyword += 1
+                    _flush_progress()
                     continue
-                if post_count >= opts.max_posts_per_target:
+                if post_limit and matched_post_count >= post_limit:
                     break
+
+                existing_row = existing_post_lookup.get(str(getattr(post, "video_id", "") or ""))
+                if existing_row and opts.max_comments_per_post > 0:
+                    expected_comment_count = _expected_comment_count_for_platform(
+                        "tiktok",
+                        {"comments_count": int(getattr(post, "comments", 0) or 0)},
+                    )
+                    decision = _decide_comment_refresh(
+                        sync_strategy=opts.sync_strategy,
+                        expected_count=expected_comment_count,
+                        snapshot=snapshots.get(str(existing_row.get("id") or "")),
+                        post_published_at=_coerce_dt(existing_row.get("posted_at")),
+                    )
+                    comment_refresh_reasons[decision.reason] += 1
+                    if not decision.should_refresh:
+                        skipped_synced += 1
+                        activity["phase"] = "posts_skip_up_to_date"
+                        _flush_progress()
+                        continue
 
                 upserted = _upsert_tiktok_post(context, job_id=job_id, account=account, post=post, conn=conn)
                 if not upserted:
+                    _flush_progress()
                     continue
-                post_count += 1
-                _report_progress()
+                matched_post_count += 1
+                activity["phase"] = "posts_upsert"
+                activity["matched_posts"] = matched_post_count
+                _flush_progress()
 
                 if opts.max_comments_per_post > 0:
                     try:
@@ -2275,16 +3439,19 @@ def _ingest_tiktok(
                             if not comments:
                                 comment_errors += 1
                         for comment in comments:
-                            comment_count += _upsert_tiktok_comment_tree(
+                            _upsert_tiktok_comment_tree(
                                 context,
                                 job_id=job_id,
                                 run_id=run_id,
                                 account=account,
                                 post_id=str(upserted["id"]),
                                 comment=comment,
+                                persist_stats=comment_stats,
                                 conn=conn,
                             )
-                            _report_progress()
+                            scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                            activity["phase"] = "comments_fetch"
+                            _flush_progress()
                     except Exception:
                         comment_errors += 1
                         try:
@@ -2297,8 +3464,12 @@ def _ingest_tiktok(
                             getattr(post, "video_id", "?"),
                         )
 
-    _report_progress(force=True)
+    activity["phase"] = f"{stage}_end"
+    activity["matched_posts"] = matched_post_count
+    _flush_progress(force=True)
 
+    if skipped_synced:
+        logger.info("[tiktok] Skipped %d posts already up-to-date", skipped_synced)
     if comment_errors:
         retrieval_meta["comment_errors"] = comment_errors
     if comment_fail_reasons:
@@ -2309,15 +3480,22 @@ def _ingest_tiktok(
         retrieval_meta["comments_marked_missing"] = missing_marked
     if incomplete_comment_fetches:
         retrieval_meta["incomplete_comment_fetches"] = incomplete_comment_fetches
+    retrieval_meta["comment_stats"] = _comment_stats_payload(comment_stats)
+    retrieval_meta["scrape_counters"] = {"posts": scraped_post_count, "comments": scraped_comment_count}
+    retrieval_meta["persist_counters"] = {
+        "posts_upserted": matched_post_count,
+        "comments_upserted": int(comment_stats.get("comments_upserted") or 0),
+    }
+    retrieval_meta["activity"] = _build_progress_activity_payload(activity, now=_now_utc())
     logger.info(
         "[tiktok] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d comment_errors=%d",
         total_scraped,
-        post_count,
+        matched_post_count,
         skipped_keyword,
-        comment_count,
+        scraped_comment_count,
         comment_errors,
     )
-    return post_count, comment_count, retrieval_meta
+    return scraped_post_count, scraped_comment_count, retrieval_meta
 
 
 def _upsert_youtube_video(
@@ -2362,12 +3540,36 @@ def _upsert_youtube_comment_tree(
     comment: Any,
     parent_comment_db_id: str | None = None,
     observed_comment_ids: set[str] | None = None,
+    persist_stats: dict[str, int] | None = None,
     conn: Any | None = None,
 ) -> int:
+    if persist_stats is not None:
+        persist_stats["comments_fetched"] = int(persist_stats.get("comments_fetched") or 0) + 1
+
     created_at = _parse_instagram_time(getattr(comment, "created_at", None))
     comment_external_id = str(getattr(comment, "comment_id", "") or "")
     if observed_comment_ids is not None and comment_external_id:
         observed_comment_ids.add(comment_external_id)
+    if not comment_external_id.strip():
+        if persist_stats is not None:
+            persist_stats["comments_skipped_missing_id"] = (
+                int(persist_stats.get("comments_skipped_missing_id") or 0) + 1
+            )
+        total = 0
+        for reply in getattr(comment, "replies", []) or []:
+            total += _upsert_youtube_comment_tree(
+                context,
+                job_id=job_id,
+                run_id=run_id,
+                account=account,
+                video_db_id=video_db_id,
+                comment=reply,
+                parent_comment_db_id=parent_comment_db_id,
+                observed_comment_ids=observed_comment_ids,
+                persist_stats=persist_stats,
+                conn=conn,
+            )
+        return total
     payload = {
         "comment_id": comment_external_id,
         "video_id": video_db_id,
@@ -2393,8 +3595,10 @@ def _upsert_youtube_comment_tree(
         payload["last_seen_run_id"] = run_id
     row = _pg_upsert("youtube_comments", payload, conflict_col="comment_id", conn=conn)
     comment_db_id = (row or {}).get("id")
+    if persist_stats is not None and row:
+        persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
 
-    total = 1
+    total = 1 if row else 0
     for reply in getattr(comment, "replies", []) or []:
         total += _upsert_youtube_comment_tree(
             context,
@@ -2405,6 +3609,7 @@ def _upsert_youtube_comment_tree(
             comment=reply,
             parent_comment_db_id=comment_db_id,
             observed_comment_ids=observed_comment_ids,
+            persist_stats=persist_stats,
             conn=conn,
         )
     return total
@@ -2426,49 +3631,59 @@ def _ingest_youtube(
     scraper = YouTubeScraper()
 
     retrieval_meta: dict[str, Any] = {}
-    video_count = 0
-    comment_count = 0
+    matched_video_count = 0
+    scraped_video_count = 0
+    scraped_comment_count = 0
     comment_errors = 0
+    comment_fail_reasons: set[str] = set()
     comment_refresh_reasons: Counter[str] = Counter()
     missing_marked = 0
     incomplete_comment_fetches = 0
+    comment_stats = _new_comment_persist_stats()
     skipped_keyword = 0
     total_scraped = 0
-    last_progress_total = 0
+    videos_scanned = 0
+    videos_matched_show_terms = 0
+    videos_filtered_show_terms = 0
+    videos_skipped_up_to_date = 0
+    youtube_comment_count_synced = 0
+    youtube_comment_count_sync_targets: set[str] = set()
+    filter_samples: list[dict[str, str]] = []
+    max_filter_samples = 8
+    progress_state = _new_job_progress_state()
+    activity: dict[str, Any] = {
+        "phase": f"{stage}_start",
+        "pages_scanned": 0,
+        "posts_checked": 0,
+        "matched_posts": 0,
+    }
 
-    def _report_progress(*, force: bool = False) -> None:
-        nonlocal last_progress_total
-        total_items = video_count + comment_count
-        if not force:
-            if total_items == 0:
-                return
-            if (total_items - last_progress_total) < JOB_PROGRESS_UPDATE_EVERY:
-                return
-        last_progress_total = total_items
-        _update_job_progress(
-            job_id,
-            items_found=total_items,
-            metadata={
-                "stage": stage,
-                "platform": "youtube",
-                "account": account,
-                "stage_counters": {"posts": video_count, "comments": comment_count},
-            },
+    def _flush_progress(*, force: bool = False) -> None:
+        _emit_job_progress(
+            job_id=job_id,
+            stage=stage,
+            platform="youtube",
+            account=account,
+            scraped_posts=scraped_video_count,
+            scraped_comments=scraped_comment_count,
+            posts_upserted=matched_video_count,
+            comments_upserted=int(comment_stats.get("comments_upserted") or 0),
+            activity=activity,
+            progress_state=progress_state,
+            force=force,
         )
 
-    _update_job_progress(
-        job_id,
-        items_found=0,
-        metadata={
-            "stage": stage,
-            "platform": "youtube",
-            "account": account,
-            "stage_counters": {"posts": 0, "comments": 0},
-        },
-    )
+    def _record_filter_sample(*, reason: str, title: str | None, video_id: str | None) -> None:
+        if len(filter_samples) >= max_filter_samples:
+            return
+        filter_samples.append(_youtube_filter_sample(reason=reason, title=title, video_id=video_id))
+
+    _flush_progress(force=True)
 
     if stage == "comments":
         existing_posts = _load_existing_posts("youtube", context, account, opts.date_start, opts.date_end)
+        videos_scanned = len([row for row in existing_posts if str(row.get("video_id") or "").strip()])
+        videos_matched_show_terms = videos_scanned
         logger.info("[youtube] Comments stage: %d existing videos from DB for account=%s", len(existing_posts), account)
         retrieval_meta["source"] = "db"
         snapshots = _load_comment_lifecycle_snapshots(
@@ -2482,20 +3697,33 @@ def _ingest_youtube(
                 post_db_id = str(row.get("id") or "")
                 if not vid_id:
                     continue
-                expected = int(row.get("comments_count") or 0)
+                snapshot = snapshots.get(post_db_id)
+                expected = _expected_comment_count_for_platform("youtube", row, snapshot=snapshot)
                 decision = _decide_comment_refresh(
                     sync_strategy=opts.sync_strategy,
                     expected_count=expected,
-                    snapshot=snapshots.get(post_db_id),
+                    snapshot=snapshot,
                     post_published_at=_coerce_dt(row.get("published_at")),
                 )
                 comment_refresh_reasons[decision.reason] += 1
                 if not decision.should_refresh:
                     skipped_synced += 1
+                    videos_skipped_up_to_date += 1
+                    _record_filter_sample(
+                        reason="up_to_date",
+                        title=str(row.get("text") or ""),
+                        video_id=vid_id,
+                    )
                     continue
-                video_count += 1
-                if video_count % 10 == 0:
+                matched_video_count += 1
+                scraped_video_count += 1
+                youtube_comment_count_sync_targets.add(post_db_id)
+                activity["phase"] = "comments_fetch"
+                activity["posts_checked"] = scraped_video_count
+                activity["matched_posts"] = matched_video_count
+                if matched_video_count % 10 == 0:
                     _touch_job_heartbeat(job_id)
+                _flush_progress()
                 fetch_failed = False
                 comments: list[Any] = []
                 observed_comment_ids: set[str] = set()
@@ -2507,7 +3735,7 @@ def _ingest_youtube(
                         delay=0.5,
                     )
                     for comment in comments:
-                        comment_count += _upsert_youtube_comment_tree(
+                        _upsert_youtube_comment_tree(
                             context,
                             job_id=job_id,
                             run_id=run_id,
@@ -2515,12 +3743,15 @@ def _ingest_youtube(
                             video_db_id=post_db_id,
                             comment=comment,
                             observed_comment_ids=observed_comment_ids,
+                            persist_stats=comment_stats,
                             conn=conn,
                         )
-                        _report_progress()
+                        scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                        _flush_progress()
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
+                    comment_fail_reasons.add("fetch_exception")
                     try:
                         conn.rollback()
                     except Exception:
@@ -2545,6 +3776,11 @@ def _ingest_youtube(
                     )
                 else:
                     incomplete_comment_fetches += 1
+            if youtube_comment_count_sync_targets:
+                youtube_comment_count_synced += _sync_youtube_video_comment_counts(
+                    list(youtube_comment_count_sync_targets),
+                    conn=conn,
+                )
         if skipped_synced:
             logger.info("[youtube] Skipped %d videos whose comments are already synced", skipped_synced)
     else:
@@ -2554,7 +3790,7 @@ def _ingest_youtube(
             date_start=opts.date_start,
             date_end=opts.date_end,
             delay_seconds=1.0,
-            max_results=max(1, opts.max_posts_per_target),
+            max_results=None if opts.max_posts_per_target <= 0 else max(1, opts.max_posts_per_target),
             show_id=context.show_id,
             season_number=context.season_number,
         )
@@ -2565,28 +3801,89 @@ def _ingest_youtube(
             opts.date_start,
             opts.date_end,
         )
-        videos = scraper.scrape(config)
+        post_limit = opts.max_posts_per_target if opts.max_posts_per_target > 0 else None
+
+        def _on_scrape_progress(payload: dict[str, Any]) -> None:
+            nonlocal scraped_video_count
+            activity["phase"] = str(payload.get("phase") or "scrape_posts")
+            activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
+            activity["posts_checked"] = _normalize_non_negative_int(payload.get("posts_checked"))
+            if payload.get("matched_posts") is not None:
+                activity["matched_posts"] = _normalize_non_negative_int(payload.get("matched_posts"))
+            scraped_video_count = max(scraped_video_count, _normalize_non_negative_int(payload.get("posts_checked")))
+            _flush_progress()
+
+        videos = scraper.scrape(config, progress_cb=_on_scrape_progress)
         retrieval_meta.update(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
 
+        existing_post_lookup: dict[str, dict[str, Any]] = {}
+        snapshots: dict[str, CommentLifecycleSnapshot] = {}
+        if opts.sync_strategy == "incremental" and opts.max_comments_per_post > 0:
+            existing_rows = _load_existing_posts("youtube", context, account, opts.date_start, opts.date_end)
+            existing_post_lookup = _build_existing_post_lookup("youtube", existing_rows)
+            snapshots = _load_comment_lifecycle_snapshots(
+                [str(row.get("id")) for row in existing_post_lookup.values() if row.get("id")],
+                platform="youtube",
+            )
+
+        skipped_synced = 0
         with pg.db_connection() as conn:
             for video in videos:
                 total_scraped += 1
+                videos_scanned += 1
+                scraped_video_count = max(scraped_video_count, total_scraped)
+                activity["phase"] = "posts_filter"
+                activity["posts_checked"] = scraped_video_count
+                video_title = str(getattr(video, "title", "") or "")
+                video_id = str(getattr(video, "video_id", "") or "")
                 if not _youtube_video_matches_show_terms(
-                    title=getattr(video, "title", ""),
+                    title=video_title,
                     description=getattr(video, "description", ""),
                     hashtags=hashtags,
                     keywords=keywords,
                 ):
                     skipped_keyword += 1
+                    videos_filtered_show_terms += 1
+                    _record_filter_sample(reason="show_terms_filtered", title=video_title, video_id=video_id)
+                    _flush_progress()
                     continue
-                if video_count >= opts.max_posts_per_target:
+                videos_matched_show_terms += 1
+                if post_limit and matched_video_count >= post_limit:
                     break
+
+                existing_row = existing_post_lookup.get(video_id)
+                if existing_row and opts.max_comments_per_post > 0:
+                    existing_post_id = str(existing_row.get("id") or "")
+                    snapshot = snapshots.get(existing_post_id)
+                    expected_comment_count = _expected_comment_count_for_platform(
+                        "youtube",
+                        {"comments_count": int(getattr(video, "comments", 0) or 0)},
+                        snapshot=snapshot,
+                    )
+                    decision = _decide_comment_refresh(
+                        sync_strategy=opts.sync_strategy,
+                        expected_count=expected_comment_count,
+                        snapshot=snapshot,
+                        post_published_at=_coerce_dt(existing_row.get("published_at")),
+                    )
+                    comment_refresh_reasons[decision.reason] += 1
+                    if not decision.should_refresh:
+                        skipped_synced += 1
+                        videos_skipped_up_to_date += 1
+                        _record_filter_sample(reason="up_to_date", title=video_title, video_id=video_id)
+                        activity["phase"] = "posts_skip_up_to_date"
+                        _flush_progress()
+                        continue
 
                 upserted = _upsert_youtube_video(context, job_id=job_id, account=account, video=video, conn=conn)
                 if not upserted:
+                    _flush_progress()
                     continue
-                video_count += 1
-                _report_progress()
+                matched_video_count += 1
+                activity["phase"] = "posts_upsert"
+                activity["matched_posts"] = matched_video_count
+                youtube_comment_count_sync_targets.add(str(upserted["id"]))
+                _flush_progress()
 
                 if opts.max_comments_per_post > 0:
                     try:
@@ -2597,18 +3894,22 @@ def _ingest_youtube(
                             delay=0.5,
                         )
                         for comment in comments:
-                            comment_count += _upsert_youtube_comment_tree(
+                            _upsert_youtube_comment_tree(
                                 context,
                                 job_id=job_id,
                                 run_id=run_id,
                                 account=account,
                                 video_db_id=str(upserted["id"]),
                                 comment=comment,
+                                persist_stats=comment_stats,
                                 conn=conn,
                             )
-                            _report_progress()
+                            scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                            activity["phase"] = "comments_fetch"
+                            _flush_progress()
                     except Exception:
                         comment_errors += 1
+                        comment_fail_reasons.add("fetch_exception")
                         try:
                             conn.rollback()
                         except Exception:
@@ -2618,26 +3919,51 @@ def _ingest_youtube(
                             upserted.get("id"),
                             getattr(video, "video_id", "?"),
                         )
+            if youtube_comment_count_sync_targets:
+                youtube_comment_count_synced += _sync_youtube_video_comment_counts(
+                    list(youtube_comment_count_sync_targets),
+                    conn=conn,
+                )
 
-    _report_progress(force=True)
+    activity["phase"] = f"{stage}_end"
+    activity["matched_posts"] = matched_video_count
+    _flush_progress(force=True)
 
+    if skipped_synced:
+        logger.info("[youtube] Skipped %d videos already up-to-date", skipped_synced)
     if comment_errors:
         retrieval_meta["comment_errors"] = comment_errors
+    if comment_fail_reasons:
+        retrieval_meta["comment_fail_reasons"] = sorted(comment_fail_reasons)
     if comment_refresh_reasons:
         retrieval_meta["comment_refresh_decisions"] = dict(comment_refresh_reasons)
     if missing_marked:
         retrieval_meta["comments_marked_missing"] = missing_marked
     if incomplete_comment_fetches:
         retrieval_meta["incomplete_comment_fetches"] = incomplete_comment_fetches
+    retrieval_meta["videos_scanned"] = videos_scanned
+    retrieval_meta["videos_matched_show_terms"] = videos_matched_show_terms
+    retrieval_meta["videos_filtered_show_terms"] = videos_filtered_show_terms
+    retrieval_meta["videos_skipped_up_to_date"] = videos_skipped_up_to_date
+    retrieval_meta["youtube_comment_count_sync_targets"] = len(youtube_comment_count_sync_targets)
+    retrieval_meta["youtube_comment_count_synced"] = youtube_comment_count_synced
+    retrieval_meta["filter_samples"] = filter_samples
+    retrieval_meta["comment_stats"] = _comment_stats_payload(comment_stats)
+    retrieval_meta["scrape_counters"] = {"posts": scraped_video_count, "comments": scraped_comment_count}
+    retrieval_meta["persist_counters"] = {
+        "posts_upserted": matched_video_count,
+        "comments_upserted": int(comment_stats.get("comments_upserted") or 0),
+    }
+    retrieval_meta["activity"] = _build_progress_activity_payload(activity, now=_now_utc())
     logger.info(
         "[youtube] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d comment_errors=%d",
         total_scraped,
-        video_count,
+        matched_video_count,
         skipped_keyword,
-        comment_count,
+        scraped_comment_count,
         comment_errors,
     )
-    return video_count, comment_count, retrieval_meta
+    return scraped_video_count, scraped_comment_count, retrieval_meta
 
 
 def _upsert_tweet(
@@ -2647,11 +3973,23 @@ def _upsert_tweet(
     run_id: str | None,
     account: str,
     tweet: Any,
+    persist_stats: dict[str, int] | None = None,
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
+    if persist_stats is not None:
+        persist_stats["comments_fetched"] = int(persist_stats.get("comments_fetched") or 0) + 1
+
+    tweet_id = str(getattr(tweet, "tweet_id", "") or "")
+    if not tweet_id.strip():
+        if persist_stats is not None:
+            persist_stats["comments_skipped_missing_id"] = (
+                int(persist_stats.get("comments_skipped_missing_id") or 0) + 1
+            )
+        return None
+
     created_at = _parse_platform_time(getattr(tweet, "created_at", None))
     payload = {
-        "tweet_id": getattr(tweet, "tweet_id", ""),
+        "tweet_id": tweet_id,
         "username": getattr(tweet, "username", ""),
         "display_name": getattr(tweet, "display_name", None),
         "user_verified": bool(getattr(tweet, "user_verified", False)),
@@ -2683,7 +4021,10 @@ def _upsert_tweet(
         payload["missing_at"] = None
         payload["last_seen_at"] = _now_utc()
         payload["last_seen_run_id"] = run_id
-    return _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn)
+    row = _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn)
+    if persist_stats is not None and row:
+        persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
+    return row
 
 
 def _ingest_twitter(
@@ -2717,46 +4058,41 @@ def _ingest_twitter(
     scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
 
     retrieval_meta: dict[str, Any] = {}
-    post_count = 0
-    reply_count = 0
+    scraped_post_count = 0
+    scraped_reply_count = 0
+    upserted_post_count = 0
     skipped_keyword = 0
     hydrated_replies = 0
     comment_errors = 0
+    comment_fail_reasons: set[str] = set()
     comment_refresh_reasons: Counter[str] = Counter()
     missing_marked = 0
     incomplete_comment_fetches = 0
-    last_progress_total = 0
+    comment_stats = _new_comment_persist_stats()
+    progress_state = _new_job_progress_state()
+    activity: dict[str, Any] = {
+        "phase": f"{stage}_start",
+        "pages_scanned": 0,
+        "posts_checked": 0,
+        "matched_posts": 0,
+    }
 
-    def _report_progress(*, force: bool = False) -> None:
-        nonlocal last_progress_total
-        total_items = post_count + reply_count
-        if not force:
-            if total_items == 0:
-                return
-            if (total_items - last_progress_total) < JOB_PROGRESS_UPDATE_EVERY:
-                return
-        last_progress_total = total_items
-        _update_job_progress(
-            job_id,
-            items_found=total_items,
-            metadata={
-                "stage": stage,
-                "platform": "twitter",
-                "account": account,
-                "stage_counters": {"posts": post_count, "comments": reply_count},
-            },
+    def _flush_progress(*, force: bool = False) -> None:
+        _emit_job_progress(
+            job_id=job_id,
+            stage=stage,
+            platform="twitter",
+            account=account,
+            scraped_posts=scraped_post_count,
+            scraped_comments=scraped_reply_count,
+            posts_upserted=upserted_post_count,
+            comments_upserted=int(comment_stats.get("comments_upserted") or 0),
+            activity=activity,
+            progress_state=progress_state,
+            force=force,
         )
 
-    _update_job_progress(
-        job_id,
-        items_found=0,
-        metadata={
-            "stage": stage,
-            "platform": "twitter",
-            "account": account,
-            "stage_counters": {"posts": 0, "comments": 0},
-        },
-    )
+    _flush_progress(force=True)
 
     if stage == "comments":
         # Comment-only stage: read existing tweets from DB and hydrate replies
@@ -2773,7 +4109,12 @@ def _ingest_twitter(
         skipped_synced = 0
         with pg.db_connection() as conn:
             if per_post_limit > 0:
-                for row in anchor_rows[: opts.max_posts_per_target]:
+                anchor_rows_iter = (
+                    anchor_rows
+                    if opts.max_posts_per_target <= 0
+                    else anchor_rows[: opts.max_posts_per_target]
+                )
+                for row in anchor_rows_iter:
                     tweet_id = str(row.get("tweet_id") or "")
                     if not tweet_id:
                         continue
@@ -2788,9 +4129,13 @@ def _ingest_twitter(
                     if not decision.should_refresh:
                         skipped_synced += 1
                         continue
-                    post_count += 1
-                    if post_count % 10 == 0:
+                    scraped_post_count += 1
+                    activity["phase"] = "comments_fetch"
+                    activity["posts_checked"] = scraped_post_count
+                    activity["matched_posts"] = scraped_post_count
+                    if scraped_post_count % 10 == 0:
                         _touch_job_heartbeat(job_id)
+                    _flush_progress()
                     fetch_failed = False
                     replies: list[Any] = []
                     observed_reply_ids: set[str] = set()
@@ -2809,13 +4154,16 @@ def _ingest_twitter(
                                 run_id=run_id,
                                 account=account,
                                 tweet=reply,
+                                persist_stats=comment_stats,
                                 conn=conn,
                             ):
                                 hydrated_replies += 1
-                                _report_progress()
+                                scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
+                                _flush_progress()
                     except Exception:
                         fetch_failed = True
                         comment_errors += 1
+                        comment_fail_reasons.add("fetch_exception")
                         logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
                     is_complete = _is_comment_fetch_complete(
                         fetch_failed=fetch_failed,
@@ -2832,7 +4180,7 @@ def _ingest_twitter(
                         )
                     else:
                         incomplete_comment_fetches += 1
-            reply_count += hydrated_replies
+            scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
         if skipped_synced:
             logger.info("[twitter] Skipped %d tweets whose replies are already synced", skipped_synced)
     else:
@@ -2851,35 +4199,88 @@ def _ingest_twitter(
             season_number=context.season_number,
         )
         logger.info("[twitter] Searching query=%r date_range=%s..%s", config.query, date_start, date_end)
-        tweets = scraper.scrape(config)[: opts.max_posts_per_target]
+        post_limit = opts.max_posts_per_target if opts.max_posts_per_target > 0 else None
+
+        def _on_scrape_progress(payload: dict[str, Any]) -> None:
+            nonlocal scraped_post_count
+            activity["phase"] = str(payload.get("phase") or "scrape_posts")
+            activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
+            activity["posts_checked"] = _normalize_non_negative_int(payload.get("posts_checked"))
+            if payload.get("matched_posts") is not None:
+                activity["matched_posts"] = _normalize_non_negative_int(payload.get("matched_posts"))
+            scraped_post_count = max(scraped_post_count, _normalize_non_negative_int(payload.get("posts_checked")))
+            _flush_progress()
+
+        scraped_tweets = scraper.scrape(config, progress_cb=_on_scrape_progress)
+        tweets = scraped_tweets if not post_limit else scraped_tweets[:post_limit]
         retrieval_meta.update(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
         logger.info("[twitter] Scraper returned %d tweets", len(tweets))
 
+        existing_post_lookup: dict[str, dict[str, Any]] = {}
+        snapshots: dict[str, CommentLifecycleSnapshot] = {}
+        if opts.sync_strategy == "incremental" and opts.max_comments_per_post > 0:
+            existing_rows = _load_existing_posts("twitter", context, account, date_start, date_end)
+            existing_post_lookup = _build_existing_post_lookup("twitter", existing_rows)
+            snapshots = _load_comment_lifecycle_snapshots(
+                list(existing_post_lookup.keys()),
+                platform="twitter",
+            )
+
+        skipped_synced = 0
         anchor_posts: list[Any] = []
         with pg.db_connection() as conn:
-            for tweet in tweets:
+            for tweet_index, tweet in enumerate(tweets, start=1):
+                scraped_post_count = max(scraped_post_count, tweet_index)
+                activity["phase"] = "posts_filter"
+                activity["posts_checked"] = scraped_post_count
                 text = str(getattr(tweet, "text", "") or "")
                 if not _text_contains_any_term(text=text, hashtags=hashtag_list, keywords=keyword_list):
                     skipped_keyword += 1
+                    _flush_progress()
                     continue
                 is_reply = bool(getattr(tweet, "is_reply", False))
                 if not is_reply:
                     anchor_posts.append(tweet)
+                    existing_row = existing_post_lookup.get(str(getattr(tweet, "tweet_id", "") or ""))
+                    if existing_row and opts.max_comments_per_post > 0:
+                        expected_comment_count = _expected_comment_count_for_platform(
+                            "twitter",
+                            {"replies_count": int(getattr(tweet, "replies", 0) or 0)},
+                        )
+                        decision = _decide_comment_refresh(
+                            sync_strategy=opts.sync_strategy,
+                            expected_count=expected_comment_count,
+                            snapshot=snapshots.get(str(getattr(tweet, "tweet_id", "") or "")),
+                            post_published_at=_coerce_dt(existing_row.get("created_at")),
+                        )
+                        comment_refresh_reasons[decision.reason] += 1
+                        if not decision.should_refresh:
+                            skipped_synced += 1
+                            activity["phase"] = "posts_skip_up_to_date"
+                            _flush_progress()
+                            continue
                 if is_reply and not include_reply_records:
+                    _flush_progress()
                     continue
                 upserted = _upsert_tweet(context, job_id=job_id, run_id=run_id, account=account, tweet=tweet, conn=conn)
                 if not upserted:
+                    _flush_progress()
                     continue
                 if is_reply:
-                    reply_count += 1
+                    scraped_reply_count += 1
                 else:
-                    post_count += 1
-                _report_progress()
+                    upserted_post_count += 1
+                    activity["matched_posts"] = upserted_post_count
+                activity["phase"] = "posts_upsert"
+                _flush_progress()
 
             if hydrate_audience_replies and opts.max_comments_per_post > 0:
                 per_post_limit = max(0, opts.max_replies_per_post or opts.max_comments_per_post)
                 if per_post_limit > 0:
-                    for tweet in anchor_posts[: opts.max_posts_per_target]:
+                    anchor_posts_iter = (
+                        anchor_posts if opts.max_posts_per_target <= 0 else anchor_posts[: opts.max_posts_per_target]
+                    )
+                    for tweet in anchor_posts_iter:
                         tweet_id = str(getattr(tweet, "tweet_id", "") or "")
                         if not tweet_id:
                             continue
@@ -2895,36 +4296,52 @@ def _ingest_twitter(
                                     run_id=run_id,
                                     account=account,
                                     tweet=reply,
+                                    persist_stats=comment_stats,
                                     conn=conn,
                                 ):
                                     hydrated_replies += 1
-                                    _report_progress()
+                                    scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
+                                    activity["phase"] = "comments_fetch"
+                                    _flush_progress()
                         except Exception:
                             comment_errors += 1
+                            comment_fail_reasons.add("fetch_exception")
                             logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
-                reply_count += hydrated_replies
+                scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
+        if skipped_synced:
+            logger.info("[twitter] Skipped %d posts already up-to-date", skipped_synced)
 
     if comment_errors:
         retrieval_meta["comment_errors"] = comment_errors
+    if comment_fail_reasons:
+        retrieval_meta["comment_fail_reasons"] = sorted(comment_fail_reasons)
     if comment_refresh_reasons:
         retrieval_meta["comment_refresh_decisions"] = dict(comment_refresh_reasons)
     if missing_marked:
         retrieval_meta["comments_marked_missing"] = missing_marked
     if incomplete_comment_fetches:
         retrieval_meta["incomplete_comment_fetches"] = incomplete_comment_fetches
+    retrieval_meta["comment_stats"] = _comment_stats_payload(comment_stats)
+    retrieval_meta["scrape_counters"] = {"posts": scraped_post_count, "comments": scraped_reply_count}
+    retrieval_meta["persist_counters"] = {
+        "posts_upserted": upserted_post_count,
+        "comments_upserted": int(comment_stats.get("comments_upserted") or 0),
+    }
+    activity["phase"] = f"{stage}_end"
+    retrieval_meta["activity"] = _build_progress_activity_payload(activity, now=_now_utc())
 
-    _report_progress(force=True)
+    _flush_progress(force=True)
 
     logger.info(
         "[twitter] Done: posts=%d replies=%d hydrated_replies=%d skipped_keyword=%d comment_errors=%d",
-        post_count,
-        reply_count,
+        scraped_post_count,
+        scraped_reply_count,
         hydrated_replies,
         skipped_keyword,
         comment_errors,
     )
     retrieval_meta["hydrated_replies"] = hydrated_replies
-    return post_count, reply_count, retrieval_meta
+    return scraped_post_count, scraped_reply_count, retrieval_meta
 
 
 def _retry_backoff_seconds(attempt_count: int) -> int:
@@ -3021,7 +4438,7 @@ def _run_platform_stage(
         if opts.max_comments_per_post <= 0:
             return 0, 0, {}
         if platform == "instagram":
-            _, comments, meta = _ingest_instagram(
+            posts, comments, meta = _ingest_instagram(
                 context,
                 run_id=run_id,
                 account=account,
@@ -3031,9 +4448,9 @@ def _run_platform_stage(
                 job_id=job_id,
                 stage=stage,
             )
-            return 0, comments, meta
+            return posts, comments, meta
         if platform == "tiktok":
-            _, comments, meta = _ingest_tiktok(
+            posts, comments, meta = _ingest_tiktok(
                 context,
                 run_id=run_id,
                 account=account,
@@ -3043,9 +4460,9 @@ def _run_platform_stage(
                 job_id=job_id,
                 stage=stage,
             )
-            return 0, comments, meta
+            return posts, comments, meta
         if platform == "youtube":
-            _, comments, meta = _ingest_youtube(
+            posts, comments, meta = _ingest_youtube(
                 context,
                 run_id=run_id,
                 account=account,
@@ -3055,9 +4472,9 @@ def _run_platform_stage(
                 job_id=job_id,
                 stage=stage,
             )
-            return 0, comments, meta
+            return posts, comments, meta
         if platform == "twitter":
-            _, comments, meta = _ingest_twitter(
+            posts, comments, meta = _ingest_twitter(
                 context,
                 run_id=run_id,
                 account=account,
@@ -3069,7 +4486,7 @@ def _run_platform_stage(
                 hydrate_audience_replies=True,
                 stage=stage,
             )
-            return 0, comments, meta
+            return posts, comments, meta
 
     raise RuntimeError(f"Platform {platform} ingest is not supported")
 
@@ -3080,6 +4497,7 @@ def _claim_next_job(
     run_id: str | None = None,
     stage: str | None = None,
 ) -> dict[str, Any] | None:
+    recover_stale_running_jobs(run_id=run_id, stage=stage, limit=25)
     return pg.fetch_one(
         """
         with candidate as (
@@ -3137,7 +4555,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         platforms=None,
         source_scope=str(config.get("source_scope") or job.get("source_scope") or "bravo"),
         sync_strategy=sync_strategy,
-        max_posts_per_target=max(1, int(config.get("max_posts_per_target") or 1000)),
+        max_posts_per_target=max(0, int(config.get("max_posts_per_target") or 1000)),
         max_comments_per_post=max(0, int(config.get("max_comments_per_post") or 0)),
         max_replies_per_post=max(0, int(config.get("max_replies_per_post") or 0)),
         fetch_replies=bool(config.get("fetch_replies", True)),
@@ -3162,6 +4580,28 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             opts=opts,
             job_id=job_id,
         )
+        persist_counters = {
+            "posts_upserted": _normalize_non_negative_int(
+                (retrieval_meta.get("persist_counters") or {}).get("posts_upserted")
+            ),
+            "comments_upserted": _normalize_non_negative_int(
+                (retrieval_meta.get("persist_counters") or {}).get("comments_upserted")
+            ),
+        }
+        activity = dict(retrieval_meta.get("activity") or {})
+        if not activity:
+            activity = {"phase": f"{stage}_end", "last_progress_at": _iso(_now_utc())}
+        fetch_counters = _comment_stats_payload(dict(retrieval_meta.get("comment_stats") or {}))
+        base_metadata = {
+            "stage": stage,
+            "stage_counters": {"posts": posts_count, "comments": comments_count},
+            "persist_counters": persist_counters,
+            "activity": activity,
+            "fetch_counters": fetch_counters,
+            "platform": platform,
+            "account": account,
+            "retrieval_meta": retrieval_meta,
+        }
         run_is_cancelled = False
         if run_id:
             run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
@@ -3171,13 +4611,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
                 job_id,
                 status="cancelled",
                 items_found=posts_count + comments_count,
-                metadata={
-                    "stage": stage,
-                    "stage_counters": {"posts": posts_count, "comments": comments_count},
-                    "platform": platform,
-                    "account": account,
-                    "retrieval_meta": retrieval_meta,
-                },
+                metadata=base_metadata,
             )
             return (
                 pg.fetch_one(
@@ -3202,13 +4636,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             job_id,
             status="completed",
             items_found=posts_count + comments_count,
-            metadata={
-                "stage": stage,
-                "stage_counters": {"posts": posts_count, "comments": comments_count},
-                "platform": platform,
-                "account": account,
-                "retrieval_meta": retrieval_meta,
-            },
+            metadata=base_metadata,
         )
     except Exception as exc:  # noqa: BLE001
         run_is_cancelled = False
@@ -3253,17 +4681,36 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         max_attempts = int(job.get("max_attempts") or 1)
         can_retry = transient and attempt_count < max_attempts
         next_available_at = _now_utc() + timedelta(seconds=_retry_backoff_seconds(attempt_count)) if can_retry else None
-        _finish_job(
-            job_id,
-            status="retrying" if can_retry else "failed",
-            items_found=0,
-            error_message=str(exc),
-            metadata={
+        existing_job = (
+            pg.fetch_one(
+                "select items_found, metadata from social.scrape_jobs where id = %s",
+                [job_id],
+            )
+            or {}
+        )
+        existing_metadata = dict(existing_job.get("metadata") or {})
+        existing_activity = dict(existing_metadata.get("activity") or {})
+        existing_activity["phase"] = "failed"
+        existing_activity["last_progress_at"] = _iso(_now_utc())
+        existing_metadata.update(
+            {
                 "stage": stage,
                 "platform": platform,
                 "account": account,
                 "error": str(exc),
-            },
+                "error_code": error_code,
+                "error_class": error_class,
+                "failure_reason_code": error_code,
+                "retryable": can_retry,
+                "activity": existing_activity,
+            }
+        )
+        _finish_job(
+            job_id,
+            status="retrying" if can_retry else "failed",
+            items_found=_normalize_non_negative_int(existing_job.get("items_found")),
+            error_message=str(exc),
+            metadata=existing_metadata,
             last_error_code=error_code,
             last_error_class=error_class,
             next_available_at=next_available_at,
@@ -3302,6 +4749,7 @@ def execute_run(
 ) -> dict[str, Any]:
     _set_run_status(run_id, "running")
     while True:
+        recover_stale_running_jobs(run_id=run_id, stage=stage, limit=25)
         job = _claim_next_job(worker_id=worker_id, run_id=run_id, stage=stage)
         if not job:
             break
@@ -3337,6 +4785,7 @@ def execute_run(
 
 
 def process_next_queued_job(*, worker_id: str, stage: str | None = None) -> dict[str, Any] | None:
+    recover_stale_running_jobs(run_id=None, stage=stage, limit=25)
     job = _claim_next_job(worker_id=worker_id, run_id=None, stage=stage)
     if not job:
         return None
@@ -3387,6 +4836,7 @@ def ingest_season(
         resolved_replies = 0
         resolved_fetch_replies = False
     elif normalized_mode == "comments_only":
+        # Comments-only runs should not cap anchor iteration by default.
         resolved_posts = 0
 
     stage_plan = (
@@ -4519,6 +5969,7 @@ def _rows_for_platform(
     platform_accounts_list = sorted(platform_accounts)
 
     if platform == "instagram":
+        thumbnail_expr = _instagram_posts_thumbnail_expr("p")
         account_filter_posts = (
             "and lower(coalesce(nullif(p.username, ''), p.source_account, '')) = any(%s)"
             if apply_account_filter
@@ -4549,7 +6000,8 @@ def _rows_for_platform(
                 )::bigint as engagement,
                 p.posted_at as ts,
                 ('https://www.instagram.com/p/' || p.shortcode || '/')::text as url,
-                p.username as author
+                p.username as author,
+                {thumbnail_expr}::text as thumbnail_url
               from social.instagram_posts p
               where p.season_id = %s
                 and p.posted_at >= %s
@@ -4564,7 +6016,8 @@ def _rows_for_platform(
                 greatest(0, coalesce(c.likes, 0))::bigint as engagement,
                 c.created_at as ts,
                 ('https://www.instagram.com/p/' || p.shortcode || '/')::text as url,
-                c.username as author
+                c.username as author,
+                {thumbnail_expr}::text as thumbnail_url
               from social.instagram_comments c
               join social.instagram_posts p on p.id = c.post_id
               where c.season_id = %s
@@ -4938,6 +6391,7 @@ def _build_rows(
                 "ts": ts,
                 "url": str(row.get("url") or ""),
                 "author": str(row.get("author") or ""),
+                "thumbnail_url": str(row.get("thumbnail_url") or "") or None,
                 "sentiment": sentiment,
                 "sentiment_score": score,
                 "_sentiment_confidence": confidence,
@@ -5136,6 +6590,33 @@ def get_analytics(
     weekly_platform_engagement_map: dict[int, dict[str, int]] = {
         item.week_index: dict.fromkeys(SUPPORTED_PLATFORMS, 0) for item in visible_windows
     }
+    local_zone = ZoneInfo(timezone)
+    weekly_daily_activity_map: dict[int, dict[str, Any]] = {}
+    day_seconds = 24 * 60 * 60
+    for window in visible_windows:
+        week_start_local = window.start_local.astimezone(local_zone)
+        week_end_local = window.end_local.astimezone(local_zone)
+        duration_seconds = max(0.0, (week_end_local - week_start_local).total_seconds())
+        day_count = max(1, int((duration_seconds + day_seconds - 1) // day_seconds))
+        days: list[dict[str, Any]] = []
+        for day_index in range(day_count):
+            day_start = week_start_local + timedelta(days=day_index)
+            days.append(
+                {
+                    "day_index": day_index,
+                    "date_local": day_start.date().isoformat(),
+                    "posts": dict.fromkeys(SUPPORTED_PLATFORMS, 0),
+                    "comments": dict.fromkeys(SUPPORTED_PLATFORMS, 0),
+                    "total_posts": 0,
+                    "total_comments": 0,
+                }
+            )
+        weekly_daily_activity_map[window.week_index] = {
+            "week_index": window.week_index,
+            "days": days,
+            "week_start": week_start_local,
+            "week_start_date": week_start_local.date(),
+        }
     for row in rows:
         week_window = _week_for_timestamp(row["ts"], windows=visible_windows, timezone=timezone)
         if not week_window:
@@ -5147,6 +6628,28 @@ def get_analytics(
             weekly_platform_posts_map[week_window.week_index][platform] += 1
         elif row["kind"] == "comment" and platform in weekly_platform_comments_map[week_window.week_index]:
             weekly_platform_comments_map[week_window.week_index][platform] += 1
+
+        day_bucket = weekly_daily_activity_map.get(week_window.week_index)
+        if not day_bucket:
+            continue
+        day_entries = day_bucket.get("days") or []
+        if not day_entries:
+            continue
+        local_ts = row["ts"].astimezone(local_zone)
+        day_index = (local_ts.date() - day_bucket["week_start_date"]).days
+        if day_index < 0:
+            continue
+        if day_index >= len(day_entries):
+            day_index = len(day_entries) - 1
+        day_entry = day_entries[day_index]
+        if platform not in day_entry["posts"]:
+            continue
+        if row["kind"] == "post":
+            day_entry["posts"][platform] += 1
+            day_entry["total_posts"] += 1
+        elif row["kind"] == "comment":
+            day_entry["comments"][platform] += 1
+            day_entry["total_comments"] += 1
 
     weekly_platform_posts: list[dict[str, Any]] = []
     for week_entry in weekly:
@@ -5208,6 +6711,45 @@ def get_analytics(
             }
         )
 
+    weekly_daily_activity: list[dict[str, Any]] = []
+    for week_entry in weekly:
+        week_index = int(week_entry["week_index"])
+        day_entries = (weekly_daily_activity_map.get(week_index) or {}).get("days") or []
+        days_payload: list[dict[str, Any]] = []
+        for day_entry in day_entries:
+            posts_payload = day_entry.get("posts") or {}
+            comments_payload = day_entry.get("comments") or {}
+            days_payload.append(
+                {
+                    "day_index": int(day_entry.get("day_index", 0)),
+                    "date_local": str(day_entry.get("date_local") or ""),
+                    "posts": {
+                        "instagram": int(posts_payload.get("instagram", 0)),
+                        "youtube": int(posts_payload.get("youtube", 0)),
+                        "tiktok": int(posts_payload.get("tiktok", 0)),
+                        "twitter": int(posts_payload.get("twitter", 0)),
+                    },
+                    "comments": {
+                        "instagram": int(comments_payload.get("instagram", 0)),
+                        "youtube": int(comments_payload.get("youtube", 0)),
+                        "tiktok": int(comments_payload.get("tiktok", 0)),
+                        "twitter": int(comments_payload.get("twitter", 0)),
+                    },
+                    "total_posts": int(day_entry.get("total_posts", 0)),
+                    "total_comments": int(day_entry.get("total_comments", 0)),
+                }
+            )
+
+        weekly_daily_activity.append(
+            {
+                "week_index": week_index,
+                "label": week_entry["label"],
+                "start": week_entry["start"],
+                "end": week_entry["end"],
+                "days": days_payload,
+            }
+        )
+
     platform_breakdown = []
     for platform in available_platforms:
         platform_rows = [row for row in rows if row["platform"] == platform]
@@ -5235,6 +6777,7 @@ def get_analytics(
                 "engagement": row["engagement"],
                 "url": row["url"],
                 "timestamp": _iso(row["ts"]),
+                "thumbnail_url": row.get("thumbnail_url"),
             }
             for row in sorted(posts, key=lambda item: item["engagement"], reverse=True)[:15]
         ],
@@ -5247,6 +6790,7 @@ def get_analytics(
                 "url": row["url"],
                 "timestamp": _iso(row["ts"]),
                 "sentiment": row["sentiment"],
+                "thumbnail_url": row.get("thumbnail_url"),
             }
             for row in sorted(comments, key=lambda item: item["engagement"], reverse=True)[:20]
         ],
@@ -5282,6 +6826,7 @@ def get_analytics(
         "weekly": weekly,
         "weekly_platform_posts": weekly_platform_posts,
         "weekly_platform_engagement": weekly_platform_engagement,
+        "weekly_daily_activity": weekly_daily_activity,
         "platform_breakdown": platform_breakdown,
         "themes": _build_drivers(comments, analyzer_context=sentiment_context),
         "leaderboards": leaderboards,
@@ -5305,6 +6850,7 @@ def get_analytics(
                     "engagement": row["engagement"],
                     "sentiment": row["sentiment"],
                     "text": row["text"],
+                    "thumbnail_url": row.get("thumbnail_url"),
                 }
             )
         response["rows"] = rows_payload
@@ -5317,6 +6863,11 @@ def get_analytics(
 # ---------------------------------------------------------------------------
 
 _MENTION_RE = re.compile(r"@([\w.]+)")
+_HASHTAG_RE = re.compile(r"(?<![\w.])#([A-Za-z0-9_]+)")
+
+
+def _json_text_list(value: Any, *, prefix: str = "", strip_prefix: str | None = None) -> list[str]:
+    return _as_text_list(value, prefix=prefix, strip_prefix=strip_prefix)
 
 
 def _parse_mentions(text: str | None) -> list[str]:
@@ -5324,6 +6875,12 @@ def _parse_mentions(text: str | None) -> list[str]:
     if not text:
         return []
     return [f"@{m}" for m in _MENTION_RE.findall(text)]
+
+
+def _parse_hashtags(text: str | None) -> list[str]:
+    if not text:
+        return []
+    return _normalize_unique_terms([tag.lstrip("#") for tag in _HASHTAG_RE.findall(text)])
 
 
 def _week_detail_instagram(
@@ -5334,6 +6891,15 @@ def _week_detail_instagram(
     account_handles: set[str],
     max_comments: int,
 ) -> dict[str, Any]:
+    thumbnail_expr = _instagram_posts_thumbnail_expr("p")
+    hosted_media_urls_expr = _instagram_posts_json_array_expr("p", "hosted_media_urls")
+    post_format_expr = _instagram_posts_json_text_expr("p", "post_format")
+    profile_tags_expr = _instagram_posts_json_array_expr("p", "profile_tags")
+    collaborators_expr = _instagram_posts_json_array_expr("p", "collaborators")
+    hashtags_expr = _instagram_posts_json_array_expr("p", "hashtags")
+    mentions_expr = _instagram_posts_json_array_expr("p", "mentions")
+    duration_expr = _instagram_posts_duration_expr("p")
+
     account_handles_list = sorted(account_handles)
     account_filter = (
         "and lower(coalesce(nullif(p.username, ''), p.source_account, '')) = any(%s)" if account_handles_list else ""
@@ -5353,7 +6919,14 @@ def _week_detail_instagram(
           coalesce(p.views, 0) as views,
           p.media_type,
           p.media_urls,
-          p.thumbnail_url,
+          {hosted_media_urls_expr} as hosted_media_urls,
+          {thumbnail_expr} as thumbnail_url,
+          {post_format_expr} as post_format,
+          {profile_tags_expr} as profile_tags,
+          {collaborators_expr} as collaborators,
+          {hashtags_expr} as hashtags,
+          {mentions_expr} as mentions,
+          {duration_expr} as duration_seconds,
           p.posted_at as ts
         from social.instagram_posts p
         where p.season_id = %s
@@ -5416,17 +6989,20 @@ def _week_detail_instagram(
     for p in posts:
         engagement = p["likes"] + p["comments_count"] + p["views"]
         total_engagement += engagement
-        mentions = _parse_mentions(p.get("text"))
         db_comment_count = comment_counts_by_post.get(p["id"], 0)
         total_comments_count += p["comments_count"]
         post_comments = comments_by_post.get(p["id"], [])
 
-        media_urls = p.get("media_urls")
-        if isinstance(media_urls, str):
-            try:
-                media_urls = json.loads(media_urls)
-            except (json.JSONDecodeError, TypeError):
-                media_urls = None
+        hosted_media_urls = _json_text_list(p.get("hosted_media_urls"))
+        media_urls = hosted_media_urls or _json_text_list(p.get("media_urls"))
+        hashtags = _json_text_list(p.get("hashtags"), strip_prefix="#")
+        mentions = _json_text_list(p.get("mentions"), prefix="@", strip_prefix="@")
+        if not hashtags:
+            hashtags = _parse_hashtags(p.get("text"))
+        if not mentions:
+            mentions = _parse_mentions(p.get("text"))
+        profile_tags = _json_text_list(p.get("profile_tags"), prefix="@", strip_prefix="@")
+        collaborators = _json_text_list(p.get("collaborators"), prefix="@", strip_prefix="@")
 
         result_posts.append(
             {
@@ -5441,7 +7017,12 @@ def _week_detail_instagram(
                 "media_type": p.get("media_type"),
                 "media_urls": media_urls,
                 "thumbnail_url": p.get("thumbnail_url"),
+                "post_format": p.get("post_format"),
+                "profile_tags": profile_tags,
+                "collaborators": collaborators,
+                "hashtags": hashtags,
                 "mentions": mentions,
+                "duration_seconds": p.get("duration_seconds"),
                 "engagement": engagement,
                 "total_comments_available": db_comment_count,
                 "comments": [
@@ -5706,10 +7287,14 @@ def _week_detail_youtube(
     total_engagement = 0
     total_comments_count = 0
     for p in posts:
-        engagement = p["views"] + p["likes"] + p["comments_count"]
-        total_engagement += engagement
-        total_comments_count += p["comments_count"]
         db_comment_count = comment_counts_by_post.get(p["id"], 0)
+        effective_comments_count = _youtube_effective_comment_count(
+            reported_count=p["comments_count"],
+            saved_count=db_comment_count,
+        )
+        engagement = p["views"] + p["likes"] + effective_comments_count
+        total_engagement += engagement
+        total_comments_count += effective_comments_count
         post_comments = comments_by_post.get(p["id"], [])
 
         result_posts.append(
@@ -5722,7 +7307,7 @@ def _week_detail_youtube(
                 "posted_at": _iso(p["ts"]),
                 "views": p["views"],
                 "likes": p["likes"],
-                "comments_count": p["comments_count"],
+                "comments_count": effective_comments_count,
                 "thumbnail_url": p.get("thumbnail_url"),
                 "duration_seconds": p.get("duration_seconds"),
                 "engagement": engagement,
@@ -6099,11 +7684,27 @@ def get_post_comments(
         raise ValueError(f"Unsupported platform: {platform}")
 
     if platform == "instagram":
+        thumbnail_expr = _instagram_posts_thumbnail_expr("p")
+        post_format_expr = _instagram_posts_json_text_expr("p", "post_format")
+        profile_tags_expr = _instagram_posts_json_array_expr("p", "profile_tags")
+        collaborators_expr = _instagram_posts_json_array_expr("p", "collaborators")
+        hashtags_expr = _instagram_posts_json_array_expr("p", "hashtags")
+        mentions_expr = _instagram_posts_json_array_expr("p", "mentions")
+        duration_expr = _instagram_posts_duration_expr("p")
+
         post = pg.fetch_one(
-            """
+            f"""
             select p.id, p.shortcode as source_id, p.username as author, p.caption as text,
                    coalesce(p.likes, 0) as likes, coalesce(p.comments_count, 0) as comments_count,
-                   coalesce(p.views, 0) as views, p.thumbnail_url, p.posted_at as ts
+                   coalesce(p.views, 0) as views,
+                   {thumbnail_expr} as thumbnail_url,
+                   {post_format_expr} as post_format,
+                   {profile_tags_expr} as profile_tags,
+                   {collaborators_expr} as collaborators,
+                   {hashtags_expr} as hashtags,
+                   {mentions_expr} as mentions,
+                   {duration_expr} as duration_seconds,
+                   p.posted_at as ts
             from social.instagram_posts p
             where p.season_id = %s and p.shortcode = %s
             """,
@@ -6128,6 +7729,14 @@ def get_post_comments(
         )
 
         engagement = post["likes"] + post["comments_count"] + post["views"]
+        hashtags = _json_text_list(post.get("hashtags"), strip_prefix="#")
+        mentions = _json_text_list(post.get("mentions"), prefix="@", strip_prefix="@")
+        if not hashtags:
+            hashtags = _parse_hashtags(post.get("text"))
+        if not mentions:
+            mentions = _parse_mentions(post.get("text"))
+        profile_tags = _json_text_list(post.get("profile_tags"), prefix="@", strip_prefix="@")
+        collaborators = _json_text_list(post.get("collaborators"), prefix="@", strip_prefix="@")
         return {
             "platform": "instagram",
             "source_id": source_id,
@@ -6136,6 +7745,12 @@ def get_post_comments(
             "url": f"https://www.instagram.com/p/{source_id}/",
             "posted_at": _iso(post["ts"]),
             "thumbnail_url": post.get("thumbnail_url"),
+            "post_format": post.get("post_format"),
+            "profile_tags": profile_tags,
+            "collaborators": collaborators,
+            "hashtags": hashtags,
+            "mentions": mentions,
+            "duration_seconds": post.get("duration_seconds"),
             "stats": {
                 "likes": post["likes"],
                 "comments_count": post["comments_count"],
@@ -6227,7 +7842,11 @@ def get_post_comments(
             [post["id"]],
         )
 
-        engagement = post["views"] + post["likes"] + post["comments_count"]
+        effective_comments_count = _youtube_effective_comment_count(
+            reported_count=post["comments_count"],
+            saved_count=len(comments),
+        )
+        engagement = post["views"] + post["likes"] + effective_comments_count
         return {
             "platform": "youtube",
             "source_id": source_id,
@@ -6240,7 +7859,7 @@ def get_post_comments(
             "stats": {
                 "views": post["views"],
                 "likes": post["likes"],
-                "comments_count": post["comments_count"],
+                "comments_count": effective_comments_count,
                 "engagement": engagement,
             },
             "total_comments_in_db": len(comments),
@@ -6504,6 +8123,7 @@ def refresh_post_comments(
                     comment=comment,
                     conn=conn,
                 )
+            comment_count_synced = _sync_youtube_video_comment_counts([str(row["id"])], conn=conn)
         total_comments = _count_stored_comments([str(row["id"])], "youtube").get(str(row["id"]), 0)
         return {
             "platform": normalized_platform,
@@ -6513,6 +8133,7 @@ def refresh_post_comments(
             "total_comments_in_db": total_comments,
             "fetch_replies": fetch_replies,
             "max_comments_per_post": max_comments,
+            "youtube_comment_count_synced": comment_count_synced,
         }
 
     row = pg.fetch_one(

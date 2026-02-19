@@ -68,7 +68,9 @@ def test_discover_people_links_adds_bravo_profile_for_housewife_friend_on_bravo_
                 "api.routers.admin_show_links._validated_person_knowledge_url",
                 side_effect=lambda url, kind, expected_name=None: url,
             ):
-                links = _discover_people_links(show_id)
+                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                    with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
+                        links = _discover_people_links(show_id)
 
     assert any(link.get("link_kind") == "bravo_profile" for link in links)
     assert any(link.get("url") == "https://www.bravotv.com/people/lisa-barlow" for link in links)
@@ -92,12 +94,102 @@ def test_discover_people_links_skips_missing_wikipedia_and_fandom_pages() -> Non
                     }
                 ],
             ]
-            with patch("api.routers.admin_show_links._validated_person_knowledge_url", return_value=None):
-                links = _discover_people_links(show_id)
+            def _validate(url: str, kind: str, expected_name: str | None = None) -> str | None:
+                if kind == "bravo_profile":
+                    return url
+                return None
+
+            with patch("api.routers.admin_show_links._validated_person_knowledge_url", side_effect=_validate):
+                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                    with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
+                        links = _discover_people_links(show_id)
 
     assert not any(link.get("link_kind") == "wikipedia" for link in links)
     assert not any(link.get("link_kind") == "fandom" for link in links)
     assert any(link.get("link_kind") == "bravo_profile" for link in links)
+
+
+def test_discover_people_links_generates_imdb_tmdb_links_from_person_ids() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["bravo"]}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [],
+                [
+                    {
+                        "id": person_id,
+                        "full_name": "Heather Gay",
+                        "external_ids": {"imdb": "nm1234567"},
+                        "fandom_url": "",
+                        "cast_tmdb_imdb_id": "nm1234567",
+                        "cast_tmdb_tmdb_id": 98765,
+                        "cast_tmdb_wikidata_id": "Q123",
+                    }
+                ],
+            ]
+            with patch(
+                "api.routers.admin_show_links._validated_person_knowledge_url",
+                side_effect=lambda url, kind, expected_name=None: url,
+            ):
+                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                    with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
+                        links = _discover_people_links(show_id)
+
+    imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
+    tmdb_links = [link for link in links if link.get("link_kind") == "tmdb"]
+    assert len(imdb_links) == 1
+    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm1234567/"
+    assert imdb_links[0]["source"] == "core.people.external_ids"
+    assert imdb_links[0]["status"] == "approved"
+    assert imdb_links[0]["link_group"] == "knowledge"
+    assert len(tmdb_links) == 1
+    assert tmdb_links[0]["url"] == "https://www.themoviedb.org/person/98765"
+    assert tmdb_links[0]["source"] == "core.cast_tmdb"
+    assert tmdb_links[0]["status"] == "approved"
+    assert tmdb_links[0]["link_group"] == "knowledge"
+
+
+def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["bravo"]}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [],
+                [
+                    {
+                        "id": person_id,
+                        "full_name": "Lisa Barlow",
+                        "external_ids": {},
+                        "fandom_url": "",
+                        "cast_tmdb_imdb_id": None,
+                        "cast_tmdb_tmdb_id": None,
+                        "cast_tmdb_wikidata_id": None,
+                    }
+                ],
+            ]
+            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                with patch(
+                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                    return_value=[
+                        "https://teen-wolf.fandom.com/wiki/Lisa_Barlow",
+                        "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+                    ],
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None: (
+                            url if kind == "fandom" and "real-housewives.fandom.com" in url else None
+                        ),
+                    ):
+                        links = _discover_people_links(show_id)
+
+    fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(fandom_links) == 1
+    assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
 
 
 def test_discover_season_links_prefers_wikidata_enwiki_sitelink() -> None:
@@ -206,6 +298,94 @@ def test_validate_person_knowledge_url_rejects_wikipedia_owner_mismatch_from_api
     assert outcome == "invalid"
 
 
+def test_validate_person_knowledge_url_rejects_imdb_owner_mismatch() -> None:
+    html = """
+    <html>
+      <head><title>Heather Gay - IMDb</title></head>
+      <body><h1>Heather Gay</h1></body>
+    </html>
+    """
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(200, html, "https://www.imdb.com/name/nm1234567/", None),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "nm1234567",
+            kind="imdb",
+            expected_name="Ashley Gay",
+        )
+    assert resolved is None
+    assert outcome == "invalid"
+
+
+def test_validate_person_knowledge_url_rejects_tmdb_owner_mismatch() -> None:
+    html = """
+    <html>
+      <head><title>Heather Gay - The Movie Database</title></head>
+      <body><h1>Heather Gay</h1></body>
+    </html>
+    """
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(200, html, "https://www.themoviedb.org/person/123-heather-gay", None),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "123",
+            kind="tmdb",
+            expected_name="Ashley Gay",
+        )
+    assert resolved is None
+    assert outcome == "invalid"
+
+
+def test_validate_person_knowledge_url_rejects_bravo_owner_mismatch() -> None:
+    html = """
+    <html>
+      <head><title>Heather Gay | Bravo TV Official Site</title></head>
+      <body><h1>Heather Gay</h1></body>
+    </html>
+    """
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(200, html, "https://www.bravotv.com/people/heather-gay", None),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "https://www.bravotv.com/people/heather-gay",
+            kind="bravo_profile",
+            expected_name="Ashley Gay",
+        )
+    assert resolved is None
+    assert outcome == "invalid"
+
+
+def test_validate_person_knowledge_url_rejects_nonexistent_imdb_page() -> None:
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(404, "<html>Not found</html>", "https://www.imdb.com/name/nm0000000/", None),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "nm0000000",
+            kind="imdb",
+            expected_name="Heather Gay",
+        )
+    assert resolved is None
+    assert outcome == "invalid"
+
+
+def test_validate_person_knowledge_url_returns_fetch_error_for_tmdb_fetch_failures() -> None:
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(None, None, None, "network timeout"),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "123",
+            kind="tmdb",
+            expected_name="Heather Gay",
+        )
+    assert resolved is None
+    assert outcome == "fetch_error"
+
+
 def test_validated_person_knowledge_url_rejects_mismatched_fandom_page() -> None:
     _validated_person_knowledge_url.cache_clear()
     html = """
@@ -284,7 +464,9 @@ def test_cleanup_invalid_person_knowledge_links_deletes_all_statuses_and_non_cas
     cast_person_id = str(uuid4())
     non_cast_person_id = str(uuid4())
     invalid_wiki_id = str(uuid4())
-    non_cast_fandom_id = str(uuid4())
+    invalid_imdb_id = str(uuid4())
+    invalid_tmdb_id = str(uuid4())
+    non_cast_bravo_id = str(uuid4())
 
     with patch("api.routers.admin_show_links._load_show_cast_names_by_person_id") as cast_lookup:
         cast_lookup.return_value = {cast_person_id: "Lisa Barlow"}
@@ -298,26 +480,74 @@ def test_cleanup_invalid_person_knowledge_links_deletes_all_statuses_and_non_cas
                     "url": "https://en.wikipedia.org/wiki/Heather_Gay",
                 },
                 {
-                    "id": non_cast_fandom_id,
-                    "person_id": non_cast_person_id,
-                    "link_kind": "fandom",
+                    "id": invalid_imdb_id,
+                    "person_id": cast_person_id,
+                    "link_kind": "imdb",
+                    "status": "approved",
+                    "url": "https://www.imdb.com/name/nm1234567/",
+                },
+                {
+                    "id": invalid_tmdb_id,
+                    "person_id": cast_person_id,
+                    "link_kind": "tmdb",
                     "status": "pending",
-                    "url": "https://real-housewives.fandom.com/wiki/Robyn_Dixon",
+                    "url": "https://www.themoviedb.org/person/12345",
+                },
+                {
+                    "id": non_cast_bravo_id,
+                    "person_id": non_cast_person_id,
+                    "link_kind": "bravo_profile",
+                    "status": "pending",
+                    "url": "https://www.bravotv.com/people/robyn-dixon",
                 },
             ]
             with patch("api.routers.admin_show_links._validate_person_knowledge_url") as validate_url:
                 validate_url.return_value = (None, "invalid")
                 with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
-                    execute_returning.return_value = [{"id": invalid_wiki_id}, {"id": non_cast_fandom_id}]
+                    execute_returning.return_value = [
+                        {"id": invalid_wiki_id},
+                        {"id": invalid_imdb_id},
+                        {"id": invalid_tmdb_id},
+                        {"id": non_cast_bravo_id},
+                    ]
                     result = _cleanup_invalid_person_knowledge_links(show_id)
 
-    assert result["scanned"] == 2
-    assert result["invalid"] == 2
-    assert result["deleted"] == 2
+    assert result["scanned"] == 4
+    assert result["invalid"] == 4
+    assert result["deleted"] == 4
     assert result["validation_failures"] == 0
     sql, params = execute_returning.call_args.args
     assert "DELETE FROM core.entity_links" in sql
-    assert params == [[invalid_wiki_id, non_cast_fandom_id]]
+    assert params == [[invalid_wiki_id, invalid_imdb_id, invalid_tmdb_id, non_cast_bravo_id]]
+
+
+def test_discover_people_links_skips_imdb_and_tmdb_when_validation_fails() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["peacock"]}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [
+                    {
+                        "id": person_id,
+                        "full_name": "Heather Gay",
+                        "external_ids": {"imdb": "nm1234567", "tmdb_id": 12345},
+                        "fandom_url": "",
+                        "cast_tmdb_imdb_id": None,
+                        "cast_tmdb_tmdb_id": None,
+                        "cast_tmdb_wikidata_id": None,
+                    }
+                ],
+            ]
+            with patch(
+                "api.routers.admin_show_links._validated_person_knowledge_url",
+                return_value=None,
+            ):
+                links = _discover_people_links(show_id)
+
+    assert not any(link.get("link_kind") == "imdb" for link in links)
+    assert not any(link.get("link_kind") == "tmdb" for link in links)
 
 
 def test_cleanup_invalid_person_knowledge_links_keeps_rows_on_validation_fetch_error() -> None:

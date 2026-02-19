@@ -158,11 +158,15 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
 
     with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
         with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
-            response = client.post(
-                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload,
-            )
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
 
     assert response.status_code == 200
     body = response.json()
@@ -194,11 +198,15 @@ def test_ingest_accepts_comments_only_mode(client: TestClient, monkeypatch: pyte
 
     with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
         with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
-            response = client.post(
-                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload,
-            )
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
 
     assert response.status_code == 200
     body = response.json()
@@ -275,6 +283,72 @@ def test_get_ingest_runs_requires_admin_auth(client: TestClient) -> None:
     season_id = str(uuid4())
     response = client.get(f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs")
     assert response.status_code in {401, 403}
+
+
+def test_get_week_detail_endpoint_returns_youtube_comment_totals(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    payload = {
+        "season_id": season_id,
+        "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
+        "platforms": {
+            "youtube": {
+                "posts": [
+                    {
+                        "source_id": "vid123",
+                        "comments_count": 420,
+                        "total_comments_available": 420,
+                    }
+                ],
+                "totals": {"posts": 1, "total_comments": 420, "total_engagement": 1000},
+            }
+        },
+        "totals": {"posts": 1, "total_comments": 420, "total_engagement": 1000},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["totals"]["total_comments"] == 420
+    assert body["platforms"]["youtube"]["posts"][0]["comments_count"] == 420
+
+
+def test_get_post_comments_endpoint_returns_youtube_effective_stats(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    payload = {
+        "platform": "youtube",
+        "source_id": "vid123",
+        "stats": {"views": 1000, "likes": 100, "comments_count": 420, "engagement": 1520},
+        "total_comments_in_db": 420,
+        "comments": [],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_post_comments", return_value=payload):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/posts/youtube/vid123",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stats"]["comments_count"] == 420
+    assert body["total_comments_in_db"] == 420
 
 
 def test_refresh_post_comments_endpoint_returns_latest_post_detail(
@@ -366,6 +440,213 @@ def test_ingest_returns_400_when_queue_schema_missing(client: TestClient, monkey
     assert "not migrated" in response.json()["detail"]
 
 
+def test_ingest_returns_503_when_queue_enabled_and_worker_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    payload = {"source_scope": "bravo", "platforms": ["instagram"]}
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "No healthy social ingest workers are reporting heartbeats.",
+                worker_health={
+                    "healthy": False,
+                    "healthy_workers": 0,
+                    "reason": "no_healthy_workers",
+                    "workers": [],
+                },
+            ),
+        ):
+            with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_WORKER_UNAVAILABLE"
+    assert body["detail"]["worker_health"]["healthy"] is False
+    ingest_mock.assert_not_called()
+
+
+def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("APP_ENV", "development")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "allow_inline_dev_fallback": True,
+    }
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-inline-fallback",
+        "status": "queued",
+        "stages": ["posts", "comments"],
+        "queued_or_started_jobs": 2,
+        "summary": {"total_jobs": 2},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "No healthy social ingest workers are reporting heartbeats.",
+                worker_health={
+                    "healthy": False,
+                    "healthy_workers": 0,
+                    "reason": "no_healthy_workers",
+                    "workers": [],
+                },
+            ),
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.ingest_season",
+                return_value=expected,
+            ) as ingest_mock:
+                with patch("trr_backend.repositories.social_season_analytics.execute_run", return_value=None):
+                    response = client.post(
+                        f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "run-inline-fallback"
+    assert body["execution_mode"] == "inline_fallback"
+    assert body["status"] == "started"
+    assert body["worker_health"]["healthy"] is False
+    assert isinstance(body.get("warnings"), list)
+    assert any("inline dev fallback" in str(item).lower() for item in (body.get("warnings") or []))
+    ingest_mock.assert_called_once()
+
+
+def test_ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_flag(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("TRR_LOCAL_DEV", raising=False)
+    monkeypatch.delenv("SOCIAL_ALLOW_INLINE_DEV_FALLBACK", raising=False)
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "allow_inline_dev_fallback": True,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "No healthy social ingest workers are reporting heartbeats.",
+                worker_health={
+                    "healthy": False,
+                    "healthy_workers": 0,
+                    "reason": "no_healthy_workers",
+                    "workers": [],
+                },
+            ),
+        ):
+            with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_WORKER_UNAVAILABLE"
+    assert body["detail"]["worker_health"]["healthy"] is False
+    ingest_mock.assert_not_called()
+
+
+def test_ingest_with_queue_enabled_and_worker_present_succeeds(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    payload = {"source_scope": "bravo", "platforms": ["instagram"]}
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-healthy",
+        "status": "queued",
+        "stages": ["posts", "comments"],
+        "queued_or_started_jobs": 2,
+        "summary": {"total_jobs": 2},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value={"healthy": True, "healthy_workers": 1},
+        ) as worker_guard:
+            with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "run-healthy"
+    assert response.json()["execution_mode"] == "queue"
+    worker_guard.assert_called_once_with()
+
+
+def test_get_worker_health_endpoint_returns_health_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    expected = {
+        "healthy": True,
+        "healthy_workers": 2,
+        "active_workers": 2,
+        "total_workers": 2,
+        "stale_after_seconds": 180,
+        "workers": [{"worker_id": "social-worker:host:1"}],
+        "reason": None,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch("trr_backend.repositories.social_season_analytics.get_worker_health", return_value=expected):
+            response = client.get(
+                "/api/v1/admin/socials/ingest/worker-health",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queue_enabled"] is True
+    assert body["healthy"] is True
+    assert body["healthy_workers"] == 2
+
+
 def test_export_csv(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")
@@ -411,6 +692,7 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
         "summary": {},
         "weekly": [],
         "weekly_platform_engagement": [],
+        "weekly_daily_activity": [],
         "platform_breakdown": [],
         "themes": {"positive": [], "negative": []},
         "leaderboards": {"bravo_content": [], "viewer_discussion": []},
@@ -426,6 +708,7 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
     assert response.status_code == 200
     assert response.json()["window"]["week"] == 0
     assert "weekly_platform_engagement" in response.json()
+    assert "weekly_daily_activity" in response.json()
     assert mocked.call_args.kwargs["week"] == 0
 
 

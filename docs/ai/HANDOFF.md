@@ -4,6 +4,269 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
 
 ## Latest Update (2026-02-19)
 
+- February 19, 2026: Expanded streaming inclusion scope to all watch-provider availability rows and fixed completion upsert array serialization.
+  - Files:
+    - `scripts/sync/sync_networks_streaming_links.py`
+    - `tests/scripts/test_sync_networks_streaming_links.py`
+  - Changes:
+    - Removed restrictive filters from provider inventory and IMDb-provider sampling:
+      - no longer constrained to `region='US'` and `offer_type in ('flatrate','ads')`.
+      - now includes all `core.show_watch_providers` availability rows, with existing fallback from `core.shows.streaming_providers`.
+    - Fixed `admin.network_streaming_completion.source_priority` writes:
+      - added Postgres `text[]` serializer (`_to_pg_text_array_literal`) to prevent malformed array literal errors during upsert.
+      - this unblocked completion row persistence and unresolved tracking.
+    - Runtime validation:
+      - Verified Bravo-scoped provider availability now includes `hayu`, `peacock premium`, and `peacock premium plus`.
+      - Reprocessed Bravo network + Bravo TV provider; both now resolved with base + black + white hosted logos.
+  - Validation:
+    - `ruff check scripts/sync/sync_networks_streaming_links.py tests/scripts/test_sync_networks_streaming_links.py` (pass)
+    - `pytest tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py tests/media/test_s3_mirror.py` (`63 passed`)
+
+- February 19, 2026: Continued networks/streaming completion pipeline with Brandfetch + Logopedia + TMDb network alias enrichment, runtime fix, and Supabase schema verification.
+  - Files:
+    - `trr_backend/integrations/brandfetch.py` (new)
+    - `trr_backend/integrations/logopedia.py` (new)
+    - `trr_backend/integrations/tmdb/client.py`
+    - `scripts/sync/sync_networks_streaming_links.py`
+    - `tests/scripts/test_sync_networks_streaming_links.py`
+    - `.env` (local runtime only; `BRANDFETCH_API_KEY` + timeout configured)
+    - `.env.example`
+  - Changes:
+    - Added Brandfetch adapter with auth/not-found/request error classification and candidate ranking that prefers transparent/vector assets.
+    - Added Logopedia adapter (logos.fandom MediaWiki API) with title/search fallback and quality-ranked candidate extraction.
+    - Added TMDb network endpoints in client:
+      - `fetch_network_details(...)`
+      - `fetch_network_alternative_names(...)`
+    - Extended `sync_networks_streaming_links` to:
+      - resolve network aliases/homepage/logo hints from show-derived `core.shows.tmdb_network_ids`,
+      - include `official`/`catalog` source tiers from Brandfetch + Logopedia + IMDb watch-box provider logos,
+      - log source attempt outcomes for completion audit rows,
+      - support `--unresolved-only` orchestration input from admin sync API.
+    - Fixed live runtime bug in provider inventory build:
+      - replaced unsupported PostgREST relation projection (`provider:watch_providers(...)`) with `provider_id` query + provider-name lookup map.
+    - Added `.env.example` contract keys:
+      - `BRANDFETCH_API_KEY=`
+      - `BRANDFETCH_TIMEOUT_SEC=20`
+  - Validation:
+    - Supabase schema checks (remote target from `SUPABASE_DB_URL`) confirmed required columns now exist on:
+      - `core.networks`
+      - `core.watch_providers`
+      - `admin.covered_shows`
+      - `admin.network_streaming_overrides`
+      - `admin.network_streaming_completion`
+      - `admin.network_streaming_completion_attempts`
+    - `ruff check trr_backend/integrations/brandfetch.py trr_backend/integrations/logopedia.py trr_backend/integrations/tmdb/client.py scripts/sync/sync_networks_streaming_links.py api/routers/admin_show_sync.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py tests/media/test_s3_mirror.py` (pass)
+    - `pytest tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py tests/media/test_s3_mirror.py` (`60 passed`)
+    - `PYTHONPATH=. python scripts/sync_networks_streaming_links.py --all --dry-run --skip-s3 --limit 1` (pass)
+  - Notes:
+    - Full-repo `ruff check .` currently reports unrelated pre-existing issues outside this task scope (`api/main.py`, `trr_backend/db/pg.py`).
+
+- February 19, 2026: Fixed Week-window YouTube undercounts caused by premature continuation stopping and improved date-window fallback recall.
+  - Files:
+    - `trr_backend/socials/youtube/scraper.py`
+    - `tests/socials/test_comment_scraper_fixes.py`
+  - Root cause:
+    - Continuation crawl used a flat `no_hit_pages >= 5` cutoff even when pages were still too recent (`in_range=False`), so older week windows could be abandoned before reaching the target dates.
+    - yt-dlp fallback used relevance-ranked `ytsearch50`, which could miss additional same-week Bravo videos.
+  - Changes:
+    - Added `pre_window_pages` tracking and changed no-hit behavior:
+      - pages that are only too-recent no longer increment no-hit cutoff,
+      - no-hit cutoff now applies once we are in/near the target window (or timestamps are unknown).
+    - Added date-aware yt-dlp fallback mode:
+      - use `ytsearchdate200` when date window is set,
+      - include broader channel-biased query (`bravo`) in addition to keyword queries,
+      - retain channel/date filtering and dedupe.
+  - Validation:
+    - `pytest -q tests/socials/test_comment_scraper_fixes.py -k youtube` (`10 passed, 15 deselected`)
+    - `pytest -q tests/socials/test_comment_scraper_fixes.py` (`25 passed`)
+    - `pytest -q tests/repositories/test_social_season_analytics.py -k youtube` (`4 passed, 35 deselected`)
+    - `ruff check trr_backend/socials/youtube/scraper.py tests/socials/test_comment_scraper_fixes.py` (pass)
+
+- February 19, 2026: Fixed Week 3 YouTube undercount caused by watch-page precise-date parser mismatch and broadened timestamp refinement coverage.
+  - Files:
+    - `trr_backend/socials/youtube/scraper.py`
+    - `tests/socials/test_comment_scraper_fixes.py`
+  - Root cause:
+    - `_fetch_precise_publish_timestamp` matched only bare `YYYY-MM-DD` JSON values.
+    - YouTube now commonly returns ISO timestamps like `uploadDate":"2025-10-02T06:00:06-07:00"` and `<meta itemprop="datePublished" content="...">`.
+    - Precise extraction silently returned `0`, so low-precision relative labels (e.g. `4 months ago`) could remain incorrectly estimated and be excluded from week windows.
+  - Changes:
+    - Replaced single regex with multiple watch-page patterns covering JSON keys (`datePublished|uploadDate|publishDate`) and meta itemprop tags.
+    - Added candidate parser that accepts ISO timestamps with timezone offsets and falls back to date-prefix parsing.
+    - Added `_refine_video_publish_timestamp_if_needed` and applied it in both initial page and continuation page paths.
+      - Now refines when publish time is low precision (`month|year`) or unknown (`0`) during date-window scrapes.
+      - Added lightweight precise-fetch delay throttling and telemetry counters in `last_retrieval_meta` (`precise_publish_attempts/successes/failures`).
+    - Corrected `first_page_count` telemetry to use actual first-page matches.
+  - Validation:
+    - `ruff check trr_backend/socials/youtube/scraper.py tests/socials/test_comment_scraper_fixes.py` (pass)
+    - `pytest -q tests/socials/test_comment_scraper_fixes.py -k youtube` (`8 passed, 15 deselected`)
+    - `pytest -q tests/repositories/test_social_season_analytics.py -k youtube` (`3 passed, 35 deselected`)
+
+- February 19, 2026: Fixed YouTube week-range misses caused by coarse relative publish timestamps.
+  - Files:
+    - `trr_backend/socials/youtube/scraper.py`
+    - `tests/socials/test_comment_scraper_fixes.py`
+  - Changes:
+    - Added absolute publish date parsing in `_estimate_publish_date` (e.g. `Premiered Oct 3, 2025`) and changed unknown fallback to `0` instead of `now`.
+    - Added low-precision detection for month/year relative labels (e.g. `4 months ago`).
+    - Added exact publish-date refinement via watch-page metadata (`datePublished`/`uploadDate`) when a low-precision estimate would otherwise be excluded by date-range filtering.
+    - Applied refinement in both initial-page and continuation-page filtering paths so week-window ingest no longer drops valid videos due month/year approximation drift.
+  - Validation:
+    - `pytest -q tests/socials/test_comment_scraper_fixes.py` (`21 passed`)
+    - `pytest -q tests/repositories/test_social_season_analytics.py -k "youtube_video_matches_show_terms or get_post_comments_youtube_includes_thumbnail_url"` (`3 passed, 34 deselected`)
+
+- February 19, 2026: Added Instagram GraphQL no-match page cutoff to prevent long-running zero-yield incremental scans.
+  - Files:
+    - `trr_backend/socials/instagram/scraper.py`
+    - `tests/socials/test_comment_scraper_fixes.py`
+  - Changes:
+    - Added `ScrapeConfig.no_match_page_limit` (optional override).
+    - Added scraper-level resolver for no-match page cap:
+      - explicit config override, else env (`SOCIAL_INSTAGRAM_NO_MATCH_PAGE_LIMIT` / `SOCIAL_NO_MATCH_PAGE_LIMIT`), else default `40` when date filters are active.
+    - Updated `_scrape_graphql` pagination loop to stop after consecutive pages with zero new matches and emit telemetry:
+      - `last_retrieval_meta.stop_reason` (`no_match_page_limit_reached`, `date_start_reached`, `max_pages_reached`, etc.)
+      - `last_retrieval_meta.no_match_pages`
+      - `last_retrieval_meta.no_match_page_limit`
+    - Added regression test asserting GraphQL crawl halts after configured no-match threshold.
+  - Validation:
+    - `pytest -q tests/socials/test_comment_scraper_fixes.py` (`19 passed`)
+    - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py -k "not test_get_analytics_includes_weekly_platform_engagement_and_has_data"` (`54 passed, 1 deselected`)
+
+- February 19, 2026: Hardened person source-link discovery/validation and executed Bravo-wide cleanup + rediscovery backfill.
+  - Files:
+    - `api/routers/admin_show_links.py`
+    - `api/routers/admin_show_bravo.py`
+    - `trr_backend/integrations/fandom.py`
+    - `trr_backend/integrations/fandom_community_allowlist.txt` (new)
+    - `scripts/shows/cleanup_invalid_person_knowledge_links.py`
+    - `scripts/shows/backfill_bravo_person_source_links.py` (new)
+    - `tests/api/routers/test_admin_show_links.py`
+    - `tests/api/routers/test_admin_show_bravo.py`
+    - `tests/integrations/fandom/test_fandom_search.py` (new)
+  - Changes:
+    - Extended person discovery to emit only validated links for `imdb`, `tmdb`, `wikidata`, `wikipedia`, `fandom`, and `bravo_profile`.
+    - Added ID sourcing from `core.people.external_ids` with fallback to `core.cast_tmdb` (`imdb_id`, `tmdb_id`, `wikidata_id`).
+    - Added strict source-specific validators:
+      - IMDb canonical `https://www.imdb.com/name/{nm...}/`
+      - TMDb canonical `https://www.themoviedb.org/person/{id}`
+      - Bravo canonical `https://www.bravotv.com/people/{slug}`
+      - Fandom/Wikipedia/Wikidata owner-match + existence checks (with fetch-error preservation)
+    - Added allowlisted cross-wiki Fandom search support and seed allowlist file.
+    - Expanded invalid-link cleanup scanner from knowledge-only to full person-source set (`wikipedia`, `wikidata`, `fandom`, `imdb`, `tmdb`, `bravo_profile`).
+    - Updated Bravo sync link persistence to respect discovered status/confidence instead of force-setting pending.
+    - Added Bravo backfill script to run per-show cleanup then rediscovery across all Bravo shows.
+  - Validation:
+    - `ruff check api/routers/admin_show_links.py api/routers/admin_show_bravo.py trr_backend/integrations/fandom.py scripts/shows/cleanup_invalid_person_knowledge_links.py scripts/shows/backfill_bravo_person_source_links.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py tests/integrations/fandom/test_fandom_search.py` (pass)
+    - `python -m py_compile api/routers/admin_show_links.py api/routers/admin_show_bravo.py trr_backend/integrations/fandom.py scripts/shows/cleanup_invalid_person_knowledge_links.py scripts/shows/backfill_bravo_person_source_links.py` (pass)
+    - `pytest -q tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py tests/integrations/fandom/test_fandom_search.py` (`38 passed`)
+    - Backfill execution:
+      - `PYTHONPATH=. python -u scripts/shows/backfill_bravo_person_source_links.py --apply`
+      - Result: `shows=62`, `failed_shows=0`, `discovered_upserted=991`, `cleanup_scanned=52`, `cleanup_invalid=0`, `cleanup_deleted=0`, `cleanup_fetch_errors=0`.
+
+- February 19, 2026: Fixed social ingest queue/runtime reliability for stale recovery and incremental post skip behavior.
+  - Files:
+    - `trr_backend/repositories/social_season_analytics.py`
+    - `tests/repositories/test_social_season_analytics.py`
+  - Changes:
+    - Escaped literal SQL format token in stale heartbeat error message (`%%s`) inside `recover_stale_running_jobs` so psycopg2 bind placeholder counting matches provided params.
+    - Added regression assertion in stale-recovery unit test that unescaped `%s` placeholder count equals parameter list length.
+    - Added posts-stage incremental fast-path for Instagram/TikTok/YouTube/Twitter:
+      - when a post already exists and expected comment/reply counts match stored active counts, skip upsert/comment fetch for that post.
+      - records skip reason in `comment_refresh_decisions.up_to_date`.
+    - Removed undefined `comment_count` accumulators in platform comment loops to avoid runtime `NameError` during comment ingest.
+    - Added regression test for Instagram posts-stage incremental skip behavior.
+  - Validation:
+    - `pytest tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py -k 'not test_get_analytics_includes_weekly_platform_engagement_and_has_data' -q` (`54 passed, 1 deselected`)
+
+- February 19, 2026: Implemented scraped-first live progress + stale job auto-retry for social ingest queue runs.
+  - Files:
+    - `trr_backend/repositories/social_season_analytics.py`
+    - `scripts/socials/worker.py`
+    - `trr_backend/socials/instagram/scraper.py`
+    - `trr_backend/socials/tiktok/scraper.py`
+    - `trr_backend/socials/twitter/scraper.py`
+    - `trr_backend/socials/youtube/scraper.py`
+    - `tests/repositories/test_social_season_analytics.py`
+    - `tests/socials/test_comment_scraper_fixes.py`
+    - `tests/api/routers/test_socials_season_analytics.py`
+  - Changes:
+    - Progress contract now tracks scraped counters as primary (`items_found`, `metadata.stage_counters`) with additive saved counters in `metadata.persist_counters`.
+    - Added additive activity diagnostics in `metadata.activity` (`phase`, `pages_scanned`, `posts_checked`, `matched_posts`, `last_progress_at`).
+    - Added reusable progress flush controls in repository:
+      - `JOB_PROGRESS_MIN_DELTA=5`
+      - `JOB_PROGRESS_MAX_INTERVAL_SECONDS=3`
+      - force flush at stage start/end.
+    - Added optional per-page `progress_cb` support to Instagram/TikTok/Twitter/YouTube scrapers and wired callbacks into ingest loops for in-flight visibility before upsert.
+    - Added stale-running-job recovery with default `SOCIAL_JOB_STALE_SECONDS=300`:
+      - stale `running` jobs move to `retrying` when attempts remain, else `failed`.
+      - metadata includes `error_code=stale_heartbeat_timeout` and retryability diagnostics.
+    - Worker loop now executes stale-recovery checks before run execution and queue claims.
+    - Preserved additive API/job metadata compatibility; no breaking route changes.
+  - Validation:
+    - `pytest tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (`71 passed`)
+
+- February 19, 2026: Implemented strict 100%-gate networks/streaming completion pipeline with schema preflight + per-entity override/completion persistence.
+  - Files:
+    - `supabase/migrations/0131_network_streaming_completion_and_overrides.sql` (new)
+    - `scripts/sync/sync_networks_streaming_links.py`
+    - `api/routers/admin_show_sync.py`
+    - `scripts/README.md`
+    - `tests/scripts/test_sync_networks_streaming_links.py`
+    - `tests/api/routers/test_admin_show_sync.py`
+  - Changes:
+    - Added admin persistence tables:
+      - `admin.network_streaming_overrides`
+      - `admin.network_streaming_completion`
+      - `admin.network_streaming_completion_attempts`
+    - Extended `sync_networks_streaming_links` to:
+      - build used-entity inventory from full show scope,
+      - apply override precedence,
+      - log per-source attempt outcomes (`override|tmdb|wikimedia|official|catalog|variant`),
+      - persist completion rows and attempt history,
+      - support `--unresolved-only` reruns,
+      - emit completion metrics (`completion_total`, `completion_resolved`, `completion_unresolved`, `completion_percent`).
+    - Added hard schema preflight to `POST /api/v1/admin/shows/sync-networks-streaming`:
+      - blocks sync when required columns/tables are missing,
+      - returns structured `missing_columns[]`.
+    - Expanded sync endpoint contract with completion gate fields:
+      - `completion_total`, `completion_resolved`, `completion_unresolved`, `completion_percent`, `completion_gate_passed`.
+    - Added override CRUD endpoints:
+      - `GET /api/v1/admin/shows/networks-streaming/overrides`
+      - `POST /api/v1/admin/shows/networks-streaming/overrides`
+      - `PATCH /api/v1/admin/shows/networks-streaming/overrides/{id}`
+      - `DELETE /api/v1/admin/shows/networks-streaming/overrides/{id}`
+  - Validation:
+    - `ruff check api/routers/admin_show_sync.py scripts/sync/sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py tests/scripts/test_sync_networks_streaming_links.py` (pass)
+    - `pytest -q tests/api/routers/test_admin_show_sync.py tests/scripts/test_sync_networks_streaming_links.py tests/media/test_s3_mirror.py` (`59 passed`)
+    - `pytest -q tests/scripts/test_sync_tmdb_watch_providers.py` (`2 passed`)
+
+- February 19, 2026: Fixed social ingest queue fail-fast behavior, worker heartbeat tracking, Twitter comments-only anchor handling, and malformed comment ID persistence guardrails.
+  - Files:
+    - `api/routers/socials.py`
+    - `scripts/socials/worker.py`
+    - `trr_backend/repositories/social_season_analytics.py`
+    - `supabase/migrations/0130_social_worker_heartbeat_and_comment_id_guardrails.sql` (new)
+    - `tests/api/routers/test_socials_season_analytics.py`
+    - `tests/repositories/test_social_season_analytics.py`
+    - `docs/runbooks/social_worker_queue_ops.md` (new)
+  - Changes:
+    - Added worker heartbeat persistence + health checks (`social.scrape_workers`) and queue-mode fail-fast enforcement.
+    - Ingest start endpoint now returns additive `503` with detail code `SOCIAL_WORKER_UNAVAILABLE` when queue mode is enabled and no healthy worker is present.
+    - Added additive admin endpoint: `GET /api/v1/admin/socials/ingest/worker-health`.
+    - Fixed Twitter comments-only anchor iteration so `max_posts_per_target <= 0` is treated as no cap in comment hydration paths.
+    - Hardened comment persistence:
+      - skip blank external IDs (`comment_id` / `tweet_id`),
+      - track `comments_fetched`, `comments_upserted`, `comments_skipped_missing_id`,
+      - include comment stats in ingest job metadata for diagnostics.
+    - Added DB guardrails in migration `0130`:
+      - heartbeat table for workers,
+      - pre-cleanup deletes for blank IDs,
+      - check constraints to prevent blank IDs going forward.
+    - Added operations runbook with worker start commands and exact SQL checks for heartbeat, queue backlog, and comment-stat gaps.
+  - Validation:
+    - `ruff check api/routers/socials.py tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py scripts/socials/worker.py trr_backend/repositories/social_season_analytics.py` (pass)
+    - `pytest -q tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (`64 passed`)
+
 - February 19, 2026: Added Google News featured-image parity with Bravo and mirrored image sync to S3/Supabase.
   - Files:
     - `api/routers/admin_show_news.py`
@@ -1640,3 +1903,224 @@ Continuation (same session, 2026-02-19) — Google News parser/router refinement
 - Validation:
   - `ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
   - `pytest -q tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (`9 passed`)
+
+Continuation (same session, 2026-02-19) — person refresh source-policy bypass + word-id completion telemetry:
+- Files:
+  - `api/routers/admin_person_images.py`
+  - `tests/api/routers/test_admin_person_images.py`
+- Changes:
+  - Added `enforce_show_source_policy: bool = true` to `RefreshImagesRequest`.
+  - Added `_resolve_refresh_sources(...)` helper so both refresh endpoints can bypass `_apply_show_source_policy(...)` when `enforce_show_source_policy=false`.
+  - Updated both endpoints:
+    - `POST /api/v1/admin/person/{person_id}/refresh-images`
+    - `POST /api/v1/admin/person/{person_id}/refresh-images/stream`
+    to use unified source resolution.
+  - Enhanced stream word-detection telemetry and completion payload fields:
+    - `text_overlay_configured: boolean`
+    - `text_overlay_candidates: number`
+    - `text_overlay_skipped_reason: "not_configured" | "no_pending_images" | null`
+  - Added explicit stream progress message when detector is configured but there are no pending text-overlay candidates.
+- Validation:
+  - `pytest TRR-Backend/tests/api/routers/test_admin_person_images.py -q` (`20 passed`)
+
+Continuation (same session, 2026-02-19) — Google News featured image extraction + hosted backfill retries:
+- Files:
+  - `trr_backend/scraping/google_news_parser.py`
+  - `api/routers/admin_show_news.py`
+  - `tests/scraping/test_google_news_parser.py`
+  - `tests/api/routers/test_admin_show_news.py`
+- Changes:
+  - Added RSS description `<img>` extraction fallback for Google News items when media/enclosure tags are absent.
+  - Added first-page `<img>` fallback in article HTML featured-image resolver (after OG/Twitter checks).
+  - Updated fresh-snapshot stale guard logic to retry sync when Google news items have image URLs but no `hosted_image_url`, enabling remirror to Supabase/S3.
+  - Kept Google sync persistence shape additive (`image_url`, `original_image_url`, `hosted_image_url`, `media_asset_id`, `featured_image_synced`).
+- Validation:
+  - `pytest -q tests/scraping/test_google_news_parser.py tests/api/routers/test_admin_show_news.py` (`11 passed`)
+  - `ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
+
+Continuation (same session, 2026-02-19) — season social analytics daily activity contract for heatmap UI:
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/repositories/test_social_season_analytics.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Added additive analytics payload field `weekly_daily_activity` to `get_analytics(...)`.
+  - Daily buckets are now built per visible week window using 24-hour slots anchored to each week start.
+  - Each day row includes:
+    - `day_index`
+    - `date_local` (`YYYY-MM-DD`)
+    - per-platform `posts` and `comments`
+    - `total_posts` and `total_comments`
+  - Kept existing analytics fields unchanged (`weekly`, `weekly_platform_posts`, `weekly_platform_engagement`).
+  - Added repository tests to verify:
+    - day-level aggregation correctness,
+    - daily totals summing to weekly totals,
+    - zero-activity weeks retaining zeroed day buckets,
+    - dynamic day counts for longer pre-season windows.
+  - Extended API analytics week-zero test expectation to include `weekly_daily_activity`.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (`55 passed`)
+
+Continuation (same session, 2026-02-19) — heatmap day-index correction for calendar-date placement:
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/repositories/test_social_season_analytics.py`
+- Changes:
+  - Fixed `weekly_daily_activity` day assignment to use **local calendar date delta** instead of elapsed 24-hour offset from week start.
+  - Normalized week-start/day-label generation to requested timezone before deriving `date_local` and day indices.
+  - Prevents one-day visual shifts (for example, Oct 1 content appearing on Sep 30 tile) in week heatmaps.
+  - Added regression test covering episode-air anchored week start (`20:00 ET`) with an Oct 1 post to ensure it maps to the `2025-10-01` tile.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (`56 passed`)
+
+Continuation (same session, 2026-02-19) — media admin stabilization (reprocess telemetry, season-scoped refresh, batch-job SSE):
+- Files:
+  - `api/routers/admin_person_images.py`
+  - `api/routers/admin_show_sync.py`
+  - `api/routers/admin_asset_batch_jobs.py` (new)
+  - `api/main.py`
+  - `tests/api/routers/test_admin_person_images.py`
+  - `tests/api/routers/test_admin_show_sync.py`
+  - `tests/api/routers/test_admin_asset_batch_jobs.py` (new)
+- Changes:
+  - Reprocess stream `complete` payload now includes:
+    - `text_overlay_configured`
+    - `text_overlay_candidates`
+    - `text_overlay_skipped_reason`
+  - Added explicit text-overlay candidate scan and no-pending/not-configured skip signaling while preserving existing counters.
+  - Extended `RefreshShowPhotosRequest` with `season_number` and updated stream behavior so season mode:
+    - scopes TMDb season/episode sync and mirror stages to the selected season,
+    - avoids show-level sync/mirror/prune stages,
+    - performs cast discovery from `episode_appearances` only (no `show_cast` fallback).
+  - Added batch-job stream router with:
+    - `POST /api/v1/admin/shows/{show_id}/assets/batch-jobs/stream`
+    - `POST /api/v1/admin/shows/{show_id}/seasons/{season_number}/assets/batch-jobs/stream`
+    - operation multi-select (`count`, `crop`, `id_text`, `resize`),
+    - explicit targets + content types,
+    - surfaced skipped/failure reasons (including unsupported origin and season-scope mismatch).
+- Validation:
+  - `ruff check api/routers/admin_person_images.py api/routers/admin_show_sync.py api/routers/admin_asset_batch_jobs.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_asset_batch_jobs.py` (pass)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py -q` (`22 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py -q` (`18 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_asset_batch_jobs.py -q` (`3 passed`)
+
+Continuation (same session, 2026-02-19) — YouTube ingest recall + queue fallback diagnostics for UI/terminal parity:
+- Files:
+  - `api/routers/socials.py`
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+  - `tests/repositories/test_social_season_analytics.py`
+- Changes:
+  - Added additive ingest request flag: `allow_inline_dev_fallback` on `SeasonSocialIngestRequest`.
+  - Added controlled dev/local inline fallback when queue is enabled but workers are unavailable:
+    - preserves existing `503 SOCIAL_WORKER_UNAVAILABLE` outside allowed fallback path,
+    - returns additive response fields: `execution_mode`, optional `warnings`, and `worker_health` when fallback is used.
+  - Broadened `_youtube_video_matches_show_terms(...)` to accept show-term matches in either title or description text while retaining:
+    - cross-show exclusion (`wife swap` + `real housewives edition`),
+    - generic season-term stripping,
+    - hashtag fast-path matching.
+  - Extended `_ingest_youtube(...)` retrieval diagnostics with additive metadata:
+    - `videos_scanned`
+    - `videos_matched_show_terms`
+    - `videos_filtered_show_terms`
+    - `videos_skipped_up_to_date`
+    - `filter_samples` (capped dropped-video samples with reason/title/video_id)
+  - Added repository/API coverage for description-based matching, filter diagnostics, and fallback vs strict queue behavior.
+- Validation:
+  - `ruff check api/routers/socials.py trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (`59 passed`)
+
+Continuation (same session, 2026-02-19) — additive live-count telemetry verification pass:
+- Files (already updated earlier in session):
+  - `api/routers/admin_show_sync.py`
+  - `api/routers/admin_asset_batch_jobs.py`
+  - `api/routers/admin_person_images.py`
+  - `tests/api/routers/test_admin_show_sync.py`
+  - `tests/api/routers/test_admin_asset_batch_jobs.py`
+  - `tests/api/routers/test_admin_person_images.py`
+- Notes:
+  - Confirmed additive `live_counts` and progress `operation_counts` snapshots remain stable and backward-compatible across show refresh, batch jobs, and person refresh/reprocess streams.
+- Validation:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py -q` (`18 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_asset_batch_jobs.py -q` (`3 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py -q` (`22 passed`)
+
+Continuation (same session, 2026-02-19) — YouTube comment-count correctness for ingest + week/detail analytics:
+- Files:
+  - `trr_backend/repositories/social_season_analytics.py`
+  - `tests/repositories/test_social_season_analytics.py`
+  - `tests/api/routers/test_socials_season_analytics.py`
+- Root cause:
+  - YouTube comments were persisted, but analytics/week detail often displayed `0 comments` because they relied on `social.youtube_videos.comments_count`, which can be `0` from YouTube search metadata.
+- Changes:
+  - Added internal helper `_youtube_effective_comment_count(...)` and applied it to:
+    - `_week_detail_youtube(...)` post payload + engagement + totals
+    - `get_post_comments(... platform='youtube' ...)` stats/engagement
+  - Added `_sync_youtube_video_comment_counts(...)` to batch-sync `youtube_videos.comments_count` from saved `youtube_comments` using `greatest(existing, saved)`.
+  - Wired sync helper into YouTube ingest flows:
+    - `_ingest_youtube(... stage='comments')`
+    - `_ingest_youtube(... stage='posts')`
+    - `refresh_post_comments(... platform='youtube' ...)`
+  - Added additive retrieval metadata:
+    - `youtube_comment_count_sync_targets`
+    - `youtube_comment_count_synced`
+  - Improved Smart Incremental expected-count behavior for YouTube:
+    - `_expected_comment_count_for_platform(..., snapshot=...)` now falls back to lifecycle snapshot active count when reported YouTube `comments_count <= 0`.
+  - Added season-scoped operational backfill helper:
+    - `backfill_youtube_comment_counts_for_season(...)`
+    - supports optional `source_account` (normalized with optional `@`) and date range scoping.
+- Validation:
+  - `pytest tests/repositories/test_social_season_analytics.py -k "youtube and (week_detail or post_comments or ingest or refresh)"` (`6 passed`)
+  - `pytest tests/api/routers/test_socials_season_analytics.py -k "week_detail or post_comments"` (`3 passed`)
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+- Operational backfill executed:
+  - Command: `backfill_youtube_comment_counts_for_season('e9161955-6ee4-4985-865e-3386a0f670fb', source_account='bravo', date_start=2025-10-01 UTC, date_end=2025-10-07 UTC)`
+  - Result: `videos_scanned=3`, `youtube_comment_count_backfilled=3`
+  - Post-check (Week 3 window):
+    - `tkaK_8nrmJE`: `comments_count=20`, saved `20`
+    - `U0wltNE406o`: `comments_count=418`, saved `418`
+    - `2QEpGFPULhY`: `comments_count=20`, saved `20`
+
+Continuation (same session, 2026-02-19) — networks/streaming metadata completion to 100%:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/sync/sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_networks_streaming_links.py`
+- Changes:
+  - Added streaming alias expansion for metadata lookup (channel/tier suffix stripping + known brand aliases) to improve Wikidata/Wikipedia resolution for provider variants.
+  - Enhanced Wikipedia URL extraction to fall back to non-`enwiki` sitelinks when English sitelink is unavailable.
+  - Applied targeted `admin.network_streaming_overrides` rows for the last unresolved entities and propagated override links into core dimension rows.
+- Validation:
+  - `ruff check scripts/sync/sync_networks_streaming_links.py tests/scripts/test_sync_networks_streaming_links.py` (pass)
+  - `pytest tests/scripts/test_sync_networks_streaming_links.py` (`12 passed`)
+  - Runtime sync runs:
+    - `PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --unresolved-only`
+    - `PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --skip-s3`
+    - `PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --unresolved-only`
+  - Final completion snapshot:
+    - `completion_total=213`
+    - `completion_resolved=213`
+    - `completion_unresolved=0`
+    - `completion_percent=100.00`
+
+Continuation (same session, 2026-02-19) — Instagram permalink metadata enrichment + media mirroring + analytics thumbnail support:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0132_instagram_permalink_metadata_and_media_mirroring.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/permalink_metadata.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/__init__.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_instagram_metadata_and_media.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_instagram_permalink_metadata.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Changes:
+  - Added additive `social.instagram_posts` columns for permalink-derived metadata (`post_format`, collaborators/tags/hashtags/mentions, `duration_seconds`, source/scrape status) and hosted media mirror fields (`hosted_thumbnail_url`, `hosted_media_urls`, mirror status/error).
+  - Implemented permalink extractor using logged-out HTML `data-sjs` parsing and recursive lookup of `xdt_api__v1__media__shortcode__web_info.items[0]`.
+  - Added best-effort enrichment flow in Instagram ingest with fallback to existing media info endpoint; ingest never fails on enrichment errors and persists status/error fields.
+  - Added best-effort S3 media mirroring for thumbnail + media URLs using deterministic keys under `social/instagram/{show_id}/{season_number}/week-{week_index|unknown}/{shortcode}/...` and persisted hosted-first URLs/status.
+  - Extended retrieval payloads to expose Instagram metadata in week detail and post-detail comments routes.
+  - Extended analytics rows/leaderboards to include `thumbnail_url` for `bravo_content` and `viewer_discussion`.
+  - Added one-time backfill script (`--weeks` default `8`) for metadata/mirroring refresh with idempotent checks and counters.
+- Validation:
+  - `ruff check trr_backend/socials/instagram/permalink_metadata.py trr_backend/repositories/social_season_analytics.py scripts/socials/backfill_instagram_metadata_and_media.py tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest -q tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py -k 'instagram or analytics_includes_weekly_platform_engagement'` (`12 passed`)

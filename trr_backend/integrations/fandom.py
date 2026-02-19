@@ -9,6 +9,8 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlencode, urlparse
 
@@ -36,6 +38,8 @@ _NOT_FOUND_MARKERS = (
 )
 
 _ORDINAL_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)", re.IGNORECASE)
+_FANDOM_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.fandom\.com$")
+_DEFAULT_FANDOM_ALLOWLIST_PATH = Path(__file__).with_name("fandom_community_allowlist.txt")
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,51 @@ class FandomFileResult:
 def build_real_housewives_wiki_url_from_name(name: str) -> str:
     safe_name = re.sub(r"\s+", "_", (name or "").strip())
     return f"https://real-housewives.fandom.com/wiki/{quote(safe_name)}"
+
+
+def _normalize_fandom_community_domain(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    host = parsed.netloc if parsed.netloc else parsed.path
+    host = host.split("/", 1)[0].strip().lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or not _FANDOM_DOMAIN_RE.fullmatch(host):
+        return None
+    return host
+
+
+@lru_cache(maxsize=16)
+def _load_fandom_community_allowlist_from_path(path: str) -> tuple[str, ...]:
+    allowlist_path = Path(path)
+    if not allowlist_path.exists():
+        return ()
+    domains: list[str] = []
+    for line in allowlist_path.read_text(encoding="utf-8").splitlines():
+        cleaned = line.split("#", 1)[0].strip()
+        if not cleaned:
+            continue
+        normalized = _normalize_fandom_community_domain(cleaned)
+        if normalized and normalized not in domains:
+            domains.append(normalized)
+    return tuple(domains)
+
+
+def load_fandom_community_allowlist(path: str | None = None) -> tuple[str, ...]:
+    resolved_path = str(Path(path).resolve()) if path else str(_DEFAULT_FANDOM_ALLOWLIST_PATH.resolve())
+    return _load_fandom_community_allowlist_from_path(resolved_path)
+
+
+def build_fandom_wiki_url_from_name(name: str, community_domain: str) -> str | None:
+    normalized_domain = _normalize_fandom_community_domain(community_domain)
+    if not normalized_domain:
+        return None
+    safe_name = re.sub(r"\s+", "_", (name or "").strip())
+    if not safe_name:
+        return None
+    return f"https://{normalized_domain}/wiki/{quote(safe_name)}"
 
 
 def _merge_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
@@ -341,18 +390,22 @@ def fetch_fandom_page(
     return FandomPageFetchResult(url=url, status_code=None, html=None, error=last_error)
 
 
-def search_real_housewives_wiki(
+def search_fandom_community_wiki(
     name: str,
     *,
+    community_domain: str,
     timeout_seconds: float = 20.0,
 ) -> str | None:
     headers = {"accept": "application/json"}
 
     query = (name or "").strip()
+    domain = _normalize_fandom_community_domain(community_domain)
+    if not domain:
+        return None
     if not query:
         return None
 
-    rest_url = "https://real-housewives.fandom.com/rest.php/v1/search"
+    rest_url = f"https://{domain}/rest.php/v1/search"
     rest_query_url = f"{rest_url}?{urlencode({'query': query, 'limit': 1})}"
     status, body, _ = fetch_html(rest_query_url, timeout=timeout_seconds, headers=headers)
     if status == 200 and body:
@@ -370,9 +423,9 @@ def search_real_housewives_wiki(
                         return url.strip()
                     title = item.get("title")
                     if isinstance(title, str) and title.strip():
-                        return build_real_housewives_wiki_url_from_name(title)
+                        return build_fandom_wiki_url_from_name(title, domain)
 
-    api_url = "https://real-housewives.fandom.com/api.php"
+    api_url = f"https://{domain}/api.php"
     api_query_url = f"{api_url}?{urlencode({'action': 'query', 'list': 'search', 'srsearch': query, 'format': 'json'})}"
     status, body, _ = fetch_html(api_query_url, timeout=timeout_seconds, headers=headers)
     if status != 200 or not body:
@@ -395,8 +448,72 @@ def search_real_housewives_wiki(
 
     title = first.get("title")
     if isinstance(title, str) and title.strip():
-        return build_real_housewives_wiki_url_from_name(title)
+        return build_fandom_wiki_url_from_name(title, domain)
     return None
+
+
+def search_allowlisted_fandom_wikis(
+    name: str,
+    *,
+    allowlist: list[str] | tuple[str, ...] | None = None,
+    timeout_seconds: float = 20.0,
+    max_results: int = 3,
+) -> list[str]:
+    query = (name or "").strip()
+    if not query:
+        return []
+    raw_allowlist = allowlist if allowlist is not None else load_fandom_community_allowlist()
+    domains: list[str] = []
+    for value in raw_allowlist:
+        normalized = _normalize_fandom_community_domain(value)
+        if normalized and normalized not in domains:
+            domains.append(normalized)
+
+    matches: list[str] = []
+    for domain in domains:
+        candidate = search_fandom_community_wiki(
+            query,
+            community_domain=domain,
+            timeout_seconds=timeout_seconds,
+        )
+        if not candidate or candidate in matches:
+            continue
+        matches.append(candidate)
+        if len(matches) >= max_results:
+            break
+    return matches
+
+
+def search_real_housewives_wiki(
+    name: str,
+    *,
+    timeout_seconds: float = 20.0,
+) -> str | None:
+    return search_fandom_community_wiki(
+        name,
+        community_domain="real-housewives.fandom.com",
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def is_allowlisted_fandom_domain(
+    url_or_domain: str,
+    *,
+    allowlist: list[str] | tuple[str, ...] | None = None,
+) -> bool:
+    normalized = _normalize_fandom_community_domain(url_or_domain)
+    if not normalized:
+        parsed = urlparse(str(url_or_domain or "").strip())
+        normalized = _normalize_fandom_community_domain(parsed.netloc or parsed.path)
+    if not normalized:
+        return False
+    raw_allowlist = allowlist if allowlist is not None else load_fandom_community_allowlist()
+    normalized_allowlist = {
+        domain
+        for domain in (_normalize_fandom_community_domain(item) for item in raw_allowlist)
+        if domain
+    }
+    return normalized in normalized_allowlist
 
 
 def build_fandom_source_record(result: FandomInfoboxResult, *, fetched_at: str) -> FandomSourceRecord:

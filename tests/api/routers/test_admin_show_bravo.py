@@ -13,7 +13,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
-from api.routers.admin_show_bravo import _dedupe_items, _merge_external_ids_fill_missing
+from api.routers.admin_show_bravo import (
+    _dedupe_items,
+    _merge_external_ids_fill_missing,
+    _persist_pending_links_from_bravo_sync,
+)
 
 
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
@@ -146,6 +150,61 @@ def test_commit_bravo_import_returns_snapshot_metadata(client: TestClient, monke
     assert payload["show_snapshot"]["source_id"] == "bravo"
     assert len(payload["person_snapshots"]) == 1
     assert payload["counts"]["people_updated"] == 1
+
+
+def test_persist_pending_links_from_bravo_sync_respects_discovered_status_and_confidence() -> None:
+    mock_db = MagicMock()
+    show_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links._discover_show_links",
+        return_value=[
+            {
+                "entity_type": "show",
+                "entity_id": show_id,
+                "link_group": "official",
+                "link_kind": "official_page",
+                "url": "https://www.bravotv.com/the-valley",
+                "label": "Official",
+            },
+            {
+                "entity_type": "show",
+                "entity_id": show_id,
+                "link_group": "cast_announcements",
+                "link_kind": "cast_announcement",
+                "url": "https://www.bravotv.com/the-daily-dish/cast-news",
+                "label": "Cast news",
+            },
+        ],
+    ):
+        with patch("api.routers.admin_show_links._discover_season_links", return_value=[]):
+            with patch(
+                "api.routers.admin_show_links._discover_people_links",
+                return_value=[
+                    {
+                        "entity_type": "person",
+                        "entity_id": str(uuid4()),
+                        "link_group": "knowledge",
+                        "link_kind": "imdb",
+                        "url": "https://www.imdb.com/name/nm1234567/",
+                        "label": "Heather Gay IMDb",
+                        "status": "approved",
+                        "confidence": 0.99,
+                    }
+                ],
+            ):
+                with patch("api.routers.admin_show_links._upsert_link") as upsert_link:
+                    upserted = _persist_pending_links_from_bravo_sync(
+                        mock_db,
+                        show_id=show_id,
+                        actor="admin@example.com",
+                    )
+
+    assert upserted == 3
+    statuses = [call.kwargs["status"] for call in upsert_link.call_args_list]
+    confidences = [call.kwargs["confidence"] for call in upsert_link.call_args_list]
+    assert statuses == ["pending", "pending", "approved"]
+    assert confidences == [0.65, 0.75, 0.99]
 
 
 def test_commit_bravo_import_persists_season_overview_for_season_scoped_sync(

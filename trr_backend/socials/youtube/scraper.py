@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -122,6 +123,7 @@ class YouTubeVideo:
     thumbnail_url: str
     tags: list[str]
     keywords_matched: list[str]
+    published_text: str = ""
 
     # Comments (populated when fetch_comments is called)
     comment_list: list[YouTubeComment] = field(default_factory=list)
@@ -147,6 +149,11 @@ class YouTubeScraper:
     VIDEO_WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
     COMMENT_API_URL = "https://www.youtube.com/youtubei/v1/next"
     YTINITAL_DATA_PATTERN = re.compile(r"var ytInitialData = ({.*?});", re.DOTALL)
+    PUBLISHED_DATE_PATTERNS = (
+        re.compile(r'"(?:datePublished|uploadDate|publishDate)"\s*:\s*"([^"]+)"', re.IGNORECASE),
+        re.compile(r'itemprop="(?:datePublished|uploadDate)"\s+content="([^"]+)"', re.IGNORECASE),
+    )
+    DATE_ONLY_PREFIX_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
     # Client context for API requests
     INNERTUBE_CONTEXT = {
@@ -167,6 +174,10 @@ class YouTubeScraper:
         self.session = self._create_session()
         self._request_count = 0
         self.last_retrieval_meta: dict[str, Any] = {}
+        self._precise_publish_ts_cache: dict[str, int] = {}
+        self._precise_publish_attempts = 0
+        self._precise_publish_successes = 0
+        self._precise_publish_failures = 0
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -317,6 +328,7 @@ class YouTubeScraper:
             thumbnail_url=thumbnail_url,
             tags=[],  # Not available in search results
             keywords_matched=keywords_matched,
+            published_text=published_text,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -361,8 +373,23 @@ class YouTubeScraper:
         """Estimate publish date from relative text like '2 days ago'."""
         if not published_text:
             return 0
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
         text = published_text.lower().replace("streamed", "").replace("premiered", "")
+        text = re.sub(r"\s+", " ", text).strip(" .")
+        text = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", text)
+
+        if text in {"today", "just now"}:
+            return int(now.timestamp())
+        if text == "yesterday":
+            return int(now.timestamp() - 86400)
+
+        # Parse absolute dates when YouTube returns full day precision.
+        for fmt in ("%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%B %d %Y"):
+            try:
+                parsed = datetime.strptime(text, fmt).replace(tzinfo=UTC)
+                return int(parsed.timestamp())
+            except ValueError:
+                continue
 
         # Parse relative time
         patterns = [
@@ -381,7 +408,90 @@ class YouTubeScraper:
                 offset = int(match.group(1)) * multiplier
                 return int(now.timestamp() - offset)
 
-        return int(now.timestamp())
+        return 0
+
+    def _is_low_precision_publish_text(self, published_text: str) -> bool:
+        text = (published_text or "").lower()
+        return "month" in text or "year" in text
+
+    def _parse_precise_publish_candidate(self, candidate: str) -> int:
+        value = str(candidate or "").strip()
+        if not value:
+            return 0
+
+        ts = self._parse_timestamp(value)
+        if ts > 0:
+            return ts
+
+        match = self.DATE_ONLY_PREFIX_PATTERN.search(value)
+        if not match:
+            return 0
+        try:
+            parsed = datetime.strptime(match.group(1), "%Y-%m-%d").replace(tzinfo=UTC)
+            return int(parsed.timestamp())
+        except ValueError:
+            return 0
+
+    def _fetch_precise_publish_timestamp(self, video_id: str, delay: float = 2.0) -> int:
+        """Fetch exact upload date from watch-page metadata."""
+        cached = self._precise_publish_ts_cache.get(video_id)
+        if cached is not None:
+            return cached
+
+        self._rate_limit(delay)
+        url = self.VIDEO_WATCH_URL.format(video_id=video_id)
+        try:
+            response = self.session.get(
+                url,
+                headers=self._get_headers(),
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logger.debug("Failed to fetch precise publish timestamp for %s: %s", video_id, e)
+            self._precise_publish_ts_cache[video_id] = 0
+            return 0
+
+        body = response.text or ""
+        ts = 0
+        for pattern in self.PUBLISHED_DATE_PATTERNS:
+            for match in pattern.finditer(body):
+                ts = self._parse_precise_publish_candidate(match.group(1))
+                if ts > 0:
+                    break
+            if ts > 0:
+                break
+
+        self._precise_publish_ts_cache[video_id] = ts
+        return ts
+
+    def _refine_video_publish_timestamp_if_needed(
+        self,
+        video: YouTubeVideo,
+        config: YouTubeScrapeConfig,
+        current_in_range: bool | None,
+    ) -> bool | None:
+        if not (config.date_start or config.date_end):
+            return current_in_range
+        if not video.video_id:
+            return current_in_range
+
+        needs_refine = video.published_at <= 0 or self._is_low_precision_publish_text(video.published_text)
+        if not needs_refine:
+            return current_in_range
+
+        self._precise_publish_attempts += 1
+        precise_delay = min(max(float(config.delay_seconds or 0.0) * 0.25, 0.05), 0.35)
+        precise_ts = self._fetch_precise_publish_timestamp(video.video_id, precise_delay)
+        if precise_ts <= 0:
+            self._precise_publish_failures += 1
+            return current_in_range
+
+        self._precise_publish_successes += 1
+        if precise_ts != video.published_at:
+            video.published_at = precise_ts
+            video.date_time = datetime.fromtimestamp(precise_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+        return config.is_in_date_range(video.published_at)
 
     def fetch_channel_videos(self, handle: str, delay: float = 2.0) -> dict | None:
         """Fetch videos from a YouTube channel page."""
@@ -505,7 +615,34 @@ class YouTubeScraper:
                 if video_renderer:
                     yield video_renderer
 
-    def scrape(self, config: YouTubeScrapeConfig) -> list[YouTubeVideo]:
+    def _emit_progress(
+        self,
+        progress_cb: Callable[[dict[str, Any]], None] | None,
+        *,
+        phase: str,
+        pages_scanned: int,
+        posts_checked: int,
+        matched_posts: int,
+    ) -> None:
+        if not progress_cb:
+            return
+        try:
+            progress_cb(
+                {
+                    "phase": phase,
+                    "pages_scanned": max(0, int(pages_scanned)),
+                    "posts_checked": max(0, int(posts_checked)),
+                    "matched_posts": max(0, int(matched_posts)),
+                }
+            )
+        except Exception:
+            logger.debug("YouTube scrape progress callback raised", exc_info=True)
+
+    def scrape(
+        self,
+        config: YouTubeScrapeConfig,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[YouTubeVideo]:
         """
         Scrape videos from a YouTube channel with filtering.
 
@@ -532,6 +669,10 @@ class YouTubeScraper:
         timestamp_unknown_count = 0
         in_range_hits = 0
         no_hit_pages = 0
+        pre_window_pages = 0
+        self._precise_publish_attempts = 0
+        self._precise_publish_successes = 0
+        self._precise_publish_failures = 0
 
         # Fetch initial channel page
         logger.info(f"Fetching videos from @{handle} channel page...")
@@ -541,7 +682,15 @@ class YouTubeScraper:
             return []
 
         # Process initial page
-        videos.extend(self._process_video_data(data, config))
+        initial_page_videos = self._process_video_data(data, config)
+        videos.extend(initial_page_videos)
+        self._emit_progress(
+            progress_cb,
+            phase="scrape_initial_page",
+            pages_scanned=1,
+            posts_checked=len(videos),
+            matched_posts=len(videos),
+        )
         continuation_token = self._extract_channel_continuation_token(data)
 
         # Paginate through older videos using continuation tokens
@@ -567,23 +716,31 @@ class YouTubeScraper:
 
             page_videos = []
             page_hits = 0
+            page_window_candidates = False
             for renderer in renderers:
                 video = self._parse_video_renderer(renderer, config)
                 if not video:
                     continue
 
+                in_range: bool | None = None
                 if video.published_at > 0:
                     in_range = config.is_in_date_range(video.published_at)
+                in_range = self._refine_video_publish_timestamp_if_needed(video, config, in_range)
+
+                if video.published_at > 0:
                     if in_range is None:  # Before range - stop paginating
+                        page_window_candidates = True
                         reached_date_limit = True
                         break
                     if in_range is False:  # After range - skip
                         continue
+                    page_window_candidates = True
                     in_range_hits += 1
                 elif config.date_start or config.date_end:
                     # Unknown timestamps are increasingly common for dynamic renderers.
                     # Still allow keyword matching but track the count.
                     timestamp_unknown_count += 1
+                    page_window_candidates = True
 
                 combined_text = f"{video.title} {video.description}"
                 if config.matches_keywords(combined_text):
@@ -593,12 +750,22 @@ class YouTubeScraper:
                     logger.info(f"Found: {video.video_id} - {title_short} ({video.date_time})")
 
             videos.extend(page_videos)
+            self._emit_progress(
+                progress_cb,
+                phase="scrape_continuation_page",
+                pages_scanned=page_num,
+                posts_checked=len(videos),
+                matched_posts=len(videos),
+            )
             logger.info(f"Page {page_num}: {len(page_videos)} matches, {len(videos)} total")
             if page_hits == 0:
-                no_hit_pages += 1
-                if no_hit_pages >= 5 and (config.date_start or config.date_end):
-                    logger.info("Stopping continuation crawl after %d no-hit pages", no_hit_pages)
-                    break
+                if (config.date_start or config.date_end) and not page_window_candidates:
+                    pre_window_pages += 1
+                else:
+                    no_hit_pages += 1
+                    if no_hit_pages >= 5 and (config.date_start or config.date_end):
+                        logger.info("Stopping continuation crawl after %d no-hit pages", no_hit_pages)
+                        break
             else:
                 no_hit_pages = 0
 
@@ -626,17 +793,35 @@ class YouTubeScraper:
                     added += 1
             if added:
                 logger.info(f"yt-dlp search added {added} additional videos (total: {len(unique_videos)})")
+                self._emit_progress(
+                    progress_cb,
+                    phase="scrape_ytdlp_fallback",
+                    pages_scanned=continuation_pages + 1,
+                    posts_checked=len(unique_videos),
+                    matched_posts=len(unique_videos),
+                )
 
         if config.max_results:
             unique_videos = unique_videos[: config.max_results]
 
         logger.info(f"Scrape complete: found {len(unique_videos)} videos")
+        self._emit_progress(
+            progress_cb,
+            phase="scrape_complete",
+            pages_scanned=max(1, continuation_pages + 1),
+            posts_checked=len(unique_videos),
+            matched_posts=len(unique_videos),
+        )
         self.last_retrieval_meta = {
             "retrieval_mode": "channel_continuation",
             "continuation_pages": continuation_pages,
             "timestamp_unknown_count": timestamp_unknown_count,
             "in_range_hits": in_range_hits,
-            "first_page_count": len(unique_videos[: min(10, len(unique_videos))]),
+            "pre_window_pages": pre_window_pages,
+            "first_page_count": len(initial_page_videos),
+            "precise_publish_attempts": self._precise_publish_attempts,
+            "precise_publish_successes": self._precise_publish_successes,
+            "precise_publish_failures": self._precise_publish_failures,
         }
         return unique_videos
 
@@ -653,16 +838,29 @@ class YouTubeScraper:
         if not search_terms:
             return []
 
+        has_date_window = bool(config.date_start or config.date_end)
+        search_prefix = "ytsearchdate" if has_date_window else "ytsearch"
+        search_limit = 200 if has_date_window else 50
+        search_queries: list[str] = []
+        for term in search_terms[:4]:
+            q = f"{term} {handle}".strip()
+            if q and q not in search_queries:
+                search_queries.append(q)
+        # Keep one broader channel-biased query so we can recover posts
+        # whose titles miss strict keyword matches in YouTube ranking.
+        if handle and handle not in search_queries:
+            search_queries.append(handle)
+
         all_videos: list[YouTubeVideo] = []
         seen_ids: set[str] = set()
 
-        for term in search_terms[:3]:  # Limit to top 3 keywords
-            query = f"{term} {handle}"
+        for query in search_queries:
             cmd = [
                 "yt-dlp",
                 "--dump-json",
                 "--skip-download",
-                f"ytsearch50:{query}",
+                "--ignore-errors",
+                f"{search_prefix}{search_limit}:{query}",
             ]
             logger.info(f"yt-dlp searching YouTube: '{query}'")
 
@@ -721,7 +919,7 @@ class YouTubeScraper:
                     url=f"https://www.youtube.com/watch?v={vid_id}",
                     thumbnail_url=(data.get("thumbnails") or [{}])[0].get("url", ""),
                     tags=data.get("tags", []) or [],
-                    keywords_matched=[term],
+                    keywords_matched=[query],
                     show_id=config.show_id,
                     season_number=config.season_number,
                 )
@@ -742,8 +940,11 @@ class YouTubeScraper:
                 continue
 
             # Check date range if publish date is known
+            in_range: bool | None = None
             if video.published_at > 0:
                 in_range = config.is_in_date_range(video.published_at)
+            in_range = self._refine_video_publish_timestamp_if_needed(video, config, in_range)
+            if video.published_at > 0:
                 if in_range is None:  # Before range
                     continue
                 if in_range is False:  # After range

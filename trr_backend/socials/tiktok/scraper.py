@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -666,7 +667,34 @@ class TikTokScraper:
             self._last_api_fail_reason = "request_error"
             return None
 
-    def scrape(self, config: TikTokScrapeConfig) -> list[TikTokPost]:
+    def _emit_progress(
+        self,
+        progress_cb: Callable[[dict[str, Any]], None] | None,
+        *,
+        phase: str,
+        pages_scanned: int,
+        posts_checked: int,
+        matched_posts: int,
+    ) -> None:
+        if not progress_cb:
+            return
+        try:
+            progress_cb(
+                {
+                    "phase": phase,
+                    "pages_scanned": max(0, int(pages_scanned)),
+                    "posts_checked": max(0, int(posts_checked)),
+                    "matched_posts": max(0, int(matched_posts)),
+                }
+            )
+        except Exception:
+            logger.debug("TikTok scrape progress callback raised", exc_info=True)
+
+    def scrape(
+        self,
+        config: TikTokScrapeConfig,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[TikTokPost]:
         """
         Scrape posts from a TikTok profile with filtering.
 
@@ -742,6 +770,14 @@ class TikTokScraper:
                     posts.append(post)
                     existing_ids.add(post.video_id)
                 logger.info(f"Found #{len(posts)}: {post.video_id} ({post.date_time}) - {post.views:,} views")
+        if html_posts:
+            self._emit_progress(
+                progress_cb,
+                phase="scrape_html_page",
+                pages_scanned=1,
+                posts_checked=posts_checked,
+                matched_posts=len(posts),
+            )
 
         # Continue with API pagination if we have secUid and haven't hit date limit
         if sec_uid and use_api and not reached_date_limit:
@@ -786,6 +822,13 @@ class TikTokScraper:
                             logger.info(
                                 f"Found #{len(posts)}: {post.video_id} ({post.date_time}) - {post.views:,} views"
                             )
+                self._emit_progress(
+                    progress_cb,
+                    phase="scrape_api_page",
+                    pages_scanned=page_num,
+                    posts_checked=posts_checked,
+                    matched_posts=len(posts),
+                )
 
                 has_more = data.get("hasMore", False)
                 cursor = data.get("cursor", 0)
@@ -811,6 +854,13 @@ class TikTokScraper:
                     existing_ids.add(p.video_id)
             if ytdlp_posts:
                 logger.info(f"yt-dlp added {len(ytdlp_posts)} posts (total now {len(posts)})")
+                self._emit_progress(
+                    progress_cb,
+                    phase="scrape_ytdlp_fallback",
+                    pages_scanned=pages_scanned,
+                    posts_checked=max(posts_checked, len(posts)),
+                    matched_posts=len(posts),
+                )
 
         self.last_retrieval_meta = {
             "retrieval_mode": (

@@ -11,6 +11,7 @@ Supports:
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
@@ -864,7 +865,34 @@ class TwitterScraper:
 
         return replies
 
-    def scrape(self, config: TwitterScrapeConfig) -> list[Tweet]:
+    def _emit_progress(
+        self,
+        progress_cb: Callable[[dict[str, Any]], None] | None,
+        *,
+        phase: str,
+        pages_scanned: int,
+        posts_checked: int,
+        matched_posts: int,
+    ) -> None:
+        if not progress_cb:
+            return
+        try:
+            progress_cb(
+                {
+                    "phase": phase,
+                    "pages_scanned": max(0, int(pages_scanned)),
+                    "posts_checked": max(0, int(posts_checked)),
+                    "matched_posts": max(0, int(matched_posts)),
+                }
+            )
+        except Exception:
+            logger.debug("Twitter scrape progress callback raised", exc_info=True)
+
+    def scrape(
+        self,
+        config: TwitterScrapeConfig,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[Tweet]:
         """
         Scrape tweets matching the search criteria.
 
@@ -903,6 +931,13 @@ class TwitterScraper:
                 tweets = self._scrape_syndication(username, config)
                 retrieval_mode = "syndication"
             if tweets:
+                self._emit_progress(
+                    progress_cb,
+                    phase="scrape_fallback_page",
+                    pages_scanned=1,
+                    posts_checked=len(tweets),
+                    matched_posts=len(tweets),
+                )
                 self.last_retrieval_meta = {
                     "retrieval_mode": retrieval_mode,
                     "graphql_404_count": graphql_404_count,
@@ -973,6 +1008,13 @@ class TwitterScraper:
                 break
 
             logger.info(f"Page {page_num}: found {tweets_on_page} tweets, {len(tweets)} total")
+            self._emit_progress(
+                progress_cb,
+                phase="scrape_graphql_page",
+                pages_scanned=page_num,
+                posts_checked=len(tweets),
+                matched_posts=len(tweets),
+            )
 
             # Get next page
             cursor = next_cursor
@@ -1011,6 +1053,13 @@ class TwitterScraper:
                     )
 
         logger.info(f"Search complete: found {len(tweets)} tweets")
+        self._emit_progress(
+            progress_cb,
+            phase="scrape_complete",
+            pages_scanned=page_num,
+            posts_checked=len(tweets),
+            matched_posts=len(tweets),
+        )
         self.last_retrieval_meta = {
             "retrieval_mode": retrieval_mode,
             "graphql_404_count": graphql_404_count,

@@ -607,6 +607,29 @@ def _is_snapshot_fresh(snapshot: dict[str, Any] | None) -> bool:
     return age <= timedelta(minutes=_STALE_WINDOW_MINUTES)
 
 
+def _snapshot_needs_google_image_backfill(snapshot: dict[str, Any] | None) -> bool:
+    if not snapshot:
+        return False
+    payload = snapshot.get("payload") if isinstance(snapshot.get("payload"), dict) else {}
+    normalized = payload.get("normalized") if isinstance(payload, dict) else {}
+    news_items = normalized.get("news") if isinstance(normalized, dict) else None
+    if not isinstance(news_items, list) or not news_items:
+        return False
+    for item in news_items:
+        if not isinstance(item, dict):
+            continue
+        image_url = str(item.get("image_url") or "").strip()
+        hosted_image_url = str(item.get("hosted_image_url") or "").strip()
+        original_image_url = str(item.get("original_image_url") or "").strip()
+        # Retry sync when an item has no image at all, or only external image URLs
+        # that were never mirrored to hosted storage.
+        if not image_url and not hosted_image_url and not original_image_url:
+            return True
+        if not hosted_image_url and (image_url or original_image_url):
+            return True
+    return False
+
+
 def _sync_google_news_featured_images(
     *,
     db: SupabaseAdminClient,
@@ -718,7 +741,11 @@ def sync_google_news(
         )
 
     existing = _fetch_show_snapshot(db, show_id=show_id_str, source_id=_GOOGLE_SOURCE_ID)
-    if not payload.force and _is_snapshot_fresh(existing):
+    if (
+        not payload.force
+        and _is_snapshot_fresh(existing)
+        and not _snapshot_needs_google_image_backfill(existing)
+    ):
         existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
         normalized = existing_payload.get("normalized") if isinstance(existing_payload, dict) else {}
         existing_news = normalized.get("news") if isinstance(normalized, dict) else []

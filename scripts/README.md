@@ -65,8 +65,16 @@ PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --verbos
 - Processes only names currently used by the full shows inventory:
   - networks from `core.shows.networks`
   - streaming providers from `core.show_watch_providers` (`US`, `flatrate|ads`) plus fallback names from `core.shows.streaming_providers`.
+- Supports overrides via `admin.network_streaming_overrides` and tracks per-entity completion in:
+  - `admin.network_streaming_completion`
+  - `admin.network_streaming_completion_attempts`
 - Mirrors missing base logos and generates black/white transparent variants (`hosted_logo_black_*`, `hosted_logo_white_*`).
+- Use `--unresolved-only` to re-run just unresolved entities from completion state.
 - Prints both machine-readable counters and unresolved logo rows:
+  - `completion_total=<count>`
+  - `completion_resolved=<count>`
+  - `completion_unresolved=<count>`
+  - `completion_percent=<0-100>`
   - `unresolved_logos=<count>`
   - `unresolved_logo={\"type\":\"network|streaming\",\"id\":\"...\",\"name\":\"...\",\"reason\":\"...\"}`
 

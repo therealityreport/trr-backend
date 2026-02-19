@@ -1,0 +1,3 @@
+# Fandom community domains allowed for person link discovery.
+# One domain per line; comments and blank lines are ignored.
+real-housewives.fandom.com

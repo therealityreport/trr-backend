@@ -65,6 +65,23 @@ def _strip_html(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _image_url_from_description(description_html: str | None, *, base_url: str) -> str | None:
+    if not isinstance(description_html, str) or not description_html.strip():
+        return None
+    soup = BeautifulSoup(description_html, "html.parser")
+    image_tag = soup.find("img")
+    if not isinstance(image_tag, Tag):
+        return None
+    for attr in ("src", "data-src", "data-original"):
+        value = image_tag.get(attr)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        resolved = _http_url(urljoin(base_url, value.strip()))
+        if resolved:
+            return resolved
+    return None
+
+
 def _parse_pubdate(pub_date: str | None) -> str | None:
     if not pub_date:
         return None
@@ -122,6 +139,11 @@ def _extract_featured_image_from_html(html_text: str, *, page_url: str) -> str |
         href = image_link.get("href")
         if isinstance(href, str) and href.strip():
             candidates.append(href.strip())
+    first_image_tag = soup.find("img")
+    if isinstance(first_image_tag, Tag):
+        src = first_image_tag.get("src")
+        if isinstance(src, str) and src.strip():
+            candidates.append(src.strip())
     for raw in candidates:
         if not raw:
             continue
@@ -205,7 +227,11 @@ def parse_rss_items(xml_text: str) -> list[dict[str, Any]]:
         if not publisher_domain:
             publisher_domain = None
 
-        description = _strip_html(_child_text(item, "description"))
+        description_raw = _child_text(item, "description")
+        description = _strip_html(description_raw)
+        image_url = _http_url(_image_url_from_item(item))
+        if not image_url:
+            image_url = _image_url_from_description(description_raw, base_url=link.strip())
 
         out.append(
             {
@@ -216,7 +242,7 @@ def parse_rss_items(xml_text: str) -> list[dict[str, Any]]:
                 "publisher_url": source_url,
                 "publisher_domain": publisher_domain,
                 "summary": description,
-                "image_url": _http_url(_image_url_from_item(item)),
+                "image_url": image_url,
                 "feed_rank": index,
             }
         )
