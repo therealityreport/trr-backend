@@ -26,7 +26,11 @@ def test_imdb_episode_fields_take_precedence_and_tmdb_fills_provider_fields(monk
 
     monkeypatch.setattr(mod, "find_show_by_imdb_id", lambda *_args, **_kwargs: dict(show_row))
     monkeypatch.setattr(mod, "find_show_by_tmdb_id", lambda *_args, **_kwargs: dict(show_row))
-    monkeypatch.setattr(mod, "insert_show", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no insert")))
+    monkeypatch.setattr(
+        mod,
+        "insert_show",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no insert")),
+    )
     monkeypatch.setattr(mod, "update_show", lambda *_args, **_kwargs: dict(show_row))
 
     season_store: dict[int, dict] = {
@@ -78,7 +82,13 @@ def test_imdb_episode_fields_take_precedence_and_tmdb_fills_provider_fields(monk
         def __init__(self, *args, **kwargs):  # noqa: D401, ANN002, ANN003
             pass
 
-        def fetch_episodes_payload(self, imdb_series_id: str, *, season: int | None = None, allow_html_fallback: bool = True):
+        def fetch_episodes_payload(
+            self,
+            imdb_series_id: str,
+            *,
+            season: int | None = None,
+            allow_html_fallback: bool = True,
+        ):
             assert imdb_series_id == "tt0100001"
             return {"season": season}
 

@@ -4,6 +4,33 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
 
 ## Latest Update (2026-02-19)
 
+- February 19, 2026: Added Google News featured-image parity with Bravo and mirrored image sync to S3/Supabase.
+  - Files:
+    - `api/routers/admin_show_news.py`
+    - `trr_backend/scraping/google_news_parser.py`
+    - `tests/api/routers/test_admin_show_news.py`
+    - `tests/scraping/test_google_news_parser.py`
+  - Changes:
+    - Extended Google RSS ingestion to backfill missing `image_url` from article metadata (`og:image`, `twitter:image`, `image_src`) when RSS omits media.
+    - Added image enrichment metrics to parser result payload:
+      - `featured_images_added`
+      - `featured_images_probed`
+      - `featured_image_errors`
+    - Added Google News featured-image import stage in sync endpoint using the same `admin_scrape.import_images` media pipeline as Bravo imports.
+      - Mirrors to S3 and persists media assets/links in Supabase.
+      - Writes hosted URLs back into normalized Google news snapshot items.
+      - Tracks sync metadata in response + snapshot source metadata (`image_sync`).
+    - Expanded normalized Google news shape with additive fields:
+      - `summary`
+      - `original_image_url`
+      - `hosted_image_url`
+      - `media_asset_id`
+      - `featured_image_synced`
+    - Preserved already-tagged payloads during normalization (reuses existing `person_tags`, `topic_tags`, `season_matches` when present).
+  - Validation:
+    - `ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
+    - `pytest -q tests/scraping/test_google_news_parser.py tests/api/routers/test_admin_show_news.py` (`9 passed`)
+
 - February 19, 2026: Completed production logo completion pipeline with black/white transparent variants + unresolved reporting contract.
   - Files:
     - `trr_backend/media/s3_mirror.py`
@@ -1594,9 +1621,10 @@ Continuation (same session, 2026-02-19) — Google News ingestion + unified show
 Continuation (same session, 2026-02-19) — CI fix for TMDb season enrichment overview precedence:
 - Files:
   - `trr_backend/ingestion/show_importer.py`
+  - `tests/integrations/tmdb/test_tmdb_season_enrichment.py`
 - Changes:
-  - Restored TMDb season enrichment behavior to write TMDb `overview` when present, even when IMDb overview already exists, while preserving existing title/air_date fallback logic.
-  - Kept synopsis backfill conditional on missing synopsis.
+  - Preserved IMDb canonical episode text (`title`, `overview`, `synopsis`, `air_date`) for existing episodes during TMDb season enrichment.
+  - Updated TMDb season enrichment regression test expectations to assert non-overwrite behavior for existing IMDb-backed episode fields.
 - Validation:
-  - `pytest -q tests/integrations/tmdb/test_tmdb_season_enrichment.py::test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters` (`1 passed`)
-  - `ruff check trr_backend/ingestion/show_importer.py tests/integrations/tmdb/test_tmdb_season_enrichment.py` (pass)
+  - `pytest -q tests/integrations/tmdb/test_tmdb_season_enrichment.py::test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters tests/ingestion/test_show_importer_episode_precedence.py::test_imdb_episode_fields_take_precedence_and_tmdb_fills_provider_fields` (`2 passed`)
+  - `ruff check trr_backend/ingestion/show_importer.py tests/integrations/tmdb/test_tmdb_season_enrichment.py tests/ingestion/test_show_importer_episode_precedence.py` (pass)

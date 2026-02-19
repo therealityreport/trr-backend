@@ -127,11 +127,10 @@ def test_tmdb_season_enrichment_preserves_imdb_title_and_upserts_posters(monkeyp
     assert len(episode_rows) == 2
 
     ep1 = next(r for r in episode_rows if r.get("episode_number") == 1)
-    # Note: TMDb episode enrichment now updates overview even if IMDb overview exists
-    # The existing IMDb title/air_date are preserved only if TMDb doesn't have them
+    # Existing IMDb canonical fields remain authoritative for already-known episodes.
     assert ep1["title"] == "IMDb Episode 1"
-    assert ep1["overview"] == "TMDb overview 1"
-    assert ep1["synopsis"] == "TMDb overview 1"
+    assert "overview" not in ep1
+    assert "synopsis" not in ep1
     assert ep1["air_date"] == "2024-02-01"  # IMDb air_date preserved (TMDb has different date)
     assert ep1["tmdb_episode_id"] == 1001
     assert ep1["tmdb_series_id"] == 12345

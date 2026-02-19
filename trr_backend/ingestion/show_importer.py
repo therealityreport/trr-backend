@@ -1885,6 +1885,7 @@ def upsert_candidates_into_supabase(
 
                                             existing = existing_by_number.get(ep_no, {})
                                             existing_title = existing.get("title")
+                                            existing_overview = existing.get("overview")
                                             existing_synopsis = existing.get("synopsis")
                                             existing_air_date = existing.get("air_date")
 
@@ -1928,6 +1929,10 @@ def upsert_candidates_into_supabase(
                                             if (
                                                 isinstance(tmdb_overview, str)
                                                 and tmdb_overview.strip()
+                                                and not (
+                                                    isinstance(existing_overview, str)
+                                                    and existing_overview.strip()
+                                                )
                                             ):
                                                 overview_value = tmdb_overview.strip()
                                                 episode_row["overview"] = overview_value
