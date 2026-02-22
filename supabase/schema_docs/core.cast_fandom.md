@@ -31,6 +31,8 @@
 | taglines | jsonb | YES |  | NO | NEVER |
 | reunion_seating | jsonb | YES |  | NO | NEVER |
 | trivia | jsonb | YES |  | NO | NEVER |
+| infobox_raw | jsonb | YES |  | NO | NEVER |
+| raw_html_sha256 | text | YES |  | NO | NEVER |
 | dynamic_sections | jsonb | YES |  | NO | NEVER |
 | bio_card | jsonb | YES |  | NO | NEVER |
 | casting_summary | text | YES |  | NO | NEVER |
@@ -39,8 +41,6 @@
 | source_variants | jsonb | YES |  | NO | NEVER |
 | ai_model | text | YES |  | NO | NEVER |
 | ai_generated_at | timestamp with time zone | YES |  | NO | NEVER |
-| infobox_raw | jsonb | YES |  | NO | NEVER |
-| raw_html_sha256 | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -97,6 +97,14 @@ false
   "reunion_seating": {},
   "trivia": {},
   "infobox_raw": {},
-  "raw_html_sha256": "example"
+  "raw_html_sha256": "example",
+  "dynamic_sections": {},
+  "bio_card": {},
+  "casting_summary": "example",
+  "citations": {},
+  "conflicts": {},
+  "source_variants": {},
+  "ai_model": "example",
+  "ai_generated_at": "1970-01-01T00:00:00Z"
 }
 ```

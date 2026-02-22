@@ -46,15 +46,18 @@ trr-backend
 │   │   └── events.py
 │   ├── routers
 │   │   ├── __init__.py
+│   │   ├── admin_asset_batch_jobs.py
 │   │   ├── admin_asset_flags.py
 │   │   ├── admin_cast.py
 │   │   ├── admin_cast_photos.py
+│   │   ├── admin_fandom_sync.py
 │   │   ├── admin_image_counts.py
 │   │   ├── admin_media_assets.py
 │   │   ├── admin_person_images.py
 │   │   ├── admin_scrape.py
 │   │   ├── admin_show_bravo.py
 │   │   ├── admin_show_links.py
+│   │   ├── admin_show_news.py
 │   │   ├── admin_show_roles.py
 │   │   ├── admin_show_sync.py
 │   │   ├── discussions.py
@@ -109,6 +112,10 @@ trr-backend
 │   │   ├── TASK1
 │   │   │   ├── OTHER_PROJECTS.md
 │   │   │   └── PLAN.md
+│   │   ├── TASK10
+│   │   │   ├── OTHER_PROJECTS.md
+│   │   │   ├── PLAN.md
+│   │   │   └── STATUS.md
 │   │   ├── TASK2
 │   │   │   ├── OTHER_PROJECTS.md
 │   │   │   └── PLAN.md
@@ -127,7 +134,15 @@ trr-backend
 │   │   │   ├── OTHER_PROJECTS.md
 │   │   │   ├── PLAN.md
 │   │   │   └── STATUS.md
-│   │   └── TASK7
+│   │   ├── TASK7
+│   │   │   ├── OTHER_PROJECTS.md
+│   │   │   ├── PLAN.md
+│   │   │   └── STATUS.md
+│   │   ├── TASK8
+│   │   │   ├── OTHER_PROJECTS.md
+│   │   │   ├── PLAN.md
+│   │   │   └── STATUS.md
+│   │   └── TASK9
 │   │       ├── OTHER_PROJECTS.md
 │   │       ├── PLAN.md
 │   │       └── STATUS.md
@@ -150,15 +165,19 @@ trr-backend
 │   │   └── google_sheets_pipeline.md
 │   ├── plans
 │   │   ├── 2026-01-28-surveys-supabase-auth.md
+│   │   ├── 2026-02-12-show-icons.md
 │   │   └── repo_cleanup.md
 │   ├── runbooks
 │   │   ├── credits_v2_rollout.md
 │   │   ├── postgrest_schema_cache.md
 │   │   ├── rhoslc-show-admin-backfill.md
-│   │   └── show_import_job.md
+│   │   ├── show_import_job.md
+│   │   └── social_worker_queue_ops.md
 │   └── workflows
 │       └── VIBE_CODING.md
 ├── pytest.ini
+├── requirements.in
+├── requirements.lock.txt
 ├── requirements.txt
 ├── resolve_tmdb_ids_via_find.py
 ├── ruff.toml
@@ -173,6 +192,7 @@ trr-backend
 │   ├── backfill_media_asset_variants.py
 │   ├── backfill_media_assets.py
 │   ├── backfill_tmdb_show_details.py
+│   ├── check_env_example.py
 │   ├── cleanup
 │   │   └── cleanup_fandom_mismatches.py
 │   ├── cleanup_expired_media_uploads.py
@@ -221,8 +241,13 @@ trr-backend
 │   ├── resolve_tmdb_ids_via_find.py
 │   ├── rhoslc_fandom_enrichment.py
 │   ├── run_show_import_job.py
+│   ├── shows
+│   │   ├── backfill_bravo_person_source_links.py
+│   │   └── cleanup_invalid_person_knowledge_links.py
 │   ├── socials
 │   │   ├── __init__.py
+│   │   ├── backfill_instagram_metadata_and_media.py
+│   │   ├── cleanup_youtube_false_positives.py
 │   │   ├── instagram
 │   │   │   ├── __init__.py
 │   │   │   ├── instagram_cookies.example.json
@@ -246,6 +271,7 @@ trr-backend
 │   │   ├── sync_cast_photos.py
 │   │   ├── sync_episode_appearances.py
 │   │   ├── sync_episodes.py
+│   │   ├── sync_networks_streaming_links.py
 │   │   ├── sync_people.py
 │   │   ├── sync_season_episode_images.py
 │   │   ├── sync_seasons.py
@@ -264,6 +290,7 @@ trr-backend
 │   ├── sync_cast_photos.py
 │   ├── sync_episode_appearances.py
 │   ├── sync_episodes.py
+│   ├── sync_networks_streaming_links.py
 │   ├── sync_people.py
 │   ├── sync_season_episode_images.py
 │   ├── sync_seasons.py
@@ -421,7 +448,17 @@ trr-backend
 │   │   ├── 0120_show_admin_links_and_roles.sql
 │   │   ├── 0121_social_scrape_runs.sql
 │   │   ├── 0122_social_scrape_jobs_queue_fields.sql
-│   │   └── 0123_social_scrape_jobs_queue_indexes.sql
+│   │   ├── 0123_social_scrape_jobs_queue_indexes.sql
+│   │   ├── 0124_social_thumbnails_and_reddit_sources.sql
+│   │   ├── 0125_social_analytics_query_indexes.sql
+│   │   ├── 0126_social_comment_lifecycle_flags.sql
+│   │   ├── 0127_add_network_provider_link_fields.sql
+│   │   ├── 0128_add_network_provider_monochrome_logo_fields.sql
+│   │   ├── 0129_add_google_news_source.sql
+│   │   ├── 0130_social_worker_heartbeat_and_comment_id_guardrails.sql
+│   │   ├── 0131_network_streaming_completion_and_overrides.sql
+│   │   ├── 0132_instagram_permalink_metadata_and_media_mirroring.sql
+│   │   └── 0133_fandom_sync_expansion.sql
 │   ├── schema_docs
 │   │   ├── INDEX.md
 │   │   ├── core.cast_fandom.json
@@ -474,6 +511,7 @@ trr-backend
 │   │   ├── core.production_companies.md
 │   │   ├── core.season_external_ids.json
 │   │   ├── core.season_external_ids.md
+│   │   ├── core.season_fandom.md
 │   │   ├── core.season_images.json
 │   │   ├── core.season_images.md
 │   │   ├── core.season_source_history.json
@@ -558,11 +596,17 @@ trr-backend
 │   ├── api
 │   │   ├── routers
 │   │   │   ├── __init__.py
+│   │   │   ├── test_admin_asset_batch_jobs.py
 │   │   │   ├── test_admin_asset_flags.py
+│   │   │   ├── test_admin_cast_photos.py
+│   │   │   ├── test_admin_fandom_sync.py
 │   │   │   ├── test_admin_image_counts_fallback.py
 │   │   │   ├── test_admin_person_images.py
 │   │   │   ├── test_admin_scrape_contracts.py
 │   │   │   ├── test_admin_show_bravo.py
+│   │   │   ├── test_admin_show_links.py
+│   │   │   ├── test_admin_show_news.py
+│   │   │   ├── test_admin_show_roles.py
 │   │   │   ├── test_admin_show_sync.py
 │   │   │   └── test_socials_season_analytics.py
 │   │   ├── test_auth.py
@@ -576,7 +620,9 @@ trr-backend
 │   ├── fixtures
 │   │   ├── fandom
 │   │   │   ├── lisa_barlow_infobox.html
-│   │   │   └── lisa_barlow_person_sample.html
+│   │   │   ├── lisa_barlow_person_live_infobox_sample.html
+│   │   │   ├── lisa_barlow_person_sample.html
+│   │   │   └── rhoslc_cast_table_sample.html
 │   │   ├── imdb
 │   │   │   ├── episodes_page_overview_one_season_sample.html
 │   │   │   ├── episodes_page_overview_sample.html
@@ -597,24 +643,30 @@ trr-backend
 │   │   │   └── title_page_tt8819906_sample.html
 │   │   ├── scraping
 │   │   │   └── eonline_pinterest_sample.html
-│   │   └── tmdb
-│   │       ├── find_by_imdb_id_sample.json
-│   │       ├── tv_alternative_titles_sample.json
-│   │       ├── tv_details_full_sample.json
-│   │       ├── tv_details_sample.json
-│   │       ├── tv_images_sample.json
-│   │       ├── tv_season_details_sample.json
-│   │       └── tv_watch_providers_sample.json
+│   │   ├── tmdb
+│   │   │   ├── find_by_imdb_id_sample.json
+│   │   │   ├── tv_alternative_titles_sample.json
+│   │   │   ├── tv_details_full_sample.json
+│   │   │   ├── tv_details_sample.json
+│   │   │   ├── tv_images_sample.json
+│   │   │   ├── tv_season_details_sample.json
+│   │   │   └── tv_watch_providers_sample.json
+│   │   └── wikipedia
+│   │       └── rhoslc_cast_table_sample.html
 │   ├── ingestion
 │   │   ├── test_episode_appearances_upsert.py
 │   │   ├── test_fandom_person_scraper.py
+│   │   ├── test_show_cast_matrix_scraper.py
+│   │   ├── test_show_importer_episode_precedence.py
 │   │   ├── test_show_importer_metadata_enrichment.py
 │   │   ├── test_show_importer_tmdb_details_links_imdb_show.py
 │   │   ├── test_show_metadata_enricher.py
 │   │   └── test_tmdb_show_backfill.py
 │   ├── integrations
 │   │   ├── fandom
-│   │   │   └── test_fandom_infobox_parser.py
+│   │   │   ├── test_fandom_discovery.py
+│   │   │   ├── test_fandom_infobox_parser.py
+│   │   │   └── test_fandom_search.py
 │   │   ├── imdb
 │   │   │   ├── test_episodic_client_normalization.py
 │   │   │   ├── test_fullcredits_cast_parser.py
@@ -655,14 +707,20 @@ trr-backend
 │   │   └── test_social_season_analytics.py
 │   ├── scraping
 │   │   ├── test_bravo_parser.py
+│   │   ├── test_google_news_parser.py
 │   │   └── test_url_image_scraper.py
 │   ├── scripts
 │   │   ├── test_import_shows_from_lists_merge.py
 │   │   ├── test_import_shows_from_lists_parsing.py
 │   │   ├── test_import_shows_from_lists_upsert.py
+│   │   ├── test_sync_episode_appearances_season_coverage.py
 │   │   ├── test_sync_incremental.py
+│   │   ├── test_sync_networks_streaming_links.py
 │   │   ├── test_sync_tmdb_watch_providers.py
 │   │   └── test_verify_credits_parity.py
+│   ├── socials
+│   │   ├── test_comment_scraper_fixes.py
+│   │   └── test_instagram_permalink_metadata.py
 │   ├── test_api_smoke.py
 │   ├── test_discussions_smoke.py
 │   ├── test_dms_smoke.py
@@ -696,8 +754,10 @@ trr-backend
     │   ├── __init__.py
     │   ├── cast_photo_sources.py
     │   ├── fandom_person_scraper.py
+    │   ├── fandom_season_scraper.py
     │   ├── imdb_images.py
     │   ├── imdb_show_mediaindex.py
+    │   ├── show_cast_matrix_scraper.py
     │   ├── show_importer.py
     │   ├── show_metadata_enricher.py
     │   ├── showinfo_overrides.py
@@ -706,7 +766,10 @@ trr-backend
     │   └── tmdb_show_backfill.py
     ├── integrations
     │   ├── __init__.py
+    │   ├── brandfetch.py
     │   ├── fandom.py
+    │   ├── fandom_community_allowlist.txt
+    │   ├── fandom_discovery.py
     │   ├── imdb
     │   │   ├── __init__.py
     │   │   ├── credits_client.py
@@ -719,6 +782,8 @@ trr-backend
     │   │   ├── person_gallery.py
     │   │   ├── title_metadata_client.py
     │   │   └── title_page_metadata.py
+    │   ├── logopedia.py
+    │   ├── openai_fandom_cleanup.py
     │   ├── tmdb
     │   │   ├── __init__.py
     │   │   └── client.py
@@ -763,6 +828,7 @@ trr-backend
     │   ├── people.py
     │   ├── person_images.py
     │   ├── screenalytics_runs.py
+    │   ├── season_fandom.py
     │   ├── season_images.py
     │   ├── seasons.py
     │   ├── show_cast.py
@@ -775,6 +841,7 @@ trr-backend
     ├── scraping
     │   ├── __init__.py
     │   ├── bravo_parser.py
+    │   ├── google_news_parser.py
     │   └── url_image_scraper.py
     ├── security
     │   └── jwt.py
@@ -782,6 +849,7 @@ trr-backend
     │   ├── __init__.py
     │   ├── instagram
     │   │   ├── __init__.py
+    │   │   ├── permalink_metadata.py
     │   │   └── scraper.py
     │   ├── tiktok
     │   │   ├── __init__.py
