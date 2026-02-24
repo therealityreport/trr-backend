@@ -199,7 +199,10 @@ def _upsert_link(
         response = (
             db.schema("core")
             .table("entity_links")
-            .upsert(payload, on_conflict="entity_type,entity_id,link_kind,season_number,url_key")
+            .upsert(
+                payload,
+                on_conflict="show_id,entity_type,entity_id,link_kind,season_number,url_key",
+            )
             .execute()
         )
         rows = get_list_result(response, "upserting entity links")
@@ -801,6 +804,65 @@ def _validated_person_knowledge_url(
     return resolved
 
 
+def _load_preapproved_person_source_url(
+    *,
+    person_id: str,
+    link_kind: str,
+    candidate_url: str,
+) -> str | None:
+    normalized_kind = _normalize_link_kind(link_kind)
+    if normalized_kind not in {"imdb", "tmdb"}:
+        return None
+    canonical_candidate = _canonicalize_url(candidate_url)
+    row = pg.fetch_one(
+        """
+        SELECT url
+        FROM core.entity_links
+        WHERE entity_type = 'person'
+          AND entity_id = %s
+          AND link_kind = %s
+          AND status = 'approved'
+          AND url_key = %s
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        [
+            person_id,
+            normalized_kind,
+            _url_key(canonical_candidate),
+        ],
+    )
+    existing_url = str((row or {}).get("url") or "").strip()
+    return _canonicalize_url(existing_url) if existing_url else None
+
+
+def _validated_or_carried_person_source_url(
+    *,
+    person_id: str,
+    candidate_url: str,
+    kind: str,
+    expected_name: str,
+    fandom_allowlist: list[str] | tuple[str, ...] | None = None,
+) -> str | None:
+    resolved, outcome = _validate_person_knowledge_url(
+        candidate_url,
+        kind=kind,
+        expected_name=expected_name,
+        fandom_allowlist=fandom_allowlist,
+    )
+    if outcome == "valid" and resolved:
+        return resolved
+    if outcome == "fetch_error":
+        carried_url = _load_preapproved_person_source_url(
+            person_id=person_id,
+            link_kind=kind,
+            candidate_url=candidate_url,
+        )
+        if carried_url:
+            return carried_url
+    return None
+
+
 def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
     show = pg.fetch_one(
         """
@@ -1245,8 +1307,9 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
         )
 
         if imdb_id and name:
-            imdb_url = _validated_person_knowledge_url(
-                f"https://www.imdb.com/name/{imdb_id}/",
+            imdb_url = _validated_or_carried_person_source_url(
+                person_id=person_id,
+                candidate_url=f"https://www.imdb.com/name/{imdb_id}/",
                 kind="imdb",
                 expected_name=name,
                 fandom_allowlist=fandom_allowlist,
@@ -1263,8 +1326,9 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                 )
 
         if tmdb_id and name:
-            tmdb_url = _validated_person_knowledge_url(
-                f"https://www.themoviedb.org/person/{tmdb_id}",
+            tmdb_url = _validated_or_carried_person_source_url(
+                person_id=person_id,
+                candidate_url=f"https://www.themoviedb.org/person/{tmdb_id}",
                 kind="tmdb",
                 expected_name=name,
                 fandom_allowlist=fandom_allowlist,

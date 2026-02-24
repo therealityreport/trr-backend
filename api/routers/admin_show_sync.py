@@ -22,7 +22,7 @@ from threading import Thread
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -69,6 +69,7 @@ from trr_backend.repositories.web_scrape_images import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-sync"])
+STREAM_HEARTBEAT_INTERVAL_SECONDS = 10
 
 
 def _split_env_list(var_name: str) -> list[str]:
@@ -300,6 +301,8 @@ class SyncNetworksStreamingRequest(BaseModel):
     batch_size: int = Field(default=25, ge=1, le=500)
     max_runtime_sec: int = Field(default=840, ge=60, le=3600)
     resume_run_id: str | None = None
+    entity_type: Literal["network", "streaming", "production"] | None = None
+    entity_keys: list[str] | None = Field(default=None, min_length=1, max_length=200)
     limit: int | None = Field(default=None, ge=1, le=5000)
     verbose: bool = False
 
@@ -1278,6 +1281,13 @@ def sync_networks_streaming(
         common_args.append("--verbose")
     if payload.resume_run_id:
         common_args.extend(["--resume-run-id", str(payload.resume_run_id)])
+    if payload.entity_type:
+        common_args.extend(["--entity-type", payload.entity_type])
+    if payload.entity_keys:
+        for key in payload.entity_keys:
+            normalized_key = str(key or "").strip().casefold()
+            if normalized_key:
+                common_args.extend(["--entity-key", normalized_key])
     if payload.batch_size is not None:
         common_args.extend(["--batch-size", str(int(payload.batch_size))])
     if payload.max_runtime_sec is not None:
@@ -2252,6 +2262,7 @@ def refresh_show(
 def refresh_show_stream(
     show_id: UUID,
     payload: ShowRefreshRequest,
+    request: Request,
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> StreamingResponse:
@@ -2262,6 +2273,7 @@ def refresh_show_stream(
     """
 
     show_id_str = str(show_id)
+    request_id = str(request.headers.get("x-trr-request-id") or "").strip() or None
     show_resp = (
         db.schema("core").table("shows").select("id,imdb_id,external_ids").eq("id", show_id_str).limit(1).execute()
     )
@@ -2380,86 +2392,171 @@ def refresh_show_stream(
     def _yield_event(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
+    def _with_request_id(data: dict[str, object]) -> dict[str, object]:
+        if request_id:
+            data["request_id"] = request_id
+        return data
+
     def event_generator():
         results: dict[str, RefreshStepResult] = {}
         current = 0
+        current_target: str | None = None
+        current_step_key: str | None = None
 
-        yield _yield_event(
-            "progress",
-            {
+        try:
+            yield _yield_event(
+                "progress",
+                _with_request_id(
+                    {
+                        "show_id": show_id_str,
+                        "current": current,
+                        "total": total_steps,
+                        "message": "Starting refresh...",
+                    }
+                ),
+            )
+
+            # Run expanded steps sequentially.
+            for target, step_key, fn, argv, topic, provider in steps:
+                current_target = target
+                current_step_key = step_key
+                step_started_at = time.perf_counter()
+                yield _yield_event(
+                    "progress",
+                    _with_request_id(
+                        {
+                            "show_id": show_id_str,
+                            "target": target,
+                            "step": step_key,
+                            "stage_key": step_key,
+                            "current": current,
+                            "total": total_steps,
+                            "step_status": "running",
+                            "message": f"{step_key.replace('_', ' ')}: running",
+                            "elapsed_ms": 0,
+                        }
+                    ),
+                )
+
+                step_result_holder: dict[str, RefreshStepResult | None] = {"result": None}
+                step_error_holder: dict[str, Exception | None] = {"error": None}
+
+                def _run_step_in_thread() -> None:
+                    try:
+                        step_result_holder["result"] = _run_script_step(step_key, fn, argv)
+                    except Exception as exc:  # noqa: BLE001
+                        step_error_holder["error"] = exc
+
+                step_thread = Thread(target=_run_step_in_thread, daemon=True)
+                step_thread.start()
+                while step_thread.is_alive():
+                    step_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)
+                    if step_thread.is_alive():
+                        yield _yield_event(
+                            "progress",
+                            _with_request_id(
+                                {
+                                    "show_id": show_id_str,
+                                    "target": target,
+                                    "step": step_key,
+                                    "stage_key": step_key,
+                                    "current": current,
+                                    "total": total_steps,
+                                    "step_status": "running",
+                                    "message": f"{step_key.replace('_', ' ')}: running",
+                                    "heartbeat": True,
+                                    "elapsed_ms": int((time.perf_counter() - step_started_at) * 1000),
+                                }
+                            ),
+                        )
+                step_thread.join()
+                if step_error_holder["error"] is not None:
+                    raise RuntimeError(f"Step {step_key} failed: {step_error_holder['error']}") from step_error_holder[
+                        "error"
+                    ]
+                step_result = step_result_holder["result"]
+                if step_result is None:
+                    raise RuntimeError(f"Step {step_key} returned no result")
+
+                results[step_key] = step_result
+                current += 1
+
+                payload_data: dict[str, object] = {
+                    "show_id": show_id_str,
+                    "target": target,
+                    "step": step_key,
+                    "stage_key": step_key,
+                    "current": current,
+                    "total": total_steps,
+                    "step_status": step_result.status,
+                    "message": f"{step_key.replace('_', ' ')}: {step_result.status}",
+                    "elapsed_ms": int((time.perf_counter() - step_started_at) * 1000),
+                }
+                if topic:
+                    payload_data["topic"] = topic
+                if provider:
+                    payload_data["provider"] = provider
+                if step_result.error:
+                    payload_data["error"] = step_result.error
+
+                yield _yield_event("progress", _with_request_id(payload_data))
+
+            # Combine step results into target-level results to match the non-stream endpoint's shape.
+            for target in ordered:
+                if target == "details":
+                    results["details"] = _combine_step_results(
+                        [
+                            ("sync_shows", results["details_sync_shows"]),
+                            ("tmdb_show_entities", results["details_tmdb_show_entities"]),
+                            ("tmdb_watch_providers", results["details_tmdb_watch_providers"]),
+                        ]
+                    )
+                    continue
+
+                if target == "seasons_episodes":
+                    results["seasons_episodes"] = _combine_step_results(
+                        [
+                            ("seasons", results["seasons_episodes_seasons"]),
+                            ("episodes", results["seasons_episodes_episodes"]),
+                        ]
+                    )
+                    continue
+
+                if target == "photos":
+                    results["photos"] = _combine_step_results(
+                        [
+                            ("show_images", results["photos_show_images"]),
+                            ("season_episode_images", results["photos_season_episode_images"]),
+                        ]
+                    )
+                    continue
+
+                if target == "cast_credits":
+                    results["cast_credits"] = _combine_step_results(
+                        [
+                            ("show_cast", results["cast_credits_show_cast"]),
+                            ("episode_appearances", results["cast_credits_episode_appearances"]),
+                        ]
+                    )
+                    continue
+
+            out = ShowRefreshResponse(show_id=show_id_str, targets=ordered, results=results)
+            yield _yield_event("complete", _with_request_id(out.model_dump()))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Show refresh stream failed for show_id=%s", show_id_str)
+            error_payload: dict[str, object] = {
                 "show_id": show_id_str,
+                "error": "Show refresh stream failed",
+                "detail": str(exc),
                 "current": current,
                 "total": total_steps,
-                "message": "Starting refresh...",
-            },
-        )
-
-        # Run expanded steps sequentially.
-        for target, step_key, fn, argv, topic, provider in steps:
-            step_result = _run_script_step(step_key, fn, argv)
-            results[step_key] = step_result
-            current += 1
-
-            payload_data: dict[str, object] = {
-                "show_id": show_id_str,
-                "target": target,
-                "step": step_key,
-                "stage_key": step_key,
-                "current": current,
-                "total": total_steps,
-                "step_status": step_result.status,
-                "message": f"{step_key.replace('_', ' ')}: {step_result.status}",
             }
-            if topic:
-                payload_data["topic"] = topic
-            if provider:
-                payload_data["provider"] = provider
-            if step_result.error:
-                payload_data["error"] = step_result.error
-
-            yield _yield_event("progress", payload_data)
-
-        # Combine step results into target-level results to match the non-stream endpoint's shape.
-        for target in ordered:
-            if target == "details":
-                results["details"] = _combine_step_results(
-                    [
-                        ("sync_shows", results["details_sync_shows"]),
-                        ("tmdb_show_entities", results["details_tmdb_show_entities"]),
-                        ("tmdb_watch_providers", results["details_tmdb_watch_providers"]),
-                    ]
-                )
-                continue
-
-            if target == "seasons_episodes":
-                results["seasons_episodes"] = _combine_step_results(
-                    [
-                        ("seasons", results["seasons_episodes_seasons"]),
-                        ("episodes", results["seasons_episodes_episodes"]),
-                    ]
-                )
-                continue
-
-            if target == "photos":
-                results["photos"] = _combine_step_results(
-                    [
-                        ("show_images", results["photos_show_images"]),
-                        ("season_episode_images", results["photos_season_episode_images"]),
-                    ]
-                )
-                continue
-
-            if target == "cast_credits":
-                results["cast_credits"] = _combine_step_results(
-                    [
-                        ("show_cast", results["cast_credits_show_cast"]),
-                        ("episode_appearances", results["cast_credits_episode_appearances"]),
-                    ]
-                )
-                continue
-
-        out = ShowRefreshResponse(show_id=show_id_str, targets=ordered, results=results)
-        yield _yield_event("complete", out.model_dump())
+            if current_target:
+                error_payload["target"] = current_target
+            if current_step_key:
+                error_payload["step"] = current_step_key
+                error_payload["stage_key"] = current_step_key
+            yield _yield_event("error", _with_request_id(error_payload))
 
     return StreamingResponse(
         event_generator(),
@@ -2475,6 +2572,7 @@ def refresh_show_stream(
 @router.post("/{show_id}/refresh-photos/stream")
 def refresh_show_photos_stream(
     show_id: UUID,
+    request: Request,
     payload: RefreshShowPhotosRequest | None = None,
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
@@ -2493,6 +2591,7 @@ def refresh_show_photos_stream(
 
     payload = payload or RefreshShowPhotosRequest()
     show_id_str = str(show_id)
+    request_id = str(request.headers.get("x-trr-request-id") or "").strip() or None
 
     show_resp = (
         db.schema("core")
@@ -2523,12 +2622,19 @@ def refresh_show_photos_stream(
     def _yield_event(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
+    def _with_request_id(data: dict[str, object]) -> dict[str, object]:
+        if request_id:
+            data["request_id"] = request_id
+        return data
+
     def event_generator():
         from uuid import UUID as _UUID
 
         from trr_backend.clients.screenalytics import (
             ScreenalyticsClientError,
+            ScreenalyticsUnavailableError,
             count_people,
+            get_screenalytics_unavailable_state,
             is_screenalytics_configured,
         )
         from trr_backend.ingestion.cast_photo_sources import (
@@ -2647,7 +2753,7 @@ def refresh_show_photos_stream(
                 data["stage_total"] = stage_total
             if extra:
                 data.update(extra)
-            return _yield_event("progress", data)
+            return _yield_event("progress", _with_request_id(data))
 
         yield progress(stage="starting", message="Starting refresh...")
 
@@ -3574,68 +3680,106 @@ def refresh_show_photos_stream(
         if payload.skip_auto_count:
             yield progress(stage="auto_count", message="Skipping auto-count (fast mode).")
         elif is_screenalytics_configured() and person_ids and not payload.skip_s3:
-            try:
-                resp = (
-                    db.schema("core")
-                    .table("cast_photos")
-                    .select("id,hosted_url,url,image_url,thumb_url,people_names,source,metadata")
-                    .in_("person_id", person_ids)
-                    .execute()
+            unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
+            if unavailable:
+                yield progress(
+                    stage="auto_count",
+                    message="Skipping auto-count (Screenalytics unavailable).",
+                    extra={
+                        "skip_reason": "service_unavailable",
+                        "service_unavailable": True,
+                        "retry_after_s": retry_after_s,
+                        "detail": unavailable_reason,
+                    },
                 )
-                rows = resp.data or []
-                if not isinstance(rows, list):
-                    rows = []
-            except Exception as exc:  # noqa: BLE001
-                rows = []
-                errors.append(f"Auto-count query: {exc}")
-
-            tag_rows = get_tags_by_photo_ids(db, [str(r.get("id")) for r in rows if r.get("id")])
-
-            to_process: list[dict] = []
-            for row in rows:
-                if row.get("people_names"):
-                    continue
-                tag_row = tag_rows.get(str(row.get("id")))
-                if has_manual_tags(tag_row):
-                    continue
-                if tag_row and tag_row.get("people_count") is not None:
-                    continue
-                to_process.append(row)
-
-            bump_total(len(to_process))
-            yield progress(stage="auto_count", message="Auto-counting people in images...", stage_total=len(to_process))
-            for idx, row in enumerate(to_process):
-                url = row.get("hosted_url") or row.get("url") or row.get("image_url") or row.get("thumb_url")
-                if not url:
-                    bump_current(1)
-                    continue
+            else:
                 try:
-                    result = count_people(str(url))
-                    upsert_cast_photo_tags(
-                        db,
-                        cast_photo_id=str(row.get("id")),
-                        people_names=None,
-                        people_ids=None,
-                        people_count=result.people_count,
-                        people_count_source="auto",
-                        detector=result.detector,
-                        updated_by_firebase_uid="system:auto",
+                    resp = (
+                        db.schema("core")
+                        .table("cast_photos")
+                        .select("id,hosted_url,url,image_url,thumb_url,people_names,source,metadata")
+                        .in_("person_id", person_ids)
+                        .execute()
                     )
-                    auto_counts_succeeded += 1
-                except ScreenalyticsClientError as exc:
-                    auto_counts_failed += 1
-                    errors.append(f"Auto-count {row.get('id')}: {exc}")
-                auto_counts_attempted += 1
-                bump_current(1)
-                if (idx + 1) % 10 == 0:
-                    yield progress(
-                        stage="auto_count",
-                        message="Auto-counting people in images...",
-                        stage_current=idx + 1,
-                        stage_total=len(to_process),
-                    )
+                    rows = resp.data or []
+                    if not isinstance(rows, list):
+                        rows = []
+                except Exception as exc:  # noqa: BLE001
+                    rows = []
+                    errors.append(f"Auto-count query: {exc}")
+
+                tag_rows = get_tags_by_photo_ids(db, [str(r.get("id")) for r in rows if r.get("id")])
+
+                to_process: list[dict] = []
+                for row in rows:
+                    if row.get("people_names"):
+                        continue
+                    tag_row = tag_rows.get(str(row.get("id")))
+                    if has_manual_tags(tag_row):
+                        continue
+                    if tag_row and tag_row.get("people_count") is not None:
+                        continue
+                    to_process.append(row)
+
+                bump_total(len(to_process))
+                yield progress(
+                    stage="auto_count",
+                    message="Auto-counting people in images...",
+                    stage_total=len(to_process),
+                )
+                for idx, row in enumerate(to_process):
+                    url = row.get("hosted_url") or row.get("url") or row.get("image_url") or row.get("thumb_url")
+                    if not url:
+                        bump_current(1)
+                        continue
+                    try:
+                        result = count_people(str(url))
+                        upsert_cast_photo_tags(
+                            db,
+                            cast_photo_id=str(row.get("id")),
+                            people_names=None,
+                            people_ids=None,
+                            people_count=result.people_count,
+                            people_count_source="auto",
+                            detector=result.detector,
+                            updated_by_firebase_uid="system:auto",
+                        )
+                        auto_counts_succeeded += 1
+                    except ScreenalyticsUnavailableError as exc:
+                        auto_counts_failed += 1
+                        detail = str(exc) or "Screenalytics unavailable"
+                        errors.append(f"Auto-count service unavailable: {detail}")
+                        yield progress(
+                            stage="auto_count",
+                            message="Auto-count paused (Screenalytics unavailable).",
+                            stage_current=idx,
+                            stage_total=len(to_process),
+                            extra={
+                                "skip_reason": "service_unavailable",
+                                "service_unavailable": True,
+                                "retry_after_s": max(int(exc.retry_after_s), 1),
+                                "detail": detail,
+                            },
+                        )
+                        break
+                    except ScreenalyticsClientError as exc:
+                        auto_counts_failed += 1
+                        errors.append(f"Auto-count {row.get('id')}: {exc}")
+                    auto_counts_attempted += 1
+                    bump_current(1)
+                    if (idx + 1) % 10 == 0:
+                        yield progress(
+                            stage="auto_count",
+                            message="Auto-counting people in images...",
+                            stage_current=idx + 1,
+                            stage_total=len(to_process),
+                        )
         else:
-            yield progress(stage="auto_count", message="Skipping auto-count (not configured).")
+            yield progress(
+                stage="auto_count",
+                message="Skipping auto-count (not configured).",
+                extra={"skip_reason": "not_configured"},
+            )
 
         # ------------------------------------------------------------------
         # Stage 6: Text overlay detection (cast photos)
@@ -3733,7 +3877,7 @@ def refresh_show_photos_stream(
         complete_payload["sources_skipped"] = len(source_skip_details)
         complete_payload["source_skip_details"] = source_skip_details
         complete_payload["live_counts"] = build_live_counts()
-        yield _yield_event("complete", complete_payload)
+        yield _yield_event("complete", _with_request_id(complete_payload))
 
     return StreamingResponse(
         event_generator(),

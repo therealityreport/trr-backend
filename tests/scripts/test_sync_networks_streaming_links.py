@@ -17,6 +17,8 @@ def _args(**overrides) -> argparse.Namespace:
         "batch_size": 25,
         "max_runtime_sec": 840,
         "resume_run_id": None,
+        "entity_type": None,
+        "entity_key": None,
         "start_after": None,
         "limit": None,
         "verbose": False,
@@ -865,6 +867,61 @@ def test_run_sync_filters_to_unresolved_only() -> None:
     assert seen == [("network", "bravo")]
 
 
+def test_run_sync_filters_to_target_entity_type_and_keys() -> None:
+    inventory = {
+        ("network", "bravo"): mod.InventoryEntity(
+            entity_type="network",
+            entity_key="bravo",
+            display_name="Bravo",
+            available_show_count=10,
+            added_show_count=4,
+        ),
+        ("streaming", "peacock"): mod.InventoryEntity(
+            entity_type="streaming",
+            entity_key="peacock",
+            display_name="Peacock",
+            available_show_count=8,
+            added_show_count=3,
+        ),
+        ("production", "shed media"): mod.InventoryEntity(
+            entity_type="production",
+            entity_key="shed media",
+            display_name="Shed Media",
+            available_show_count=6,
+            added_show_count=2,
+        ),
+    }
+    seen: list[tuple[str, str]] = []
+
+    def fake_process_entity(_db, **kwargs):  # noqa: ANN003
+        entity = kwargs["entity"]
+        seen.append((entity.entity_type, entity.entity_key))
+
+    with patch.object(mod, "load_env"):
+        with patch.object(mod, "create_supabase_admin_client", return_value=object()):
+            with patch.object(mod, "_load_used_inventory", return_value=inventory):
+                with patch.object(mod, "_load_dimension_lookup", return_value={}):
+                    with patch.object(mod, "_load_overrides", return_value={}):
+                        with patch.object(mod, "_process_entity", side_effect=fake_process_entity):
+                            with patch.object(mod, "_refresh_completion_snapshot"):
+                                with patch.object(
+                                    mod,
+                                    "_build_sync_context",
+                                    return_value=mod.SyncRunContext(
+                                        tmdb_api_key=None,
+                                        tmdb_bearer_token=None,
+                                    ),
+                                ):
+                                    mod.run_sync(
+                                        _args(
+                                            entity_type="production",
+                                            entity_key=["shed media", "missing key"],
+                                        )
+                                    )
+
+    assert seen == [("production", "shed media")]
+
+
 def test_run_sync_stops_on_runtime_limit_and_returns_resume_cursor() -> None:
     inventory = {
         ("network", "bravo"): mod.InventoryEntity(
@@ -960,6 +1017,54 @@ def test_run_sync_resume_run_id_uses_saved_cursor() -> None:
                                     )
 
     assert seen == [("streaming", "peacock")]
+
+
+def test_run_sync_marks_run_failed_and_persists_cursor_on_keyboard_interrupt() -> None:
+    inventory = {
+        ("network", "bravo"): mod.InventoryEntity(
+            entity_type="network",
+            entity_key="bravo",
+            display_name="Bravo",
+            available_show_count=10,
+            added_show_count=4,
+        ),
+        ("streaming", "peacock"): mod.InventoryEntity(
+            entity_type="streaming",
+            entity_key="peacock",
+            display_name="Peacock",
+            available_show_count=8,
+            added_show_count=3,
+        ),
+    }
+    process_side_effect = [None, KeyboardInterrupt()]
+
+    with patch.object(mod, "load_env"):
+        with patch.object(mod, "create_supabase_admin_client", return_value=object()):
+            with patch.object(mod, "_load_used_inventory", return_value=inventory):
+                with patch.object(mod, "_load_dimension_lookup", return_value={}):
+                    with patch.object(mod, "_load_overrides", return_value={}):
+                        with patch.object(mod, "_process_entity", side_effect=process_side_effect):
+                            with patch.object(mod, "_refresh_completion_snapshot") as refresh_snapshot:
+                                with patch.object(mod, "_upsert_sync_run_state") as upsert_run_state:
+                                    with patch.object(
+                                        mod,
+                                        "_build_sync_context",
+                                        return_value=mod.SyncRunContext(
+                                            tmdb_api_key=None,
+                                            tmdb_bearer_token=None,
+                                            svg_rasterizer_available=True,
+                                        ),
+                                    ):
+                                        summary = mod.run_sync(_args(skip_s3=True))
+
+    assert summary.run_status == "failed"
+    assert summary.failures == 1
+    assert summary.resume_cursor_entity_type == "network"
+    assert summary.resume_cursor_entity_key == "bravo"
+    refresh_snapshot.assert_not_called()
+    assert upsert_run_state.call_count >= 2
+    assert upsert_run_state.call_args.kwargs["status"] == "failed"
+    assert upsert_run_state.call_args.kwargs["cursor"] == ("network", "bravo")
 
 
 def test_load_unresolved_keys_includes_missing_completion_rows() -> None:

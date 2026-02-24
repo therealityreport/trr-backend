@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Literal
 
 import requests
@@ -12,10 +14,58 @@ import requests
 DetectorMode = Literal["faces_then_yolo", "faces", "yolo"]
 
 logger = logging.getLogger(__name__)
+_UNAVAILABLE_LOCK = Lock()
+_UNAVAILABLE_UNTIL_MONO = 0.0
+_UNAVAILABLE_REASON: str | None = None
+
+
+def _unavailable_cooldown_seconds() -> int:
+    raw = os.getenv("SCREENALYTICS_UNAVAILABLE_COOLDOWN_SECONDS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    return 300
+
+
+def _mark_screenalytics_unavailable(reason: str) -> None:
+    global _UNAVAILABLE_UNTIL_MONO, _UNAVAILABLE_REASON
+    now = time.monotonic()
+    cooldown = _unavailable_cooldown_seconds()
+    with _UNAVAILABLE_LOCK:
+        _UNAVAILABLE_UNTIL_MONO = max(_UNAVAILABLE_UNTIL_MONO, now + cooldown)
+        _UNAVAILABLE_REASON = reason[:500]
+
+
+def _clear_screenalytics_unavailable() -> None:
+    global _UNAVAILABLE_UNTIL_MONO, _UNAVAILABLE_REASON
+    with _UNAVAILABLE_LOCK:
+        _UNAVAILABLE_UNTIL_MONO = 0.0
+        _UNAVAILABLE_REASON = None
+
+
+def get_screenalytics_unavailable_state() -> tuple[bool, int, str | None]:
+    now = time.monotonic()
+    with _UNAVAILABLE_LOCK:
+        if _UNAVAILABLE_UNTIL_MONO <= now:
+            return (False, 0, None)
+        retry_after_s = int(max(1, round(_UNAVAILABLE_UNTIL_MONO - now)))
+        return (True, retry_after_s, _UNAVAILABLE_REASON)
 
 
 class ScreenalyticsClientError(RuntimeError):
     """Raised when Screenalytics requests fail."""
+
+
+class ScreenalyticsUnavailableError(ScreenalyticsClientError):
+    """Raised when Screenalytics is temporarily unavailable."""
+
+    def __init__(self, message: str, *, retry_after_s: int = 0):
+        super().__init__(message)
+        self.retry_after_s = max(0, int(retry_after_s))
 
 
 @dataclass
@@ -198,6 +248,13 @@ def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> P
     base = _base_url()
     if not base:
         raise ScreenalyticsClientError("SCREENALYTICS_API_URL is not configured")
+    unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
+    if unavailable:
+        reason_suffix = f": {unavailable_reason}" if unavailable_reason else ""
+        raise ScreenalyticsUnavailableError(
+            f"Screenalytics temporarily unavailable{reason_suffix}",
+            retry_after_s=retry_after_s,
+        )
     payload = {"image_url": image_url, "mode": mode}
     last_error: str | None = None
 
@@ -218,18 +275,37 @@ def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> P
 
         if response.status_code >= 400:
             detail = response.text.strip()[:200]
+            if response.status_code >= 500:
+                reason = f"Screenalytics error {response.status_code}: {detail or 'unknown error'}"
+                _mark_screenalytics_unavailable(reason)
+                unavailable, retry_after_s, _ = get_screenalytics_unavailable_state()
+                raise ScreenalyticsUnavailableError(
+                    reason,
+                    retry_after_s=retry_after_s if unavailable else _unavailable_cooldown_seconds(),
+                )
             raise ScreenalyticsClientError(f"Screenalytics error {response.status_code}: {detail or 'unknown error'}")
         break
     else:
+        _mark_screenalytics_unavailable(last_error or "Screenalytics request failed")
+        unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
         logger.error(
             "Screenalytics people-count endpoint not found. Tried: %s",
             ", ".join(tried_urls),
         )
-        raise ScreenalyticsClientError(last_error or "Screenalytics request failed")
+        raise ScreenalyticsUnavailableError(
+            unavailable_reason or last_error or "Screenalytics request failed",
+            retry_after_s=retry_after_s if unavailable else _unavailable_cooldown_seconds(),
+        )
 
     if response is None:
-        raise ScreenalyticsClientError(last_error or "Screenalytics request failed")
+        _mark_screenalytics_unavailable(last_error or "Screenalytics request failed")
+        unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
+        raise ScreenalyticsUnavailableError(
+            unavailable_reason or last_error or "Screenalytics request failed",
+            retry_after_s=retry_after_s if unavailable else _unavailable_cooldown_seconds(),
+        )
 
+    _clear_screenalytics_unavailable()
     logger.info("Screenalytics people-count endpoint used: %s", response.url)
 
     try:

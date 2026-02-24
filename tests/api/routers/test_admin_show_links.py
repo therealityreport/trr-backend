@@ -9,6 +9,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
+import api.routers.admin_show_links as admin_show_links
 from api.main import app
 from api.routers.admin_show_links import (
     _canonicalize_url,
@@ -124,6 +125,35 @@ def test_source_timeout_seconds_uses_env_override_with_fallback() -> None:
         assert _source_timeout_seconds("imdb", default=20.0) == 12.5
     with patch.dict("os.environ", {"TRR_LINK_TIMEOUT_IMDB_SECONDS": "invalid"}, clear=False):
         assert _source_timeout_seconds("imdb", default=20.0) == 20.0
+
+
+def test_upsert_link_uses_show_scoped_conflict_key() -> None:
+    db = MagicMock()
+    execute_response = MagicMock()
+    db.schema.return_value.table.return_value.upsert.return_value.execute.return_value = execute_response
+
+    with patch("api.routers.admin_show_links.get_list_result", return_value=[{"id": "link-1"}]):
+        row = admin_show_links._upsert_link(
+            db,
+            show_id=str(uuid4()),
+            entity_type="person",
+            entity_id=str(uuid4()),
+            link_group="knowledge",
+            link_kind="imdb",
+            url="https://www.imdb.com/name/nm0169212/",
+            label="IMDb",
+            season_number=0,
+            status="approved",
+            confidence=0.99,
+            source="test",
+            discovered_by="test",
+            metadata={},
+            actor="test",
+        )
+
+    assert row["id"] == "link-1"
+    upsert_call = db.schema.return_value.table.return_value.upsert.call_args
+    assert upsert_call.kwargs["on_conflict"] == "show_id,entity_type,entity_id,link_kind,season_number,url_key"
 
 
 def test_get_fandom_allowlist_requires_auth(client: TestClient) -> None:
@@ -824,13 +854,88 @@ def test_discover_people_links_skips_imdb_and_tmdb_when_validation_fails() -> No
                 ],
             ]
             with patch(
-                "api.routers.admin_show_links._validated_person_knowledge_url",
-                return_value=None,
+                "api.routers.admin_show_links._validate_person_knowledge_url",
+                return_value=(None, "invalid"),
             ):
-                links = _discover_people_links(show_id)
+                with patch(
+                    "api.routers.admin_show_links._load_preapproved_person_source_url",
+                    return_value=None,
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        return_value=None,
+                    ):
+                        links = _discover_people_links(show_id)
 
     assert not any(link.get("link_kind") == "imdb" for link in links)
     assert not any(link.get("link_kind") == "tmdb" for link in links)
+
+
+def test_discover_people_links_carries_forward_imdb_when_validation_fetch_errors() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["peacock"]}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [
+                    {
+                        "id": person_id,
+                        "full_name": "Andy Cohen",
+                        "external_ids": {"imdb": "nm0169212"},
+                        "fandom_url": "",
+                        "cast_tmdb_imdb_id": None,
+                        "cast_tmdb_tmdb_id": None,
+                        "cast_tmdb_wikidata_id": None,
+                    }
+                ],
+            ]
+            with patch(
+                "api.routers.admin_show_links._validate_person_knowledge_url",
+                return_value=(None, "fetch_error"),
+            ):
+                with patch(
+                    "api.routers.admin_show_links._load_preapproved_person_source_url",
+                    return_value="https://www.imdb.com/name/nm0169212/",
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        return_value=None,
+                    ):
+                        links = _discover_people_links(show_id)
+
+    imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
+    assert len(imdb_links) == 1
+    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm0169212/"
+
+
+def test_load_preapproved_person_source_url_matches_by_url_key() -> None:
+    person_id = str(uuid4())
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"url": "https://www.imdb.com/name/nm0169212/"},
+    ) as fetch_one:
+        url = admin_show_links._load_preapproved_person_source_url(
+            person_id=person_id,
+            link_kind="imdb",
+            candidate_url="https://www.imdb.com/name/nm0169212/?ref_=fn_al_nm_1",
+        )
+    assert url == "https://www.imdb.com/name/nm0169212"
+    params = fetch_one.call_args.args[1]
+    assert params[0] == person_id
+    assert params[1] == "imdb"
+    assert params[2] == "https://www.imdb.com/name/nm0169212"
+
+
+def test_load_preapproved_person_source_url_ignores_non_person_sources() -> None:
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        url = admin_show_links._load_preapproved_person_source_url(
+            person_id=str(uuid4()),
+            link_kind="wikipedia",
+            candidate_url="https://en.wikipedia.org/wiki/Andy_Cohen",
+        )
+    assert url is None
+    fetch_one.assert_not_called()
 
 
 def test_cleanup_invalid_person_knowledge_links_keeps_rows_on_validation_fetch_error() -> None:

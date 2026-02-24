@@ -3381,6 +3381,48 @@ Continuation (same session, 2026-02-24) — Networks/Streaming operational follo
 - Notes:
   - Unresolved-only refresh run (`network-streaming-20260224T173031Z`) processed `10` entities before manual interruption during external Logopedia lookup; run status reconciled to `failed` with explicit operator-stop error.
 
+Continuation (same session, 2026-02-24) — Finalization hardening implementation (credit-safe stability + targeted execution).
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/brandfetch.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/logopedia.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/sync/sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/README.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_brandfetch.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_logopedia.py` (new)
+- Changes:
+  - Added bounded timeout tuples + transient retry budgets for Brandfetch and Logopedia integrations.
+    - Brandfetch env knobs: `BRANDFETCH_TIMEOUT_SEC`, `BRANDFETCH_RETRY_ATTEMPTS`, `BRANDFETCH_RETRY_BACKOFF_MS`.
+    - Logopedia env knobs: `LOGOPEDIA_TIMEOUT_SEC`, `LOGOPEDIA_RETRY_ATTEMPTS`, `LOGOPEDIA_RETRY_BACKOFF_MS`.
+  - Extended sync script CLI targeting controls:
+    - `--entity-type network|streaming|production`
+    - `--entity-key <normalized key>` (repeatable)
+  - Added interruption-safe run behavior:
+    - catches `KeyboardInterrupt`,
+    - marks run `failed`,
+    - persists resume cursor + terminal run state.
+  - Added bounded Wikidata fetch/search retries in sync script (`429`, `5xx`, timeout retry budget).
+  - Made sync context build selection-aware to reduce expensive preloads:
+    - only build network hints when network entities are selected,
+    - only build streaming hints when streaming entities are selected,
+    - production IMDb hints can be skipped on unresolved-only safe runs unless external refresh is enabled.
+  - Added API passthrough for targeted execution:
+    - request additions to `/api/v1/admin/shows/sync-networks-streaming`:
+      - `entity_type`
+      - `entity_keys`
+  - Updated script docs for new targeting flags + timeout/retry env vars.
+- Production ops executed:
+  - Seeded/updated override rows for unresolved production entities:
+    - first pass `seeded_overrides=14`, then refreshed to `seeded_overrides=17` after unresolved set expanded.
+  - Multiple production-only unresolved runs executed; several were operator-terminated and reconciled to terminal `failed` state in `admin.network_streaming_sync_runs`.
+  - Current unresolved snapshot after execution:
+    - `admin.network_streaming_completion` unresolved rows = `18` (all production, `resolution_reason=incomplete_metadata`).
+- Validation:
+  - `ruff check trr_backend/integrations/brandfetch.py trr_backend/integrations/logopedia.py scripts/sync/sync_networks_streaming_links.py api/routers/admin_show_sync.py tests/integrations/test_brandfetch.py tests/integrations/test_logopedia.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (pass)
+  - `pytest tests/integrations/test_brandfetch.py tests/integrations/test_logopedia.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (`51 passed`)
+
 Continuation (same session, 2026-02-24) — Bravo video thumbnail one-time backfill execution + scheduled backfill script.
 - Files:
   - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/backfill/backfill_bravo_video_thumbnails.py`
@@ -3408,3 +3450,264 @@ Continuation (same session, 2026-02-24) — Bravo video thumbnail one-time backf
   - `ruff check scripts/backfill/backfill_bravo_video_thumbnails.py scripts/backfill_bravo_video_thumbnails.py` (pass)
   - `PYTHONPATH=. .venv/bin/python scripts/backfill/backfill_bravo_video_thumbnails.py --show-id 7782652f-783a-488b-8860-41b97de32e75 --dry-run --json-summary -` (pass)
   - `PYTHONPATH=. .venv/bin/python scripts/backfill/backfill_bravo_video_thumbnails.py --show-id 7782652f-783a-488b-8860-41b97de32e75 --json-summary -` (pass)
+
+Continuation (same session, 2026-02-24) — Cross-platform media mirror rollout completion follow-through.
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/supabase_migration_history_repair.md` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- Changes:
+  - Added stage-compatibility fallback SQL to social queue runbook:
+    - uses `coalesce(nullif(to_jsonb(j)->>'stage',''), nullif(j.metadata->>'stage',''), 'unknown')`.
+  - Added dedicated runbook for Supabase migration-history drift repair to restore `supabase db push` workflow when remote/local migration histories diverge.
+  - Executed additional rollout operations:
+    - attempted non-interactive Cloud Run access with available service-account keys;
+    - re-validated deploy blocker was IAM-scoped in this environment;
+    - ran manual `media_mirror` queue drain loop for 15 jobs.
+- Execution evidence:
+  - Cloud Run auth/permissions:
+    - activated SA `firebase-adminsdk-fbsvc@trr-web-25d2e.iam.gserviceaccount.com` (success),
+    - `gcloud run services list --region us-east1` failed with `Permission 'run.services.list' denied`.
+    - `trr-backend-sa@trr-backend.iam.gserviceaccount.com` key points at project `trr-backend` where Cloud Run API is not enabled.
+  - Manual queue drain:
+    - `PYTHONPATH=. python - <<PY ... process_next_queued_job(... stage='media_mirror') ... PY`
+    - processed `15` jobs, all `completed` (Instagram).
+  - Post-drain monitoring snapshot:
+    - mirror status:
+      - instagram `pending=45`, `failed=16`
+      - tiktok `pending=58`
+      - youtube `pending=24`
+      - twitter `pending=1`
+    - media_mirror job statuses (24h):
+      - `completed=16`, `pending=254`
+    - retry reasons (48h):
+      - `pending/unknown=254`, `completed/unknown=16`
+    - worker heartbeat:
+      - latest manual worker recorded as `stopped` after controlled exit.
+  - Coverage snapshot (season `e9161955-6ee4-4985-865e-3386a0f670fb`, source_scope `bravo`):
+    - `saved=35261`, `reported=177223`, `coverage_pct=19.9`, `up_to_date=false`.
+- Outstanding blocker:
+  - Production Cloud Run API/worker deployment still requires an account with `run.services.list/deploy` permissions (interactive `gcloud auth login` as privileged user or proper deploy service-account grant).
+
+Continuation (same session, 2026-02-24) — RHOSLC media refresh stabilization: first-event SSE + Screenalytics degraded mode.
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/clients/screenalytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+- Changes:
+  - Added temporary Screenalytics circuit-breaker behavior in client:
+    - new `ScreenalyticsUnavailableError` with `retry_after_s`.
+    - new unavailable-state helper `get_screenalytics_unavailable_state()`.
+    - failed endpoint probing now enters cooldown (`SCREENALYTICS_UNAVAILABLE_COOLDOWN_SECONDS`, default 300s) and short-circuits subsequent calls.
+  - Person refresh stream (`refresh-images/stream`):
+    - emits immediate `starting` progress event before setup work.
+    - auto-count and centering stages now emit structured service-unavailable skip/pause payloads (`skip_reason=service_unavailable`, `retry_after_s`, `service_unavailable=true`) instead of noisy repeated failures.
+    - additive `skip_reason=not_configured` on not-configured skip path.
+  - Show photos refresh stream (`refresh-photos/stream`):
+    - auto-count stage now checks Screenalytics unavailable state and skips fast with structured payload.
+    - mid-stage service outage emits pause event with retry-after metadata.
+    - additive `skip_reason=not_configured` on not-configured skip path.
+- Validation:
+  - `python -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/clients/screenalytics.py` (pass)
+
+Continuation (same session, 2026-02-24) — URL/Sync/Bravo stabilization follow-up (operational diagnostics + guardrails).
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/shows/backfill_bravo_person_source_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_backfill_bravo_person_source_links.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/README.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- Changes:
+  - Extended person-source backfill script with operations-oriented diagnostics and threshold controls:
+    - `--warn-fetch-errors`, `--fail-fetch-errors`
+    - `--warn-pending-person-sources`, `--fail-pending-person-sources`
+    - `--diagnose-missing-person-sources`, `--diagnose-name`, `--diagnostics-json`
+  - Added missing-source diagnostics output with per-person rationale fields for IMDb/TMDb (`missing_identifier`, `validation_outcome:*`, `owner_mismatch`, etc.).
+  - Added pending person-source post-run count into summary and JSON artifacts.
+  - Added threshold-aware non-zero exit (`2`) for alertable/failing operational conditions while preserving existing failure exit (`1`) for `failed_shows`.
+  - Documented script usage/exit-code behavior in `scripts/README.md`.
+  - Added tests for parser flags, pending-count query, diagnostic reason mapping, and threshold exit semantics.
+- Validation:
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/shows/backfill_bravo_person_source_links.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_backfill_bravo_person_source_links.py` (pass)
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_backfill_bravo_person_source_links.py` (pass, `79 passed`)
+  - `python -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/shows/backfill_bravo_person_source_links.py` (pass)
+- Runtime verification:
+  - DB check confirmed fandom allowlist migration target table present: `core.fandom_community_allowlist`.
+
+Continuation (same session, 2026-02-24) — MEDIA/GALLERY post-hardening completion run.
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_asset_batch_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_gallery_hosts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py`
+- Validation completed:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_asset_batch_jobs.py -q` (`6 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py -q` (`20 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_gallery_hosts.py -q` (`8 passed`)
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_gallery_hosts.py` (pass)
+- Repair rollout execution:
+  - Initial broad dry-run with default timeout was terminated due runtime impracticality at this dataset scale.
+  - Completed staged run with explicit timeout while preserving retry+confirm logic:
+    - Dry-run: `python /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py --sources imdb,tmdb,fandom,bravo --timeout 3 --limit 100 --output-json /tmp/gallery-host-repair-dryrun-full.json`
+      - Result: `scanned=100`, `ok=3`, `repaired=28`, `broken_unreachable=69`, `error=0`, `apply=false`
+    - Apply batch-1: `python /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py --sources imdb,tmdb,fandom,bravo --timeout 3 --limit 100 --apply --output-json /tmp/gallery-host-repair-apply-batch1.json`
+      - Result: `scanned=100`, `ok=3`, `repaired=28`, `broken_unreachable=69`, `error=0`, `apply=true`
+- Outstanding operational step:
+  - Stage-3 full apply remains deferred until manual UI acceptance checks are completed on post-batch state.
+- Follow-up fix (same pass):
+  - Corrected diagnostics SQL in `_load_show_cast_people_for_diagnostics` to `ORDER BY person_name NULLS LAST, person_id` for Postgres `SELECT DISTINCT` compliance.
+  - Added regression test `test_load_show_cast_people_for_diagnostics_orders_by_selected_aliases`.
+  - Re-ran validation: `ruff` (pass), `py_compile` (pass), `pytest` (pass, `80 passed`).
+  - Ran direct Andy diagnostics artifact generation:
+    - `/tmp/trr_andy_missing_diagnostics_direct_2026-02-24.json`
+- Additional fix (same session, 2026-02-24): cross-show entity link collision root cause.
+  - Root cause: `core.entity_links` uniqueness/upsert conflict key omitted `show_id`, allowing shared person URLs to collide across shows.
+  - Code fix: `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+    - `_upsert_link(...).upsert(... on_conflict=...)` now uses `show_id,entity_type,entity_id,link_kind,season_number,url_key`.
+  - Migration added: `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0146_entity_links_unique_per_show.sql`
+    - drops/recreates `entity_links_unique_active` to include `show_id`.
+  - Test coverage:
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+      - `test_upsert_link_uses_show_scoped_conflict_key`.
+  - Validation:
+    - `ruff check ...` (pass)
+    - `python -m py_compile ...` (pass)
+    - `pytest -q ...test_admin_show_links.py ...test_admin_show_bravo.py ...test_backfill_bravo_person_source_links.py` (pass, `81 passed`).
+  - Operational note:
+    - Migration `0146` must be applied before running production backfill apply so per-show person source rows are persisted independently.
+
+Continuation (same session, 2026-02-24) — MEDIA/GALLERY completion follow-up (rollout execution limits).
+- Additional execution performed:
+  - Re-validated completion-test gate:
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_asset_batch_jobs.py -q` (pass, `6 passed`)
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py -q` (pass, `20 passed`)
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_gallery_hosts.py -q` (pass, `8 passed`)
+- Repair rollout status:
+  - Batch-1 dry-run/apply artifacts from prior step remain the latest successful operational outputs:
+    - `/tmp/gallery-host-repair-dryrun-full.json`
+    - `/tmp/gallery-host-repair-apply-batch1.json`
+  - Attempted unlimited follow-up dry-runs were started and then interrupted due runtime impracticality at current network-bound probe volume:
+    - `python /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py --sources imdb,tmdb,fandom,bravo --timeout 1 --output-json /tmp/gallery-host-repair-dryrun-full-unlimited.json` (interrupted)
+    - `python /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py --sources imdb --timeout 1 --output-json /tmp/gallery-host-repair-dryrun-imdb.json` (interrupted)
+- Current operational recommendation:
+  - Keep stage-3 “full/no-limit” repair as an async/offline run window (not interactive shell window), then re-run manual gallery spot checks on repaired rows.
+
+Continuation (same session, 2026-02-24) — Stage-3 full/no-limit repair apply launched offline.
+- Launch mode:
+  - `launchctl submit` one-shot job (detached from interactive shell lifecycle).
+  - Label: `trr.gallery.repair.stage3.20260224-145429`
+- Runner/artifacts:
+  - Runner script: `/tmp/gallery-host-repair-stage3-apply-20260224-145429.sh`
+  - Live log: `/tmp/gallery-host-repair-stage3-apply-20260224-145429.log`
+  - JSON output (on completion): `/tmp/gallery-host-repair-stage3-apply-20260224-145429.json`
+- Launch command path:
+  - Uses explicit backend interpreter to avoid PATH issues in launchd:
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.venv/bin/python`
+- Initial verification:
+  - `launchctl list | rg 'trr.gallery.repair.stage3.20260224-145429'` showed active entry (`pid=75091`, status `0` while running).
+  - Log shows start marker: `[start] 2026-02-24T14:54:29-0500`.
+
+Continuation (same session, 2026-02-24) — Conflict-resolved mirror rollout finalization (ops execution).
+- Scope and constraints:
+  - Kept rollout work operational-only (migration/deploy/backfill/monitoring) and left unrelated dirty worktree files untouched.
+  - Verified migration truth: `0145_cross_platform_media_mirror_fields_and_job_types.sql` is the mirror migration; `0144` is unrelated.
+- Phase execution:
+  - Cloud Run auth/IAM preflight:
+    - checked all available principals (`admin@thereality.report`, `firebase-adminsdk-fbsvc@trr-web-25d2e.iam.gserviceaccount.com`, `trr-backend-sa@trr-backend.iam.gserviceaccount.com`).
+    - none had deploy-capable access in this shell:
+      - user account requires interactive reauth,
+      - service accounts fail `run.services.list/get` on `trr-web-25d2e`.
+  - Supabase migration drift repair:
+    - drift before repair: remote-only `0142`, local pending `0146`.
+    - `supabase migration repair --status reverted 0142 --db-url "$SUPABASE_DB_URL"` failed on pooler `:6543` with prepared-statement errors.
+    - repaired successfully using pooler `:5432` alternate URL.
+    - post-repair verification:
+      - `supabase migration list --db-url "$SUPABASE_DB_URL"` no longer reports remote-only drift.
+      - `supabase db push --dry-run --db-url "$SUPABASE_DB_URL"` succeeds and shows only pending local `0146`.
+  - Backfill enqueue rerun:
+    - `PYTHONPATH=. python scripts/socials/backfill_social_media_mirror_jobs.py --weeks 8 --platforms instagram,tiktok,youtube,twitter --source-scope bravo --limit-per-platform 5000`
+    - result: `scanned=1002`, `queued=267`, `skipped=735`, `failed=0`.
+  - Queue drain attempt (manual worker loop):
+    - processed 60 `media_mirror` jobs via `process_next_queued_job(...)`.
+    - outcome summary: `completed=52`, `retrying=8`.
+- Monitoring snapshots (post-drain):
+  - mirror status by platform rows:
+    - instagram: `pending=16`, `failed=45`
+    - tiktok: `pending=50`, `failed=8`
+    - youtube: `pending=24`
+    - twitter: `pending=1`
+  - media_mirror jobs (24h):
+    - `completed=69`, `pending=212`, `retrying=5`
+  - retry reasons (48h):
+    - `unknown/pending=212`, `unknown/completed=69`, `transient_error/retrying=5`
+  - workers:
+    - no continuously healthy worker heartbeat (manual workers now `stopped`).
+  - comments coverage (season `e9161955-6ee4-4985-865e-3386a0f670fb`, scope `bravo`):
+    - `saved=35353`, `reported=177223`, `coverage_pct=19.9`, `up_to_date=false`.
+- New blocker discovered during drain:
+  - Twitter media-mirror job updates fail with DB type mismatch:
+    - `psycopg2.errors.DatatypeMismatch: column "hosted_media_urls" is of type jsonb but expression is of type text[]`
+    - failing path:
+      - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py:3210`
+      - invoked from `_update_platform_post_media_mirror_fields` during `media_mirror` stage.
+  - Impact:
+    - queue can process many jobs, but affected Twitter jobs keep retrying/failing to persist hosted URLs until code fix is applied.
+- Remaining blockers to close rollout acceptance:
+  - deploy-capable GCP principal still required to complete Cloud Run API + dedicated worker deployment (`trr-web-25d2e`, `us-east1`).
+  - Twitter `hosted_media_urls` write path must cast/write JSONB correctly to prevent retry churn.
+
+Continuation (same session, 2026-02-24) — mirror requeue + additional drain verification.
+- Actions:
+  - Ran failed-only cross-platform mirror requeue (season `e9161955-6ee4-4985-865e-3386a0f670fb`, `source_scope=bravo`):
+    - instagram: `queued_jobs=45`
+    - tiktok: `queued_jobs=8`
+    - youtube: `queued_jobs=0`
+    - twitter: `queued_jobs=0`
+  - Ran additional manual `media_mirror` drain batch (`max_jobs=30`):
+    - result: `completed=12`, `retrying=13`, `failed=5`.
+- Runtime findings:
+  - Confirmed recurring twitter mirror persistence error during drain:
+    - `DatatypeMismatch: hosted_media_urls jsonb vs text[]` in `_update_platform_post_media_mirror_fields`.
+  - Current retry reason aggregation now surfaces this under `transient_error` job classification (needs code-level error classification fix if this should be permanent).
+- Latest monitoring snapshot:
+  - post-table mirror status:
+    - instagram: `pending=61`
+    - tiktok: `pending=58`
+    - youtube: `mirrored=12`, `pending=12`
+    - twitter: `pending=1`
+  - `social.scrape_jobs` (24h):
+    - `media_mirror pending=246`, `completed=81`, `retrying=7`, `failed=5`
+  - retry reasons (48h):
+    - `unknown/pending=246`, `unknown/completed=81`, `transient_error/retrying=7`, `transient_error/failed=5`
+- Rollout implication:
+  - Queue is executable and draining for many jobs, but full stabilization still blocked by:
+    1) missing Cloud Run deploy principal permissions,
+    2) twitter `hosted_media_urls` write-path type mismatch causing retry/fail churn.
+- Rollout continuation (same session, 2026-02-24): applied per-show entity link uniqueness in live DB and re-ran targeted backfills.
+  - DB migration state before apply:
+    - `entity_links_unique_active` columns were `entity_type, entity_id, link_kind, season_number, url_key` (missing `show_id`).
+  - Applied DDL in connected DB:
+    - dropped/recreated `entity_links_unique_active` as
+      `(show_id, entity_type, entity_id, link_kind, season_number, url_key)`.
+  - Verified post-apply constraint columns include `show_id` first.
+  - Backfill apply runs executed for remaining impacted shows with artifacts:
+    - `/tmp/trr_backfill_person_sources_apply_show_9b20_2026-02-24.json`
+    - `/tmp/trr_backfill_person_sources_apply_show_eebf_2026-02-24.json`
+  - Post-run checks:
+    - global pending person-source rows (`imdb/tmdb/wikipedia/wikidata/fandom/wikia/bravo_profile`) = `0`.
+    - Andy/Heather spot check query confirms approved links present per show where validated.
+    - Andy targeted diagnostics artifact:
+      - `/tmp/trr_andy_missing_diagnostics_post_showkey_2026-02-24.json`
+      - result now only IMDb `unverifiable_fetch_error` on two show contexts (TMDb no longer `valid_but_not_persisted`).
+  - Additional release evidence artifact:
+    - `/tmp/trr_person_source_spotcheck_10_2026-02-24.json` (10-person matrix sample across impacted shows).
+
+Continuation (same session, 2026-02-24) — Social soak verification backend observations.
+- Backend process behavior during soak window:
+  - Health endpoint remained available when backend process was up (`/health` -> `200`).
+  - Ingest run `2014239f-1b37-43ea-ad89-b1a63c6392b3` completed successfully (`4/4` comments jobs completed, no failed jobs).
+- Extracted backend failure signals from current backend log window:
+  - `connection pool exhausted`: `0`
+  - social endpoint `5xx` log lines (`/api/v1/admin/socials/*`): `0`
+- Interpretation:
+  - Current NO_GO is driven primarily by app-proxy timeout/restart behavior under concurrent admin traffic rather than confirmed backend pool exhaustion in this run window.
+  - Backend remains candidate for further job-list path optimization to reduce end-to-end latency pressure on app poll routes.

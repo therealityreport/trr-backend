@@ -74,7 +74,7 @@ PYTHONPATH=. python scripts/sync/sync_show_logos.py --all --verbose
   - `admin.network_streaming_logo_assets`
 - External discovery is cache-first:
   - Normal runs reuse persisted `source_url` candidates from `admin.network_streaming_logo_assets` and do not re-query Brandfetch/Logopedia/IMDb for entities that already have cached source URLs.
-  - Use `--force` only when you intentionally want to refresh external discovery (this will consume external API credits again).
+  - Use `--refresh-external-sources` only when you intentionally want to refresh external discovery (this will consume external API credits again).
 - Discovery is persisted per entity/source in `admin.network_streaming_discovery_state`:
   - Once a source is attempted, it is discovery-locked and won’t be queried again on normal runs.
   - Use `--refresh-external-sources` to explicitly re-open external discovery for that run.
@@ -93,6 +93,12 @@ PYTHONPATH=. python scripts/sync/sync_show_logos.py --all --verbose
   - `--max-runtime-sec` gracefully stops long runs with status `stopped`.
   - `--resume-run-id <run_id>` resumes from stored cursor in `admin.network_streaming_sync_runs`.
   - `--start-after <entity_type:entity_key>` starts after an explicit cursor.
+  - `--entity-type <network|streaming|production>` limits processing to one entity type.
+  - `--entity-key <normalized key>` (repeatable) targets specific entities only.
+- External lookup timeouts/retries:
+  - Brandfetch uses `BRANDFETCH_TIMEOUT_SEC` (read timeout), `BRANDFETCH_RETRY_ATTEMPTS`, and `BRANDFETCH_RETRY_BACKOFF_MS`.
+  - Logopedia uses `LOGOPEDIA_TIMEOUT_SEC`, `LOGOPEDIA_RETRY_ATTEMPTS`, and `LOGOPEDIA_RETRY_BACKOFF_MS`.
+  - Retry budget only applies to transient failures (`429`, `5xx`, connect/read timeout).
 - Prints both machine-readable counters and unresolved logo rows:
   - `completion_total=<count>`
   - `completion_resolved=<count>`
@@ -161,6 +167,49 @@ Wrapper alias:
 ```bash
 PYTHONPATH=. python scripts/download_scraped_images_local.py --url "https://deadline.com/..."
 ```
+
+### 8) Bravo person-source backfill + diagnostics
+
+Run cleanup + rediscovery for person-source links (IMDb/TMDb/Wikipedia/Wikidata/Fandom/Bravo profile):
+
+```bash
+python scripts/shows/backfill_bravo_person_source_links.py --json-summary /tmp/person_sources_dryrun.json
+python scripts/shows/backfill_bravo_person_source_links.py --apply --json-summary /tmp/person_sources_apply.json
+```
+
+Target specific shows:
+
+```bash
+python scripts/shows/backfill_bravo_person_source_links.py \
+  --show-id <show-uuid-1> \
+  --show-id <show-uuid-2> \
+  --apply
+```
+
+Threshold/alert mode for automation:
+
+```bash
+python scripts/shows/backfill_bravo_person_source_links.py \
+  --json-summary /tmp/person_sources_daily.json \
+  --warn-fetch-errors 500 \
+  --fail-fetch-errors 1500 \
+  --warn-pending-person-sources 0 \
+  --fail-pending-person-sources 0
+```
+
+Diagnostics for missing approved IMDb/TMDb links (example: Andy Cohen):
+
+```bash
+python scripts/shows/backfill_bravo_person_source_links.py \
+  --diagnose-missing-person-sources \
+  --diagnose-name "Andy Cohen" \
+  --diagnostics-json /tmp/person_sources_diagnostics_andy.json
+```
+
+Script exit codes:
+- `0` success (no failed shows and no fail-threshold breach)
+- `1` one or more failed shows
+- `2` threshold failure (`--fail-*` options)
 
 ## Utilities & Validation
 
