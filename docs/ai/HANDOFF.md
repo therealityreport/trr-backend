@@ -2,6 +2,27 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-24) — Show refresh stream heartbeat + request-id tracing
+
+- February 24, 2026: Implemented final RHOSLC stabilization items for show refresh SSE observability and request correlation.
+  - Files:
+    - `api/routers/admin_show_sync.py`
+    - `tests/api/routers/test_admin_show_sync.py`
+  - Changes:
+    - `POST /api/v1/admin/shows/{show_id}/refresh/stream`
+      - accepts `x-trr-request-id` and echoes `request_id` in stream events.
+      - emits explicit step-start progress event (`step_status=running`).
+      - runs each blocking script step in a worker thread and emits periodic heartbeat progress every 10s while step is active:
+        - `heartbeat=true`
+        - `elapsed_ms`
+        - stable `step`, `stage_key`, `target`, `current`, `total`.
+      - wraps uncaught stream failures in terminal SSE `error` payload including `request_id` when provided.
+    - `POST /api/v1/admin/shows/{show_id}/refresh-photos/stream`
+      - accepts `x-trr-request-id` and echoes `request_id` on all `progress` and `complete` events.
+  - Validation:
+    - `python3 -m py_compile api/routers/admin_show_sync.py` (pass)
+    - `pytest tests/api/routers/test_admin_show_sync.py -q` (`22 passed`)
+
 ## Latest Update (2026-02-24) — Credit-safe discovery locks + resumable sync run state
 
 - February 24, 2026: Implemented next-phase hardening for networks/streaming/production logo sync to prevent repeated external discovery calls and support resumable long runs.

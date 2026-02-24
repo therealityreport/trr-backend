@@ -2441,13 +2441,33 @@ def refresh_show_stream(
                 step_result_holder: dict[str, RefreshStepResult | None] = {"result": None}
                 step_error_holder: dict[str, Exception | None] = {"error": None}
 
-                def _run_step_in_thread() -> None:
+                def _run_step_in_thread(
+                    result_holder: dict[str, RefreshStepResult | None],
+                    error_holder: dict[str, Exception | None],
+                    step_key_for_thread: str,
+                    fn_for_thread: Callable[[list[str] | None], int],
+                    argv_for_thread: list[str],
+                ) -> None:
                     try:
-                        step_result_holder["result"] = _run_script_step(step_key, fn, argv)
+                        result_holder["result"] = _run_script_step(
+                            step_key_for_thread,
+                            fn_for_thread,
+                            argv_for_thread,
+                        )
                     except Exception as exc:  # noqa: BLE001
-                        step_error_holder["error"] = exc
+                        error_holder["error"] = exc
 
-                step_thread = Thread(target=_run_step_in_thread, daemon=True)
+                step_thread = Thread(
+                    target=_run_step_in_thread,
+                    args=(
+                        step_result_holder,
+                        step_error_holder,
+                        step_key,
+                        fn,
+                        list(argv),
+                    ),
+                    daemon=True,
+                )
                 step_thread.start()
                 while step_thread.is_alive():
                     step_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)

@@ -248,12 +248,16 @@ def test_discover_people_links_adds_bravo_profile_for_housewife_friend_on_bravo_
                 ],
             ]
             with patch(
-                "api.routers.admin_show_links._validated_person_knowledge_url",
-                side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
             ):
-                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
-                    with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
-                        links = _discover_people_links(show_id)
+                with patch(
+                    "api.routers.admin_show_links._validated_person_knowledge_url",
+                    side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                ):
+                    with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                        with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
+                            links = _discover_people_links(show_id)
 
     assert any(link.get("link_kind") == "bravo_profile" for link in links)
     assert any(link.get("url") == "https://www.bravotv.com/people/lisa-barlow" for link in links)
@@ -319,12 +323,16 @@ def test_discover_people_links_generates_imdb_tmdb_links_from_person_ids() -> No
                 ],
             ]
             with patch(
-                "api.routers.admin_show_links._validated_person_knowledge_url",
-                side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
             ):
-                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
-                    with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
-                        links = _discover_people_links(show_id)
+                with patch(
+                    "api.routers.admin_show_links._validated_person_knowledge_url",
+                    side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                ):
+                    with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                        with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
+                            links = _discover_people_links(show_id)
 
     imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
     tmdb_links = [link for link in links if link.get("link_kind") == "tmdb"]
@@ -918,7 +926,7 @@ def test_load_preapproved_person_source_url_matches_by_url_key() -> None:
         url = admin_show_links._load_preapproved_person_source_url(
             person_id=person_id,
             link_kind="imdb",
-            candidate_url="https://www.imdb.com/name/nm0169212/?ref_=fn_al_nm_1",
+            candidate_url="https://www.imdb.com/name/nm0169212/",
         )
     assert url == "https://www.imdb.com/name/nm0169212"
     params = fetch_one.call_args.args[1]

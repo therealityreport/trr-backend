@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import time
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -860,4 +860,6 @@ class TestRefreshShowPhotosStream:
             )
 
         assert response.status_code == 200
-        assert '"request_id": "req-refresh-photos-1"' in response.text or '"request_id":"req-refresh-photos-1"' in response.text
+        assert '"request_id": "req-refresh-photos-1"' in response.text or (
+            '"request_id":"req-refresh-photos-1"' in response.text
+        )
