@@ -153,31 +153,63 @@ def test_ordered_candidate_sources_includes_priority_then_remaining() -> None:
 
 
 def test_build_resolution_status_resolved_requires_all_fields() -> None:
-    status, reason = mod._build_resolution_status(
+    status, reason, policy, logo_required = mod._build_resolution_status(
+        entity_type="network",
+        display_name="Bravo",
+        entity_id="74",
         wikidata_id="Q1",
         wikipedia_url="https://en.wikipedia.org/wiki/Test",
         hosted_logo_url="https://cdn.example.com/logo.png",
         hosted_logo_black_url="https://cdn.example.com/logo-black.png",
         hosted_logo_white_url="https://cdn.example.com/logo-white.png",
         base_logo_format="png",
+        reference_urls=[],
         reason=None,
     )
     assert status == "resolved"
     assert reason is None
+    assert policy == "strict"
+    assert logo_required is True
 
 
 def test_build_resolution_status_failed_for_processing_errors() -> None:
-    status, reason = mod._build_resolution_status(
+    status, reason, policy, logo_required = mod._build_resolution_status(
+        entity_type="streaming",
+        display_name="Peacock",
+        entity_id="531",
         wikidata_id="Q1",
         wikipedia_url="https://en.wikipedia.org/wiki/Test",
         hosted_logo_url="https://cdn.example.com/logo.png",
         hosted_logo_black_url="",
         hosted_logo_white_url="",
         base_logo_format="unknown",
+        reference_urls=[],
         reason="transparent_extraction_failed",
     )
     assert status == "failed"
     assert reason == "transparent_extraction_failed"
+    assert policy == "strict"
+    assert logo_required is True
+
+
+def test_build_resolution_status_production_allows_missing_logo_when_metadata_present() -> None:
+    status, reason, policy, logo_required = mod._build_resolution_status(
+        entity_type="production",
+        display_name="Shed Media",
+        entity_id="13120",
+        wikidata_id="",
+        wikipedia_url="",
+        hosted_logo_url="",
+        hosted_logo_black_url="",
+        hosted_logo_white_url="",
+        base_logo_format="unknown",
+        reference_urls=["https://www.themoviedb.org/company/13120"],
+        reason=None,
+    )
+    assert status == "resolved"
+    assert reason is None
+    assert policy == "production_logo_optional"
+    assert logo_required is False
 
 
 def test_process_entity_uses_override_metadata_when_wikidata_search_empty() -> None:
@@ -235,6 +267,50 @@ def test_process_entity_uses_override_metadata_when_wikidata_search_empty() -> N
     assert summary.wikidata_linked == 1
     assert summary.wikipedia_linked == 1
     assert summary.links_enriched == 1
+    assert summary.unresolved_logos == []
+
+
+def test_process_entity_allows_missing_production_logo_with_tmdb_identity() -> None:
+    entity = mod.InventoryEntity(
+        entity_type="production",
+        entity_key="shed media",
+        display_name="Shed Media",
+        available_show_count=6,
+        added_show_count=2,
+    )
+    core_row = {
+        "id": 13120,
+        "name": "Shed Media",
+        "hosted_logo_url": None,
+        "hosted_logo_black_url": None,
+        "hosted_logo_white_url": None,
+        "wikidata_id": None,
+        "wikipedia_url": None,
+        "wikimedia_logo_file": None,
+    }
+    summary = mod.SyncSummary()
+
+    with patch.object(
+        mod,
+        "_resolve_entity_metadata",
+        return_value={
+            "wikidata_id": None,
+            "wikipedia_url": None,
+            "wikimedia_logo_file": None,
+        },
+    ):
+        mod._process_entity(
+            db=object(),
+            entity=entity,
+            core_row=core_row,
+            override=None,
+            run_id="test-run",
+            args=_args(skip_s3=True, dry_run=True),
+            summary=summary,
+            s3_client=None,
+        )
+
+    assert summary.processed == 1
     assert summary.unresolved_logos == []
 
 

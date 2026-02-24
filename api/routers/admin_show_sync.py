@@ -353,6 +353,12 @@ class SyncNetworksStreamingResponse(BaseModel):
     completion_total: int
     completion_resolved: int
     completion_unresolved: int
+    completion_unresolved_total: int
+    completion_unresolved_network: int
+    completion_unresolved_streaming: int
+    completion_unresolved_production: int
+    production_missing_logos: int
+    production_missing_bw_variants: int
     completion_percent: float
     completion_gate_passed: bool
     missing_columns: list[SyncNetworksStreamingMissingColumn] = Field(default_factory=list)
@@ -638,6 +644,8 @@ def _schema_requirements() -> dict[tuple[str, str], set[str]]:
             "entity_key",
             "resolution_status",
             "resolution_reason",
+            "resolution_policy",
+            "logo_required",
             "last_run_id",
             "last_attempt_at",
         },
@@ -1185,14 +1193,21 @@ def _run_script_step_with_metrics(
     try:
         with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
             code = fn(list(argv))
-    except Exception as exc:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.exception("admin sync step failed: %s", name)
+        exit_code = None
+        if isinstance(exc, SystemExit):
+            raw_code = exc.code
+            if isinstance(raw_code, int):
+                exit_code = raw_code
+            elif isinstance(raw_code, str) and raw_code.isdigit():
+                exit_code = int(raw_code)
         return (
             SyncNetworksStreamingStepResult(
                 status="failed",
                 duration_ms=duration_ms,
-                exit_code=None,
+                exit_code=exit_code,
                 error=str(exc),
                 metrics=dict.fromkeys(metric_keys, 0),
             ),
@@ -1258,6 +1273,12 @@ def sync_networks_streaming(
             completion_total=0,
             completion_resolved=0,
             completion_unresolved=0,
+            completion_unresolved_total=0,
+            completion_unresolved_network=0,
+            completion_unresolved_streaming=0,
+            completion_unresolved_production=0,
+            production_missing_logos=0,
+            production_missing_bw_variants=0,
             completion_percent=0.0,
             completion_gate_passed=False,
             missing_columns=missing_columns,
@@ -1273,25 +1294,8 @@ def sync_networks_streaming(
         common_args.append("--force")
     if payload.dry_run:
         common_args.append("--dry-run")
-    if payload.unresolved_only:
-        common_args.append("--unresolved-only")
-    if payload.refresh_external_sources:
-        common_args.append("--refresh-external-sources")
     if payload.verbose:
         common_args.append("--verbose")
-    if payload.resume_run_id:
-        common_args.extend(["--resume-run-id", str(payload.resume_run_id)])
-    if payload.entity_type:
-        common_args.extend(["--entity-type", payload.entity_type])
-    if payload.entity_keys:
-        for key in payload.entity_keys:
-            normalized_key = str(key or "").strip().casefold()
-            if normalized_key:
-                common_args.extend(["--entity-key", normalized_key])
-    if payload.batch_size is not None:
-        common_args.extend(["--batch-size", str(int(payload.batch_size))])
-    if payload.max_runtime_sec is not None:
-        common_args.extend(["--max-runtime-sec", str(int(payload.max_runtime_sec))])
     if payload.limit is not None:
         common_args.extend(["--limit", str(int(payload.limit))])
 
@@ -1304,6 +1308,23 @@ def sync_networks_streaming(
         providers_args.append("--skip-s3")
 
     links_args = list(common_args)
+    if payload.unresolved_only:
+        links_args.append("--unresolved-only")
+    if payload.refresh_external_sources:
+        links_args.append("--refresh-external-sources")
+    if payload.resume_run_id:
+        links_args.extend(["--resume-run-id", str(payload.resume_run_id)])
+    if payload.entity_type:
+        links_args.extend(["--entity-type", payload.entity_type])
+    if payload.entity_keys:
+        for key in payload.entity_keys:
+            normalized_key = str(key or "").strip().casefold()
+            if normalized_key:
+                links_args.extend(["--entity-key", normalized_key])
+    if payload.batch_size is not None:
+        links_args.extend(["--batch-size", str(int(payload.batch_size))])
+    if payload.max_runtime_sec is not None:
+        links_args.extend(["--max-runtime-sec", str(int(payload.max_runtime_sec))])
     if payload.skip_s3:
         links_args.append("--skip-s3")
 
@@ -1342,6 +1363,12 @@ def sync_networks_streaming(
             "completion_total",
             "completion_resolved",
             "completion_unresolved",
+            "completion_unresolved_total",
+            "completion_unresolved_network",
+            "completion_unresolved_streaming",
+            "completion_unresolved_production",
+            "production_missing_logos",
+            "production_missing_bw_variants",
             "completion_percent",
             "unresolved_logos",
             "failures",
@@ -1390,6 +1417,15 @@ def sync_networks_streaming(
     completion_total = network_streaming_links.metrics.get("completion_total", 0)
     completion_resolved = network_streaming_links.metrics.get("completion_resolved", 0)
     completion_unresolved = network_streaming_links.metrics.get("completion_unresolved", 0)
+    completion_unresolved_total = network_streaming_links.metrics.get(
+        "completion_unresolved_total",
+        completion_unresolved,
+    )
+    completion_unresolved_network = network_streaming_links.metrics.get("completion_unresolved_network", 0)
+    completion_unresolved_streaming = network_streaming_links.metrics.get("completion_unresolved_streaming", 0)
+    completion_unresolved_production = network_streaming_links.metrics.get("completion_unresolved_production", 0)
+    production_missing_logos = network_streaming_links.metrics.get("production_missing_logos", 0)
+    production_missing_bw_variants = network_streaming_links.metrics.get("production_missing_bw_variants", 0)
     completion_percent = _extract_metric_float(network_streaming_links_output, "completion_percent")
     run_id = _extract_metric_text(network_streaming_links_output, "run_id") or "network-streaming-unknown"
     run_status_raw = (_extract_metric_text(network_streaming_links_output, "run_status") or "").lower()
@@ -1421,7 +1457,7 @@ def sync_networks_streaming(
         + tmdb_watch_providers.metrics.get("failures", 0)
         + network_streaming_links.metrics.get("failures", 0)
     )
-    completion_gate_passed = completion_unresolved == 0 and run_status != "failed"
+    completion_gate_passed = completion_unresolved_total == 0 and run_status != "failed"
     if not completion_gate_passed and run_status != "failed":
         failures += 1
 
@@ -1446,6 +1482,12 @@ def sync_networks_streaming(
         completion_total=completion_total,
         completion_resolved=completion_resolved,
         completion_unresolved=completion_unresolved,
+        completion_unresolved_total=completion_unresolved_total,
+        completion_unresolved_network=completion_unresolved_network,
+        completion_unresolved_streaming=completion_unresolved_streaming,
+        completion_unresolved_production=completion_unresolved_production,
+        production_missing_logos=production_missing_logos,
+        production_missing_bw_variants=production_missing_bw_variants,
         completion_percent=completion_percent,
         completion_gate_passed=completion_gate_passed,
         missing_columns=[],

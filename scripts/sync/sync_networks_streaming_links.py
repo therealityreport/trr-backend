@@ -215,6 +215,12 @@ class SyncSummary:
     completion_total: int = 0
     completion_resolved: int = 0
     completion_unresolved: int = 0
+    completion_unresolved_total: int = 0
+    completion_unresolved_network: int = 0
+    completion_unresolved_streaming: int = 0
+    completion_unresolved_production: int = 0
+    production_missing_logos: int = 0
+    production_missing_bw_variants: int = 0
     completion_percent: float = 0.0
 
 
@@ -2324,16 +2330,62 @@ def _ordered_candidate_sources(
     return out
 
 
+HARD_RESOLUTION_FAILURE_REASONS = {
+    "download_failed",
+    "logo_decode_failed",
+    "transparent_extraction_failed",
+    "s3_upload_failed",
+    "missing_dimension_row",
+}
+
+
+def _completion_policy_for_entity(entity_type: str) -> tuple[str, bool]:
+    if entity_type == "production":
+        return "production_logo_optional", False
+    return "strict", True
+
+
+def _has_company_reference_url(urls: list[str], pattern: str) -> bool:
+    for item in urls:
+        value = _normalize_text(item).lower()
+        if pattern in value:
+            return True
+    return False
+
+
 def _build_resolution_status(
     *,
+    entity_type: str,
+    display_name: str,
+    entity_id: str,
     wikidata_id: str,
     wikipedia_url: str,
     hosted_logo_url: str,
     hosted_logo_black_url: str,
     hosted_logo_white_url: str,
     base_logo_format: str,
+    reference_urls: list[str] | None,
     reason: str | None,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str, bool]:
+    resolution_policy, logo_required = _completion_policy_for_entity(entity_type)
+    normalized_reason = _normalize_text(reason)
+    links = reference_urls or []
+    has_imdb_company_url = _has_company_reference_url(links, "imdb.com/company/")
+    has_tmdb_company_url = _has_company_reference_url(links, "themoviedb.org/company/")
+
+    if normalized_reason in HARD_RESOLUTION_FAILURE_REASONS:
+        return "failed", normalized_reason, resolution_policy, logo_required
+
+    if entity_type == "production":
+        has_display_name = bool(_normalize_text(display_name))
+        has_reference_link = bool(wikipedia_url or has_imdb_company_url or has_tmdb_company_url)
+        has_identifier = bool(wikidata_id or _normalize_text(entity_id) or has_imdb_company_url or has_tmdb_company_url)
+        if has_display_name and has_reference_link and has_identifier:
+            return "resolved", None, resolution_policy, logo_required
+        if not has_display_name:
+            return "manual_required", "missing_display_name", resolution_policy, logo_required
+        return "manual_required", "missing_reference_metadata", resolution_policy, logo_required
+
     complete = all(
         [
             bool(wikidata_id),
@@ -2345,18 +2397,9 @@ def _build_resolution_status(
         ]
     )
     if complete:
-        return "resolved", None
+        return "resolved", None, resolution_policy, logo_required
 
-    if reason in {
-        "download_failed",
-        "logo_decode_failed",
-        "transparent_extraction_failed",
-        "s3_upload_failed",
-        "missing_dimension_row",
-    }:
-        return "failed", reason
-
-    return "manual_required", reason or "incomplete_metadata"
+    return "manual_required", normalized_reason or "incomplete_metadata", resolution_policy, logo_required
 
 
 def _process_entity(
@@ -2902,7 +2945,7 @@ def _process_entity(
             else:
                 has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
 
-        if not has_base_logo:
+        if not has_base_logo and entity.entity_type in {"network", "streaming"}:
             if not (_normalize_text(wikidata_id) or _normalize_text(existing_wikidata)):
                 unresolved_reason = unresolved_reason or "no_wikidata_match"
             elif not any(candidates.values()):
@@ -2982,13 +3025,33 @@ def _process_entity(
             logo_source_url=selected_logo_url,
             hosted_logo_url=final_logo_url,
         )
-        resolution_status, resolution_reason = _build_resolution_status(
+        reference_urls: list[str] = []
+        if final_wikipedia:
+            reference_urls.append(final_wikipedia)
+        if entity.entity_type == "production":
+            production_id_text = _normalize_text(merged_row.get(id_field)) or entity_id_value
+            if production_id_text:
+                reference_urls.append(f"https://www.themoviedb.org/company/{production_id_text}")
+            if context is not None:
+                production_hints = context.production_imdb_hints_by_key.get(entity.entity_key, {})
+                for url in production_hints.get("company_urls") or []:
+                    if isinstance(url, str):
+                        reference_urls.append(url)
+                for url in production_hints.get("source_urls") or []:
+                    if isinstance(url, str):
+                        reference_urls.append(url)
+
+        resolution_status, resolution_reason, resolution_policy, logo_required = _build_resolution_status(
+            entity_type=entity.entity_type,
+            display_name=display_name,
+            entity_id=entity_id_value,
             wikidata_id=final_wikidata,
             wikipedia_url=final_wikipedia,
             hosted_logo_url=final_logo_url,
             hosted_logo_black_url=final_logo_black,
             hosted_logo_white_url=final_logo_white,
             base_logo_format=base_logo_format,
+            reference_urls=reference_urls,
             reason=unresolved_reason,
         )
 
@@ -3007,6 +3070,8 @@ def _process_entity(
             "base_logo_format": base_logo_format,
             "resolution_status": resolution_status,
             "resolution_reason": resolution_reason,
+            "resolution_policy": resolution_policy,
+            "logo_required": logo_required,
             "source_priority": source_priority,
             "last_run_id": run_id,
             "last_attempt_at": _now_iso(),
@@ -3061,6 +3126,8 @@ def _process_entity(
                     "base_logo_format": "unknown",
                     "resolution_status": "failed",
                     "resolution_reason": reason,
+                    "resolution_policy": _completion_policy_for_entity(entity.entity_type)[0],
+                    "logo_required": _completion_policy_for_entity(entity.entity_type)[1],
                     "source_priority": _source_priority(override),
                     "last_run_id": run_id,
                     "last_attempt_at": _now_iso(),
@@ -3102,9 +3169,21 @@ def _refresh_completion_snapshot(
 
     unresolved: list[UnresolvedLogo] = []
     resolved_count = 0
+    unresolved_by_type: dict[str, int] = {"network": 0, "streaming": 0, "production": 0}
+    production_missing_logos = 0
+    production_missing_bw_variants = 0
     for key, entity in inventory.items():
         row = completion_rows.get(key)
+        if entity.entity_type == "production":
+            hosted_logo_url = _normalize_text((row or {}).get("hosted_logo_url"))
+            hosted_logo_black_url = _normalize_text((row or {}).get("hosted_logo_black_url"))
+            hosted_logo_white_url = _normalize_text((row or {}).get("hosted_logo_white_url"))
+            if not hosted_logo_url:
+                production_missing_logos += 1
+            if not (hosted_logo_black_url and hosted_logo_white_url):
+                production_missing_bw_variants += 1
         if not row:
+            unresolved_by_type[entity.entity_type] = unresolved_by_type.get(entity.entity_type, 0) + 1
             unresolved.append(
                 UnresolvedLogo(
                     type=entity.entity_type,
@@ -3118,6 +3197,7 @@ def _refresh_completion_snapshot(
         if status == "resolved":
             resolved_count += 1
             continue
+        unresolved_by_type[entity.entity_type] = unresolved_by_type.get(entity.entity_type, 0) + 1
         unresolved.append(
             UnresolvedLogo(
                 type=entity.entity_type,
@@ -3130,6 +3210,12 @@ def _refresh_completion_snapshot(
     summary.completion_total = len(inventory)
     summary.completion_resolved = resolved_count
     summary.completion_unresolved = len(unresolved)
+    summary.completion_unresolved_total = len(unresolved)
+    summary.completion_unresolved_network = unresolved_by_type.get("network", 0)
+    summary.completion_unresolved_streaming = unresolved_by_type.get("streaming", 0)
+    summary.completion_unresolved_production = unresolved_by_type.get("production", 0)
+    summary.production_missing_logos = production_missing_logos
+    summary.production_missing_bw_variants = production_missing_bw_variants
     summary.completion_percent = round((resolved_count / len(inventory)) * 100.0, 2) if inventory else 100.0
     summary.unresolved_logos = unresolved
 
@@ -3347,6 +3433,18 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
         summary.completion_total = len(inventory)
         summary.completion_resolved = 0
         summary.completion_unresolved = len(inventory)
+        summary.completion_unresolved_total = len(inventory)
+        summary.completion_unresolved_network = len(
+            [item for item in inventory.values() if item.entity_type == "network"]
+        )
+        summary.completion_unresolved_streaming = len(
+            [item for item in inventory.values() if item.entity_type == "streaming"]
+        )
+        summary.completion_unresolved_production = len(
+            [item for item in inventory.values() if item.entity_type == "production"]
+        )
+        summary.production_missing_logos = summary.completion_unresolved_production
+        summary.production_missing_bw_variants = summary.completion_unresolved_production
         summary.completion_percent = 0.0
 
     if summary.run_status not in {"stopped", "failed"}:
@@ -3401,6 +3499,12 @@ def main(argv: list[str] | None = None) -> int:
         "completion_total",
         "completion_resolved",
         "completion_unresolved",
+        "completion_unresolved_total",
+        "completion_unresolved_network",
+        "completion_unresolved_streaming",
+        "completion_unresolved_production",
+        "production_missing_logos",
+        "production_missing_bw_variants",
         "failures",
     ):
         print(f"{key}={summary_dict[key]}")

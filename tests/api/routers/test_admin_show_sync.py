@@ -161,6 +161,12 @@ class TestSyncNetworksStreaming:
             print("completion_total=40")
             print("completion_resolved=39")
             print("completion_unresolved=1")
+            print("completion_unresolved_total=1")
+            print("completion_unresolved_network=1")
+            print("completion_unresolved_streaming=0")
+            print("completion_unresolved_production=0")
+            print("production_missing_logos=6")
+            print("production_missing_bw_variants=6")
             print("completion_percent=97.50")
             print("unresolved_logos=2")
             print('unresolved_logo={"type":"network","id":"77","name":"Bravo","reason":"no_logo_claim"}')
@@ -226,6 +232,12 @@ class TestSyncNetworksStreaming:
         assert payload["completion_total"] == 40
         assert payload["completion_resolved"] == 39
         assert payload["completion_unresolved"] == 1
+        assert payload["completion_unresolved_total"] == 1
+        assert payload["completion_unresolved_network"] == 1
+        assert payload["completion_unresolved_streaming"] == 0
+        assert payload["completion_unresolved_production"] == 0
+        assert payload["production_missing_logos"] == 6
+        assert payload["production_missing_bw_variants"] == 6
         assert payload["completion_percent"] == 97.5
         assert payload["completion_gate_passed"] is False
         assert payload["missing_columns"] == []
@@ -313,6 +325,12 @@ class TestSyncNetworksStreaming:
                         "completion_total": 350,
                         "completion_resolved": 0,
                         "completion_unresolved": 350,
+                        "completion_unresolved_total": 350,
+                        "completion_unresolved_network": 350,
+                        "completion_unresolved_streaming": 0,
+                        "completion_unresolved_production": 0,
+                        "production_missing_logos": 0,
+                        "production_missing_bw_variants": 0,
                         "unresolved_logos": 350,
                         "failures": 0,
                     },
