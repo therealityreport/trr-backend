@@ -3216,3 +3216,18 @@ Continuation (same session, 2026-02-24) — Cross-platform social sync hardening
   - `find /Users/thomashulihan/Projects/TRR/screenalytics/apps/api -name '*.py' -print0 | xargs -0 -n 1 python -m py_compile` (pass)
   - `pytest -q /Users/thomashulihan/Projects/TRR/screenalytics/tests/unit -k "metadata or api"` (`4 passed`)
   - `pnpm --dir /Users/thomashulihan/Projects/TRR/TRR-APP/apps/web test -- --runInBand season-social-analytics-section.test.tsx week-social-thumbnails.test.tsx` executed broad vitest run in this workspace (`181 files / 737 tests passed`).
+
+Continuation (same session, 2026-02-24) — Comments-coverage SQL alias regression fix.
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Changes:
+  - Fixed Twitter comments-coverage lifecycle filter aliasing in recursive CTE path:
+    - use `r.is_missing` in the root reply branch,
+    - use `child.is_missing` in recursive branch,
+    - keep `t.is_missing` only in the non-recursive aggregate path.
+  - Eliminates runtime SQL error: `missing FROM-clause entry for table "t"` on `/analytics/comments-coverage`.
+  - Added regression test: `test_comments_coverage_twitter_recursive_filter_uses_reply_aliases`.
+- Validation:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k "comments_coverage"` (`3 passed`).
+  - Endpoint smoke after restart returns `200` for season comments-coverage requests.
