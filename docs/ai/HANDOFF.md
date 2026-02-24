@@ -2,6 +2,26 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-24) — Networks sync release branch + deploy preflight
+
+- February 24, 2026: Isolated and validated releasable networks sync updates in a clean branch for deployment handoff.
+  - Branch:
+    - `codex/networks-sync-release`
+  - Commit:
+    - `a0c96de5bf1f4351b3aafff48811b37c0f55c5e8`
+  - Files:
+    - `api/routers/admin_show_sync.py`
+    - `scripts/sync/sync_networks_streaming_links.py`
+    - `tests/api/routers/test_admin_show_sync.py`
+    - `tests/scripts/test_sync_networks_streaming_links.py`
+  - Validation:
+    - `ruff check api/routers/admin_show_sync.py scripts/sync/sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py tests/scripts/test_sync_networks_streaming_links.py` (pass)
+    - `PYTHONPATH=. pytest tests/api/routers/test_admin_show_sync.py tests/scripts/test_sync_networks_streaming_links.py -q` (`49 passed`)
+  - Deploy blocker:
+    - Cloud Run deploy still blocked from this shell:
+      - `gcloud run services list --project trr-web-25d2e --region us-east1` fails for active service accounts with `Permission 'run.services.list' denied`.
+      - `admin@thereality.report` requires interactive re-auth (`gcloud auth login`) which cannot run non-interactively here.
+
 ## Latest Update (2026-02-24) — Show refresh stream heartbeat + request-id tracing
 
 - February 24, 2026: Implemented final RHOSLC stabilization items for show refresh SSE observability and request correlation.
