@@ -3732,3 +3732,20 @@ Continuation (same session, 2026-02-24) — Social soak verification backend obs
 - Interpretation:
   - Current NO_GO is driven primarily by app-proxy timeout/restart behavior under concurrent admin traffic rather than confirmed backend pool exhaustion in this run window.
   - Backend remains candidate for further job-list path optimization to reduce end-to-end latency pressure on app poll routes.
+
+Continuation (same session, 2026-02-24) — NO_GO follow-up patch: unscoped jobs hot path optimization.
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Change summary:
+  - Optimized `list_jobs(...)` for unscoped polling path (no `run_id` filter) by introducing a two-step query:
+    1. `candidate_jobs` CTE selects `id` ordered by `created_at desc` with `limit`.
+    2. Joined fetch reads full row payload (`config`, `metadata`, queue fields) only for candidate IDs.
+  - Preserved response shape and existing filters (`season_id`, `status`, `platform`).
+  - Kept run-scoped path as direct query (`run_id` filter) to preserve behavior.
+- Regression tests added:
+  - `test_list_jobs_uses_candidate_cte_for_unscoped_queries`
+  - `test_list_jobs_uses_direct_query_for_run_scoped_queries`
+- Validation evidence:
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest tests/repositories/test_social_season_analytics.py -k "list_jobs_uses_candidate_cte_for_unscoped_queries or list_jobs_uses_direct_query_for_run_scoped_queries"` (pass)

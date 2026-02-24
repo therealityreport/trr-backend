@@ -932,7 +932,8 @@ def test_load_preapproved_person_source_url_matches_by_url_key() -> None:
     params = fetch_one.call_args.args[1]
     assert params[0] == person_id
     assert params[1] == "imdb"
-    assert params[2] == "https://www.imdb.com/name/nm0169212"
+    assert "https://www.imdb.com/name/nm0169212" in params[2]
+    assert "https://www.imdb.com/name/nm0169212/" in params[2]
 
 
 def test_load_preapproved_person_source_url_ignores_non_person_sources() -> None:

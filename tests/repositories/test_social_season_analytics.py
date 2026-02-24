@@ -1866,7 +1866,15 @@ def test_list_jobs_uses_direct_query_for_run_scoped_queries(monkeypatch) -> None
     def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
         captured["sql"] = sql
         captured["params"] = params
-        return [{"id": "job-1", "metadata": {}, "last_error_code": None, "error_message": None, "last_error_class": None}]
+        return [
+            {
+                "id": "job-1",
+                "metadata": {},
+                "last_error_code": None,
+                "error_message": None,
+                "last_error_class": None,
+            }
+        ]
 
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": False})
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)

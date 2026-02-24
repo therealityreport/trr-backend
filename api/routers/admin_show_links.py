@@ -814,6 +814,9 @@ def _load_preapproved_person_source_url(
     if normalized_kind not in {"imdb", "tmdb"}:
         return None
     canonical_candidate = _canonicalize_url(candidate_url)
+    candidate_key = _url_key(canonical_candidate)
+    stripped_key = candidate_key.rstrip("/")
+    candidate_keys = sorted({candidate_key, stripped_key, f"{stripped_key}/"})
     row = pg.fetch_one(
         """
         SELECT url
@@ -822,14 +825,14 @@ def _load_preapproved_person_source_url(
           AND entity_id = %s
           AND link_kind = %s
           AND status = 'approved'
-          AND url_key = %s
+          AND url_key = ANY(%s::text[])
         ORDER BY updated_at DESC
         LIMIT 1
         """,
         [
             person_id,
             normalized_kind,
-            _url_key(canonical_candidate),
+            candidate_keys,
         ],
     )
     existing_url = str((row or {}).get("url") or "").strip()
