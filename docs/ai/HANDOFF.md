@@ -3231,3 +3231,74 @@ Continuation (same session, 2026-02-24) — Comments-coverage SQL alias regressi
 - Validation:
   - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k "comments_coverage"` (`3 passed`).
   - Endpoint smoke after restart returns `200` for season comments-coverage requests.
+
+Continuation (same session, 2026-02-24) — Cross-platform media mirror rollout execution (ops run).
+- Scope:
+  - Applied migration target: `0145_cross_platform_media_mirror_fields_and_job_types.sql`.
+  - Enqueued recent cross-platform mirror jobs (8 weeks, bravo scope).
+  - Captured mirror/queue/coverage health snapshots.
+- Execution details:
+  - `supabase migration list --db-url "$SUPABASE_DB_URL"` and `supabase db push --db-url "$SUPABASE_DB_URL"` were blocked by existing remote/local migration drift (`0142` exists remotely but no local file), so migration apply was completed via direct `psql` execution of `0145` plus explicit insert into `supabase_migrations.schema_migrations`.
+  - Verified post-apply:
+    - `0145` present in `supabase_migrations.schema_migrations`.
+    - mirror columns exist on `social.tiktok_posts`, `social.youtube_videos`, `social.twitter_tweets`.
+    - `social.scrape_jobs` check constraint includes `instagram_media_mirror|tiktok_media_mirror|youtube_media_mirror|twitter_media_mirror`.
+    - mirror pending indexes exist (`idx_tiktok_posts_media_mirror_pending`, `idx_youtube_videos_media_mirror_pending`, `idx_twitter_tweets_media_mirror_pending`).
+  - Backfill enqueue run:
+    - `PYTHONPATH=. python scripts/socials/backfill_social_media_mirror_jobs.py --weeks 8 --platforms instagram,tiktok,youtube,twitter --source-scope bravo --limit-per-platform 5000`
+    - Output: `scanned=1017`, `queued=270`, `skipped=747`, `failed=0`
+    - Platform breakdown:
+      - instagram: `scanned=61`, `queued=61`
+      - tiktok: `scanned=80`, `queued=58`
+      - youtube: `scanned=24`, `queued=24`
+      - twitter: `scanned=852`, `queued=127`
+  - Worker executability check:
+    - Ran local one-shot worker against queue: `SOCIAL_QUEUE_ENABLED=true PYTHONPATH=. python -m scripts.socials.worker --stage media_mirror --once --interval 1`
+    - Processed one mirror job successfully (`status=completed`, `items=1`), proving `media_mirror` stage execution path is live.
+- Monitoring snapshot (immediately after enqueue + one local worker pass):
+  - Mirror status distribution:
+    - instagram: `pending=60`, `failed=1`
+    - tiktok: `pending=58`
+    - youtube: `pending=24`
+    - twitter: `pending=1`
+  - Mirror retry/status reasons (48h):
+    - `pending/unknown=269`, `completed/unknown=1`
+  - Queue backlog (24h):
+    - `media_mirror`: `pending=269`, `completed=1`
+    - existing posts/comments queue items unchanged from prior runs.
+  - Comments coverage snapshot (`season_id=e9161955-6ee4-4985-865e-3386a0f670fb`, `source_scope=bravo`):
+    - `saved=35261`, `reported=177223`, `coverage_pct=19.9`, `up_to_date=false`
+    - by platform:
+      - instagram `7.6%`
+      - tiktok `27.5%`
+      - twitter `37.1%`
+      - youtube `100%`
+- Blocker:
+  - Cloud Run deploy actions from this environment are blocked by non-interactive gcloud reauthentication:
+    - `gcloud run services list --region us-east1` => `Reauthentication failed. cannot prompt during non-interactive execution.`
+  - API/worker deployment step remains pending until interactive reauth (`gcloud auth login`) or service-account auth is provided.
+
+Continuation (same session, 2026-02-24) — MEDIA/GALLERY hardening follow-through (repair script safety).
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_gallery_hosts.py`
+- Changes:
+  - Added additive CLI controls to `repair_gallery_hosts.py`:
+    - `--retry-attempts` (default `2`)
+    - `--retry-backoff-ms` (default `500`)
+    - `--confirm-unreachable-pass/--no-confirm-unreachable-pass` (default confirm enabled)
+  - Added retry-aware reachability probing with transient-failure classification (`429`, `5xx`, connection/timeout class request failures).
+  - Hardened candidate classification semantics:
+    - `broken_unreachable` only after non-transient source failure, with optional confirmation pass.
+    - transient/indeterminate outcomes classified as `error` and never marked broken in apply mode.
+  - Preserved existing repair semantics for recoverable rows (re-mirror + base variants, crop variants when crop payload exists).
+  - Expanded script tests to cover:
+    - transient retry behavior,
+    - confirmation-pass rescue from broken classification,
+    - transient-indeterminate non-mutation guarantees,
+    - CLI defaults for new flags.
+- Validation:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_gallery_hosts.py -q` (`8 passed`).
+  - Script dry-run smoke:
+    - `python /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py --sources imdb,tmdb,fandom,bravo --limit 10 --output-json /tmp/gallery-host-repair-post-hardening-dryrun.json`
+    - Result summary: `scanned=10`, `ok=0`, `repaired=5`, `broken_unreachable=5`, `error=0`, `apply=false`.
