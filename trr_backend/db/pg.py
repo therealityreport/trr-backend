@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from psycopg2.extensions import connection as connection_type
     from psycopg2.extensions import cursor as cursor_type
 
-DEFAULT_POOL_MINCONN = 1
-DEFAULT_POOL_MAXCONN = 8
+DEFAULT_POOL_MINCONN = 2
+DEFAULT_POOL_MAXCONN = 24
 
 _pool: ThreadedConnectionPool | None = None
 _active_pool_dsn: str | None = None

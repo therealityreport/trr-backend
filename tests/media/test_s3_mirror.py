@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -190,6 +192,19 @@ def test_download_image_sniffs_image_type_when_missing_content_type(monkeypatch:
     data, content_type = s3_mirror.download_image("https://example.com/x.png", source="fandom")
     assert data == png_bytes
     assert content_type == "image/png"
+
+
+def test_sniff_image_content_type_detects_svg() -> None:
+    svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    assert s3_mirror._sniff_image_content_type(svg) == "image/svg+xml"
+
+
+def test_ensure_png_bytes_rasterizes_svg_with_cairosvg(monkeypatch: pytest.MonkeyPatch) -> None:
+    png_bytes = b"\x89PNG\r\n\x1a\npng"
+    monkeypatch.setitem(sys.modules, "cairosvg", types.SimpleNamespace(svg2png=lambda **kwargs: png_bytes))
+    svg = b"<svg xmlns='http://www.w3.org/2000/svg'/>"
+    result = s3_mirror._ensure_png_bytes(svg, "image/svg+xml")
+    assert result == (png_bytes, "image/png", ".png")
 
 
 def test_normalize_fandom_file_url_strips_revision_latest_suffix() -> None:

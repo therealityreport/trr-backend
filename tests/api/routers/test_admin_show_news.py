@@ -617,3 +617,215 @@ def test_google_news_sync_async_returns_job_id(
     assert payload["queued"] is True
     assert isinstance(payload["job_id"], str)
     assert payload["status"] == "queued"
+
+
+def test_google_news_sync_featured_image_marks_terminal_when_source_missing() -> None:
+    item = {
+        "headline": "No image story",
+        "article_url": "https://example.com/story-no-image",
+        "mirror_status": "missing_image",
+        "mirror_attempt_count": 0,
+    }
+    result = admin_show_news._sync_google_news_featured_images(
+        db=MagicMock(),
+        admin_user={"email": "admin@example.com"},
+        show_id=str(uuid4()),
+        items=[item],
+    )
+
+    assert result["attempted"] == 0
+    assert result["mirrored"] == 0
+    assert item["mirror_status"] == "missing_image_terminal"
+    assert item["mirror_attempt_count"] == 1
+    assert item["mirror_retry_after"] is None
+
+
+def test_google_news_sync_featured_image_marks_terminal_when_article_missing() -> None:
+    item = {
+        "headline": "Missing article",
+        "article_url": "",
+        "image_url": "https://images.example.com/story.jpg",
+        "mirror_status": "pending",
+        "mirror_attempt_count": 0,
+    }
+    result = admin_show_news._sync_google_news_featured_images(
+        db=MagicMock(),
+        admin_user={"email": "admin@example.com"},
+        show_id=str(uuid4()),
+        items=[item],
+    )
+
+    assert result["attempted"] == 0
+    assert result["mirrored"] == 0
+    assert item["mirror_status"] == "missing_image_terminal"
+    assert item["last_mirror_error"] == "Missing article URL required for mirroring"
+    assert item["mirror_retry_after"] is None
+
+
+def test_google_news_sync_featured_image_calls_heartbeat_periodically() -> None:
+    items = [
+        {
+            "headline": f"Story {index}",
+            "article_url": f"https://example.com/story-{index}",
+            "image_url": f"https://images.example.com/story-{index}.jpg",
+            "mirror_status": "pending",
+            "mirror_attempt_count": 0,
+        }
+        for index in range(1, 7)
+    ]
+    heartbeat_calls = 0
+
+    def _heartbeat() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+
+    asset_counter = 0
+
+    def _fake_import_images(*_args, **_kwargs):
+        nonlocal asset_counter
+        asset_counter += 1
+        return SimpleNamespace(
+            imported=1,
+            skipped_duplicates=0,
+            errors=[],
+            assets=[SimpleNamespace(id=uuid4(), hosted_url=f"https://cdn.example.com/story-{asset_counter}.jpg")],
+        )
+
+    with patch("api.routers.admin_scrape.import_images", side_effect=_fake_import_images):
+        result = admin_show_news._sync_google_news_featured_images(
+            db=MagicMock(),
+            admin_user={"email": "admin@example.com"},
+            show_id=str(uuid4()),
+            items=items,
+            heartbeat_cb=_heartbeat,
+        )
+
+    assert result["attempted"] == 6
+    assert heartbeat_calls == 2
+
+
+def test_snapshot_backfill_ignores_terminal_missing_image_items() -> None:
+    snapshot = {
+        "status": "success",
+        "fetched_at": datetime.now(tz=UTC).isoformat(),
+        "payload": {
+            "normalized": {
+                "news": [
+                    {
+                        "headline": "Terminal no image",
+                        "article_url": "https://example.com/terminal",
+                        "mirror_status": "missing_image_terminal",
+                        "mirror_attempt_count": 2,
+                    }
+                ]
+            }
+        },
+    }
+    assert admin_show_news._snapshot_needs_google_image_backfill(snapshot) is False
+
+
+def test_reconcile_stale_google_news_sync_jobs_marks_orphaned_jobs_failed() -> None:
+    with patch("api.routers.admin_show_news.pg.execute_returning", return_value=[{"id": str(uuid4())}]) as exec_mock:
+        reconciled = admin_show_news._reconcile_stale_google_news_sync_jobs(show_id=str(uuid4()))
+
+    assert len(reconciled) == 1
+    assert exec_mock.called
+
+
+def test_reconcile_stale_google_news_sync_jobs_uses_heartbeat_filter() -> None:
+    with patch("api.routers.admin_show_news.pg.execute_returning", return_value=[]) as exec_mock:
+        reconciled = admin_show_news._reconcile_stale_google_news_sync_jobs(show_id=str(uuid4()))
+
+    assert reconciled == []
+    sql = exec_mock.call_args.args[0]
+    assert "COALESCE(heartbeat_at, updated_at, created_at)" in sql
+
+
+def test_google_sync_stale_timeout_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_NEWS_SYNC_STALE_TIMEOUT_MINUTES", "30")
+    assert admin_show_news._get_google_sync_stale_timeout_minutes() == 30
+    monkeypatch.setenv("GOOGLE_NEWS_SYNC_STALE_TIMEOUT_MINUTES", "invalid")
+    assert admin_show_news._get_google_sync_stale_timeout_minutes() == 15
+    monkeypatch.setenv("GOOGLE_NEWS_SYNC_STALE_TIMEOUT_MINUTES", "0")
+    assert admin_show_news._get_google_sync_stale_timeout_minutes() == 1
+
+
+def test_infer_topic_tags_uses_word_boundaries() -> None:
+    tags = admin_show_news._infer_topic_tags("This podcast recap is live")
+    assert "casting" not in tags
+
+
+def test_build_show_cast_index_only_adds_unique_first_name_aliases() -> None:
+    show_id = str(uuid4())
+    with patch(
+        "api.routers.admin_show_news.pg.fetch_all",
+        side_effect=[
+            [
+                {"person_id": "person-1", "person_name": "Jen Shah"},
+                {"person_id": "person-2", "person_name": "Jen Lee"},
+                {"person_id": "person-3", "person_name": "Meredith Marks"},
+            ]
+        ],
+    ):
+        cast_index = admin_show_news._build_show_cast_index(show_id)
+
+    jen_aliases = next(ref["name_aliases"] for ref in cast_index if ref["person_id"] == "person-1")
+    second_jen_aliases = next(ref["name_aliases"] for ref in cast_index if ref["person_id"] == "person-2")
+    meredith_aliases = next(ref["name_aliases"] for ref in cast_index if ref["person_id"] == "person-3")
+    assert "jen" not in jen_aliases
+    assert "jen" not in second_jen_aliases
+    assert "meredith" in meredith_aliases
+
+
+def test_unified_news_response_includes_facets(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+    person_id = str(uuid4())
+
+    def _snapshot_side_effect(*_args, **kwargs):
+        if kwargs.get("source_id") == "google_news":
+            return {
+                "source_id": "google_news",
+                "fetched_at": "2026-02-15T10:00:00Z",
+                "payload_sha256": "google-sha",
+                "payload": {
+                    "normalized": {
+                        "news": [
+                            {
+                                "headline": "Season 4 reunion recap",
+                                "article_url": "https://example.com/story-facet",
+                                "published_at": "2026-02-15T11:30:00Z",
+                                "publisher_name": "People",
+                                "publisher_domain": "people.com",
+                                "person_tags": [{"person_id": person_id, "person_name": "Jane Doe"}],
+                                "topic_tags": ["reunion"],
+                                "season_matches": [{"season_number": 4, "match_types": ["mention"]}],
+                                "feed_rank": 0,
+                            }
+                        ]
+                    }
+                },
+            }
+        return None
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_news._show_exists", return_value=True):
+            with patch("api.routers.admin_show_news._fetch_show_snapshot", side_effect=_snapshot_side_effect):
+                with patch("api.routers.admin_show_news._load_season_windows", return_value={}):
+                    response = client.get(
+                        f"/api/v1/admin/shows/{show_id}/news?sources=google_news",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload.get("facets"), dict)
+    assert payload["facets"]["sources"][0]["token"] == "people.com"
+    assert payload["facets"]["people"][0]["person_id"] == person_id
+    assert payload["facets"]["topics"][0]["topic"] == "reunion"
+    assert payload["facets"]["seasons"][0]["season_number"] == 4

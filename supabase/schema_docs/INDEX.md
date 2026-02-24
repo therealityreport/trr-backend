@@ -12,6 +12,7 @@
 - [core.episode_source_latest](core.episode_source_latest.md) ([diagram](diagrams/core.episode_source_latest.mermaid.md))
 - [core.episodes](core.episodes.md) ([diagram](diagrams/core.episodes.mermaid.md))
 - [core.external_id_conflicts](core.external_id_conflicts.md) ([diagram](diagrams/core.external_id_conflicts.mermaid.md))
+- [core.fandom_community_allowlist](core.fandom_community_allowlist.md) ([diagram](diagrams/core.fandom_community_allowlist.mermaid.md))
 - [core.google_news_sync_jobs](core.google_news_sync_jobs.md) ([diagram](diagrams/core.google_news_sync_jobs.mermaid.md))
 - [core.media_asset_variants](core.media_asset_variants.md) ([diagram](diagrams/core.media_asset_variants.mermaid.md))
 - [core.media_assets](core.media_assets.md) ([diagram](diagrams/core.media_assets.mermaid.md))

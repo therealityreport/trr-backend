@@ -174,10 +174,35 @@ class YouTubeScraper:
         self.session = self._create_session()
         self._request_count = 0
         self.last_retrieval_meta: dict[str, Any] = {}
+        self.last_comment_fetch_reason: str | None = None
+        self.comments_auth_failed = False
         self._precise_publish_ts_cache: dict[str, int] = {}
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
+
+    @staticmethod
+    def _is_auth_related_failure(reason: str | None) -> bool:
+        value = str(reason or "").strip().lower()
+        if not value:
+            return False
+        markers = (
+            "auth",
+            "login",
+            "challenge",
+            "captcha",
+            "forbidden",
+            "unauthorized",
+        )
+        return any(marker in value for marker in markers)
+
+    def _set_comment_failure_reason(self, reason: str | None) -> None:
+        normalized = str(reason or "").strip()
+        if not normalized:
+            return
+        self.last_comment_fetch_reason = normalized
+        if self._is_auth_related_failure(normalized):
+            self.comments_auth_failed = True
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -967,6 +992,8 @@ class YouTubeScraper:
         Returns:
             List of YouTubeComment objects with nested replies
         """
+        self.last_comment_fetch_reason = None
+        self.comments_auth_failed = False
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         logger.info(f"Fetching comments for video {video_id}")
 
@@ -981,16 +1008,19 @@ class YouTubeScraper:
             response.raise_for_status()
             yt_data = self._extract_ytinital_data(response.text)
         except requests.exceptions.RequestException as e:
+            self._set_comment_failure_reason("request_error")
             logger.error(f"Failed to fetch video page: {e}")
             return []
 
         if not yt_data:
+            self._set_comment_failure_reason("parse_error")
             logger.error("Could not extract ytInitialData from video page")
             return []
 
         # Extract comment section continuation token
         continuation_token = self._extract_comment_continuation(yt_data)
         if not continuation_token:
+            self._set_comment_failure_reason("comments_unavailable")
             logger.warning("No comment continuation token found - video may have comments disabled")
             return []
 
@@ -1003,6 +1033,8 @@ class YouTubeScraper:
             # Fetch comments using continuation
             comment_data = self._fetch_comment_continuation(continuation_token, delay)
             if not comment_data:
+                if not self.last_comment_fetch_reason:
+                    self._set_comment_failure_reason("continuation_fetch_failed")
                 break
 
             # Parse comments from response
@@ -1110,7 +1142,18 @@ class YouTubeScraper:
             )
             response.raise_for_status()
             return response.json()
+        except ValueError:
+            self._set_comment_failure_reason("parse_error")
+            logger.error("Failed to decode YouTube comment continuation payload as JSON")
+            return None
         except requests.exceptions.RequestException as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code in {401, 403}:
+                self._set_comment_failure_reason(f"http_{status_code}_auth")
+            elif status_code is not None:
+                self._set_comment_failure_reason(f"http_{status_code}")
+            else:
+                self._set_comment_failure_reason("request_error")
             logger.error(f"Failed to fetch comment continuation: {e}")
             return None
 

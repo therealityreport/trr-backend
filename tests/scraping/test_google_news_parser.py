@@ -195,9 +195,66 @@ def test_fetch_google_news_backfills_featured_image_from_article_meta(
     assert result["items"][0]["image_url"] == "https://cdn.example.com/featured-9.jpg"
 
 
+def test_fetch_google_news_calls_heartbeat_callback(monkeypatch: pytest.MonkeyPatch) -> None:
+    topic_url = "https://news.google.com/topics/topic-abc?ceid=US:en&oc=3"
+    candidate = google_news_parser.topic_url_to_rss_candidates(topic_url)[0]
+    article_url = "https://example.com/story-heartbeat"
+    heartbeat_calls = 0
+
+    def _heartbeat() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+
+    monkeypatch.setattr(
+        google_news_parser.requests,
+        "get",
+        _mock_get_factory(
+            {
+                candidate: f"""
+                    <rss version="2.0">
+                      <channel>
+                        <item>
+                          <title>Heartbeat Story</title>
+                          <link>{article_url}</link>
+                          <pubDate>Thu, 13 Feb 2026 10:15:00 +0000</pubDate>
+                          <source url="https://people.com">People</source>
+                        </item>
+                      </channel>
+                    </rss>
+                """,
+                article_url: """
+                    <html>
+                      <head>
+                        <meta property="og:image" content="https://cdn.example.com/heartbeat.jpg" />
+                      </head>
+                    </html>
+                """,
+            }
+        ),
+    )
+
+    result = google_news_parser.fetch_google_news(
+        topic_url=topic_url,
+        show_name="RHOSLC",
+        show_aliases=["The Real Housewives of Salt Lake City"],
+        heartbeat_cb=_heartbeat,
+    )
+
+    assert result["fallback_used"] is False
+    assert heartbeat_calls >= 3
+
+
 def test_normalize_article_url_strips_tracking_params() -> None:
     normalized = google_news_parser.normalize_article_url(
         "https://www.people.com/story-1/?utm_source=google&oc=3&foo=bar"
     )
 
     assert normalized == "https://people.com/story-1?foo=bar"
+
+
+def test_normalize_article_url_sorts_query_params_for_stable_dedupe() -> None:
+    normalized = google_news_parser.normalize_article_url(
+        "https://people.com/story-1?b=2&a=1&utm_source=google"
+    )
+
+    assert normalized == "https://people.com/story-1?a=1&b=2"

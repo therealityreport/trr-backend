@@ -105,6 +105,14 @@
       "default": "now()",
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "heartbeat_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -144,6 +152,16 @@
       ],
       "unique": false,
       "definition": "CREATE INDEX idx_google_news_sync_jobs_status ON core.google_news_sync_jobs USING btree (status, updated_at DESC)"
+    },
+    {
+      "name": "idx_google_news_sync_jobs_status_heartbeat",
+      "columns": [
+        "status",
+        "COALESCE(heartbeat_at",
+        "updated_at) DESC"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_google_news_sync_jobs_status_heartbeat ON core.google_news_sync_jobs USING btree (status, COALESCE(heartbeat_at, updated_at) DESC)"
     }
   ],
   "rls_enabled": false,
@@ -160,6 +178,7 @@
     "created_at": "1970-01-01T00:00:00Z",
     "started_at": "1970-01-01T00:00:00Z",
     "finished_at": "1970-01-01T00:00:00Z",
-    "updated_at": "1970-01-01T00:00:00Z"
+    "updated_at": "1970-01-01T00:00:00Z",
+    "heartbeat_at": "1970-01-01T00:00:00Z"
   }
 }

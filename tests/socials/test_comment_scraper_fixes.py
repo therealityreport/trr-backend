@@ -409,6 +409,24 @@ def test_twitter_reply_fetch_rediscover_hashes_after_404(monkeypatch: pytest.Mon
     assert all(timeout == scraper.REQUEST_TIMEOUT_SECONDS for timeout in requested_timeouts)
 
 
+def test_twitter_reply_fetch_sets_reason_on_logical_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    scraper._detail_hash = "abc123"
+    scraper._search_hash = "def456"
+
+    def _fake_get(url: str, **_: object) -> _FakeResponse:
+        del url
+        return _FakeResponse(status_code=200, payload={"errors": [{"message": "auth required"}]})
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+
+    replies = scraper.fetch_tweet_replies("tweet-1", delay=0)
+
+    assert replies == []
+    assert scraper.last_reply_fetch_reason == "api_errors"
+
+
 def test_twitter_parse_tweet_result_reads_username_from_core_fallback() -> None:
     scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
 

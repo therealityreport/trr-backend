@@ -17,5 +17,6 @@ erDiagram
         TIMESTAMP_WITH_TIME_ZONE started_at
         TIMESTAMP_WITH_TIME_ZONE finished_at
         TIMESTAMP_WITH_TIME_ZONE updated_at
+        TIMESTAMP_WITH_TIME_ZONE heartbeat_at
     }
 ```

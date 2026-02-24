@@ -489,6 +489,41 @@ def test_requeue_instagram_mirror_jobs_endpoint(
     assert mocked.call_args.kwargs["failed_only"] is True
 
 
+def test_requeue_platform_mirror_jobs_endpoint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "platform": "tiktok",
+        "source_scope": "bravo",
+        "failed_only": False,
+        "scanned": 15,
+        "queued_jobs": 4,
+        "skipped": 11,
+        "failed": 0,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.requeue_media_mirror_jobs",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/tiktok/mirror/requeue?source_scope=bravo&limit=250",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["platform"] == "tiktok"
+    assert mocked.call_args.kwargs["platform"] == "tiktok"
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["limit"] == 250
+    assert mocked.call_args.kwargs["failed_only"] is False
+
+
 def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")
@@ -624,6 +659,61 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
     ingest_mock.assert_called_once()
 
 
+def test_ingest_comments_only_inline_fallback_respects_worker_cap(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SOCIAL_INLINE_COMMENTS_WORKERS", "2")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "ingest_mode": "comments_only",
+    }
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-inline-comments-only",
+        "status": "pending",
+        "stages": ["comments"],
+        "queued_or_started_jobs": 4,
+        "summary": {"total_jobs": 4},
+    }
+    worker_counts: list[int] = []
+
+    class _FakeFuture:
+        def result(self) -> None:
+            return None
+
+    class _FakeThreadPoolExecutor:
+        def __init__(self, *, max_workers: int):
+            worker_counts.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn, *args, **kwargs):  # noqa: ANN001
+            fn(*args, **kwargs)
+            return _FakeFuture()
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
+            with patch("trr_backend.repositories.social_season_analytics.execute_run", return_value=None):
+                with patch("api.routers.socials.ThreadPoolExecutor", _FakeThreadPoolExecutor):
+                    response = client.post(
+                        f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    assert worker_counts == [2]
+
+
 def test_ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_flag(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -732,6 +822,38 @@ def test_get_worker_health_endpoint_returns_health_payload(
     assert body["queue_enabled"] is True
     assert body["healthy"] is True
     assert body["healthy_workers"] == 2
+
+
+def test_get_comments_coverage_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "total_saved_comments": 10,
+        "total_reported_comments": 10,
+        "coverage_pct": 100.0,
+        "up_to_date": True,
+        "stale_posts_count": 0,
+        "posts_scanned": 5,
+        "by_platform": {"instagram": {"saved_comments": 10, "reported_comments": 10}},
+        "evaluated_at": "2026-02-24T12:00:00+00:00",
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_comments_coverage",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/comments-coverage"
+            "?source_scope=bravo&platforms=instagram,twitter&timezone=America/New_York",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["total_saved_comments"] == 10
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["platforms"] == ["instagram", "twitter"]
 
 
 def test_export_csv(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

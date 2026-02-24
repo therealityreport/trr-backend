@@ -225,8 +225,9 @@ def main() -> int:
                 counters.mirrored += 1
             else:
                 try:
-                    mirror_job_id = social_repo._enqueue_instagram_media_mirror_job(  # noqa: SLF001
+                    mirror_job_id = social_repo._enqueue_platform_media_mirror_job(  # noqa: SLF001
                         context,
+                        platform="instagram",
                         run_id=None,
                         source_scope=args.source_scope,
                         account=str(row.get("source_account") or row.get("username") or ""),

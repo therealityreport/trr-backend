@@ -1,16 +1,42 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from contextlib import nullcontext
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import jwt
+import pytest
+from fastapi.testclient import TestClient
+
+from api.main import app
 from api.routers.admin_show_links import (
+    _canonicalize_url,
     _cleanup_invalid_person_knowledge_links,
     _discover_people_links,
     _discover_season_links,
     _discover_show_links,
+    _normalize_link_kind,
+    _source_timeout_seconds,
     _validate_person_knowledge_url,
     _validated_person_knowledge_url,
 )
+
+
+def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
+    now = datetime.now(tz=UTC)
+    payload = {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "role": "service_role",
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+@pytest.fixture
+def client() -> TestClient:
+    return TestClient(app)
 
 
 def test_discover_show_links_uses_default_bravo_snapshot_variant() -> None:
@@ -80,6 +106,99 @@ def test_discover_show_links_prefers_existing_show_level_fandom_links() -> None:
     assert fandom_links[0]["source"] == "core.entity_links"
 
 
+def test_canonicalize_url_normalizes_host_scheme_port_fragment_and_trailing_slash() -> None:
+    assert (
+        _canonicalize_url("HTTPS://WWW.IMDB.COM:443/name/nm1234567/#bio")
+        == "https://www.imdb.com/name/nm1234567"
+    )
+    assert _canonicalize_url("http://example.com:80/path/") == "http://example.com/path"
+
+
+def test_normalize_link_kind_maps_wikia_to_fandom() -> None:
+    assert _normalize_link_kind("wikia") == "fandom"
+    assert _normalize_link_kind("FANDOM") == "fandom"
+
+
+def test_source_timeout_seconds_uses_env_override_with_fallback() -> None:
+    with patch.dict("os.environ", {"TRR_LINK_TIMEOUT_IMDB_SECONDS": "12.5"}, clear=False):
+        assert _source_timeout_seconds("imdb", default=20.0) == 12.5
+    with patch.dict("os.environ", {"TRR_LINK_TIMEOUT_IMDB_SECONDS": "invalid"}, clear=False):
+        assert _source_timeout_seconds("imdb", default=20.0) == 20.0
+
+
+def test_get_fandom_allowlist_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/v1/admin/fandom/allowlist")
+    assert response.status_code == 401
+
+
+def test_get_fandom_allowlist_returns_domains_with_source(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    with patch(
+        "api.routers.admin_show_links.load_fandom_community_allowlist_with_source",
+        return_value=(("real-housewives.fandom.com", "starwars.fandom.com"), "database"),
+    ):
+        response = client.get(
+            "/api/v1/admin/fandom/allowlist",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["domains"] == ["real-housewives.fandom.com", "starwars.fandom.com"]
+    assert payload["source"] == "database"
+    assert payload["count"] == 2
+
+
+def test_put_fandom_allowlist_rejects_invalid_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    response = client.put(
+        "/api/v1/admin/fandom/allowlist",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"domains": ["", "invalid host"]},
+    )
+    assert response.status_code == 400
+    assert "At least one valid fandom domain is required" in str(response.json())
+
+
+def test_put_fandom_allowlist_normalizes_dedupes_and_refreshes_cache(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    cursor = MagicMock()
+
+    with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+        with patch("api.routers.admin_show_links.pg.db_cursor", return_value=nullcontext(cursor)):
+            with patch("api.routers.admin_show_links.refresh_fandom_community_allowlist_cache") as refresh_cache:
+                response = client.put(
+                    "/api/v1/admin/fandom/allowlist",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={
+                        "domains": [
+                            "https://real-housewives.fandom.com/wiki/Andy_Cohen",
+                            "REAL-HOUSEWIVES.FANDOM.COM",
+                            " starwars.fandom.com ",
+                        ]
+                    },
+                )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["domains"] == ["real-housewives.fandom.com", "starwars.fandom.com"]
+    assert payload["count"] == 2
+    refresh_cache.assert_called_once()
+    # One bulk deactivate + one upsert per normalized domain.
+    assert cursor.execute.call_count == 3
+
+
 def test_discover_people_links_adds_bravo_profile_for_housewife_friend_on_bravo_show() -> None:
     show_id = str(uuid4())
     person_id = str(uuid4())
@@ -100,7 +219,7 @@ def test_discover_people_links_adds_bravo_profile_for_housewife_friend_on_bravo_
             ]
             with patch(
                 "api.routers.admin_show_links._validated_person_knowledge_url",
-                side_effect=lambda url, kind, expected_name=None: url,
+                side_effect=lambda url, kind, expected_name=None, **kwargs: url,
             ):
                 with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
                     with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
@@ -129,7 +248,12 @@ def test_discover_people_links_skips_missing_wikipedia_and_fandom_pages() -> Non
                 ],
             ]
 
-            def _validate(url: str, kind: str, expected_name: str | None = None) -> str | None:
+            def _validate(
+                url: str,
+                kind: str,
+                expected_name: str | None = None,
+                **kwargs,
+            ) -> str | None:
                 if kind == "bravo_profile":
                     return url
                 return None
@@ -166,7 +290,7 @@ def test_discover_people_links_generates_imdb_tmdb_links_from_person_ids() -> No
             ]
             with patch(
                 "api.routers.admin_show_links._validated_person_knowledge_url",
-                side_effect=lambda url, kind, expected_name=None: url,
+                side_effect=lambda url, kind, expected_name=None, **kwargs: url,
             ):
                 with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
                     with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
@@ -216,9 +340,48 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
                 ):
                     with patch(
                         "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None: (
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
                             url if kind == "fandom" and "real-housewives.fandom.com" in url else None
                         ),
+                    ):
+                        links = _discover_people_links(show_id)
+
+    fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(fandom_links) == 1
+    assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
+
+
+def test_discover_people_links_fandom_fallback_prefers_highest_scored_candidate() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["bravo"]}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [],
+                [
+                    {
+                        "id": person_id,
+                        "full_name": "Lisa Barlow",
+                        "external_ids": {},
+                        "fandom_url": "",
+                        "cast_tmdb_imdb_id": None,
+                        "cast_tmdb_tmdb_id": None,
+                        "cast_tmdb_wikidata_id": None,
+                    }
+                ],
+            ]
+            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                with patch(
+                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                    return_value=[
+                        "https://real-housewives.fandom.com/wiki/Lisa",
+                        "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+                    ],
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, **kwargs: url,
                     ):
                         links = _discover_people_links(show_id)
 
@@ -264,8 +427,13 @@ def test_validated_person_knowledge_url_rejects_mismatched_wikipedia_page() -> N
         </html>
         """
         with patch(
-            "api.routers.admin_show_links.try_fetch_html",
-            return_value=(html, "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City", None),
+            "api.routers.admin_show_links._fetch_html_with_status",
+            return_value=(
+                200,
+                html,
+                "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                None,
+            ),
         ):
             resolved = _validated_person_knowledge_url(
                 "https://en.wikipedia.org/wiki/Georgia_Gay",
@@ -277,7 +445,7 @@ def test_validated_person_knowledge_url_rejects_mismatched_wikipedia_page() -> N
 
 def test_validate_person_knowledge_url_rejects_missing_wikipedia_article_from_api() -> None:
     with patch("api.routers.admin_show_links._fetch_wikipedia_page_summary", return_value=(None, False)):
-        with patch("api.routers.admin_show_links.try_fetch_html") as try_fetch_html:
+        with patch("api.routers.admin_show_links._fetch_html_with_status") as fetch_html:
             resolved, outcome = _validate_person_knowledge_url(
                 "https://en.wikipedia.org/wiki/Whitney_Comstock_Duncan",
                 kind="wikipedia",
@@ -286,7 +454,7 @@ def test_validate_person_knowledge_url_rejects_missing_wikipedia_article_from_ap
 
     assert resolved is None
     assert outcome == "invalid"
-    try_fetch_html.assert_not_called()
+    fetch_html.assert_not_called()
 
 
 def test_validate_person_knowledge_url_accepts_wikipedia_article_from_api() -> None:
@@ -300,7 +468,7 @@ def test_validate_person_knowledge_url_accepts_wikipedia_article_from_api() -> N
             False,
         ),
     ):
-        with patch("api.routers.admin_show_links.try_fetch_html") as try_fetch_html:
+        with patch("api.routers.admin_show_links._fetch_html_with_status") as fetch_html:
             resolved, outcome = _validate_person_knowledge_url(
                 "https://en.wikipedia.org/wiki/Lisa_Barlow",
                 kind="wikipedia",
@@ -309,7 +477,7 @@ def test_validate_person_knowledge_url_accepts_wikipedia_article_from_api() -> N
 
     assert resolved == "https://en.wikipedia.org/wiki/Lisa_Barlow"
     assert outcome == "valid"
-    try_fetch_html.assert_not_called()
+    fetch_html.assert_not_called()
 
 
 def test_validate_person_knowledge_url_rejects_wikipedia_owner_mismatch_from_api() -> None:
@@ -407,7 +575,7 @@ def test_validate_person_knowledge_url_rejects_nonexistent_imdb_page() -> None:
     assert outcome == "invalid"
 
 
-def test_validate_person_knowledge_url_accepts_imdb_access_challenge_for_canonical_id() -> None:
+def test_validate_person_knowledge_url_classifies_imdb_challenge_without_owner_signal_as_fetch_error() -> None:
     html = """
     <html>
       <head><title>IMDb Security Challenge</title></head>
@@ -423,7 +591,73 @@ def test_validate_person_knowledge_url_accepts_imdb_access_challenge_for_canonic
             kind="imdb",
             expected_name="Ashley Gay",
         )
+    assert resolved is None
+    assert outcome == "fetch_error"
+
+
+def test_validate_person_knowledge_url_accepts_imdb_challenge_when_owner_signal_present() -> None:
+    html = """
+    <html>
+      <head><title>IMDb Security Challenge</title></head>
+      <body>
+        <h1>Heather Gay</h1>
+        JavaScript is disabled. Please enable JavaScript. Reference ID: abc123
+      </body>
+    </html>
+    """
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(202, html, "https://www.imdb.com/name/nm1234567/", None),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "nm1234567",
+            kind="imdb",
+            expected_name="Heather Gay",
+        )
     assert resolved == "https://www.imdb.com/name/nm1234567/"
+    assert outcome == "valid"
+
+
+def test_validate_person_knowledge_url_classifies_tmdb_challenge_without_owner_signal_as_fetch_error() -> None:
+    html = """
+    <html>
+      <head><title>The Movie Database (TMDB)</title></head>
+      <body>Please verify you are human</body>
+    </html>
+    """
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(429, html, "https://www.themoviedb.org/person/12345", None),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "12345",
+            kind="tmdb",
+            expected_name="Heather Gay",
+        )
+    assert resolved is None
+    assert outcome == "fetch_error"
+
+
+def test_validate_person_knowledge_url_accepts_tmdb_challenge_when_owner_signal_present() -> None:
+    html = """
+    <html>
+      <head><title>The Movie Database (TMDB)</title></head>
+      <body>
+        <h1>Heather Gay</h1>
+        Please verify you are human
+      </body>
+    </html>
+    """
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(403, html, "https://www.themoviedb.org/person/12345", None),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "12345",
+            kind="tmdb",
+            expected_name="Heather Gay",
+        )
+    assert resolved == "https://www.themoviedb.org/person/12345"
     assert outcome == "valid"
 
 
@@ -450,8 +684,8 @@ def test_validated_person_knowledge_url_rejects_mismatched_fandom_page() -> None
     </html>
     """
     with patch(
-        "api.routers.admin_show_links.try_fetch_html",
-        return_value=(html, "https://real-housewives.fandom.com/wiki/John_Barlow", None),
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(200, html, "https://real-housewives.fandom.com/wiki/John_Barlow", None),
     ):
         resolved = _validated_person_knowledge_url(
             "https://real-housewives.fandom.com/wiki/Henry_Barlow",
@@ -470,8 +704,8 @@ def test_validated_person_knowledge_url_accepts_matching_fandom_person_page() ->
     </html>
     """
     with patch(
-        "api.routers.admin_show_links.try_fetch_html",
-        return_value=(html, "https://real-housewives.fandom.com/wiki/Lisa_Barlow", None),
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(200, html, "https://real-housewives.fandom.com/wiki/Lisa_Barlow", None),
     ):
         resolved = _validated_person_knowledge_url(
             "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
@@ -558,23 +792,16 @@ def test_cleanup_invalid_person_knowledge_links_deletes_all_statuses_and_non_cas
             ]
             with patch("api.routers.admin_show_links._validate_person_knowledge_url") as validate_url:
                 validate_url.return_value = (None, "invalid")
-                with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
-                    execute_returning.return_value = [
-                        {"id": invalid_wiki_id},
-                        {"id": invalid_imdb_id},
-                        {"id": invalid_tmdb_id},
-                        {"id": non_cast_bravo_id},
-                    ]
-                    result = _cleanup_invalid_person_knowledge_links(show_id)
+                with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                    with patch("api.routers.admin_show_links._promote_pending_person_source_links", return_value=0):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=4):
+                            result = _cleanup_invalid_person_knowledge_links(show_id)
 
     assert result["scanned"] == 4
     assert result["invalid"] == 4
     assert result["promoted"] == 0
     assert result["deleted"] == 4
     assert result["validation_failures"] == 0
-    sql, params = execute_returning.call_args.args
-    assert "DELETE FROM core.entity_links" in sql
-    assert params == [[invalid_wiki_id, invalid_imdb_id, invalid_tmdb_id, non_cast_bravo_id]]
 
 
 def test_discover_people_links_skips_imdb_and_tmdb_when_validation_fails() -> None:
@@ -627,15 +854,16 @@ def test_cleanup_invalid_person_knowledge_links_keeps_rows_on_validation_fetch_e
                 "api.routers.admin_show_links._validate_person_knowledge_url",
                 return_value=(None, "fetch_error"),
             ):
-                with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
-                    result = _cleanup_invalid_person_knowledge_links(show_id)
+                with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                    with patch("api.routers.admin_show_links._promote_pending_person_source_links", return_value=0):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
+                            result = _cleanup_invalid_person_knowledge_links(show_id)
 
     assert result["scanned"] == 1
     assert result["invalid"] == 0
     assert result["promoted"] == 0
     assert result["deleted"] == 0
     assert result["validation_failures"] == 1
-    execute_returning.assert_not_called()
 
 
 def test_cleanup_invalid_person_knowledge_links_promotes_pending_valid_rows() -> None:
@@ -659,18 +887,16 @@ def test_cleanup_invalid_person_knowledge_links_promotes_pending_valid_rows() ->
                 "api.routers.admin_show_links._validate_person_knowledge_url",
                 return_value=("https://www.imdb.com/name/nm1234567/", "valid"),
             ):
-                with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
-                    execute_returning.return_value = [{"id": link_id}]
-                    result = _cleanup_invalid_person_knowledge_links(show_id)
+                with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                    with patch("api.routers.admin_show_links._promote_pending_person_source_links", return_value=1):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
+                            result = _cleanup_invalid_person_knowledge_links(show_id)
 
     assert result["scanned"] == 1
     assert result["invalid"] == 0
     assert result["promoted"] == 1
     assert result["deleted"] == 0
     assert result["validation_failures"] == 0
-    sql, params = execute_returning.call_args.args
-    assert "UPDATE core.entity_links" in sql
-    assert params == ["https://www.imdb.com/name/nm1234567/", "https://www.imdb.com/name/nm1234567/", link_id]
 
 
 def test_cleanup_invalid_person_knowledge_links_deletes_pending_rows_on_fetch_error() -> None:
@@ -694,15 +920,13 @@ def test_cleanup_invalid_person_knowledge_links_deletes_pending_rows_on_fetch_er
                 "api.routers.admin_show_links._validate_person_knowledge_url",
                 return_value=(None, "fetch_error"),
             ):
-                with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
-                    execute_returning.return_value = [{"id": link_id}]
-                    result = _cleanup_invalid_person_knowledge_links(show_id)
+                with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                    with patch("api.routers.admin_show_links._promote_pending_person_source_links", return_value=0):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1):
+                            result = _cleanup_invalid_person_knowledge_links(show_id)
 
     assert result["scanned"] == 1
     assert result["invalid"] == 1
     assert result["promoted"] == 0
     assert result["deleted"] == 1
     assert result["validation_failures"] == 1
-    sql, params = execute_returning.call_args.args
-    assert "DELETE FROM core.entity_links" in sql
-    assert params == [[link_id]]

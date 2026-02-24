@@ -27,6 +27,7 @@ from trr_backend.repositories.social_season_analytics import (
     _youtube_title_is_cross_show_excluded,
     _youtube_video_matches_show_terms,
     get_analytics,
+    get_comments_coverage,
     get_post_comments,
     get_targets,
     sentiment_for_text,
@@ -392,9 +393,9 @@ def test_rows_for_platform_twitter_bravo_uses_parent_post_scoping(monkeypatch) -
     assert "child.reply_to_tweet_id = parent.tweet_id" in sql
     assert "and t.is_reply = false" in sql
     assert "and t.is_reply = true" in sql
-    assert "lower(coalesce(nullif(p.username, ''), p.source_account, '')) = any(%s)" in sql
-    assert "lower(coalesce(nullif(t.username, ''), t.source_account, '')) = any(%s)" in sql
-    assert "lower(coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '')) = any(%s)" in sql
+    assert "ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)" in sql
+    assert "ltrim(lower(coalesce(nullif(t.username, ''), nullif(t.source_account, ''), '')), '@') = any(%s)" in sql
+    assert "ltrim(lower(coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '')), '@') = any(%s)" in sql
     assert "t.tweet_id in (select tweet_id from legacy_thread_replies)" in sql
     assert "and t.created_at >= %s" in sql
     assert "and t.created_at <= %s" in sql
@@ -990,6 +991,146 @@ def test_get_analytics_additive_quality_flags_schedule_and_benchmark(monkeypatch
     assert "benchmark" in payload
 
 
+def test_get_comments_coverage_aggregates_scoped_platform_totals(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _sid: context)
+    monkeypatch.setattr(
+        social_repo,
+        "_target_accounts_by_platform",
+        lambda *_args, **_kwargs: {"instagram": {"bravotv"}, "twitter": {"bravotv"}},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_comments_coverage_for_platform",
+        lambda _season_id, *, platform, **_kwargs: (
+            {
+                "posts_scanned": 4,
+                "stale_posts_count": 1,
+                "saved_comments": 8,
+                "reported_comments": 10,
+            }
+            if platform == "instagram"
+            else {
+                "posts_scanned": 3,
+                "stale_posts_count": 0,
+                "saved_comments": 5,
+                "reported_comments": 3,
+            }
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_now_utc", lambda: datetime(2026, 2, 24, 12, 0, tzinfo=UTC))
+
+    payload = get_comments_coverage(
+        "season-1",
+        platforms=["instagram", "twitter"],
+        timezone="America/New_York",
+        source_scope="bravo",
+        date_start=datetime(2026, 2, 1, 0, 0, tzinfo=UTC),
+        date_end=datetime(2026, 2, 20, 0, 0, tzinfo=UTC),
+    )
+
+    assert payload["total_saved_comments"] == 13
+    assert payload["total_reported_comments"] == 13
+    assert payload["up_to_date"] is True
+    assert payload["stale_posts_count"] == 1
+    assert payload["posts_scanned"] == 7
+    assert payload["by_platform"]["instagram"]["up_to_date"] is False
+    assert payload["by_platform"]["twitter"]["up_to_date"] is True
+
+
+def test_get_comments_coverage_uses_week_zero_window_when_dates_omitted(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    week_zero_start = datetime(2026, 1, 10, 20, 0, tzinfo=ZoneInfo("America/New_York"))
+    now_utc = datetime(2026, 2, 24, 12, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _sid: context)
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_week_windows",
+        lambda *_args, **_kwargs: (
+            [WeekWindow(0, week_zero_start, week_zero_start + timedelta(days=7))],
+            week_zero_start,
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_now_utc", lambda: now_utc)
+    monkeypatch.setattr(
+        social_repo,
+        "_target_accounts_by_platform",
+        lambda *_args, **_kwargs: {"instagram": {"bravotv"}},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_comments_coverage_for_platform",
+        lambda *_args, **_kwargs: {
+            "posts_scanned": 0,
+            "stale_posts_count": 0,
+            "saved_comments": 0,
+            "reported_comments": 0,
+        },
+    )
+
+    payload = get_comments_coverage(
+        "season-1",
+        platforms=["instagram"],
+        timezone="America/New_York",
+        source_scope="bravo",
+    )
+
+    assert payload["window"]["start"] == social_repo._iso(week_zero_start.astimezone(UTC))
+    assert payload["window"]["end"] == social_repo._iso(now_utc)
+    assert payload["evaluated_at"] == social_repo._iso(now_utc)
+
+
+def test_comments_coverage_twitter_recursive_filter_uses_reply_aliases(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_one(query: str, params=None):
+        captured["query"] = query
+        captured["params"] = params
+        return {
+            "posts_scanned": 1,
+            "stale_posts_count": 0,
+            "saved_comments": 0,
+            "reported_comments": 0,
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(
+        social_repo,
+        "_comment_lifecycle_supported",
+        lambda table: table == "twitter_tweets",
+    )
+
+    social_repo._comments_coverage_for_platform(
+        "season-1",
+        platform="twitter",
+        start_dt=datetime(2026, 2, 1, tzinfo=UTC),
+        end_dt=datetime(2026, 2, 2, tzinfo=UTC),
+        source_scope="bravo",
+        target_accounts_by_platform={"twitter": {"bravotv"}},
+    )
+
+    normalized = " ".join(str(captured.get("query") or "").split())
+    assert (
+        "where r.season_id = %s and r.is_reply = true and r.is_missing = false "
+        "and r.reply_to_tweet_id in"
+    ) in normalized
+    assert "where child.season_id = %s and child.is_reply = true and child.is_missing = false" in normalized
+    assert "and t.is_missing = false and r.reply_to_tweet_id in" not in normalized
+
+
 def test_weekly_daily_activity_indexes_by_calendar_day_not_elapsed_hours(monkeypatch) -> None:
     season_id = "season-analytics-calendar-day-index"
     context = SeasonContext(
@@ -1513,6 +1654,116 @@ def test_refresh_post_comments_youtube_reports_comment_count_sync(monkeypatch) -
         max_comments_per_post=0,
     )
     assert payload["youtube_comment_count_synced"] == 1
+    assert payload["is_complete"] is False
+    assert payload["incomplete_reason"] == "fetch_disabled"
+    assert payload["comment_fail_reasons"] == ["fetch_disabled"]
+
+
+def test_refresh_post_comments_tiktok_returns_additive_completeness_fields(monkeypatch) -> None:
+    marked_missing: list[str] = []
+    monkeypatch.setattr(
+        social_repo,
+        "get_season_context",
+        lambda _season_id: SeasonContext(
+            season_id="season-1",
+            show_id="show-1",
+            show_name="Test Show",
+            season_number=6,
+            anchor_date=date(2025, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {"id": "tt-db-1", "account": "bravotv"},
+    )
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_count_stored_comments", lambda *_args, **_kwargs: {"tt-db-1": 0})
+    monkeypatch.setattr(
+        social_repo,
+        "_mark_missing_comments_for_anchor",
+        lambda **kwargs: marked_missing.append(str(kwargs.get("anchor_id"))) or 0,
+    )
+
+    class _FakeTikTokScraper:
+        comments_auth_failed = False
+        last_comment_fetch_reason = ""
+        _last_api_fail_reason = ""
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def fetch_comments(self, *args, **kwargs):
+            del args, kwargs
+            self.last_comment_fetch_reason = "api_status_fail"
+            self._last_api_fail_reason = "api_status_fail"
+            return []
+
+    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FakeTikTokScraper)
+
+    payload = social_repo.refresh_post_comments(
+        "season-1",
+        platform="tiktok",
+        source_id="777",
+        max_comments_per_post=25,
+        fetch_replies=True,
+    )
+
+    assert payload["fetch_failed"] is False
+    assert payload["is_complete"] is False
+    assert payload["incomplete_reason"] == "api_status_fail"
+    assert payload["comment_fail_reasons"] == ["api_status_fail"]
+    assert payload["comments_marked_missing"] == 0
+    assert marked_missing == []
+
+
+def test_refresh_post_comments_twitter_zero_limit_sets_fetch_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "get_season_context",
+        lambda _season_id: SeasonContext(
+            season_id="season-1",
+            show_id="show-1",
+            show_name="Test Show",
+            season_number=6,
+            anchor_date=date(2025, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {"tweet_id": "123", "account": "bravotv"},
+    )
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_count_stored_replies", lambda *_args, **_kwargs: {"123": 2})
+    monkeypatch.setattr(social_repo, "_load_twitter_auth", lambda: ({}, "bearer"))
+    monkeypatch.setattr(social_repo, "_load_twikit_credentials", lambda: {})
+
+    class _FakeTwitterScraper:
+        comments_auth_failed = False
+        last_reply_fetch_reason = ""
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def fetch_tweet_replies(self, *args, **kwargs):
+            raise AssertionError("fetch_tweet_replies should not be called when max_comments_per_post=0")
+
+    monkeypatch.setattr("trr_backend.socials.twitter.TwitterScraper", _FakeTwitterScraper)
+
+    payload = social_repo.refresh_post_comments(
+        "season-1",
+        platform="twitter",
+        source_id="123",
+        max_comments_per_post=0,
+        fetch_replies=True,
+    )
+
+    assert payload["comments_fetched"] == 0
+    assert payload["fetch_failed"] is False
+    assert payload["is_complete"] is False
+    assert payload["incomplete_reason"] == "fetch_disabled"
+    assert payload["comment_fail_reasons"] == ["fetch_disabled"]
 
 
 def test_backfill_youtube_comment_counts_for_season_scopes_rows(monkeypatch) -> None:
@@ -2686,6 +2937,79 @@ def test_mirror_instagram_media_to_s3_enforces_asset_size_cap(monkeypatch) -> No
     assert status == "failed"
     assert error and "asset_too_large" in error
     assert uploads_seen == []
+
+
+def test_requeue_media_mirror_jobs_supports_non_instagram_platforms(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    enqueue_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: context)
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all",
+        lambda _sql, _params: [
+            {
+                "id": "tt-db-1",
+                "source_id": "777",
+                "account": "bravotv",
+                "posted_at": datetime(2026, 2, 22, tzinfo=UTC),
+                "thumbnail_url": "https://cdn.test/source-thumb.jpg",
+                "media_urls": ["https://cdn.test/source-vid.mp4"],
+                "hosted_thumbnail_url": "",
+                "hosted_media_urls": [],
+                "media_mirror_status": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_week_windows",
+        lambda *_args, **_kwargs: (
+            [
+                WeekWindow(
+                    week_index=1,
+                    start_local=datetime(2026, 2, 20, tzinfo=UTC),
+                    end_local=datetime(2026, 2, 27, tzinfo=UTC),
+                )
+            ],
+            datetime(2026, 2, 20, tzinfo=UTC),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_week_for_timestamp",
+        lambda *_args, **_kwargs: WeekWindow(
+            week_index=1,
+            start_local=datetime(2026, 2, 20, tzinfo=UTC),
+            end_local=datetime(2026, 2, 27, tzinfo=UTC),
+        ),
+    )
+
+    def _fake_enqueue(*_args, **kwargs):
+        enqueue_calls.append(dict(kwargs))
+        return "job-1"
+
+    monkeypatch.setattr(social_repo, "_enqueue_platform_media_mirror_job", _fake_enqueue)
+
+    payload = social_repo.requeue_media_mirror_jobs(
+        "season-1",
+        platform="tiktok",
+        source_scope="bravo",
+        limit=100,
+    )
+
+    assert payload["platform"] == "tiktok"
+    assert payload["queued_jobs"] == 1
+    assert payload["failed"] == 0
+    assert len(enqueue_calls) == 1
+    assert enqueue_calls[0]["platform"] == "tiktok"
 
 
 def test_week_detail_instagram_includes_media_mirror_diagnostics(monkeypatch) -> None:

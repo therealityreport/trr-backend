@@ -189,6 +189,32 @@ class TwitterScraper:
         self._detail_hash: str | None = None
         self._last_graphql_status_code: int | None = None
         self.last_retrieval_meta: dict[str, Any] = {}
+        self.last_reply_fetch_reason: str | None = None
+        self.comments_auth_failed = False
+
+    @staticmethod
+    def _is_auth_related_failure(reason: str | None) -> bool:
+        value = str(reason or "").strip().lower()
+        if not value:
+            return False
+        markers = (
+            "auth",
+            "login",
+            "challenge",
+            "forbidden",
+            "unauthorized",
+            "http_401",
+            "http_403",
+        )
+        return any(marker in value for marker in markers)
+
+    def _set_reply_failure_reason(self, reason: str | None) -> None:
+        normalized = str(reason or "").strip()
+        if not normalized:
+            return
+        self.last_reply_fetch_reason = normalized
+        if self._is_auth_related_failure(normalized):
+            self.comments_auth_failed = True
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -765,6 +791,8 @@ class TwitterScraper:
         import json
         import urllib.parse
 
+        self.last_reply_fetch_reason = None
+        self.comments_auth_failed = False
         self._ensure_auth()
         self._rate_limit(delay)
 
@@ -814,8 +842,18 @@ class TwitterScraper:
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code is not None:
+                self._set_reply_failure_reason(f"http_{status_code}")
+            else:
+                self._set_reply_failure_reason("request_error")
             logger.error(f"Tweet detail request failed: {e}")
             return []
+        if not isinstance(data, dict):
+            self._set_reply_failure_reason("parse_error")
+            return []
+        if data.get("errors"):
+            self._set_reply_failure_reason("api_errors")
 
         # Parse replies from response
         replies = []

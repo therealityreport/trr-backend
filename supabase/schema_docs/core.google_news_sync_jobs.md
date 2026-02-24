@@ -17,6 +17,7 @@
 | started_at | timestamp with time zone | YES |  | NO | NEVER |
 | finished_at | timestamp with time zone | YES |  | NO | NEVER |
 | updated_at | timestamp with time zone | NO | now() | NO | NEVER |
+| heartbeat_at | timestamp with time zone | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -35,6 +36,7 @@ id
 - google_news_sync_jobs_pkey (unique): id
 - idx_google_news_sync_jobs_show_created (non-unique): show_id, created_at DESC
 - idx_google_news_sync_jobs_status (non-unique): status, updated_at DESC
+- idx_google_news_sync_jobs_status_heartbeat (non-unique): status, COALESCE(heartbeat_at, updated_at) DESC
 
 ## RLS Enabled
 
@@ -56,6 +58,7 @@ false
   "created_at": "1970-01-01T00:00:00Z",
   "started_at": "1970-01-01T00:00:00Z",
   "finished_at": "1970-01-01T00:00:00Z",
-  "updated_at": "1970-01-01T00:00:00Z"
+  "updated_at": "1970-01-01T00:00:00Z",
+  "heartbeat_at": "1970-01-01T00:00:00Z"
 }
 ```

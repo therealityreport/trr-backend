@@ -36,6 +36,17 @@ def _env_truthy(name: str) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
 def _is_local_or_dev_runtime() -> bool:
     runtime_markers = [
         os.getenv("APP_ENV"),
@@ -934,7 +945,8 @@ async def ingest_season_social(
             def _run_sync() -> None:
                 try:
                     if payload.ingest_mode == "comments_only":
-                        worker_count = min(4, max(1, int(run_payload.get("queued_or_started_jobs") or 1)))
+                        max_workers = _env_int("SOCIAL_INLINE_COMMENTS_WORKERS", 1, minimum=1, maximum=4)
+                        worker_count = min(max_workers, max(1, int(run_payload.get("queued_or_started_jobs") or 1)))
                         with ThreadPoolExecutor(max_workers=worker_count) as pool:
                             futures = [
                                 pool.submit(
@@ -1231,6 +1243,38 @@ async def get_season_analytics_week_detail(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/seasons/{season_id}/analytics/comments-coverage")
+async def get_season_comments_coverage(
+    season_id: UUID,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    timezone: str = Query(default="America/New_York"),
+    platforms: str | None = Query(default=None, description="Comma-separated platform list"),
+    date_start: datetime | None = Query(default=None),
+    date_end: datetime | None = Query(default=None),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import get_comments_coverage
+
+    parsed_platforms = None
+    if platforms and platforms.strip():
+        parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
+
+    try:
+        return get_comments_coverage(
+            str(season_id),
+            platforms=parsed_platforms,
+            timezone=timezone,
+            source_scope=source_scope,
+            date_start=date_start,
+            date_end=date_end,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to compute comments coverage: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/seasons/{season_id}/analytics/posts/{platform}/{source_id}")
 async def get_post_comments(
     season_id: UUID,
@@ -1316,6 +1360,38 @@ async def requeue_instagram_mirror_jobs(
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Failed to requeue instagram media mirror jobs: season=%s source_scope=%s",
+            season_id,
+            source_scope,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/seasons/{season_id}/{platform}/mirror/requeue")
+async def requeue_platform_mirror_jobs(
+    season_id: UUID,
+    platform: str,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    failed_only: bool = Query(default=False),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import requeue_media_mirror_jobs
+
+    normalized_platform = (platform or "").strip().lower()
+    try:
+        return requeue_media_mirror_jobs(
+            str(season_id),
+            platform=normalized_platform,
+            source_scope=source_scope,
+            limit=limit,
+            failed_only=failed_only,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to requeue %s media mirror jobs: season=%s source_scope=%s",
+            normalized_platform,
             season_id,
             source_scope,
         )

@@ -126,6 +126,10 @@ def _normalize_fandom_community_domain(value: str | None) -> str | None:
     return host
 
 
+def normalize_fandom_community_domain(value: str | None) -> str | None:
+    return _normalize_fandom_community_domain(value)
+
+
 @lru_cache(maxsize=16)
 def _load_fandom_community_allowlist_from_path(path: str) -> tuple[str, ...]:
     allowlist_path = Path(path)
@@ -142,9 +146,52 @@ def _load_fandom_community_allowlist_from_path(path: str) -> tuple[str, ...]:
     return tuple(domains)
 
 
-def load_fandom_community_allowlist(path: str | None = None) -> tuple[str, ...]:
+@lru_cache(maxsize=1)
+def _load_fandom_community_allowlist_from_db() -> tuple[str, ...]:
+    try:
+        from trr_backend.db import pg
+    except Exception:  # noqa: BLE001
+        return ()
+
+    try:
+        rows = pg.fetch_all(
+            """
+            SELECT domain
+            FROM core.fandom_community_allowlist
+            WHERE is_active = true
+            ORDER BY domain
+            """
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc).lower()
+        if "fandom_community_allowlist" in message and ("does not exist" in message or "undefined table" in message):
+            return ()
+        return ()
+
+    domains: list[str] = []
+    for row in rows:
+        normalized = _normalize_fandom_community_domain(str(row.get("domain") or ""))
+        if normalized and normalized not in domains:
+            domains.append(normalized)
+    return tuple(domains)
+
+
+def refresh_fandom_community_allowlist_cache() -> None:
+    _load_fandom_community_allowlist_from_path.cache_clear()
+    _load_fandom_community_allowlist_from_db.cache_clear()
+
+
+def load_fandom_community_allowlist_with_source(path: str | None = None) -> tuple[tuple[str, ...], str]:
+    db_allowlist = _load_fandom_community_allowlist_from_db()
+    if db_allowlist:
+        return db_allowlist, "database"
     resolved_path = str(Path(path).resolve()) if path else str(_DEFAULT_FANDOM_ALLOWLIST_PATH.resolve())
-    return _load_fandom_community_allowlist_from_path(resolved_path)
+    return _load_fandom_community_allowlist_from_path(resolved_path), "file"
+
+
+def load_fandom_community_allowlist(path: str | None = None) -> tuple[str, ...]:
+    allowlist, _ = load_fandom_community_allowlist_with_source(path)
+    return allowlist
 
 
 def build_fandom_wiki_url_from_name(name: str, community_domain: str) -> str | None:

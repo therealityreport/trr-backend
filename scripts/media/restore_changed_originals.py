@@ -58,7 +58,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         prog="restore_changed_originals",
         description=(
             "Audit and optionally repair rows where hosted/original media integrity changed. "
-            "Default scope is IMDb only."
+            "Default scope is IMDb only. "
+            "For hosted URL availability repair (403/404), use scripts/media/repair_gallery_hosts.py."
         ),
     )
     parser.add_argument(

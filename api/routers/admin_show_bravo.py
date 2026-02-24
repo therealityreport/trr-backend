@@ -23,7 +23,11 @@ from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html
 from trr_backend.ingestion.show_cast_matrix_scraper import is_missing_fandom_page
 from trr_backend.integrations.fandom import is_allowlisted_fandom_domain, load_fandom_community_allowlist
 from trr_backend.repositories.cast_fandom import upsert_cast_fandom
-from trr_backend.scraping.bravo_parser import parse_bravo_show_bundle, probe_bravo_person_url_candidates
+from trr_backend.scraping.bravo_parser import (
+    parse_bravo_show_bundle,
+    probe_bravo_person_url_candidates,
+    resolve_page_featured_image_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,11 @@ _FANDOM_PROBE_SOURCE_VALUE = "bravo_import_commit"
 _DEFAULT_FANDOM_COMMUNITY_DOMAIN = "real-housewives.fandom.com"
 _BRAVO_CAST_ONLY_PREVIEW_WORKER_LIMIT = 3
 _BRAVO_SLOW_CANDIDATE_WARN_MS = 3500
+_BRAVO_PREVIEW_HEARTBEAT_SECONDS = 5.0
+_BRAVO_PREVIEW_SIGNATURE_VERSION = "v1"
+_BRAVO_VIDEO_THUMBNAIL_CONTEXT_SECTION = "bravo_video"
+_BRAVO_VIDEO_THUMBNAIL_CONTEXT_TYPE = "thumbnail"
+_BRAVO_VIDEO_THUMBNAIL_ASSET_NAME = "Bravo video thumbnail"
 _CAST_ANNOUNCEMENT_RE = re.compile(
     r"\b(cast|friend\s*[- ]?of|full\s*[- ]?time|housewife|joins|joined|returning|returns)\b",
     re.IGNORECASE,
@@ -95,6 +104,11 @@ class BravoCommitRequest(BaseModel):
     season_number: int | None = Field(default=None, ge=1, le=200)
     sync_cast_matrix: bool = True
     preview_result: dict[str, Any] | None = None
+    preview_signature: str | None = None
+
+
+class BravoVideoThumbnailSyncRequest(BaseModel):
+    force: bool = False
 
 
 def _to_iso_now() -> str:
@@ -678,6 +692,41 @@ def _normalize_candidate_url_set(urls: list[str]) -> set[str]:
     return normalized
 
 
+def _build_preview_signature(
+    *,
+    show_url: str,
+    cast_only: bool,
+    season_number: int | None,
+    candidate_urls: list[str],
+    fandom_candidate_urls: list[str],
+) -> str:
+    normalized_show_url = _normalize_show_url(show_url) or str(show_url or "").strip()
+    normalized_candidate_urls = sorted(_normalize_candidate_url_set(candidate_urls))
+    normalized_fandom_urls = sorted(
+        {
+            value
+            for value in (_normalize_fandom_url(raw) for raw in fandom_candidate_urls)
+            if isinstance(value, str) and value.strip()
+        }
+    )
+    payload = {
+        "v": _BRAVO_PREVIEW_SIGNATURE_VERSION,
+        "show_url": normalized_show_url,
+        "cast_only": bool(cast_only),
+        "season_number": season_number,
+        "candidate_urls": normalized_candidate_urls,
+        "fandom_candidate_urls": normalized_fandom_urls,
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _stable_show_image_candidate_id(url: str) -> str:
+    normalized = _normalize_show_url(url) or str(url or "").strip()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"bravo-show-{digest}"
+
+
 def _coerce_optional_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -776,6 +825,8 @@ def _validate_cast_only_preview_reuse_or_raise(
     season_number: int | None,
     expected_candidate_urls: list[str],
     expected_fandom_candidate_urls: list[str] | None = None,
+    expected_preview_signature: str | None = None,
+    request_preview_signature: str | None = None,
 ) -> None:
     preview_show = preview_result.get("show") if isinstance(preview_result.get("show"), dict) else {}
     preview_show_url = (
@@ -800,12 +851,9 @@ def _validate_cast_only_preview_reuse_or_raise(
             value for value in (_normalize_fandom_url(raw) for raw in expected_fandom_candidate_urls) if value
         }
         preview_fandom_urls = _extract_preview_fandom_candidate_urls(preview_result)
-        if preview_fandom_urls:
-            preview_fandom_set = {
-                value for value in (_normalize_fandom_url(raw) for raw in preview_fandom_urls) if value
-            }
-            if expected_fandom_set != preview_fandom_set:
-                raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
+        preview_fandom_set = {value for value in (_normalize_fandom_url(raw) for raw in preview_fandom_urls) if value}
+        if expected_fandom_set != preview_fandom_set:
+            raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
 
     preview_season_number = _coerce_optional_int(preview_result.get("season_filter"))
     if preview_season_number != season_number:
@@ -813,6 +861,16 @@ def _validate_cast_only_preview_reuse_or_raise(
 
     preview_cast_only = preview_result.get("cast_only")
     if preview_cast_only is not None and bool(preview_cast_only) is False:
+        raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
+
+    preview_signature = str(preview_result.get("preview_signature") or "").strip()
+    if expected_preview_signature and preview_signature and preview_signature != expected_preview_signature:
+        raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
+    if (
+        request_preview_signature
+        and expected_preview_signature
+        and request_preview_signature != expected_preview_signature
+    ):
         raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
 
 
@@ -1278,6 +1336,16 @@ def _merge_person_tags(
     return out
 
 
+def _is_non_empty_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return len(value) > 0
+    return True
+
+
 def _dedupe_items(
     items: list[dict[str, Any]],
     key: str,
@@ -1305,6 +1373,24 @@ def _dedupe_items(
                 existing.get("person_tags") if isinstance(existing.get("person_tags"), list) else [],
                 item.get("person_tags") if isinstance(item.get("person_tags"), list) else [],
             )
+        for field in (
+            "title",
+            "runtime",
+            "kicker",
+            "headline",
+            "season_number",
+            "published_at",
+            "image_url",
+            "original_image_url",
+            "hosted_image_url",
+            "media_asset_id",
+            "thumbnail_sync_status",
+            "thumbnail_sync_error",
+        ):
+            if _is_non_empty_value(existing.get(field)):
+                continue
+            if _is_non_empty_value(item.get(field)):
+                existing[field] = item.get(field)
     return out
 
 
@@ -2010,6 +2096,155 @@ def _fetch_person_snapshots(db: SupabaseAdminClient, person_ids: list[str]) -> l
     return response.data or []
 
 
+def _video_item_needs_thumbnail_sync(item: dict[str, Any]) -> bool:
+    hosted_image_url = str(item.get("hosted_image_url") or "").strip()
+    image_url = str(item.get("image_url") or "").strip()
+    status = str(item.get("thumbnail_sync_status") or "").strip().lower()
+    if hosted_image_url:
+        return False
+    if status == "synced" and image_url:
+        return False
+    return True
+
+
+def _sync_bravo_video_thumbnails(
+    *,
+    db: SupabaseAdminClient,
+    admin_user: AdminUser,
+    show_id: str,
+    normalized: dict[str, Any],
+    force: bool = False,
+    refresh_from_clip_metadata: bool = True,
+) -> dict[str, Any]:
+    from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
+
+    attempted = 0
+    imported = 0
+    skipped = 0
+    synced = 0
+    failed = 0
+    missing_source = 0
+    refreshed_from_clip = 0
+    errors: list[str] = []
+    candidate_counter = 0
+
+    for list_key in ("videos_show", "videos_person"):
+        video_items = normalized.get(list_key) if isinstance(normalized.get(list_key), list) else []
+        for item in video_items:
+            if not isinstance(item, dict):
+                continue
+            if not force and not _video_item_needs_thumbnail_sync(item):
+                continue
+
+            clip_url = str(item.get("clip_url") or "").strip()
+            image_url = str(item.get("image_url") or "").strip()
+            original_image_url = str(item.get("original_image_url") or "").strip()
+            previous_image_url = image_url
+
+            if refresh_from_clip_metadata and clip_url:
+                try:
+                    featured_image_url = resolve_page_featured_image_url(clip_url)
+                except Exception:  # noqa: BLE001
+                    featured_image_url = None
+                if isinstance(featured_image_url, str) and featured_image_url.strip():
+                    featured_image_url = featured_image_url.strip()
+                    if featured_image_url != image_url:
+                        if image_url and not original_image_url:
+                            original_image_url = image_url
+                        image_url = featured_image_url
+                        refreshed_from_clip += 1
+
+            source_image_url = image_url or original_image_url
+            if source_image_url and not original_image_url:
+                original_image_url = source_image_url
+            item["original_image_url"] = original_image_url or None
+
+            if not source_image_url or not clip_url:
+                item["thumbnail_sync_status"] = "missing_source"
+                item["thumbnail_sync_error"] = (
+                    "Missing source thumbnail URL for Bravo video mirroring"
+                    if not source_image_url
+                    else "Missing clip URL for Bravo video mirroring"
+                )
+                missing_source += 1
+                continue
+
+            attempted += 1
+            candidate_counter += 1
+
+            try:
+                import_request = ImportRequest(
+                    entity_type="show",
+                    show_id=UUID(show_id),
+                    source_url=clip_url,
+                    images=[
+                        ImportImageItem(
+                            candidate_id=f"bravo-video-thumbnail-{candidate_counter}",
+                            url=source_image_url,
+                            caption=str(item.get("title") or "").strip()[:160] or _BRAVO_VIDEO_THUMBNAIL_ASSET_NAME,
+                            kind="promo",
+                            context_section=_BRAVO_VIDEO_THUMBNAIL_CONTEXT_SECTION,
+                            context_type=_BRAVO_VIDEO_THUMBNAIL_CONTEXT_TYPE,
+                            source_logo="bravo",
+                            asset_name=_BRAVO_VIDEO_THUMBNAIL_ASSET_NAME,
+                        )
+                    ],
+                )
+                import_result = import_images(import_request, db, admin_user)
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                error_message = f"{clip_url}: {exc}"
+                errors.append(error_message)
+                item["thumbnail_sync_status"] = "failed"
+                item["thumbnail_sync_error"] = str(exc)
+                item["image_url"] = image_url or previous_image_url or source_image_url
+                continue
+
+            imported += int(import_result.imported)
+            skipped += int(import_result.skipped_duplicates)
+            if import_result.errors:
+                errors.extend([f"{clip_url}: {str(err)}" for err in import_result.errors])
+
+            first_asset = import_result.assets[0] if import_result.assets else None
+            if isinstance(first_asset, dict):
+                hosted_url = str(first_asset.get("hosted_url") or "").strip()
+                media_asset_id = str(first_asset.get("id") or "").strip() or None
+            else:
+                hosted_url = str(getattr(first_asset, "hosted_url", "") or "").strip()
+                media_asset_id = str(getattr(first_asset, "id", "") or "").strip() or None
+
+            if not hosted_url:
+                failed += 1
+                error_message = "; ".join([str(err) for err in import_result.errors]) or (
+                    "Media import returned no hosted URL"
+                )
+                item["thumbnail_sync_status"] = "failed"
+                item["thumbnail_sync_error"] = error_message
+                item["image_url"] = image_url or previous_image_url or source_image_url
+                continue
+
+            synced += 1
+            item["hosted_image_url"] = hosted_url
+            item["image_url"] = hosted_url
+            item["media_asset_id"] = media_asset_id
+            item["thumbnail_sync_status"] = "synced"
+            item["thumbnail_sync_error"] = None
+            if not item.get("original_image_url"):
+                item["original_image_url"] = source_image_url
+
+    return {
+        "attempted": attempted,
+        "synced": synced,
+        "failed": failed,
+        "missing_source": missing_source,
+        "imported": imported,
+        "skipped": skipped,
+        "refreshed_from_clip": refreshed_from_clip,
+        "remaining": max(0, attempted - synced),
+        "errors": errors,
+    }
+
+
 def _extract_videos_from_snapshot(
     snapshot_payload: dict[str, Any],
     *,
@@ -2041,7 +2276,18 @@ def _extract_videos_from_snapshot(
                 if isinstance(person_videos, list):
                     videos_person.extend(person_videos)
 
-    return _dedupe_items([*videos_show, *videos_person], "clip_url", merge_person_tags=True)
+    deduped = _dedupe_items([*videos_show, *videos_person], "clip_url", merge_person_tags=True)
+    for item in deduped:
+        if not isinstance(item, dict):
+            continue
+        hosted_image_url = str(item.get("hosted_image_url") or "").strip()
+        current_image_url = str(item.get("image_url") or "").strip()
+        if hosted_image_url:
+            if current_image_url and not str(item.get("original_image_url") or "").strip():
+                item["original_image_url"] = current_image_url
+            item["image_url"] = hosted_image_url
+            item["thumbnail_sync_status"] = "synced"
+    return deduped
 
 
 def _extract_news_from_snapshot(
@@ -2093,6 +2339,11 @@ def _normalize_bundle_for_show(
                 "runtime": raw_video.get("runtime"),
                 "kicker": raw_video.get("kicker"),
                 "image_url": raw_video.get("image_url"),
+                "original_image_url": raw_video.get("original_image_url") or raw_video.get("image_url"),
+                "hosted_image_url": raw_video.get("hosted_image_url"),
+                "media_asset_id": raw_video.get("media_asset_id"),
+                "thumbnail_sync_status": raw_video.get("thumbnail_sync_status"),
+                "thumbnail_sync_error": raw_video.get("thumbnail_sync_error"),
                 "clip_url": clip_url,
                 "season_number": raw_video.get("season_number"),
                 "published_at": raw_video.get("published_at"),
@@ -2160,6 +2411,11 @@ def _normalize_bundle_for_show(
                     "runtime": video.get("runtime"),
                     "kicker": video.get("kicker"),
                     "image_url": video.get("image_url"),
+                    "original_image_url": video.get("original_image_url") or video.get("image_url"),
+                    "hosted_image_url": video.get("hosted_image_url"),
+                    "media_asset_id": video.get("media_asset_id"),
+                    "thumbnail_sync_status": video.get("thumbnail_sync_status"),
+                    "thumbnail_sync_error": video.get("thumbnail_sync_error"),
                     "clip_url": clip_url,
                     "season_number": video.get("season_number"),
                     "published_at": video.get("published_at"),
@@ -2301,12 +2557,12 @@ def _get_or_create_show_role_id(
     return None
 
 
-def _persist_pending_links_from_bravo_sync(
+def _persist_discovered_links_from_bravo_sync(
     db: SupabaseAdminClient,
     *,
     show_id: str,
     actor: str,
-) -> int:
+) -> dict[str, int]:
     from api.routers import admin_show_links
 
     discovered = admin_show_links._discover_show_links(show_id)
@@ -2314,16 +2570,20 @@ def _persist_pending_links_from_bravo_sync(
     discovered.extend(admin_show_links._discover_people_links(show_id))
 
     upserted = 0
+    skipped_invalid_url = 0
+    skipped_person_source_non_approved = 0
     for row in discovered:
         url = str(row.get("url") or "").strip()
         parsed = urlparse(url)
         if not url or not parsed.scheme.startswith("http"):
+            skipped_invalid_url += 1
             continue
         entity_type = str(row.get("entity_type") or "show").strip().lower()
-        link_kind = str(row.get("link_kind") or "other").strip().lower()
+        link_kind = admin_show_links._normalize_link_kind(str(row.get("link_kind") or "other").strip().lower())
         row_status = str(row.get("status") or "").strip().lower()
         is_person_source = entity_type == "person" and link_kind in admin_show_links._PERSON_SOURCE_LINK_KINDS
         if is_person_source and row_status != "approved":
+            skipped_person_source_non_approved += 1
             continue
         status = (
             "approved"
@@ -2357,7 +2617,11 @@ def _persist_pending_links_from_bravo_sync(
             actor=actor,
         )
         upserted += 1
-    return upserted
+    return {
+        "upserted": upserted,
+        "skipped_invalid_url": skipped_invalid_url,
+        "skipped_person_source_non_approved": skipped_person_source_non_approved,
+    }
 
 
 def _persist_cast_role_suggestions_from_bravo_sync(
@@ -2527,6 +2791,13 @@ def preview_bravo_import(
         and str(result.get("status") or "").strip().lower() == "ok"
         and isinstance(result.get("person"), dict)
     ]
+    preview_signature = _build_preview_signature(
+        show_url=str(payload.show_url),
+        cast_only=bool(payload.cast_only),
+        season_number=payload.season_number,
+        candidate_urls=person_url_candidates,
+        fandom_candidate_urls=fandom_candidate_urls,
+    )
 
     return {
         "show": bundle.get("show") or {},
@@ -2557,6 +2828,7 @@ def preview_bravo_import(
         "show_url": str(payload.show_url),
         "cast_only": payload.cast_only,
         "season_filter": payload.season_number,
+        "preview_signature": preview_signature,
     }
 
 
@@ -2619,6 +2891,13 @@ def preview_bravo_import_stream(
         _build_cast_candidate_fandom_urls(show_cast, community_domains=fandom_domains)
     )
     max_people = max(40, len(person_url_candidates), len(fandom_candidate_urls))
+    preview_signature = _build_preview_signature(
+        show_url=str(payload.show_url),
+        cast_only=bool(payload.cast_only),
+        season_number=payload.season_number,
+        candidate_urls=person_url_candidates,
+        fandom_candidate_urls=fandom_candidate_urls,
+    )
 
     candidate_name_by_url: dict[str, str] = {}
     for candidate_url in person_url_candidates:
@@ -2657,6 +2936,7 @@ def preview_bravo_import_stream(
                     "fandom_total": len(fandom_candidate_rows),
                     "fandom_domains_used": fandom_domains,
                     "cast_only": payload.cast_only,
+                    "preview_signature": preview_signature,
                 },
             )
 
@@ -2721,7 +3001,31 @@ def preview_bravo_import_stream(
                             next_candidate_idx += 1
 
                         while pending:
-                            done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
+                            done, _ = wait(
+                                list(pending.keys()),
+                                timeout=_BRAVO_PREVIEW_HEARTBEAT_SECONDS,
+                                return_when=FIRST_COMPLETED,
+                            )
+                            if not done:
+                                current_summary = _summarize_candidate_results(person_candidate_results)
+                                current_fandom_summary = _summarize_candidate_results(fandom_candidate_results)
+                                yield _sse_event(
+                                    "heartbeat",
+                                    {
+                                        "source": "bravo",
+                                        "cast_only": payload.cast_only,
+                                        "in_flight": len(pending),
+                                        "bravo_candidates_tested": current_summary["tested"],
+                                        "bravo_candidates_valid": current_summary["valid"],
+                                        "bravo_candidates_missing": current_summary["missing"],
+                                        "bravo_candidates_errors": current_summary["errors"],
+                                        "fandom_candidates_tested": current_fandom_summary["tested"],
+                                        "fandom_candidates_valid": current_fandom_summary["valid"],
+                                        "fandom_candidates_missing": current_fandom_summary["missing"],
+                                        "fandom_candidates_errors": current_fandom_summary["errors"],
+                                    },
+                                )
+                                continue
                             for future in done:
                                 submitted_candidate_url, candidate_index, candidate_started_at = pending.pop(future)
                                 candidate_elapsed_ms = max(0, int((perf_counter() - candidate_started_at) * 1000))
@@ -3052,6 +3356,7 @@ def preview_bravo_import_stream(
                 "show_url": str(payload.show_url),
                 "cast_only": payload.cast_only,
                 "season_filter": payload.season_number,
+                "preview_signature": preview_signature,
             }
             yield _sse_event("complete", complete_payload)
         except Exception as exc:  # noqa: BLE001
@@ -3112,6 +3417,16 @@ def commit_bravo_import(
     fandom_candidate_urls, fandom_candidate_url_to_person_id, fandom_candidate_name_by_url = (
         _build_cast_candidate_fandom_urls(show_cast, community_domains=fandom_domains)
     )
+    expected_preview_signature = _build_preview_signature(
+        show_url=str(payload.show_url),
+        cast_only=bool(payload.cast_only),
+        season_number=payload.season_number,
+        candidate_urls=person_url_candidates,
+        fandom_candidate_urls=fandom_candidate_urls,
+    )
+    request_preview_signature = str(payload.preview_signature or "").strip() or None
+    if payload.cast_only and not request_preview_signature:
+        raise HTTPException(status_code=422, detail="preview_signature is required for cast-only commit")
     fandom_link_state_by_person_id = _load_fandom_link_state_by_person_id(
         db,
         show_id=show_id_str,
@@ -3125,9 +3440,14 @@ def commit_bravo_import(
             season_number=payload.season_number,
             expected_candidate_urls=person_url_candidates,
             expected_fandom_candidate_urls=fandom_candidate_urls,
+            expected_preview_signature=expected_preview_signature,
+            request_preview_signature=request_preview_signature,
         )
         bundle = _build_bundle_from_preview_result(payload.preview_result)
     else:
+        if payload.cast_only and request_preview_signature:
+            if request_preview_signature != expected_preview_signature:
+                raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
         bundle = parse_bravo_show_bundle(
             str(payload.show_url),
             include_people=True,
@@ -3217,6 +3537,14 @@ def commit_bravo_import(
         )
 
     normalized = _normalize_bundle_for_show(bundle, people_refs=people_refs)
+    video_thumbnail_sync = _sync_bravo_video_thumbnails(
+        db=db,
+        admin_user=admin_user,
+        show_id=show_id_str,
+        normalized=normalized,
+        force=False,
+        refresh_from_clip_metadata=False,
+    )
 
     show_description = (
         payload.description_override.strip()
@@ -3246,6 +3574,7 @@ def commit_bravo_import(
             "season_filter": payload.season_number,
             "fandom_domains_used": fandom_domains,
             "fandom_candidate_results": fandom_candidate_results,
+            "video_thumbnail_sync": video_thumbnail_sync,
         },
         "raw": bundle.get("raw") or bundle,
         "person_url_map": person_url_map,
@@ -3293,17 +3622,26 @@ def commit_bravo_import(
         link_state_by_person_id=fandom_link_state_by_person_id,
     )
     discovered_links = 0
+    discovered_link_skips = {
+        "invalid_url": 0,
+        "person_source_non_approved": 0,
+    }
     role_suggestion_stats = {
         "role_suggestions": 0,
         "role_assignments": 0,
         "announcement_people": 0,
     }
     if not payload.cast_only:
-        discovered_links = _persist_pending_links_from_bravo_sync(
+        discovered_link_stats = _persist_discovered_links_from_bravo_sync(
             db,
             show_id=show_id_str,
             actor=actor,
         )
+        discovered_links = int(discovered_link_stats.get("upserted") or 0)
+        discovered_link_skips = {
+            "invalid_url": int(discovered_link_stats.get("skipped_invalid_url") or 0),
+            "person_source_non_approved": int(discovered_link_stats.get("skipped_person_source_non_approved") or 0),
+        }
         role_suggestion_stats = _persist_cast_role_suggestions_from_bravo_sync(
             db,
             show_id=show_id_str,
@@ -3342,6 +3680,8 @@ def commit_bravo_import(
     fandom_fallback_images_imported = 0
     person_image_import_errors: list[str] = []
     profile_image_promoted_by_person_id: dict[str, bool] = {}
+    fandom_profile_stage_done: set[str] = set()
+    fandom_image_stage_done: set[str] = set()
 
     for person in bundle.get("people") or []:
         if not isinstance(person, dict):
@@ -3457,7 +3797,7 @@ def commit_bravo_import(
             else ""
         )
         cast_fandom_payload = result.get("cast_fandom") if isinstance(result.get("cast_fandom"), dict) else None
-        if cast_fandom_payload:
+        if cast_fandom_payload and person_id not in fandom_profile_stage_done:
             try:
                 row = dict(cast_fandom_payload)
                 row["person_id"] = person_id
@@ -3475,11 +3815,12 @@ def commit_bravo_import(
                     social_links={},
                     source="fandom",
                 )
+                fandom_profile_stage_done.add(person_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Fandom profile upsert failed for person_id=%s", person_id)
                 person_image_import_errors.append(f"{person_id}: fandom_profile_upsert_failed: {exc}")
 
-        if profile_image_promoted_by_person_id.get(person_id):
+        if profile_image_promoted_by_person_id.get(person_id) or person_id in fandom_image_stage_done:
             continue
         photos = result.get("photos") if isinstance(result.get("photos"), list) else []
         fallback_image_url = _select_fandom_profile_image_url(photos)
@@ -3508,6 +3849,7 @@ def commit_bravo_import(
                     season_number=payload.season_number,
                 )
                 profile_image_promoted_by_person_id[person_id] = True
+                fandom_image_stage_done.add(person_id)
             hosted_profile_url = fandom_import_result.get("primary_hosted_url")
             if isinstance(hosted_profile_url, str) and hosted_profile_url.strip():
                 _persist_person_profile(
@@ -3520,6 +3862,7 @@ def commit_bravo_import(
                     source="fandom",
                 )
                 profile_image_promoted_by_person_id[person_id] = True
+                fandom_image_stage_done.add(person_id)
             imported_person_images += int(fandom_import_result.get("imported") or 0)
             skipped_person_images += int(fandom_import_result.get("skipped") or 0)
             fandom_fallback_images_imported += int(fandom_import_result.get("imported") or 0)
@@ -3577,12 +3920,12 @@ def commit_bravo_import(
                 source_url=str(payload.show_url),
                 images=[
                     ImportImageItem(
-                        candidate_id=f"bravo-{index + 1}",
+                        candidate_id=_stable_show_image_candidate_id(image["url"]),
                         url=image["url"],
                         caption=f"Bravo import ({image['kind']})",
                         kind=image["kind"],
                     )
-                    for index, image in enumerate(selected_show_images)
+                    for image in selected_show_images
                 ],
             )
             import_result = import_images(import_request, db, admin_user)
@@ -3598,11 +3941,16 @@ def commit_bravo_import(
         "person_snapshots": person_snapshots,
         "cast_matrix_sync": cast_matrix_sync,
         "cast_matrix_sync_error": cast_matrix_sync_error,
+        "video_thumbnail_sync": video_thumbnail_sync,
         "counts": {
             "show_videos": len(normalized.get("videos_show") or []),
             "show_news": len(normalized.get("news_show") or []),
             "person_videos": len(normalized.get("videos_person") or []),
             "person_news": len(normalized.get("news_person") or []),
+            "video_thumbnail_attempted": int(video_thumbnail_sync.get("attempted") or 0),
+            "video_thumbnail_synced": int(video_thumbnail_sync.get("synced") or 0),
+            "video_thumbnail_failed": int(video_thumbnail_sync.get("failed") or 0),
+            "video_thumbnail_missing_source": int(video_thumbnail_sync.get("missing_source") or 0),
             "people_updated": updated_people,
             "unmatched_people": len(unmatched_people),
             "imported_show_images": imported_show_images,
@@ -3610,6 +3958,10 @@ def commit_bravo_import(
             "imported_person_images": imported_person_images,
             "skipped_person_images": skipped_person_images,
             "discovered_links": discovered_links,
+            "discovered_links_skipped_invalid_url": discovered_link_skips["invalid_url"],
+            "discovered_links_skipped_person_source_non_approved": discovered_link_skips[
+                "person_source_non_approved"
+            ],
             "role_suggestions": role_suggestion_stats.get("role_suggestions", 0),
             "role_assignments": role_suggestion_stats.get("role_assignments", 0),
             "announcement_people": role_suggestion_stats.get("announcement_people", 0),
@@ -3644,6 +3996,57 @@ def commit_bravo_import(
         "fandom_domains_used": fandom_domains,
         "image_import_errors": image_import_errors,
         "person_image_import_errors": person_image_import_errors,
+        "preview_signature": expected_preview_signature,
+    }
+
+
+@router.post("/{show_id}/bravo/videos/sync-thumbnails")
+def sync_bravo_video_thumbnails(
+    show_id: UUID,
+    payload: BravoVideoThumbnailSyncRequest,
+    db: SupabaseAdminClient = None,
+    admin_user: AdminUser = None,
+):
+    show_id_str = str(show_id)
+    if not _show_exists(db, show_id_str):
+        raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+
+    snapshot = _fetch_show_snapshot(db, show_id_str)
+    snapshot_payload = snapshot.get("payload") if isinstance(snapshot.get("payload"), dict) else {}
+    if not isinstance(snapshot_payload, dict):
+        raise HTTPException(status_code=409, detail="Bravo snapshot payload missing for this show")
+
+    normalized = snapshot_payload.get("normalized") if isinstance(snapshot_payload.get("normalized"), dict) else {}
+    if not isinstance(normalized, dict):
+        raise HTTPException(status_code=409, detail="Bravo snapshot normalized payload missing for this show")
+
+    video_thumbnail_sync = _sync_bravo_video_thumbnails(
+        db=db,
+        admin_user=admin_user,
+        show_id=show_id_str,
+        normalized=normalized,
+        force=bool(payload.force),
+        refresh_from_clip_metadata=True,
+    )
+    normalized["video_thumbnail_sync"] = {
+        **video_thumbnail_sync,
+        "forced": bool(payload.force),
+        "synced_at": _to_iso_now(),
+    }
+    snapshot_payload["normalized"] = normalized
+
+    updated_snapshot = _upsert_show_snapshot(db, show_id=show_id_str, payload=snapshot_payload)
+    pending_remaining = sum(
+        1
+        for item in _extract_videos_from_snapshot(snapshot_payload, merge_person_sources=True, db=db)
+        if isinstance(item, dict) and _video_item_needs_thumbnail_sync(item)
+    )
+
+    return {
+        "show_snapshot": updated_snapshot,
+        "video_thumbnail_sync": video_thumbnail_sync,
+        "skipped": int(video_thumbnail_sync.get("attempted") or 0) == 0,
+        "pending_remaining": pending_remaining,
     }
 
 

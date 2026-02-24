@@ -142,6 +142,10 @@ class TestSyncNetworksStreaming:
 
         def fake_links(argv):
             received["links"] = list(argv or [])
+            print("run_id=network-streaming-20260224T210000Z")
+            print("run_status=stopped")
+            print("resume_cursor_entity_type=network")
+            print("resume_cursor_entity_key=bravo")
             print("processed=30")
             print("links_enriched=18")
             print("wikidata_linked=10")
@@ -186,11 +190,22 @@ class TestSyncNetworksStreaming:
                             response = client.post(
                                 "/api/v1/admin/shows/sync-networks-streaming",
                                 headers={"Authorization": f"Bearer {token}"},
-                                json={"skip_s3": True, "force": True, "limit": 50},
+                                json={
+                                    "skip_s3": True,
+                                    "force": True,
+                                    "limit": 50,
+                                    "refresh_external_sources": True,
+                                    "batch_size": 20,
+                                    "max_runtime_sec": 1200,
+                                    "resume_run_id": "network-streaming-20260224T200000Z",
+                                },
                             )
 
         assert response.status_code == 200
         payload = response.json()
+        assert payload["run_id"] == "network-streaming-20260224T210000Z"
+        assert payload["status"] == "stopped"
+        assert payload["resume_cursor"] == {"entity_type": "network", "entity_key": "bravo"}
         assert payload["entities_synced"] == 12
         assert payload["providers_synced"] == 12
         assert payload["links_enriched"] == 18
@@ -230,6 +245,10 @@ class TestSyncNetworksStreaming:
         assert "--skip-s3" in (received["providers"] or [])
         assert "--skip-s3" in (received["links"] or [])
         assert "--skip-s3" in (received["show_logos"] or [])
+        assert "--refresh-external-sources" in (received["links"] or [])
+        assert "--batch-size" in (received["links"] or [])
+        assert "--max-runtime-sec" in (received["links"] or [])
+        assert "--resume-run-id" in (received["links"] or [])
 
     def test_truncates_unresolved_logo_list_to_cap(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
@@ -371,6 +390,7 @@ class TestSyncNetworksStreaming:
 
         assert response.status_code == 200
         payload = response.json()
+        assert payload["status"] == "failed"
         assert payload["steps"]["tmdb_show_entities"]["status"] == "failed"
         assert payload["steps"]["tmdb_show_entities"]["exit_code"] == 2
         assert payload["failures"] == 4

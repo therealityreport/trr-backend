@@ -156,6 +156,33 @@ class TikTokScraper:
         self._request_count = 0
         self.last_retrieval_meta: dict[str, Any] = {}
         self._last_api_fail_reason: str | None = None
+        self.last_comment_fetch_reason: str | None = None
+        self.comments_auth_failed = False
+
+    @staticmethod
+    def _is_auth_related_failure(reason: str | None) -> bool:
+        value = str(reason or "").strip().lower()
+        if not value:
+            return False
+        markers = (
+            "auth",
+            "login",
+            "challenge",
+            "captcha",
+            "blocked",
+            "forbidden",
+            "unauthorized",
+        )
+        return any(marker in value for marker in markers)
+
+    def _set_comment_failure_reason(self, reason: str | None) -> None:
+        normalized = str(reason or "").strip()
+        if not normalized:
+            return
+        self._last_api_fail_reason = normalized
+        self.last_comment_fetch_reason = normalized
+        if self._is_auth_related_failure(normalized):
+            self.comments_auth_failed = True
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -885,6 +912,8 @@ class TikTokScraper:
             List of TikTokComment objects with nested replies
         """
         self._last_api_fail_reason = None
+        self.last_comment_fetch_reason = None
+        self.comments_auth_failed = False
         post_url = f"https://www.tiktok.com/@{username}/video/{video_id}" if username else ""
         logger.info(f"Fetching comments for video {video_id}")
 
@@ -915,14 +944,19 @@ class TikTokScraper:
                 response.raise_for_status()
                 data = self._safe_response_json(response)
             except requests.exceptions.RequestException as e:
+                self._set_comment_failure_reason("request_error")
                 logger.error(f"Failed to fetch comments: {e}")
                 break
             if not data:
+                if self._last_api_fail_reason:
+                    self._set_comment_failure_reason(self._last_api_fail_reason)
+                else:
+                    self._set_comment_failure_reason("empty_response")
                 break
 
             status_code = int(data.get("status_code", 0) or 0)
             if status_code != 0:
-                self._last_api_fail_reason = f"comment_status_{status_code}"
+                self._set_comment_failure_reason(f"comment_status_{status_code}")
                 logger.warning(
                     "TikTok comments API returned non-zero status (video_id=%s status_code=%s status_msg=%s)",
                     video_id,
@@ -995,14 +1029,19 @@ class TikTokScraper:
                 response.raise_for_status()
                 data = self._safe_response_json(response)
             except requests.exceptions.RequestException as e:
+                self._set_comment_failure_reason("request_error")
                 logger.error(f"Failed to fetch replies for comment {comment_id}: {e}")
                 break
             if not data:
+                if self._last_api_fail_reason:
+                    self._set_comment_failure_reason(self._last_api_fail_reason)
+                else:
+                    self._set_comment_failure_reason("empty_response")
                 break
 
             status_code = int(data.get("status_code", 0) or 0)
             if status_code != 0:
-                self._last_api_fail_reason = f"reply_status_{status_code}"
+                self._set_comment_failure_reason(f"reply_status_{status_code}")
                 logger.warning(
                     "TikTok replies API returned non-zero status (comment_id=%s status_code=%s status_msg=%s)",
                     comment_id,

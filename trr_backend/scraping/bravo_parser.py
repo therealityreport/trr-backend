@@ -134,6 +134,63 @@ def _meta_content(soup: BeautifulSoup, *, property_name: str | None = None, name
     return None
 
 
+def _parse_srcset_candidates(srcset: str | None) -> list[tuple[str, float, str]]:
+    if not isinstance(srcset, str) or not srcset.strip():
+        return []
+    candidates: list[tuple[str, float, str]] = []
+    for raw_part in srcset.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        tokens = part.split()
+        if not tokens:
+            continue
+        url = tokens[0].strip()
+        descriptor = tokens[1].strip().lower() if len(tokens) > 1 else ""
+        match = re.match(r"^(\d+(?:\.\d+)?)([wx])$", descriptor)
+        if match:
+            value = float(match.group(1))
+            unit = match.group(2)
+        else:
+            value = 0.0
+            unit = ""
+        candidates.append((url, value, unit))
+    return candidates
+
+
+def _best_srcset_url(srcset: str | None) -> str | None:
+    candidates = _parse_srcset_candidates(srcset)
+    if not candidates:
+        return None
+    width_candidates = [row for row in candidates if row[2] == "w"]
+    if width_candidates:
+        return max(width_candidates, key=lambda row: row[1])[0]
+    density_candidates = [row for row in candidates if row[2] == "x"]
+    if density_candidates:
+        return max(density_candidates, key=lambda row: row[1])[0]
+    return candidates[0][0]
+
+
+def _best_image_src_from_tag(image_tag: Tag | None) -> str | None:
+    if not isinstance(image_tag, Tag):
+        return None
+    return _first_non_empty(
+        _best_srcset_url(_first_non_empty(image_tag.get("data-srcset"), image_tag.get("srcset"))),
+        _first_non_empty(image_tag.get("data-src")),
+        _first_non_empty(image_tag.get("src")),
+    )
+
+
+def _extract_page_featured_image(soup: BeautifulSoup, page_url: str) -> str | None:
+    image_url = _first_non_empty(
+        _meta_content(soup, property_name="og:image"),
+        _meta_content(soup, name="twitter:image"),
+    )
+    if not image_url:
+        return None
+    return _canonicalize_url(urljoin(page_url, image_url))
+
+
 def _fetch_html(url: str, *, timeout: float = 25.0) -> BravoFetchResult:
     response = requests.get(url, headers=_DEFAULT_HEADERS, timeout=timeout, allow_redirects=True)
     response.raise_for_status()
@@ -504,34 +561,63 @@ def _hydrate_items_published_at(
     *,
     url_key: str,
     max_lookups: int = 30,
+    image_key: str | None = None,
+    original_image_key: str | None = None,
 ) -> list[dict[str, Any]]:
-    cache: dict[str, str | None] = {}
+    cache: dict[str, tuple[str | None, str | None]] = {}
     lookups = 0
 
     for item in items:
-        if item.get("published_at"):
-            continue
+        published_at = item.get("published_at")
         raw_url = item.get(url_key)
         if not isinstance(raw_url, str) or not raw_url.strip():
             continue
         url = raw_url.strip()
 
         if url in cache:
-            item["published_at"] = cache[url]
+            cached_published_at, cached_featured_image = cache[url]
+            if not published_at:
+                item["published_at"] = cached_published_at
+            if image_key and isinstance(cached_featured_image, str) and cached_featured_image.strip():
+                current_image = str(item.get(image_key) or "").strip()
+                if (
+                    original_image_key
+                    and current_image
+                    and current_image != cached_featured_image
+                    and not str(item.get(original_image_key) or "").strip()
+                ):
+                    item[original_image_key] = current_image
+                item[image_key] = cached_featured_image
             continue
 
-        if lookups >= max_lookups:
+        if lookups >= max_lookups and published_at:
             continue
-        lookups += 1
 
-        try:
-            fetched = _fetch_html(url)
-            published_at = _extract_published_at_from_page(fetched.soup, fetched.html)
-        except requests.RequestException:
-            published_at = None
+        if lookups < max_lookups:
+            lookups += 1
+            try:
+                fetched = _fetch_html(url)
+                published_at = _extract_published_at_from_page(fetched.soup, fetched.html)
+                featured_image = _extract_page_featured_image(fetched.soup, fetched.url) if image_key else None
+            except requests.RequestException:
+                published_at = None
+                featured_image = None
+        else:
+            featured_image = None
 
-        cache[url] = published_at
-        item["published_at"] = published_at
+        cache[url] = (published_at, featured_image)
+        if not item.get("published_at"):
+            item["published_at"] = published_at
+        if image_key and isinstance(featured_image, str) and featured_image.strip():
+            current_image = str(item.get(image_key) or "").strip()
+            if (
+                original_image_key
+                and current_image
+                and current_image != featured_image
+                and not str(item.get(original_image_key) or "").strip()
+            ):
+                item[original_image_key] = current_image
+            item[image_key] = featured_image
 
     return items
 
@@ -582,10 +668,9 @@ def _collect_video_items(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
 
         image_url = None
         image_tag = card.find("img")
-        if isinstance(image_tag, Tag):
-            src = _first_non_empty(image_tag.get("data-src"), image_tag.get("src"), image_tag.get("srcset"))
-            if src:
-                image_url = _canonicalize_url(urljoin(base_url, src.split(" ")[0]))
+        src = _best_image_src_from_tag(image_tag if isinstance(image_tag, Tag) else None)
+        if src:
+            image_url = _canonicalize_url(urljoin(base_url, src))
 
         seen.add(resolved)
         items.append(
@@ -594,6 +679,7 @@ def _collect_video_items(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
                 "runtime": runtime,
                 "kicker": kicker,
                 "image_url": image_url,
+                "original_image_url": image_url,
                 "clip_url": resolved,
                 "season_number": season_number,
                 "published_at": _extract_published_at_from_card(card),
@@ -636,10 +722,9 @@ def _collect_video_items(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
 
         image_url = None
         image_tag = card.find("img") if isinstance(card, Tag) else None
-        if isinstance(image_tag, Tag):
-            src = _first_non_empty(image_tag.get("data-src"), image_tag.get("src"))
-            if src:
-                image_url = _canonicalize_url(urljoin(base_url, src))
+        src = _best_image_src_from_tag(image_tag if isinstance(image_tag, Tag) else None)
+        if src:
+            image_url = _canonicalize_url(urljoin(base_url, src))
 
         seen.add(resolved)
         items.append(
@@ -648,6 +733,7 @@ def _collect_video_items(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
                 "runtime": runtime,
                 "kicker": kicker,
                 "image_url": image_url,
+                "original_image_url": image_url,
                 "clip_url": resolved,
                 "season_number": season_number,
                 "published_at": _extract_published_at_from_card(card if isinstance(card, Tag) else None),
@@ -888,7 +974,12 @@ def parse_show_videos(show_url: str, *, max_pages: int = 6) -> list[dict[str, An
             break
 
     deduped = _dedupe_by_key(all_items, "clip_url")
-    return _hydrate_items_published_at(deduped, url_key="clip_url")
+    return _hydrate_items_published_at(
+        deduped,
+        url_key="clip_url",
+        image_key="image_url",
+        original_image_key="original_image_url",
+    )
 
 
 def parse_show_news(
@@ -966,7 +1057,12 @@ def parse_person_page(
         raw_videos = _collect_video_items(soup, fetched.url)
         raw_news = _collect_news_items(soup, fetched.url)
         if hydrate_related_dates:
-            videos = _hydrate_items_published_at(raw_videos, url_key="clip_url")
+            videos = _hydrate_items_published_at(
+                raw_videos,
+                url_key="clip_url",
+                image_key="image_url",
+                original_image_key="original_image_url",
+            )
             news = _hydrate_items_published_at(raw_news, url_key="article_url")
         else:
             videos = raw_videos
@@ -1042,6 +1138,11 @@ def probe_bravo_person_url_candidates(
                     "status": "error",
                     "error": error_text or "request_failed",
                 }
+
+
+def resolve_page_featured_image_url(page_url: str) -> str | None:
+    fetched = _fetch_html(page_url)
+    return _extract_page_featured_image(fetched.soup, fetched.url)
 
 
 def parse_bravo_show_bundle(

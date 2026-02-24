@@ -13,6 +13,11 @@ def _args(**overrides) -> argparse.Namespace:
         "dry_run": False,
         "skip_s3": True,
         "unresolved_only": False,
+        "refresh_external_sources": False,
+        "batch_size": 25,
+        "max_runtime_sec": 840,
+        "resume_run_id": None,
+        "start_after": None,
         "limit": None,
         "verbose": False,
     }
@@ -112,6 +117,27 @@ def test_expand_candidate_urls_adds_logopedia_svg_raster_variant() -> None:
     out = mod._expand_candidate_urls("catalog", [svg_url])
     assert svg_url in out
     assert any("/scale-to-width-down/1024" in value for value in out)
+
+
+def test_superseded_failed_logopedia_svg_urls_detects_raster_mirror_pair() -> None:
+    raw_url = "https://static.wikia.nocookie.net/logopedia/images/2/22/Bravo_2024.svg/revision/latest?cb=20240508041547"
+    raster_url = (
+        "https://static.wikia.nocookie.net/logopedia/images/2/22/Bravo_2024.svg/"
+        "revision/latest/scale-to-width-down/1024?cb=20240508041547"
+    )
+    out = mod._superseded_failed_logopedia_svg_urls(
+        {
+            ("catalog", raw_url): {
+                "mirror_status": "failed",
+                "failure_reason": "logo_decode_failed",
+            },
+            ("catalog", raster_url): {
+                "mirror_status": "mirrored",
+                "hosted_logo_url": "https://cdn.example.com/bravo-2024.png",
+            },
+        }
+    )
+    assert out == [("catalog", raw_url)]
 
 
 def test_ordered_candidate_sources_includes_priority_then_remaining() -> None:
@@ -510,6 +536,194 @@ def test_process_entity_reuses_cached_sources_without_requerying_external_discov
     assert summary.logo_assets_discovered >= 1
 
 
+def test_process_entity_respects_discovery_lock_without_refresh() -> None:
+    entity = mod.InventoryEntity(
+        entity_type="network",
+        entity_key="bravo",
+        display_name="Bravo",
+        available_show_count=12,
+        added_show_count=5,
+    )
+    core_row = {
+        "id": 77,
+        "name": "Bravo",
+        "hosted_logo_url": None,
+        "hosted_logo_black_url": None,
+        "hosted_logo_white_url": None,
+        "wikidata_id": "Q902771",
+        "wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+        "wikimedia_logo_file": None,
+    }
+    summary = mod.SyncSummary()
+
+    with patch.object(
+        mod,
+        "_resolve_entity_metadata",
+        return_value={
+            "wikidata_id": "Q902771",
+            "wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+            "wikimedia_logo_file": None,
+        },
+    ):
+        with patch.object(mod, "_load_existing_logo_asset_source_urls", return_value={}):
+            with patch.object(
+                mod,
+                "_load_discovery_state",
+                return_value={
+                    "official": {"lock_until": None, "attempt_count": 1},
+                    "catalog": {"lock_until": None, "attempt_count": 1},
+                },
+            ):
+                with patch.object(mod, "_collect_external_logo_candidates") as collect_external:
+                    with patch.object(mod, "_load_existing_logo_assets_sha", return_value=set()):
+                        with patch.object(mod, "_load_existing_logo_asset_index", return_value={}):
+                            with patch.object(
+                                mod,
+                                "mirror_external_logo_row",
+                                return_value={
+                                    "hosted_logo_url": "https://cdn.example.com/bravo-primary.png",
+                                    "hosted_logo_key": "logos/bravo-primary.png",
+                                    "hosted_logo_sha256": "sha-primary",
+                                },
+                            ):
+                                with patch.object(
+                                    mod,
+                                    "mirror_logo_monochrome_variants_row",
+                                    return_value=mod.MonochromeLogoMirrorResult(
+                                        patch={
+                                            "hosted_logo_black_url": "https://cdn.example.com/bravo-black.png",
+                                            "hosted_logo_white_url": "https://cdn.example.com/bravo-white.png",
+                                        },
+                                        black_mirrored=1,
+                                        white_mirrored=1,
+                                    ),
+                                ):
+                                    with patch.object(mod, "_upsert_logo_asset"):
+                                        with patch.object(mod, "_reset_logo_asset_primary_flags"):
+                                            with patch.object(mod, "_mark_logo_asset_primary"):
+                                                with patch.object(mod, "_update_core_row"):
+                                                    with patch.object(
+                                                        mod,
+                                                        "_upsert_completion",
+                                                        return_value={"id": "completion-1"},
+                                                    ):
+                                                        with patch.object(mod, "_insert_attempts"):
+                                                            mod._process_entity(
+                                                                db=object(),
+                                                                entity=entity,
+                                                                core_row=core_row,
+                                                                override=None,
+                                                                run_id="test-run",
+                                                                args=_args(skip_s3=False, dry_run=False),
+                                                                summary=summary,
+                                                                s3_client=object(),
+                                                                context=mod.SyncRunContext(
+                                                                    tmdb_api_key=None,
+                                                                    tmdb_bearer_token=None,
+                                                                    svg_rasterizer_available=True,
+                                                                ),
+                                                            )
+
+    collect_external.assert_not_called()
+
+
+def test_process_entity_refresh_external_sources_bypasses_discovery_lock() -> None:
+    entity = mod.InventoryEntity(
+        entity_type="network",
+        entity_key="bravo",
+        display_name="Bravo",
+        available_show_count=12,
+        added_show_count=5,
+    )
+    core_row = {
+        "id": 77,
+        "name": "Bravo",
+        "hosted_logo_url": None,
+        "hosted_logo_black_url": None,
+        "hosted_logo_white_url": None,
+        "wikidata_id": "Q902771",
+        "wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+        "wikimedia_logo_file": None,
+    }
+    summary = mod.SyncSummary()
+
+    with patch.object(
+        mod,
+        "_resolve_entity_metadata",
+        return_value={
+            "wikidata_id": "Q902771",
+            "wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+            "wikimedia_logo_file": None,
+        },
+    ):
+        with patch.object(mod, "_load_existing_logo_asset_source_urls", return_value={}):
+            with patch.object(
+                mod,
+                "_load_discovery_state",
+                return_value={"official": {"lock_until": None, "attempt_count": 1}},
+            ):
+                with patch.object(
+                    mod,
+                    "_collect_external_logo_candidates",
+                    return_value=({"official": ["https://logos.example.com/bravo.png"]}, [], None),
+                ) as collect_external:
+                    with patch.object(mod, "_load_existing_logo_assets_sha", return_value=set()):
+                        with patch.object(mod, "_load_existing_logo_asset_index", return_value={}):
+                            with patch.object(
+                                mod,
+                                "mirror_external_logo_row",
+                                return_value={
+                                    "hosted_logo_url": "https://cdn.example.com/bravo-primary.png",
+                                    "hosted_logo_key": "logos/bravo-primary.png",
+                                    "hosted_logo_sha256": "sha-primary",
+                                },
+                            ):
+                                with patch.object(
+                                    mod,
+                                    "mirror_logo_monochrome_variants_row",
+                                    return_value=mod.MonochromeLogoMirrorResult(
+                                        patch={
+                                            "hosted_logo_black_url": "https://cdn.example.com/bravo-black.png",
+                                            "hosted_logo_white_url": "https://cdn.example.com/bravo-white.png",
+                                        },
+                                        black_mirrored=1,
+                                        white_mirrored=1,
+                                    ),
+                                ):
+                                    with patch.object(mod, "_upsert_logo_asset"):
+                                        with patch.object(mod, "_reset_logo_asset_primary_flags"):
+                                            with patch.object(mod, "_mark_logo_asset_primary"):
+                                                with patch.object(mod, "_update_core_row"):
+                                                    with patch.object(mod, "_upsert_discovery_state"):
+                                                        with patch.object(
+                                                            mod,
+                                                            "_upsert_completion",
+                                                            return_value={"id": "completion-1"},
+                                                        ):
+                                                            with patch.object(mod, "_insert_attempts"):
+                                                                mod._process_entity(
+                                                                    db=object(),
+                                                                    entity=entity,
+                                                                    core_row=core_row,
+                                                                    override=None,
+                                                                    run_id="test-run",
+                                                                    args=_args(
+                                                                        skip_s3=False,
+                                                                        dry_run=False,
+                                                                        refresh_external_sources=True,
+                                                                    ),
+                                                                    summary=summary,
+                                                                    s3_client=object(),
+                                                                    context=mod.SyncRunContext(
+                                                                        tmdb_api_key=None,
+                                                                        tmdb_bearer_token=None,
+                                                                        svg_rasterizer_available=True,
+                                                                    ),
+                                                                )
+
+    collect_external.assert_called_once()
+
+
 def test_process_entity_skips_remirroring_cached_asset_urls() -> None:
     entity = mod.InventoryEntity(
         entity_type="network",
@@ -649,6 +863,103 @@ def test_run_sync_filters_to_unresolved_only() -> None:
                                         mod.run_sync(_args(unresolved_only=True))
 
     assert seen == [("network", "bravo")]
+
+
+def test_run_sync_stops_on_runtime_limit_and_returns_resume_cursor() -> None:
+    inventory = {
+        ("network", "bravo"): mod.InventoryEntity(
+            entity_type="network",
+            entity_key="bravo",
+            display_name="Bravo",
+            available_show_count=10,
+            added_show_count=4,
+        ),
+        ("streaming", "peacock"): mod.InventoryEntity(
+            entity_type="streaming",
+            entity_key="peacock",
+            display_name="Peacock",
+            available_show_count=8,
+            added_show_count=3,
+        ),
+    }
+    seen: list[tuple[str, str]] = []
+
+    def fake_process_entity(_db, **kwargs):  # noqa: ANN003
+        entity = kwargs["entity"]
+        seen.append((entity.entity_type, entity.entity_key))
+
+    perf_counter_values = iter([0.0, 0.1, 2.0])
+    with patch.object(mod, "time") as time_mod:
+        time_mod.perf_counter.side_effect = lambda: next(perf_counter_values)
+        with patch.object(mod, "load_env"):
+            with patch.object(mod, "create_supabase_admin_client", return_value=object()):
+                with patch.object(mod, "_load_used_inventory", return_value=inventory):
+                    with patch.object(mod, "_load_dimension_lookup", return_value={}):
+                        with patch.object(mod, "_load_overrides", return_value={}):
+                            with patch.object(mod, "_process_entity", side_effect=fake_process_entity):
+                                with patch.object(
+                                    mod,
+                                    "_build_sync_context",
+                                    return_value=mod.SyncRunContext(
+                                        tmdb_api_key=None,
+                                        tmdb_bearer_token=None,
+                                        svg_rasterizer_available=True,
+                                    ),
+                                ):
+                                    summary = mod.run_sync(
+                                        _args(dry_run=True, max_runtime_sec=1, skip_s3=True),
+                                    )
+
+    assert seen == [("network", "bravo")]
+    assert summary.run_status == "stopped"
+    assert summary.resume_cursor_entity_type == "network"
+    assert summary.resume_cursor_entity_key == "bravo"
+
+
+def test_run_sync_resume_run_id_uses_saved_cursor() -> None:
+    inventory = {
+        ("network", "bravo"): mod.InventoryEntity(
+            entity_type="network",
+            entity_key="bravo",
+            display_name="Bravo",
+            available_show_count=10,
+            added_show_count=4,
+        ),
+        ("streaming", "peacock"): mod.InventoryEntity(
+            entity_type="streaming",
+            entity_key="peacock",
+            display_name="Peacock",
+            available_show_count=8,
+            added_show_count=3,
+        ),
+    }
+    seen: list[tuple[str, str]] = []
+
+    def fake_process_entity(_db, **kwargs):  # noqa: ANN003
+        entity = kwargs["entity"]
+        seen.append((entity.entity_type, entity.entity_key))
+
+    with patch.object(mod, "load_env"):
+        with patch.object(mod, "create_supabase_admin_client", return_value=object()):
+            with patch.object(mod, "_load_used_inventory", return_value=inventory):
+                with patch.object(mod, "_load_dimension_lookup", return_value={}):
+                    with patch.object(mod, "_load_overrides", return_value={}):
+                        with patch.object(mod, "_load_sync_run_cursor", return_value=("network", "bravo")):
+                            with patch.object(mod, "_process_entity", side_effect=fake_process_entity):
+                                with patch.object(
+                                    mod,
+                                    "_build_sync_context",
+                                    return_value=mod.SyncRunContext(
+                                        tmdb_api_key=None,
+                                        tmdb_bearer_token=None,
+                                        svg_rasterizer_available=True,
+                                    ),
+                                ):
+                                    mod.run_sync(
+                                        _args(dry_run=True, resume_run_id="network-streaming-20260224T210000Z"),
+                                    )
+
+    assert seen == [("streaming", "peacock")]
 
 
 def test_load_unresolved_keys_includes_missing_completion_rows() -> None:
