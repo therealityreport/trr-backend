@@ -27,6 +27,7 @@ from trr_backend.repositories.social_season_analytics import (
     _youtube_title_is_cross_show_excluded,
     _youtube_video_matches_show_terms,
     get_analytics,
+    get_comments_coverage,
     get_post_comments,
     get_targets,
     sentiment_for_text,
@@ -988,6 +989,146 @@ def test_get_analytics_additive_quality_flags_schedule_and_benchmark(monkeypatch
     assert payload["schedule_profile"]["timezone"] == "America/New_York"
     assert payload["schedule_profile"]["platforms"][0]["platform"] == "instagram"
     assert "benchmark" in payload
+
+
+def test_get_comments_coverage_aggregates_scoped_platform_totals(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _sid: context)
+    monkeypatch.setattr(
+        social_repo,
+        "_target_accounts_by_platform",
+        lambda *_args, **_kwargs: {"instagram": {"bravotv"}, "twitter": {"bravotv"}},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_comments_coverage_for_platform",
+        lambda _season_id, *, platform, **_kwargs: (
+            {
+                "posts_scanned": 4,
+                "stale_posts_count": 1,
+                "saved_comments": 8,
+                "reported_comments": 10,
+            }
+            if platform == "instagram"
+            else {
+                "posts_scanned": 3,
+                "stale_posts_count": 0,
+                "saved_comments": 5,
+                "reported_comments": 3,
+            }
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_now_utc", lambda: datetime(2026, 2, 24, 12, 0, tzinfo=UTC))
+
+    payload = get_comments_coverage(
+        "season-1",
+        platforms=["instagram", "twitter"],
+        timezone="America/New_York",
+        source_scope="bravo",
+        date_start=datetime(2026, 2, 1, 0, 0, tzinfo=UTC),
+        date_end=datetime(2026, 2, 20, 0, 0, tzinfo=UTC),
+    )
+
+    assert payload["total_saved_comments"] == 13
+    assert payload["total_reported_comments"] == 13
+    assert payload["up_to_date"] is True
+    assert payload["stale_posts_count"] == 1
+    assert payload["posts_scanned"] == 7
+    assert payload["by_platform"]["instagram"]["up_to_date"] is False
+    assert payload["by_platform"]["twitter"]["up_to_date"] is True
+
+
+def test_get_comments_coverage_uses_week_zero_window_when_dates_omitted(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    week_zero_start = datetime(2026, 1, 10, 20, 0, tzinfo=ZoneInfo("America/New_York"))
+    now_utc = datetime(2026, 2, 24, 12, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _sid: context)
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_week_windows",
+        lambda *_args, **_kwargs: (
+            [WeekWindow(0, week_zero_start, week_zero_start + timedelta(days=7))],
+            week_zero_start,
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_now_utc", lambda: now_utc)
+    monkeypatch.setattr(
+        social_repo,
+        "_target_accounts_by_platform",
+        lambda *_args, **_kwargs: {"instagram": {"bravotv"}},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_comments_coverage_for_platform",
+        lambda *_args, **_kwargs: {
+            "posts_scanned": 0,
+            "stale_posts_count": 0,
+            "saved_comments": 0,
+            "reported_comments": 0,
+        },
+    )
+
+    payload = get_comments_coverage(
+        "season-1",
+        platforms=["instagram"],
+        timezone="America/New_York",
+        source_scope="bravo",
+    )
+
+    assert payload["window"]["start"] == social_repo._iso(week_zero_start.astimezone(UTC))
+    assert payload["window"]["end"] == social_repo._iso(now_utc)
+    assert payload["evaluated_at"] == social_repo._iso(now_utc)
+
+
+def test_comments_coverage_twitter_recursive_filter_uses_reply_aliases(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_one(query: str, params=None):
+        captured["query"] = query
+        captured["params"] = params
+        return {
+            "posts_scanned": 1,
+            "stale_posts_count": 0,
+            "saved_comments": 0,
+            "reported_comments": 0,
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(
+        social_repo,
+        "_comment_lifecycle_supported",
+        lambda table: table == "twitter_tweets",
+    )
+
+    social_repo._comments_coverage_for_platform(
+        "season-1",
+        platform="twitter",
+        start_dt=datetime(2026, 2, 1, tzinfo=UTC),
+        end_dt=datetime(2026, 2, 2, tzinfo=UTC),
+        source_scope="bravo",
+        target_accounts_by_platform={"twitter": {"bravotv"}},
+    )
+
+    normalized = " ".join(str(captured.get("query") or "").split())
+    assert (
+        "where r.season_id = %s and r.is_reply = true and r.is_missing = false "
+        "and r.reply_to_tweet_id in"
+    ) in normalized
+    assert "where child.season_id = %s and child.is_reply = true and child.is_missing = false" in normalized
+    assert "and t.is_missing = false and r.reply_to_tweet_id in" not in normalized
 
 
 def test_weekly_daily_activity_indexes_by_calendar_day_not_elapsed_hours(monkeypatch) -> None:

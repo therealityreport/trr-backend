@@ -6,8 +6,10 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
@@ -33,6 +35,7 @@ _GOOGLE_FEATURED_IMAGE_MAX_PROBES = 8
 _GOOGLE_CANONICAL_URL_MAX_PROBES = 25
 _MIRROR_RETRY_COOLDOWN_MINUTES = 180
 _MIRROR_MAX_ATTEMPTS = 3
+_MIRROR_STATUS_MISSING_IMAGE_TERMINAL = "missing_image_terminal"
 _GOOGLE_SYNC_JOB_STATUS_QUEUED = "queued"
 _GOOGLE_SYNC_JOB_STATUS_RUNNING = "running"
 _GOOGLE_SYNC_JOB_STATUS_COMPLETED = "completed"
@@ -50,6 +53,15 @@ _TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
 _SEASON_WORD_RE = re.compile(r"\bseason\s*0*(\d{1,3})\b", re.IGNORECASE)
 _SEASON_SHORT_RE = re.compile(r"\bs(?:\s*|[-_]?)(\d{1,2})(?:\b|e\d{1,2}\b)", re.IGNORECASE)
 _GOOGLE_NEWS_IMAGE_CAPTION = "Google News featured image"
+
+
+def _get_google_sync_stale_timeout_minutes() -> int:
+    raw = str(os.getenv("GOOGLE_NEWS_SYNC_STALE_TIMEOUT_MINUTES", "15") or "").strip()
+    try:
+        parsed = int(raw)
+    except ValueError:
+        parsed = 15
+    return max(1, parsed)
 
 
 class GoogleNewsSyncRequest(BaseModel):
@@ -223,7 +235,6 @@ def _build_name_aliases(person_name: str) -> list[str]:
         for expanded in _NICKNAME_EQUIVALENTS.get(first, ()):
             if last:
                 aliases.add(f"{expanded} {last}")
-            aliases.add(expanded)
     return sorted(alias for alias in aliases if alias)
 
 
@@ -292,6 +303,26 @@ def _build_show_cast_index(show_id: str) -> list[dict[str, Any]]:
                 "name_aliases": _build_name_aliases(person_name),
             }
         )
+    first_name_counts: dict[str, int] = {}
+    for ref in out:
+        normalized_name = str(ref.get("normalized_name") or "").strip()
+        first = normalized_name.split(" ", 1)[0] if normalized_name else ""
+        if not first:
+            continue
+        first_name_counts[first] = first_name_counts.get(first, 0) + 1
+    for ref in out:
+        normalized_name = str(ref.get("normalized_name") or "").strip()
+        first = normalized_name.split(" ", 1)[0] if normalized_name else ""
+        if not first or first_name_counts.get(first, 0) != 1:
+            continue
+        aliases = ref.get("name_aliases")
+        if isinstance(aliases, list):
+            alias_list = [str(alias).strip() for alias in aliases if str(alias).strip()]
+        else:
+            alias_list = []
+        if first not in alias_list:
+            alias_list.append(first)
+        ref["name_aliases"] = sorted(set(alias_list))
     return out
 
 
@@ -349,12 +380,19 @@ def _load_topic_keyword_map() -> dict[str, tuple[str, ...]]:
 
 
 def _infer_topic_tags(text: str, *, topic_keywords: dict[str, tuple[str, ...]] | None = None) -> list[str]:
-    haystack = text.lower()
+    haystack = _normalize_name(text)
+    if not haystack:
+        return []
     tags: list[str] = []
     keywords_by_topic = topic_keywords or _TOPIC_KEYWORDS
     for topic, keywords in keywords_by_topic.items():
-        if any(keyword in haystack for keyword in keywords):
-            tags.append(topic)
+        for keyword in keywords:
+            normalized_keyword = _normalize_name(keyword)
+            if not normalized_keyword:
+                continue
+            if re.search(rf"(^|\s){re.escape(normalized_keyword)}($|\s)", haystack):
+                tags.append(topic)
+                break
     return tags
 
 
@@ -547,7 +585,7 @@ def _normalize_google_news_items(
             elif image_url or original_image_url:
                 mirror_status = "pending"
             else:
-                mirror_status = "missing_image"
+                mirror_status = _MIRROR_STATUS_MISSING_IMAGE_TERMINAL
         feed_rank_raw = raw.get("feed_rank")
         try:
             feed_rank = int(feed_rank_raw)
@@ -722,6 +760,76 @@ def _apply_news_time_window(
     return out
 
 
+def _build_news_facets(items: list[dict[str, Any]]) -> dict[str, Any]:
+    source_counts: dict[str, dict[str, Any]] = {}
+    people_counts: dict[str, dict[str, Any]] = {}
+    topic_counts: dict[str, int] = {}
+    season_counts: dict[int, int] = {}
+
+    for item in items:
+        source_label = str(item.get("publisher_domain") or item.get("publisher_name") or "").strip()
+        if source_label:
+            token = source_label.lower()
+            existing = source_counts.get(token)
+            if existing is None:
+                source_counts[token] = {"token": token, "label": source_label, "count": 1}
+            else:
+                existing["count"] = int(existing.get("count") or 0) + 1
+
+        for person_tag in item.get("person_tags") or []:
+            if not isinstance(person_tag, dict):
+                continue
+            person_id = str(person_tag.get("person_id") or "").strip()
+            person_name = str(person_tag.get("person_name") or "").strip()
+            if not person_id:
+                continue
+            existing = people_counts.get(person_id)
+            if existing is None:
+                people_counts[person_id] = {
+                    "person_id": person_id,
+                    "person_name": person_name or person_id,
+                    "count": 1,
+                }
+            else:
+                existing["count"] = int(existing.get("count") or 0) + 1
+
+        for topic in item.get("topic_tags") or []:
+            topic_label = str(topic or "").strip()
+            if not topic_label:
+                continue
+            topic_counts[topic_label] = topic_counts.get(topic_label, 0) + 1
+
+        for season_match in item.get("season_matches") or []:
+            if not isinstance(season_match, dict):
+                continue
+            try:
+                season_number = int(season_match.get("season_number") or 0)
+            except (TypeError, ValueError):
+                continue
+            if season_number <= 0:
+                continue
+            season_counts[season_number] = season_counts.get(season_number, 0) + 1
+
+    return {
+        "sources": sorted(
+            source_counts.values(),
+            key=lambda row: (-int(row.get("count") or 0), str(row.get("label") or "").lower()),
+        ),
+        "people": sorted(
+            people_counts.values(),
+            key=lambda row: (-int(row.get("count") or 0), str(row.get("person_name") or "").lower()),
+        ),
+        "topics": sorted(
+            [{"topic": topic, "count": count} for topic, count in topic_counts.items()],
+            key=lambda row: (-int(row["count"]), str(row["topic"]).lower()),
+        ),
+        "seasons": sorted(
+            [{"season_number": season_number, "count": count} for season_number, count in season_counts.items()],
+            key=lambda row: (-int(row["season_number"])),
+        ),
+    }
+
+
 def _dedupe_item_key(item: dict[str, Any]) -> str:
     canonical = normalize_article_url(str(item.get("canonical_article_url") or "").strip() or None)
     if canonical:
@@ -861,27 +969,28 @@ def _snapshot_needs_google_image_backfill(snapshot: dict[str, Any] | None) -> bo
 
 def _google_item_needs_mirror_retry(item: dict[str, Any], *, now: datetime) -> bool:
     image_url = str(item.get("image_url") or "").strip()
-    hosted_image_url = str(item.get("hosted_image_url") or "").strip()
     original_image_url = str(item.get("original_image_url") or "").strip()
+    hosted_image_url = str(item.get("hosted_image_url") or "").strip()
     mirror_status = str(item.get("mirror_status") or "").strip().lower()
     try:
         attempt_count = max(0, int(item.get("mirror_attempt_count") or 0))
     except (TypeError, ValueError):
         attempt_count = 0
     retry_after = _parse_datetime(item.get("mirror_retry_after"))
+    source_image_url = image_url or original_image_url
 
     if hosted_image_url:
+        return False
+    if mirror_status in {"synced", "external", _MIRROR_STATUS_MISSING_IMAGE_TERMINAL}:
+        return False
+    if not source_image_url:
         return False
     if attempt_count >= _MIRROR_MAX_ATTEMPTS:
         return False
     if retry_after and retry_after.astimezone(UTC) > now.astimezone(UTC):
         return False
 
-    if image_url or original_image_url:
-        return True
-    if mirror_status in {"missing_image", "pending", "failed"}:
-        return True
-    return False
+    return mirror_status in {"", "missing_image", "pending", "failed", "running"}
 
 
 def _mirror_retry_after_iso(*, now: datetime) -> str:
@@ -894,6 +1003,7 @@ def _sync_google_news_featured_images(
     admin_user: AdminUser,
     show_id: str,
     items: list[dict[str, Any]],
+    heartbeat_cb: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     # Reuse the Bravo media import path so Google featured images are mirrored to S3/Supabase too.
     from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
@@ -906,17 +1016,27 @@ def _sync_google_news_featured_images(
     for index, item in enumerate(items):
         article_url = str(item.get("article_url") or "").strip()
         image_url = str(item.get("image_url") or "").strip()
+        original_image_url = str(item.get("original_image_url") or "").strip()
+        source_image_url = image_url or original_image_url
         hosted_image_url = str(item.get("hosted_image_url") or "").strip()
         if hosted_image_url:
             item["mirror_status"] = "synced"
             continue
+        if not source_image_url:
+            if str(item.get("mirror_status") or "").strip().lower() == _MIRROR_STATUS_MISSING_IMAGE_TERMINAL:
+                continue
+            try:
+                previous_attempts = max(0, int(item.get("mirror_attempt_count") or 0))
+            except (TypeError, ValueError):
+                previous_attempts = 0
+            item["mirror_attempt_count"] = previous_attempts + 1
+            item["last_mirror_attempt_at"] = now_iso
+            item["mirror_retry_after"] = None
+            item["mirror_status"] = _MIRROR_STATUS_MISSING_IMAGE_TERMINAL
+            item["last_mirror_error"] = "No source image URL available for mirroring"
+            continue
         if not _google_item_needs_mirror_retry(item, now=now):
             skipped_cooldown += 1
-            continue
-        if not article_url or not image_url:
-            item["mirror_status"] = "missing_image"
-            item["last_mirror_attempt_at"] = now_iso
-            item["mirror_retry_after"] = _mirror_retry_after_iso(now=now)
             continue
         try:
             previous_attempts = max(0, int(item.get("mirror_attempt_count") or 0))
@@ -924,8 +1044,15 @@ def _sync_google_news_featured_images(
             previous_attempts = 0
         item["mirror_attempt_count"] = previous_attempts + 1
         item["last_mirror_attempt_at"] = now_iso
-        item["original_image_url"] = str(item.get("original_image_url") or image_url).strip()
+        item["mirror_retry_after"] = _mirror_retry_after_iso(now=now)
+        item["original_image_url"] = str(item.get("original_image_url") or source_image_url).strip()
         item["featured_image_synced"] = bool(item.get("featured_image_synced"))
+        if not article_url:
+            item["mirror_status"] = _MIRROR_STATUS_MISSING_IMAGE_TERMINAL
+            item["last_mirror_error"] = "Missing article URL required for mirroring"
+            item["mirror_retry_after"] = None
+            continue
+        image_url = source_image_url
         item["mirror_status"] = "running"
         indexed_by_image_url.setdefault(image_url, []).append((index, article_url))
 
@@ -936,6 +1063,8 @@ def _sync_google_news_featured_images(
     errors: list[str] = []
 
     for image_index, (image_url, references) in enumerate(indexed_by_image_url.items(), start=1):
+        if heartbeat_cb and image_index % 5 == 1:
+            heartbeat_cb()
         source_item = items[references[0][0]]
         source_article_url = references[0][1]
         headline = str(source_item.get("headline") or "").strip()
@@ -1038,10 +1167,11 @@ def _create_google_news_sync_job(*, show_id: str, force: bool, requested_by: str
           requested_async,
           force,
           requested_by,
+          heartbeat_at,
           created_at,
           updated_at
         )
-        VALUES (%s, %s, %s, TRUE, %s, %s, NOW(), NOW())
+        VALUES (%s, %s, %s, TRUE, %s, %s, NOW(), NOW(), NOW())
         RETURNING id::text
         """,
         [show_id, _GOOGLE_SOURCE_ID, _GOOGLE_SYNC_JOB_STATUS_QUEUED, force, requested_by],
@@ -1055,10 +1185,22 @@ def _set_google_news_sync_job_running(*, job_id: str) -> None:
     pg.execute_returning(
         """
         UPDATE core.google_news_sync_jobs
-        SET status = %s, started_at = NOW(), updated_at = NOW()
+        SET status = %s, started_at = NOW(), heartbeat_at = NOW(), updated_at = NOW()
         WHERE id = %s::uuid
         """,
         [_GOOGLE_SYNC_JOB_STATUS_RUNNING, job_id],
+    )
+
+
+def _touch_google_news_sync_job_heartbeat(*, job_id: str) -> None:
+    pg.execute_returning(
+        """
+        UPDATE core.google_news_sync_jobs
+        SET heartbeat_at = NOW(), updated_at = NOW()
+        WHERE id = %s::uuid
+          AND status IN (%s, %s)
+        """,
+        [job_id, _GOOGLE_SYNC_JOB_STATUS_QUEUED, _GOOGLE_SYNC_JOB_STATUS_RUNNING],
     )
 
 
@@ -1076,6 +1218,7 @@ def _set_google_news_sync_job_finished(
             result = %s::jsonb,
             error = %s,
             finished_at = NOW(),
+            heartbeat_at = NOW(),
             updated_at = NOW()
         WHERE id = %s::uuid
         """,
@@ -1096,6 +1239,7 @@ def _get_google_news_sync_job(*, show_id: str, job_id: str) -> dict[str, Any] | 
           requested_by,
           result,
           error,
+          heartbeat_at,
           created_at,
           started_at,
           finished_at,
@@ -1109,12 +1253,54 @@ def _get_google_news_sync_job(*, show_id: str, job_id: str) -> dict[str, Any] | 
     )
 
 
+def _reconcile_stale_google_news_sync_jobs(
+    *,
+    show_id: str,
+    job_id: str | None = None,
+) -> list[str]:
+    where_job = "AND id = %s::uuid" if job_id else ""
+    params: list[Any] = [
+        _GOOGLE_SYNC_JOB_STATUS_FAILED,
+        json.dumps({"error": "job_orphaned_or_timed_out"}),
+        "job_orphaned_or_timed_out",
+        _GOOGLE_SYNC_JOB_STATUS_QUEUED,
+        _GOOGLE_SYNC_JOB_STATUS_RUNNING,
+        _get_google_sync_stale_timeout_minutes(),
+        show_id,
+    ]
+    if job_id:
+        params.append(job_id)
+    try:
+        rows = pg.execute_returning(
+            f"""
+            UPDATE core.google_news_sync_jobs
+            SET status = %s,
+                result = %s::jsonb,
+                error = %s,
+                finished_at = COALESCE(finished_at, NOW()),
+                heartbeat_at = NOW(),
+                updated_at = NOW()
+            WHERE status IN (%s, %s)
+              AND COALESCE(heartbeat_at, updated_at, created_at) < NOW() - (%s::int * INTERVAL '1 minute')
+              AND show_id = %s::uuid
+              {where_job}
+            RETURNING id::text AS id
+            """,
+            params,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to reconcile stale google_news sync jobs for show_id=%s", show_id)
+        return []
+    return [str(row.get("id")) for row in rows or [] if row.get("id")]
+
+
 def _run_google_news_sync_impl(
     *,
     show_id_str: str,
     force: bool,
     db: SupabaseAdminClient,
     admin_user: AdminUser,
+    heartbeat_cb: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
     topic_url = _resolve_google_news_topic_url(show_id_str)
@@ -1142,6 +1328,8 @@ def _run_google_news_sync_impl(
     show_name, show_aliases = _show_name_and_aliases(show_id_str)
     cast_index = _build_show_cast_index(show_id_str)
     season_windows = _load_season_windows(show_id_str)
+    if heartbeat_cb:
+        heartbeat_cb()
 
     try:
         parse_result = fetch_google_news(
@@ -1150,6 +1338,7 @@ def _run_google_news_sync_impl(
             show_aliases=show_aliases,
             max_featured_image_probes=_GOOGLE_FEATURED_IMAGE_MAX_PROBES,
             max_canonical_url_probes=_GOOGLE_CANONICAL_URL_MAX_PROBES,
+            heartbeat_cb=heartbeat_cb,
         )
     except Exception as exc:  # noqa: BLE001
         _upsert_show_snapshot(
@@ -1168,11 +1357,14 @@ def _run_google_news_sync_impl(
         season_windows=season_windows,
         topic_keywords=topic_keywords,
     )
+    if heartbeat_cb:
+        heartbeat_cb()
     image_sync = _sync_google_news_featured_images(
         db=db,
         admin_user=admin_user,
         show_id=show_id_str,
         items=normalized_items,
+        heartbeat_cb=heartbeat_cb,
     )
     snapshot_payload = {
         "show": {
@@ -1254,7 +1446,14 @@ def _run_google_news_sync_job(
     _set_google_news_sync_job_running(job_id=job_id)
     admin_user = admin_user_payload or {"id": "service_role:background", "role": "service_role"}
     try:
-        result = _run_google_news_sync_impl(show_id_str=show_id_str, force=force, db=db, admin_user=admin_user)
+        _touch_google_news_sync_job_heartbeat(job_id=job_id)
+        result = _run_google_news_sync_impl(
+            show_id_str=show_id_str,
+            force=force,
+            db=db,
+            admin_user=admin_user,
+            heartbeat_cb=lambda: _touch_google_news_sync_job_heartbeat(job_id=job_id),
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Google News async sync job failed for %s", show_id_str)
         _set_google_news_sync_job_finished(
@@ -1283,6 +1482,7 @@ def sync_google_news(
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+    _reconcile_stale_google_news_sync_jobs(show_id=show_id_str)
 
     # Preflight the show-level Google URL so async requests fail fast.
     _resolve_google_news_topic_url(show_id_str)
@@ -1318,6 +1518,7 @@ def get_google_news_sync_job_status(
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+    _reconcile_stale_google_news_sync_jobs(show_id=show_id_str, job_id=str(job_id))
     row = _get_google_news_sync_job(show_id=show_id_str, job_id=str(job_id))
     if not row:
         raise HTTPException(status_code=404, detail="Google News sync job not found")
@@ -1406,6 +1607,7 @@ def get_show_news(
         topic_filter=topic,
         season_number=season_number,
     )
+    facets = _build_news_facets(filtered)
     sorted_items = _sort_news(filtered, mode=sort)
     page_limit = _NEWS_DEFAULT_LIMIT if limit is None else limit
     page_items, next_cursor = _paginate_news(sorted_items, limit=page_limit, cursor=cursor)
@@ -1418,5 +1620,6 @@ def get_show_news(
         "limit": page_limit,
         "sort": sort,
         "sources": selected_sources,
+        "facets": facets,
         "snapshots": snapshot_meta,
     }

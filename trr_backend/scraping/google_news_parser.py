@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -73,6 +73,7 @@ def normalize_article_url(value: str | None) -> str | None:
         if any(lowered.startswith(prefix) for prefix in _TRACKING_QUERY_PREFIXES):
             continue
         filtered_query.append((key, val))
+    filtered_query.sort(key=lambda part: (part[0], part[1]))
     normalized_query = urlencode(filtered_query, doseq=True)
     return urlunparse((scheme, host, path, "", normalized_query, ""))
 
@@ -208,6 +209,7 @@ def _enrich_items_with_featured_images(
     *,
     timeout: float,
     max_probes: int = 15,
+    heartbeat_cb: Callable[[], None] | None = None,
 ) -> tuple[int, int, list[str]]:
     if max_probes <= 0:
         return (0, 0, [])
@@ -217,6 +219,8 @@ def _enrich_items_with_featured_images(
     for item in items:
         if probes >= max_probes:
             break
+        if heartbeat_cb:
+            heartbeat_cb()
         image_url = _http_url(str(item.get("image_url") or "").strip() or None)
         if image_url:
             item["image_url"] = image_url
@@ -242,6 +246,7 @@ def _enrich_items_with_canonical_urls(
     *,
     timeout: float,
     max_probes: int = _DEFAULT_MAX_CANONICAL_URL_PROBES,
+    heartbeat_cb: Callable[[], None] | None = None,
 ) -> tuple[int, int, list[str]]:
     if max_probes <= 0:
         return (0, 0, [])
@@ -249,6 +254,8 @@ def _enrich_items_with_canonical_urls(
     probes = 0
     errors: list[str] = []
     for item in items:
+        if heartbeat_cb:
+            heartbeat_cb()
         article_url = _http_url(str(item.get("article_url") or "").strip() or None)
         if not article_url:
             continue
@@ -419,12 +426,15 @@ def fetch_google_news(
     timeout: float = 20.0,
     max_featured_image_probes: int = _DEFAULT_MAX_FEATURED_IMAGE_PROBES,
     max_canonical_url_probes: int = _DEFAULT_MAX_CANONICAL_URL_PROBES,
+    heartbeat_cb: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     topic_candidates = topic_url_to_rss_candidates(topic_url)
     attempted_feeds: list[str] = []
     errors: list[str] = []
 
     for candidate in topic_candidates:
+        if heartbeat_cb:
+            heartbeat_cb()
         attempted_feeds.append(candidate)
         try:
             items = parse_rss_items(_fetch_rss(candidate, timeout=timeout))
@@ -436,11 +446,13 @@ def fetch_google_news(
                 items,
                 timeout=timeout,
                 max_probes=max_canonical_url_probes,
+                heartbeat_cb=heartbeat_cb,
             )
             featured_images_added, featured_images_probed, featured_image_errors = _enrich_items_with_featured_images(
                 items,
                 timeout=timeout,
                 max_probes=max_featured_image_probes,
+                heartbeat_cb=heartbeat_cb,
             )
             return {
                 "items": items,
@@ -467,11 +479,13 @@ def fetch_google_news(
         fallback_items,
         timeout=timeout,
         max_probes=max_canonical_url_probes,
+        heartbeat_cb=heartbeat_cb,
     )
     featured_images_added, featured_images_probed, featured_image_errors = _enrich_items_with_featured_images(
         fallback_items,
         timeout=timeout,
         max_probes=max_featured_image_probes,
+        heartbeat_cb=heartbeat_cb,
     )
 
     return {

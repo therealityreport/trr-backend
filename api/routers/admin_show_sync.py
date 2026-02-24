@@ -8,13 +8,13 @@ This router exposes "one-button" admin actions that wrap existing ingestion/sync
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
 import os
 import re
 import time
-import hashlib
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
@@ -296,6 +296,10 @@ class SyncNetworksStreamingRequest(BaseModel):
     skip_s3: bool = False
     dry_run: bool = False
     unresolved_only: bool = False
+    refresh_external_sources: bool = False
+    batch_size: int = Field(default=25, ge=1, le=500)
+    max_runtime_sec: int = Field(default=840, ge=60, le=3600)
+    resume_run_id: str | None = None
     limit: int | None = Field(default=None, ge=1, le=5000)
     verbose: bool = False
 
@@ -320,7 +324,15 @@ class SyncNetworksStreamingMissingColumn(BaseModel):
     column: str
 
 
+class SyncNetworksStreamingResumeCursor(BaseModel):
+    entity_type: Literal["network", "streaming", "production"]
+    entity_key: str
+
+
 class SyncNetworksStreamingResponse(BaseModel):
+    run_id: str
+    status: Literal["completed", "stopped", "failed"]
+    resume_cursor: SyncNetworksStreamingResumeCursor | None = None
     entities_synced: int
     providers_synced: int
     links_enriched: int
@@ -519,6 +531,14 @@ def _extract_metric_float(output: str, key: str) -> float:
     return float(match.group(1))
 
 
+def _extract_metric_text(output: str, key: str) -> str | None:
+    match = re.search(rf"^{re.escape(key)}=(.*)\s*$", output, flags=re.MULTILINE)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
 def _extract_unresolved_logos(output: str) -> list[SyncNetworksStreamingUnresolvedLogo]:
     rows: list[SyncNetworksStreamingUnresolvedLogo] = []
     for line in output.splitlines():
@@ -645,6 +665,42 @@ def _schema_requirements() -> dict[tuple[str, str], set[str]]:
             "mirror_status",
             "is_primary",
             "updated_at",
+        },
+        ("admin", "network_streaming_discovery_state"): {
+            "entity_type",
+            "entity_key",
+            "source",
+            "last_outcome",
+            "attempt_count",
+            "last_attempt_at",
+            "lock_until",
+            "cached_candidate_count",
+            "updated_at",
+        },
+        ("admin", "network_streaming_sync_runs"): {
+            "run_id",
+            "status",
+            "started_at",
+            "finished_at",
+            "cursor_entity_type",
+            "cursor_entity_key",
+            "processed",
+            "links_enriched",
+            "wikidata_linked",
+            "wikipedia_linked",
+            "logos_mirrored",
+            "variants_black_mirrored",
+            "variants_white_mirrored",
+            "logo_assets_discovered",
+            "logo_assets_mirrored",
+            "logo_assets_skipped",
+            "logo_assets_failed",
+            "completion_total",
+            "completion_resolved",
+            "completion_unresolved",
+            "completion_percent",
+            "failures",
+            "error_message",
         },
     }
 
@@ -1179,6 +1235,9 @@ def sync_networks_streaming(
         raise HTTPException(status_code=502, detail=f"Schema preflight failed: {exc}") from exc
     if missing_columns:
         return SyncNetworksStreamingResponse(
+            run_id="schema-preflight",
+            status="failed",
+            resume_cursor=None,
             entities_synced=0,
             providers_synced=0,
             links_enriched=0,
@@ -1213,8 +1272,16 @@ def sync_networks_streaming(
         common_args.append("--dry-run")
     if payload.unresolved_only:
         common_args.append("--unresolved-only")
+    if payload.refresh_external_sources:
+        common_args.append("--refresh-external-sources")
     if payload.verbose:
         common_args.append("--verbose")
+    if payload.resume_run_id:
+        common_args.extend(["--resume-run-id", str(payload.resume_run_id)])
+    if payload.batch_size is not None:
+        common_args.extend(["--batch-size", str(int(payload.batch_size))])
+    if payload.max_runtime_sec is not None:
+        common_args.extend(["--max-runtime-sec", str(int(payload.max_runtime_sec))])
     if payload.limit is not None:
         common_args.extend(["--limit", str(int(payload.limit))])
 
@@ -1314,6 +1381,26 @@ def sync_networks_streaming(
     completion_resolved = network_streaming_links.metrics.get("completion_resolved", 0)
     completion_unresolved = network_streaming_links.metrics.get("completion_unresolved", 0)
     completion_percent = _extract_metric_float(network_streaming_links_output, "completion_percent")
+    run_id = _extract_metric_text(network_streaming_links_output, "run_id") or "network-streaming-unknown"
+    run_status_raw = (_extract_metric_text(network_streaming_links_output, "run_status") or "").lower()
+    if network_streaming_links.status == "failed":
+        run_status: Literal["completed", "stopped", "failed"] = "failed"
+    elif run_status_raw in {"completed", "stopped", "failed"}:
+        run_status = run_status_raw  # type: ignore[assignment]
+    else:
+        run_status = "completed"
+    if any(step.status == "failed" for step in steps.values()):
+        run_status = "failed"
+    cursor_entity_type = (
+        _extract_metric_text(network_streaming_links_output, "resume_cursor_entity_type") or ""
+    ).lower()
+    cursor_entity_key = _extract_metric_text(network_streaming_links_output, "resume_cursor_entity_key") or ""
+    resume_cursor = None
+    if run_status == "stopped" and cursor_entity_type in {"network", "streaming", "production"} and cursor_entity_key:
+        resume_cursor = SyncNetworksStreamingResumeCursor(
+            entity_type=cursor_entity_type,  # type: ignore[arg-type]
+            entity_key=cursor_entity_key,
+        )
     unresolved_logos = _extract_unresolved_logos(network_streaming_links_output)
     unresolved_logos_count = network_streaming_links.metrics.get("unresolved_logos", len(unresolved_logos))
     unresolved_cap = 300
@@ -1324,11 +1411,14 @@ def sync_networks_streaming(
         + tmdb_watch_providers.metrics.get("failures", 0)
         + network_streaming_links.metrics.get("failures", 0)
     )
-    completion_gate_passed = completion_unresolved == 0
-    if not completion_gate_passed:
+    completion_gate_passed = completion_unresolved == 0 and run_status != "failed"
+    if not completion_gate_passed and run_status != "failed":
         failures += 1
 
     return SyncNetworksStreamingResponse(
+        run_id=run_id,
+        status=run_status,
+        resume_cursor=resume_cursor,
         entities_synced=entities_synced,
         providers_synced=providers_synced,
         links_enriched=links_enriched,
@@ -1570,7 +1660,13 @@ def import_logo_url(
             )
             if variant_patch and isinstance(variant_patch.patch, dict):
                 update_patch.update(variant_patch.patch)
-            core_update = db.schema("core").table(table).update(update_patch).eq(id_field, target_row.get(id_field)).execute()
+            core_update = (
+                db.schema("core")
+                .table(table)
+                .update(update_patch)
+                .eq(id_field, target_row.get(id_field))
+                .execute()
+            )
             if hasattr(core_update, "error") and core_update.error:
                 raise HTTPException(status_code=502, detail=f"Failed to update {table} row: {core_update.error}")
 
@@ -1669,7 +1765,14 @@ async def import_logo_file(
     if target_type == "show":
         if not show_id:
             raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
-        show_response = db.schema("core").table("shows").select("id,imdb_id,canonical_slug").eq("id", show_id).limit(1).execute()
+        show_response = (
+            db.schema("core")
+            .table("shows")
+            .select("id,imdb_id,canonical_slug")
+            .eq("id", show_id)
+            .limit(1)
+            .execute()
+        )
         if hasattr(show_response, "error") and show_response.error:
             raise HTTPException(status_code=502, detail=f"Failed to fetch show row: {show_response.error}")
         rows = show_response.data or []

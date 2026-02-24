@@ -75,12 +75,24 @@ PYTHONPATH=. python scripts/sync/sync_show_logos.py --all --verbose
 - External discovery is cache-first:
   - Normal runs reuse persisted `source_url` candidates from `admin.network_streaming_logo_assets` and do not re-query Brandfetch/Logopedia/IMDb for entities that already have cached source URLs.
   - Use `--force` only when you intentionally want to refresh external discovery (this will consume external API credits again).
+- Discovery is persisted per entity/source in `admin.network_streaming_discovery_state`:
+  - Once a source is attempted, it is discovery-locked and won’t be queried again on normal runs.
+  - Use `--refresh-external-sources` to explicitly re-open external discovery for that run.
+- SVG logo sources are rasterized to PNG during mirror (via `cairosvg`) so vector-only sources can still be persisted into hosted PNG assets and used for monochrome variant generation.
+- Runtime preflight:
+  - Script prints `svg_rasterizer_available=true|false`.
+  - If SVG logo candidates are encountered while rasterizer support is unavailable, sync fails fast with an explicit error.
 - Keeps canonical logo serving fields on `core.networks` / `core.watch_providers` unchanged for primary color + black/white variants:
   - `hosted_logo_*`
   - `hosted_logo_black_*`
   - `hosted_logo_white_*`
   - same parity for `core.production_companies`.
 - Use `--unresolved-only` to re-run just unresolved entities from completion state.
+- Resumable execution controls:
+  - `--batch-size` controls how often run progress is persisted.
+  - `--max-runtime-sec` gracefully stops long runs with status `stopped`.
+  - `--resume-run-id <run_id>` resumes from stored cursor in `admin.network_streaming_sync_runs`.
+  - `--start-after <entity_type:entity_key>` starts after an explicit cursor.
 - Prints both machine-readable counters and unresolved logo rows:
   - `completion_total=<count>`
   - `completion_resolved=<count>`

@@ -68,6 +68,80 @@ def test_parse_show_videos_extracts_runtime_and_clip_url(monkeypatch: pytest.Mon
     assert videos[0]["published_at"] == "2026-02-09T13:54:05-05:00"
 
 
+def test_parse_show_videos_prefers_largest_srcset_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    show_url = "https://www.bravotv.com/the-valley"
+    watch_videos_url = "https://www.bravotv.com/the-valley/watch/videos"
+    clip_url = "https://www.bravotv.com/the-valley/video/the-valley-night-out"
+
+    monkeypatch.setattr(
+        bravo_parser.requests,
+        "get",
+        _mock_get_factory(
+            {
+                watch_videos_url: """
+                    <html><body>
+                      <article>
+                        <a href=\"/the-valley/video/the-valley-night-out\">Watch</a>
+                        <h3>The Valley Night Out</h3>
+                        <img
+                          src=\"/images/thumb-default.jpg\"
+                          srcset=\"/images/thumb-320.jpg 320w, /images/thumb-1280.jpg 1280w\"
+                        />
+                      </article>
+                    </body></html>
+                """,
+                clip_url: """
+                    <html><head>
+                      <meta property=\"article:published_time\" content=\"2026-02-09T13:54:05-05:00\" />
+                    </head><body></body></html>
+                """,
+            }
+        ),
+    )
+
+    videos = bravo_parser.parse_show_videos(show_url)
+
+    assert len(videos) == 1
+    assert videos[0]["image_url"] == "https://www.bravotv.com/images/thumb-1280.jpg"
+    assert videos[0]["original_image_url"] == "https://www.bravotv.com/images/thumb-1280.jpg"
+
+
+def test_parse_show_videos_upgrades_image_from_clip_page_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    show_url = "https://www.bravotv.com/the-valley"
+    watch_videos_url = "https://www.bravotv.com/the-valley/watch/videos"
+    clip_url = "https://www.bravotv.com/the-valley/video/the-valley-night-out"
+
+    monkeypatch.setattr(
+        bravo_parser.requests,
+        "get",
+        _mock_get_factory(
+            {
+                watch_videos_url: """
+                    <html><body>
+                      <article>
+                        <a href=\"/the-valley/video/the-valley-night-out\">Watch</a>
+                        <h3>The Valley Night Out</h3>
+                        <img src=\"/images/thumb-1280.jpg\" />
+                      </article>
+                    </body></html>
+                """,
+                clip_url: """
+                    <html><head>
+                      <meta property=\"article:published_time\" content=\"2026-02-09T13:54:05-05:00\" />
+                      <meta property=\"og:image\" content=\"/images/clip-featured-4k.jpg\" />
+                    </head><body></body></html>
+                """,
+            }
+        ),
+    )
+
+    videos = bravo_parser.parse_show_videos(show_url)
+
+    assert len(videos) == 1
+    assert videos[0]["image_url"] == "https://www.bravotv.com/images/clip-featured-4k.jpg"
+    assert videos[0]["original_image_url"] == "https://www.bravotv.com/images/thumb-1280.jpg"
+
+
 def test_parse_show_news_extracts_headline_image_and_url(monkeypatch: pytest.MonkeyPatch) -> None:
     show_url = "https://www.bravotv.com/the-valley"
     news_url = "https://www.bravotv.com/the-valley/news"

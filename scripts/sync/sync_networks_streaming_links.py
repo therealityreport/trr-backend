@@ -44,6 +44,7 @@ from trr_backend.media.s3_mirror import (
     get_s3_client,
     mirror_external_logo_row,
     mirror_logo_monochrome_variants_row,
+    svg_rasterizer_available,
 )
 from trr_backend.utils.env import load_env
 
@@ -60,12 +61,17 @@ LOGO_SOURCE_CAPS: dict[str, int] = {
     "catalog": 12,
     "imdb": 8,
 }
+DISCOVERY_SOURCES = ("official", "catalog", "imdb")
 ATTEMPT_TABLE_SOURCES = {"override", "tmdb", "wikimedia", "official", "catalog", "variant"}
 LOGO_ASSET_TABLE_SOURCES = {"override", "tmdb", "wikimedia", "official", "catalog", "imdb"}
 REQUEST_HEADERS = {
     "accept": "application/json",
     "user-agent": "TRR-Backend/1.0",
 }
+
+
+class FatalSyncError(RuntimeError):
+    """Raised when sync should fail immediately instead of marking entity unresolved."""
 STREAMING_SUFFIX_PATTERNS = (
     r"\s+amazon channel$",
     r"\s+apple tv channel$",
@@ -175,10 +181,16 @@ class SyncRunContext:
     provider_imdb_ids_by_provider_id: dict[int, list[str]] = field(default_factory=dict)
     imdb_watch_box_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     production_imdb_hints_by_key: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    svg_rasterizer_available: bool = False
 
 
 @dataclass
 class SyncSummary:
+    run_id: str = ""
+    run_status: str = "running"
+    resume_cursor_entity_type: str | None = None
+    resume_cursor_entity_key: str | None = None
+    svg_rasterizer_available: bool = False
     processed: int = 0
     links_enriched: int = 0
     wikidata_linked: int = 0
@@ -190,6 +202,10 @@ class SyncSummary:
     logo_assets_mirrored: int = 0
     logo_assets_skipped: int = 0
     logo_assets_failed: int = 0
+    show_logos_discovered: int = 0
+    show_logos_imported: int = 0
+    show_logos_skipped: int = 0
+    show_logo_failures: int = 0
     failures: int = 0
     unresolved_logos: list[UnresolvedLogo] = field(default_factory=list)
     completion_total: int = 0
@@ -212,6 +228,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Resolve + print intended updates without writing.")
     parser.add_argument("--skip-s3", action="store_true", help="Skip logo and variant mirroring.")
     parser.add_argument("--unresolved-only", action="store_true", help="Process only unresolved completion rows.")
+    parser.add_argument(
+        "--refresh-external-sources",
+        action="store_true",
+        help="Refresh Brandfetch/Logopedia/IMDb discovery even when discovery lock exists.",
+    )
+    parser.add_argument("--batch-size", type=int, default=25, help="Persist run-progress metrics every N entities.")
+    parser.add_argument(
+        "--max-runtime-sec",
+        type=int,
+        default=840,
+        help="Gracefully stop after this runtime budget and return resumable cursor.",
+    )
+    parser.add_argument("--resume-run-id", type=str, default=None, help="Resume an existing run id from stored cursor.")
+    parser.add_argument(
+        "--start-after",
+        type=str,
+        default=None,
+        help="Start after explicit cursor in form entity_type:entity_key.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Optional per-type processing cap.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
     return parser.parse_args(argv)
@@ -284,6 +319,222 @@ def _to_pg_text_array_literal(values: list[str]) -> str:
         value = text.replace("\\", "\\\\").replace('"', '\\"')
         escaped.append(f'"{value}"')
     return "{" + ",".join(escaped) + "}"
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = _normalize_text(value)
+    if not raw:
+        return None
+    candidate = raw
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _load_discovery_state(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+) -> dict[str, dict[str, Any]]:
+    if not hasattr(db, "schema"):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    query = (
+        db.schema("admin")
+        .table("network_streaming_discovery_state")
+        .select("*")
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+    )
+    for row in _iter_rows_paged(query):
+        source = _normalize_text(row.get("source")).lower()
+        if not source:
+            continue
+        out[source] = row
+    return out
+
+
+def _is_discovery_locked(row: dict[str, Any] | None) -> bool:
+    if not isinstance(row, dict) or not row:
+        return False
+    lock_until = _parse_iso_datetime(row.get("lock_until"))
+    if lock_until is None:
+        return True
+    return lock_until > datetime.now(UTC)
+
+
+def _upsert_discovery_state(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+    source: str,
+    outcome: str,
+    reason: str | None,
+    cached_candidate_count: int,
+    previous_row: dict[str, Any] | None = None,
+) -> None:
+    if not hasattr(db, "schema"):
+        return
+    source_name = _normalize_text(source).lower()
+    if source_name not in {"official", "catalog", "imdb", "tmdb", "wikimedia", "override"}:
+        return
+    previous_attempt_count = _to_int((previous_row or {}).get("attempt_count"))
+    payload = {
+        "entity_type": entity_type,
+        "entity_key": entity_key,
+        "source": source_name,
+        "last_outcome": outcome if outcome in {"success", "failed", "skipped"} else "failed",
+        "last_reason": _normalize_text(reason) or None,
+        "attempt_count": max(1, previous_attempt_count + 1),
+        "last_attempt_at": _now_iso(),
+        "lock_until": None,
+        "cached_candidate_count": max(0, int(cached_candidate_count)),
+        "updated_at": _now_iso(),
+    }
+    response = (
+        db.schema("admin")
+        .table("network_streaming_discovery_state")
+        .upsert(payload, on_conflict="entity_type,entity_key,source")
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error upserting discovery state: {response.error}")
+
+
+def _load_sync_run_row(db, *, run_id: str) -> dict[str, Any] | None:
+    if not hasattr(db, "schema"):
+        return None
+    response = (
+        db.schema("admin")
+        .table("network_streaming_sync_runs")
+        .select("*")
+        .eq("run_id", run_id)
+        .limit(1)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error loading sync run row: {response.error}")
+    rows = response.data or []
+    if isinstance(rows, list) and rows:
+        first = rows[0]
+        if isinstance(first, dict):
+            return first
+    return None
+
+
+def _load_sync_run_cursor(db, *, run_id: str) -> tuple[str, str] | None:
+    row = _load_sync_run_row(db, run_id=run_id)
+    if not row:
+        return None
+    entity_type = _normalize_text(row.get("cursor_entity_type"))
+    entity_key = _name_key(row.get("cursor_entity_key"))
+    if entity_type in {"network", "streaming", "production"} and entity_key:
+        return entity_type, entity_key
+    return None
+
+
+def _upsert_sync_run_state(
+    db,
+    *,
+    run_id: str,
+    status: str,
+    summary: SyncSummary,
+    cursor: tuple[str, str] | None,
+    started_at: str,
+    finished_at: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    if not hasattr(db, "schema"):
+        return
+    cursor_entity_type = cursor[0] if cursor else None
+    cursor_entity_key = cursor[1] if cursor else None
+    payload = {
+        "run_id": run_id,
+        "status": status,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "cursor_entity_type": cursor_entity_type,
+        "cursor_entity_key": cursor_entity_key,
+        "processed": int(summary.processed),
+        "links_enriched": int(summary.links_enriched),
+        "wikidata_linked": int(summary.wikidata_linked),
+        "wikipedia_linked": int(summary.wikipedia_linked),
+        "logos_mirrored": int(summary.logos_mirrored),
+        "variants_black_mirrored": int(summary.variants_black_mirrored),
+        "variants_white_mirrored": int(summary.variants_white_mirrored),
+        "logo_assets_discovered": int(summary.logo_assets_discovered),
+        "logo_assets_mirrored": int(summary.logo_assets_mirrored),
+        "logo_assets_skipped": int(summary.logo_assets_skipped),
+        "logo_assets_failed": int(summary.logo_assets_failed),
+        "show_logos_discovered": int(summary.show_logos_discovered),
+        "show_logos_imported": int(summary.show_logos_imported),
+        "show_logos_skipped": int(summary.show_logos_skipped),
+        "show_logo_failures": int(summary.show_logo_failures),
+        "completion_total": int(summary.completion_total),
+        "completion_resolved": int(summary.completion_resolved),
+        "completion_unresolved": int(summary.completion_unresolved),
+        "completion_percent": float(summary.completion_percent),
+        "failures": int(summary.failures),
+        "error_message": _normalize_text(error_message) or None,
+    }
+    response = (
+        db.schema("admin")
+        .table("network_streaming_sync_runs")
+        .upsert(payload, on_conflict="run_id")
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error upserting sync run state: {response.error}")
+
+
+def _parse_start_after(value: str | None) -> tuple[str, str] | None:
+    text = _normalize_text(value)
+    if not text:
+        return None
+    if ":" not in text:
+        raise ValueError("start-after must be in form entity_type:entity_key")
+    entity_type, entity_key = text.split(":", 1)
+    type_name = _normalize_text(entity_type).lower()
+    key = _name_key(entity_key)
+    if type_name not in {"network", "streaming", "production"} or not key:
+        raise ValueError("start-after must use entity_type in network|streaming|production and non-empty key")
+    return type_name, key
+
+
+def _apply_start_after_cursor(
+    entities: list[InventoryEntity],
+    *,
+    start_after: tuple[str, str] | None,
+) -> list[InventoryEntity]:
+    if not start_after:
+        return entities
+    for idx, entity in enumerate(entities):
+        if (entity.entity_type, entity.entity_key) == start_after:
+            return entities[idx + 1 :]
+    return entities
+
+
+def _url_looks_like_svg(value: str | None) -> bool:
+    text = _normalize_text(value).lower()
+    if not text:
+        return False
+    return ".svg" in text or "format=svg" in text
+
+
+def _candidates_contain_svg(candidates: dict[str, list[str]]) -> bool:
+    for urls in candidates.values():
+        for url in urls:
+            if _url_looks_like_svg(url):
+                return True
+    return False
 
 
 def _score_search_result(name: str, candidate: dict[str, Any]) -> int:
@@ -1005,6 +1256,7 @@ def _build_sync_context(db) -> SyncRunContext:
         tmdb_network_ids_by_key=_collect_tmdb_network_ids_by_key(db),
         provider_imdb_ids_by_provider_id=_load_provider_imdb_ids_by_provider_id(db),
         production_imdb_hints_by_key=_load_production_imdb_hints_by_key(db),
+        svg_rasterizer_available=svg_rasterizer_available(),
     )
 
 
@@ -1191,7 +1443,7 @@ def _load_existing_logo_asset_index(
         .table("network_streaming_logo_assets")
         .select(
             "source,source_url,mirror_status,hosted_logo_key,hosted_logo_url,hosted_logo_sha256,"
-            "hosted_logo_content_type,hosted_logo_bytes,hosted_logo_etag,base_logo_format"
+            "hosted_logo_content_type,hosted_logo_bytes,hosted_logo_etag,base_logo_format,failure_reason"
         )
         .eq("entity_type", entity_type)
         .eq("entity_key", entity_key)
@@ -1240,6 +1492,60 @@ def _upsert_logo_asset(
     )
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error upserting logo asset row: {response.error}")
+
+
+def _mark_logo_asset_skipped(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+    source: str,
+    source_url: str,
+    reason: str,
+) -> None:
+    response = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .update(
+            {
+                "mirror_status": "skipped",
+                "failure_reason": reason,
+                "updated_at": _now_iso(),
+            }
+        )
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+        .eq("source", source)
+        .eq("source_url", source_url)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error marking logo asset skipped: {response.error}")
+
+
+def _superseded_failed_logopedia_svg_urls(
+    existing_asset_index: dict[tuple[str, str], dict[str, Any]],
+) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for (source, source_url), row in existing_asset_index.items():
+        if source != "catalog":
+            continue
+        if _normalize_text(row.get("mirror_status")) != "failed":
+            continue
+        if _normalize_text(row.get("failure_reason")) != "logo_decode_failed":
+            continue
+        raster_url = _logopedia_svg_raster_variant(source_url)
+        if not raster_url:
+            continue
+        raster_row = existing_asset_index.get((source, raster_url))
+        if not raster_row:
+            continue
+        if _normalize_text(raster_row.get("mirror_status")) != "mirrored":
+            continue
+        if not _normalize_text(raster_row.get("hosted_logo_url")):
+            continue
+        out.append((source, source_url))
+    return out
 
 
 def _reset_logo_asset_primary_flags(
@@ -1318,7 +1624,7 @@ def _insert_attempts(
             "run_id": run_id,
             "entity_type": entity_type,
             "entity_key": entity_key,
-            "source": attempt.source,
+            "source": _attempt_source_name(attempt.source),
             "attempt_url": attempt.attempt_url,
             "outcome": attempt.outcome,
             "failure_reason": attempt.failure_reason,
@@ -1733,7 +2039,7 @@ def _collect_external_logo_candidates(
         if imdb_source_urls or imdb_company_hints.get("aliases") or imdb_company_hints.get("company_urls"):
             attempts.append(
                 AttemptRecord(
-                    source="catalog",
+                    source="imdb",
                     attempt_url=imdb_source_urls[0] if imdb_source_urls else "https://www.imdb.com/",
                     outcome="success",
                     failure_reason=None,
@@ -1749,7 +2055,7 @@ def _collect_external_logo_candidates(
         else:
             attempts.append(
                 AttemptRecord(
-                    source="catalog",
+                    source="imdb",
                     attempt_url="https://www.imdb.com/",
                     outcome="failed",
                     failure_reason="imdb_companycredits_not_found",
@@ -1784,7 +2090,7 @@ def _collect_external_logo_candidates(
             _merge_source_urls(by_source, "imdb", imdb_candidates)
             attempts.append(
                 AttemptRecord(
-                    source="catalog",
+                    source="imdb",
                     attempt_url="https://www.imdb.com/",
                     outcome="success",
                     failure_reason=None,
@@ -1796,7 +2102,7 @@ def _collect_external_logo_candidates(
             unresolved_reason = unresolved_reason or "imdb_provider_not_found"
             attempts.append(
                 AttemptRecord(
-                    source="catalog",
+                    source="imdb",
                     attempt_url="https://www.imdb.com/",
                     outcome="failed",
                     failure_reason="imdb_provider_not_found",
@@ -1807,7 +2113,7 @@ def _collect_external_logo_candidates(
     elif entity.entity_type == "streaming" and context is not None:
         attempts.append(
             AttemptRecord(
-                source="catalog",
+                source="imdb",
                 attempt_url="https://www.imdb.com/",
                 outcome="skipped",
                 failure_reason="cached_discovery_reused",
@@ -2061,8 +2367,14 @@ def _process_entity(
         merged_row = {**core_row, **patch}
         has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
         existing_asset_source_urls: dict[str, list[str]] = {}
+        discovery_state: dict[str, dict[str, Any]] = {}
         if not args.skip_s3 and core_row:
             existing_asset_source_urls = _load_existing_logo_asset_source_urls(
+                db,
+                entity_type=entity.entity_type,
+                entity_key=entity.entity_key,
+            )
+            discovery_state = _load_discovery_state(
                 db,
                 entity_type=entity.entity_type,
                 entity_key=entity.entity_key,
@@ -2074,13 +2386,19 @@ def _process_entity(
                 _merge_source_urls(external_candidates, source_name, urls)
 
         has_cached_official = bool(existing_asset_source_urls.get("official"))
-        has_cached_catalog = bool(existing_asset_source_urls.get("catalog"))
         has_cached_logopedia = _source_has_logopedia_urls(existing_asset_source_urls.get("catalog", []))
         has_cached_imdb = bool(existing_asset_source_urls.get("imdb"))
+        official_locked = _is_discovery_locked(discovery_state.get("official"))
+        catalog_locked = _is_discovery_locked(discovery_state.get("catalog"))
+        imdb_locked = _is_discovery_locked(discovery_state.get("imdb"))
 
-        allow_brandfetch_lookup = bool(args.force or not has_cached_official)
-        allow_logopedia_lookup = bool(args.force or not has_cached_logopedia)
-        allow_imdb_lookup = bool(args.force or not has_cached_imdb)
+        allow_brandfetch_lookup = bool(
+            args.refresh_external_sources or (not official_locked and not has_cached_official)
+        )
+        allow_logopedia_lookup = bool(
+            args.refresh_external_sources or (not catalog_locked and not has_cached_logopedia)
+        )
+        allow_imdb_lookup = bool(args.refresh_external_sources or (not imdb_locked and not has_cached_imdb))
         should_collect_external = bool(
             not args.skip_s3
             and not args.dry_run
@@ -2088,7 +2406,7 @@ def _process_entity(
                 allow_brandfetch_lookup
                 or allow_logopedia_lookup
                 or (entity.entity_type == "streaming" and allow_imdb_lookup)
-                or (entity.entity_type == "production" and (not has_cached_catalog or args.force))
+                or (entity.entity_type == "production" and allow_imdb_lookup)
             )
         )
 
@@ -2109,13 +2427,59 @@ def _process_entity(
             for source_name, urls in external_new_candidates.items():
                 _merge_source_urls(external_candidates, source_name, urls)
             attempts.extend(external_attempts)
+            if core_row:
+                for discovery_source in DISCOVERY_SOURCES:
+                    source_attempts = [item for item in external_attempts if item.source == discovery_source]
+                    if not source_attempts:
+                        continue
+                    outcomes = {item.outcome for item in source_attempts}
+                    if "success" in outcomes:
+                        outcome = "success"
+                    elif "failed" in outcomes:
+                        outcome = "failed"
+                    else:
+                        outcome = "skipped"
+                    reason = next(
+                        (
+                            _normalize_text(item.failure_reason) or None
+                            for item in source_attempts
+                            if _normalize_text(item.failure_reason)
+                        ),
+                        None,
+                    )
+                    candidate_count = len(external_new_candidates.get(discovery_source, []))
+                    _upsert_discovery_state(
+                        db,
+                        entity_type=entity.entity_type,
+                        entity_key=entity.entity_key,
+                        source=discovery_source,
+                        outcome=outcome,
+                        reason=reason,
+                        cached_candidate_count=candidate_count,
+                        previous_row=discovery_state.get(discovery_source),
+                    )
         elif not args.skip_s3:
+            official_skip_reason = (
+                "discovery_locked"
+                if official_locked and not args.refresh_external_sources
+                else "cached_discovery_reused"
+            )
+            catalog_skip_reason = (
+                "discovery_locked"
+                if catalog_locked and not args.refresh_external_sources
+                else "cached_discovery_reused"
+            )
+            imdb_skip_reason = (
+                "discovery_locked"
+                if imdb_locked and not args.refresh_external_sources
+                else "cached_discovery_reused"
+            )
             attempts.append(
                 AttemptRecord(
                     source="official",
                     attempt_url=None,
                     outcome="skipped",
-                    failure_reason="cached_discovery_reused",
+                    failure_reason=official_skip_reason,
                     duration_ms=0,
                     details={"provider": "brandfetch"},
                 )
@@ -2125,11 +2489,22 @@ def _process_entity(
                     source="catalog",
                     attempt_url=None,
                     outcome="skipped",
-                    failure_reason="cached_discovery_reused",
+                    failure_reason=catalog_skip_reason,
                     duration_ms=0,
                     details={"provider": "logopedia"},
                 )
             )
+            if entity.entity_type in {"streaming", "production"}:
+                attempts.append(
+                    AttemptRecord(
+                        source="imdb",
+                        attempt_url=None,
+                        outcome="skipped",
+                        failure_reason=imdb_skip_reason,
+                        duration_ms=0,
+                        details={"provider": "imdb"},
+                    )
+                )
 
         source_priority = _source_priority(override)
         candidates = _capped_candidates(
@@ -2141,6 +2516,17 @@ def _process_entity(
                 extra_tmdb_logo_urls=[url for url in (tmdb_hints.get("tmdb_logo_urls") or []) if isinstance(url, str)],
             )
         )
+        if (
+            not args.skip_s3
+            and not args.dry_run
+            and context is not None
+            and not context.svg_rasterizer_available
+            and _candidates_contain_svg(candidates)
+        ):
+            raise FatalSyncError(
+                "svg_rasterizer_unavailable: cairosvg is required "
+                "for SVG logo candidates in sync_networks_streaming_links"
+            )
 
         selected_logo_source = ""
         selected_logo_url = ""
@@ -2198,27 +2584,27 @@ def _process_entity(
                                 duration_ms=0,
                             )
                         )
-                        _upsert_logo_asset(
-                            db,
-                            row={
-                                "entity_type": entity.entity_type,
-                                "entity_key": entity.entity_key,
-                                "entity_id": entity_id_value or None,
-                                "display_name": display_name,
-                                "source": _logo_asset_source_name(source_name),
-                                "source_url": candidate_url,
-                                "source_rank": source_rank,
-                                "run_id": run_id,
-                                "base_logo_format": _detect_base_logo_format(
-                                    wikimedia_logo_file="",
-                                    logo_source_url=candidate_url,
-                                    hosted_logo_url="",
-                                ),
-                                "mirror_status": mirror_status,
-                                "failure_reason": failure_reason,
-                                "is_primary": False,
-                            },
-                        )
+                        duplicate_url_asset_row = {
+                            "entity_type": entity.entity_type,
+                            "entity_key": entity.entity_key,
+                            "entity_id": entity_id_value or None,
+                            "display_name": display_name,
+                            "source": _logo_asset_source_name(source_name),
+                            "source_url": candidate_url,
+                            "source_rank": source_rank,
+                            "run_id": run_id,
+                            "base_logo_format": _detect_base_logo_format(
+                                wikimedia_logo_file="",
+                                logo_source_url=candidate_url,
+                                hosted_logo_url="",
+                            ),
+                            "mirror_status": mirror_status,
+                            "failure_reason": failure_reason,
+                            "is_primary": False,
+                        }
+                        _upsert_logo_asset(db, row=duplicate_url_asset_row)
+                        duplicate_key = (duplicate_url_asset_row["source"], candidate_url)
+                        existing_asset_index[duplicate_key] = duplicate_url_asset_row
                         continue
 
                     seen_urls.add(candidate_url)
@@ -2244,41 +2630,38 @@ def _process_entity(
                                 existing_sha.add(cached_sha)
                             if source_name not in successful_by_source:
                                 successful_by_source[source_name] = (candidate_url, cached_logo_patch)
-                            _upsert_logo_asset(
-                                db,
-                                row={
-                                    "entity_type": entity.entity_type,
-                                    "entity_key": entity.entity_key,
-                                    "entity_id": entity_id_value or None,
-                                    "display_name": display_name,
-                                    "source": source_key,
-                                    "source_url": candidate_url,
-                                    "source_rank": source_rank,
-                                    "run_id": run_id,
-                                    "hosted_logo_key": _normalize_text(cached_logo_patch.get("hosted_logo_key"))
-                                    or None,
-                                    "hosted_logo_url": cached_hosted_url or None,
-                                    "hosted_logo_sha256": _normalize_text(cached_logo_patch.get("hosted_logo_sha256"))
-                                    or None,
-                                    "hosted_logo_content_type": (
-                                        _normalize_text(cached_logo_patch.get("hosted_logo_content_type")) or None
-                                    ),
-                                    "hosted_logo_bytes": cached_logo_patch.get("hosted_logo_bytes"),
-                                    "hosted_logo_etag": _normalize_text(cached_logo_patch.get("hosted_logo_etag"))
-                                    or None,
-                                    "base_logo_format": _normalize_text(cached_asset_row.get("base_logo_format"))
-                                    or _detect_base_logo_format(
-                                        wikimedia_logo_file="",
-                                        logo_source_url=candidate_url,
-                                        hosted_logo_url=cached_hosted_url,
-                                    ),
-                                    "pixel_width": None,
-                                    "pixel_height": None,
-                                    "mirror_status": "mirrored",
-                                    "failure_reason": None,
-                                    "is_primary": False,
-                                },
-                            )
+                            cached_asset_update = {
+                                "entity_type": entity.entity_type,
+                                "entity_key": entity.entity_key,
+                                "entity_id": entity_id_value or None,
+                                "display_name": display_name,
+                                "source": source_key,
+                                "source_url": candidate_url,
+                                "source_rank": source_rank,
+                                "run_id": run_id,
+                                "hosted_logo_key": _normalize_text(cached_logo_patch.get("hosted_logo_key")) or None,
+                                "hosted_logo_url": cached_hosted_url or None,
+                                "hosted_logo_sha256": _normalize_text(cached_logo_patch.get("hosted_logo_sha256"))
+                                or None,
+                                "hosted_logo_content_type": (
+                                    _normalize_text(cached_logo_patch.get("hosted_logo_content_type")) or None
+                                ),
+                                "hosted_logo_bytes": cached_logo_patch.get("hosted_logo_bytes"),
+                                "hosted_logo_etag": _normalize_text(cached_logo_patch.get("hosted_logo_etag")) or None,
+                                "base_logo_format": _normalize_text(cached_asset_row.get("base_logo_format"))
+                                or _detect_base_logo_format(
+                                    wikimedia_logo_file="",
+                                    logo_source_url=candidate_url,
+                                    hosted_logo_url=cached_hosted_url,
+                                ),
+                                "pixel_width": None,
+                                "pixel_height": None,
+                                "mirror_status": "mirrored",
+                                "failure_reason": None,
+                                "is_primary": False,
+                            }
+                            _upsert_logo_asset(db, row=cached_asset_update)
+                            existing_asset_index[(source_key, candidate_url)] = cached_asset_update
                             continue
 
                     started = time.perf_counter()
@@ -2362,37 +2745,51 @@ def _process_entity(
                             )
                         )
 
-                    _upsert_logo_asset(
-                        db,
-                        row={
-                            "entity_type": entity.entity_type,
-                            "entity_key": entity.entity_key,
-                            "entity_id": entity_id_value or None,
-                            "display_name": display_name,
-                            "source": _logo_asset_source_name(source_name),
-                            "source_url": candidate_url,
-                            "source_rank": source_rank,
-                            "run_id": run_id,
-                            "hosted_logo_key": _normalize_text(logo_patch.get("hosted_logo_key")) or None,
-                            "hosted_logo_url": _normalize_text(logo_patch.get("hosted_logo_url")) or None,
-                            "hosted_logo_sha256": _normalize_text(logo_patch.get("hosted_logo_sha256")) or None,
-                            "hosted_logo_content_type": (
-                                _normalize_text(logo_patch.get("hosted_logo_content_type")) or None
-                            ),
-                            "hosted_logo_bytes": logo_patch.get("hosted_logo_bytes"),
-                            "hosted_logo_etag": _normalize_text(logo_patch.get("hosted_logo_etag")) or None,
-                            "base_logo_format": _detect_base_logo_format(
-                                wikimedia_logo_file="",
-                                logo_source_url=candidate_url,
-                                hosted_logo_url=_normalize_text(logo_patch.get("hosted_logo_url")),
-                            ),
-                            "pixel_width": None,
-                            "pixel_height": None,
-                            "mirror_status": mirror_status,
-                            "failure_reason": failure_reason,
-                            "is_primary": False,
-                        },
-                    )
+                    source_key = _logo_asset_source_name(source_name)
+                    logo_asset_row = {
+                        "entity_type": entity.entity_type,
+                        "entity_key": entity.entity_key,
+                        "entity_id": entity_id_value or None,
+                        "display_name": display_name,
+                        "source": source_key,
+                        "source_url": candidate_url,
+                        "source_rank": source_rank,
+                        "run_id": run_id,
+                        "hosted_logo_key": _normalize_text(logo_patch.get("hosted_logo_key")) or None,
+                        "hosted_logo_url": _normalize_text(logo_patch.get("hosted_logo_url")) or None,
+                        "hosted_logo_sha256": _normalize_text(logo_patch.get("hosted_logo_sha256")) or None,
+                        "hosted_logo_content_type": _normalize_text(logo_patch.get("hosted_logo_content_type")) or None,
+                        "hosted_logo_bytes": logo_patch.get("hosted_logo_bytes"),
+                        "hosted_logo_etag": _normalize_text(logo_patch.get("hosted_logo_etag")) or None,
+                        "base_logo_format": _detect_base_logo_format(
+                            wikimedia_logo_file="",
+                            logo_source_url=candidate_url,
+                            hosted_logo_url=_normalize_text(logo_patch.get("hosted_logo_url")),
+                        ),
+                        "pixel_width": None,
+                        "pixel_height": None,
+                        "mirror_status": mirror_status,
+                        "failure_reason": failure_reason,
+                        "is_primary": False,
+                    }
+                    _upsert_logo_asset(db, row=logo_asset_row)
+                    existing_asset_index[(source_key, candidate_url)] = logo_asset_row
+
+            for source_name, source_url in _superseded_failed_logopedia_svg_urls(existing_asset_index):
+                _mark_logo_asset_skipped(
+                    db,
+                    entity_type=entity.entity_type,
+                    entity_key=entity.entity_key,
+                    source=source_name,
+                    source_url=source_url,
+                    reason="raster_variant_mirrored",
+                )
+                updated_row = existing_asset_index.get((source_name, source_url), {})
+                existing_asset_index[(source_name, source_url)] = {
+                    **updated_row,
+                    "mirror_status": "skipped",
+                    "failure_reason": "raster_variant_mirrored",
+                }
 
             for source_name in source_priority:
                 candidate = successful_by_source.get(source_name)
@@ -2557,6 +2954,8 @@ def _process_entity(
                     reason=resolution_reason or "incomplete_metadata",
                 )
             )
+    except FatalSyncError:
+        raise
     except Exception as exc:  # noqa: BLE001
         summary.failures += 1
         reason = _reason_from_exception(exc)
@@ -2685,8 +3084,12 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
     db = create_supabase_admin_client()
     summary = SyncSummary()
     s3_client = None if args.skip_s3 or args.dry_run else get_s3_client()
-    run_id = f"network-streaming-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    run_id = _normalize_text(args.resume_run_id) or f"network-streaming-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    summary.run_id = run_id
+    summary.run_status = "running"
+    started_at_iso = _now_iso()
     context = _build_sync_context(db)
+    summary.svg_rasterizer_available = bool(context.svg_rasterizer_available)
 
     inventory = _load_used_inventory(db)
     network_lookup = _load_dimension_lookup(db, table="networks", id_field="id", name_field="name")
@@ -2705,14 +3108,44 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
     overrides = _load_overrides(db)
 
     unresolved_keys = _load_unresolved_keys(db, used_keys=set(inventory.keys())) if args.unresolved_only else set()
-    entities = _select_entities(
+    selected_entities = _select_entities(
         inventory,
         unresolved_only=bool(args.unresolved_only),
         unresolved_keys=unresolved_keys,
         limit=args.limit,
     )
 
-    for entity in entities:
+    start_after = _parse_start_after(args.start_after)
+    if args.resume_run_id and not start_after:
+        start_after = _load_sync_run_cursor(db, run_id=run_id)
+    entities = _apply_start_after_cursor(selected_entities, start_after=start_after)
+
+    batch_size = max(1, int(args.batch_size or 25))
+    max_runtime_sec = max(1, int(args.max_runtime_sec or 840))
+    runtime_started = time.perf_counter()
+    last_cursor: tuple[str, str] | None = start_after
+    fatal_error: str | None = None
+
+    if not args.dry_run:
+        _upsert_sync_run_state(
+            db,
+            run_id=run_id,
+            status="running",
+            summary=summary,
+            cursor=last_cursor,
+            started_at=started_at_iso,
+            finished_at=None,
+            error_message=None,
+        )
+
+    for idx, entity in enumerate(entities):
+        elapsed = time.perf_counter() - runtime_started
+        if elapsed >= max_runtime_sec:
+            summary.run_status = "stopped"
+            summary.resume_cursor_entity_type = last_cursor[0] if last_cursor else None
+            summary.resume_cursor_entity_key = last_cursor[1] if last_cursor else None
+            break
+
         pair = (entity.entity_type, entity.entity_key)
         if entity.entity_type == "network":
             core_row = network_lookup.get(entity.entity_key)
@@ -2721,17 +3154,50 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
         else:
             core_row = production_lookup.get(entity.entity_key)
         override = overrides.get(pair)
-        _process_entity(
-            db,
-            entity=entity,
-            core_row=core_row,
-            override=override,
-            run_id=run_id,
-            args=args,
-            summary=summary,
-            s3_client=s3_client,
-            context=context,
-        )
+        try:
+            _process_entity(
+                db,
+                entity=entity,
+                core_row=core_row,
+                override=override,
+                run_id=run_id,
+                args=args,
+                summary=summary,
+                s3_client=s3_client,
+                context=context,
+            )
+        except FatalSyncError as exc:
+            summary.failures += 1
+            summary.run_status = "failed"
+            fatal_error = str(exc)
+            summary.resume_cursor_entity_type = entity.entity_type
+            summary.resume_cursor_entity_key = entity.entity_key
+            last_cursor = (entity.entity_type, entity.entity_key)
+            if not args.dry_run:
+                _upsert_sync_run_state(
+                    db,
+                    run_id=run_id,
+                    status="failed",
+                    summary=summary,
+                    cursor=last_cursor,
+                    started_at=started_at_iso,
+                    finished_at=_now_iso(),
+                    error_message=fatal_error,
+                )
+            break
+
+        last_cursor = pair
+        if not args.dry_run and ((idx + 1) % batch_size == 0):
+            _upsert_sync_run_state(
+                db,
+                run_id=run_id,
+                status="running",
+                summary=summary,
+                cursor=last_cursor,
+                started_at=started_at_iso,
+                finished_at=None,
+                error_message=None,
+            )
 
     if not args.dry_run:
         _refresh_completion_snapshot(db, inventory=inventory, summary=summary)
@@ -2741,6 +3207,29 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
         summary.completion_unresolved = len(inventory)
         summary.completion_percent = 0.0
 
+    if summary.run_status not in {"stopped", "failed"}:
+        summary.run_status = "completed"
+        summary.resume_cursor_entity_type = None
+        summary.resume_cursor_entity_key = None
+
+    if summary.run_status == "stopped" and last_cursor:
+        summary.resume_cursor_entity_type = last_cursor[0]
+        summary.resume_cursor_entity_key = last_cursor[1]
+
+    if not args.dry_run:
+        _upsert_sync_run_state(
+            db,
+            run_id=run_id,
+            status=summary.run_status,
+            summary=summary,
+            cursor=(summary.resume_cursor_entity_type, summary.resume_cursor_entity_key)
+            if summary.resume_cursor_entity_type and summary.resume_cursor_entity_key
+            else None,
+            started_at=started_at_iso,
+            finished_at=_now_iso(),
+            error_message=fatal_error,
+        )
+
     return summary
 
 
@@ -2749,6 +3238,11 @@ def main(argv: list[str] | None = None) -> int:
     summary = run_sync(args)
     summary_dict = asdict(summary)
 
+    print(f"run_id={summary.run_id}")
+    print(f"run_status={summary.run_status}")
+    print(f"resume_cursor_entity_type={summary.resume_cursor_entity_type or ''}")
+    print(f"resume_cursor_entity_key={summary.resume_cursor_entity_key or ''}")
+    print(f"svg_rasterizer_available={'true' if summary.svg_rasterizer_available else 'false'}")
     print("Summary")
     for key in (
         "processed",
@@ -2775,7 +3269,7 @@ def main(argv: list[str] | None = None) -> int:
     for item in summary.unresolved_logos:
         print("unresolved_logo=" + json.dumps(asdict(item), ensure_ascii=False))
 
-    return 0
+    return 0 if summary.run_status != "failed" else 1
 
 
 if __name__ == "__main__":

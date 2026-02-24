@@ -2,6 +2,87 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-24) — Credit-safe discovery locks + resumable sync run state
+
+- February 24, 2026: Implemented next-phase hardening for networks/streaming/production logo sync to prevent repeated external discovery calls and support resumable long runs.
+  - Files:
+    - `supabase/migrations/0143_network_streaming_discovery_state.sql` (new)
+    - `supabase/migrations/0144_network_streaming_sync_runs.sql` (new)
+    - `scripts/sync/sync_networks_streaming_links.py`
+    - `api/routers/admin_show_sync.py`
+    - `trr_backend/media/s3_mirror.py`
+    - `Dockerfile`
+    - `scripts/README.md`
+    - `tests/scripts/test_sync_networks_streaming_links.py`
+    - `tests/api/routers/test_admin_show_sync.py`
+  - Changes:
+    - Added persistent source-lock state table (`admin.network_streaming_discovery_state`) with per entity/source outcome and candidate counts.
+    - Added run-state table (`admin.network_streaming_sync_runs`) with status, cursor, counters, and error tracking.
+    - Added sync script flags:
+      - `--refresh-external-sources`
+      - `--batch-size`
+      - `--max-runtime-sec`
+      - `--resume-run-id`
+      - `--start-after`
+    - Enforced discovery lock policy:
+      - source is treated locked after first attempt; normal runs reuse cached URLs and skip re-query.
+      - refresh requires explicit `--refresh-external-sources`.
+    - Added resumable runtime behavior:
+      - periodic run-state updates by batch,
+      - graceful `stopped` status when runtime budget is reached,
+      - resume cursor emitted in output.
+    - Added SVG rasterizer preflight plumbing:
+      - `svg_rasterizer_available()` helper in media mirror,
+      - sync emits startup preflight line,
+      - sync fails fast when SVG candidates are encountered without rasterizer availability.
+    - Expanded admin sync endpoint contract:
+      - request: `refresh_external_sources`, `batch_size`, `max_runtime_sec`, `resume_run_id`
+      - response: `run_id`, `status`, `resume_cursor`
+      - schema preflight now validates new admin run/discovery tables.
+    - Docker runtime parity update for CairoSVG dependency (`libcairo2`, `libffi-dev`).
+  - Validation:
+    - `ruff check scripts/sync/sync_networks_streaming_links.py api/routers/admin_show_sync.py trr_backend/media/s3_mirror.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (pass)
+    - `pytest tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py tests/media/test_s3_mirror.py` (`80 passed`)
+
+## Latest Update (2026-02-24) — Gallery host reliability repair script + broken-row audit marking
+
+- February 24, 2026: Implemented backend repair tooling for person-gallery hosted URL failures (403/unreachable) with dry-run classification, selective repair, and audit-safe broken marking.
+  - Files:
+    - `scripts/media/repair_gallery_hosts.py` (new)
+    - `tests/scripts/test_repair_gallery_hosts.py` (new)
+    - `scripts/media/restore_changed_originals.py` (docs note only)
+  - Changes:
+    - Added `repair_gallery_hosts.py` CLI for person-gallery candidates from:
+      - `core.media_links(kind='gallery', entity_type='person')` + `core.media_assets`
+      - person-scope `core.cast_photos`
+    - Reachability model:
+      - hosted URL probe via `GET` + `Range: bytes=0-0`
+      - source URL probe with source-aware headers (IMDb referer etc.)
+      - classification: `ok`, `repaired`, `broken_unreachable`, `error`
+    - Apply mode behavior:
+      - `repaired`: force re-mirror + base variant regeneration; crop variants regenerated only when crop payload exists
+      - `broken_unreachable`: add audit marker fields without deleting data:
+        - `gallery_status="broken_unreachable"`
+        - `gallery_status_reason`
+        - `gallery_status_checked_at`
+      - media-link candidates write markers to `media_links.context`; cast-photo candidates write markers to `cast_photos.metadata`
+    - Script options:
+      - `--apply`, `--sources`, `--person-id`, `--show-id`, `--limit`, `--timeout`, `--output-json`
+    - Clarified `restore_changed_originals.py` as hash-integrity tooling (separate concern from host availability).
+  - Validation:
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_gallery_hosts.py -q` (`4 passed`)
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_asset_batch_jobs.py -q` (`6 passed`)
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py -q` (`20 passed`)
+    - Runtime dry-run (bounded sample):
+      - `python /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py --sources imdb,tmdb,fandom,bravo --limit 50 --output-json /tmp/gallery-host-repair-dryrun.json`
+      - Result: `scanned=50`, `ok=0`, `repaired=21`, `broken_unreachable=29`, `error=0`, `apply=false`.
+    - Runtime direct-invocation smoke:
+      - `python /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py --sources imdb,tmdb,fandom,bravo --limit 1 --output-json /tmp/gallery-host-repair-dryrun-smoke.json`
+      - Result: `scanned=1`, `broken_unreachable=1`, script executes directly without manual `PYTHONPATH`.
+  - Notes:
+    - Unbounded dry-run/apply was not executed in this session because it is network-bound and long-running.
+    - No DB migration required.
+
 ## Latest Update (2026-02-24) — Instagram scraper + async S3 mirror hardening (queue-backed)
 
 - February 24, 2026: Implemented additional Instagram reliability hardening and async mirror queue plumbing with additive diagnostics.
@@ -2863,6 +2944,49 @@ Continuation (same session, 2026-02-24) — Networks/Streaming logo discovery ca
     - After SVG raster fallback expansion run: `asset_rows=28`, `mirrored_assets=13`
     - Re-run cache verification: `brandfetch_calls=0`, `logopedia_calls=0`
 
+Continuation (same session, 2026-02-24) — SVG rasterization enablement for logo mirroring:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/media/s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/media/test_s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.in`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.lock.txt`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/README.md`
+- Changes:
+  - Added SVG sniffing in image content-type detection.
+  - Added SVG->PNG conversion path in `_ensure_png_bytes(...)` using `cairosvg.svg2png(...)` before PIL fallback.
+  - Added media tests for SVG sniffing and raster conversion behavior.
+  - Added `cairosvg` to `requirements.in` and recompiled lock via:
+    - `uv pip compile requirements.in --python-version 3.11 -o requirements.lock.txt`
+  - Local runtime install for execution validation:
+    - `/opt/homebrew/opt/python@3.11/bin/python3.11 -m pip install cairosvg`
+- Validation:
+  - `ruff check trr_backend/media/s3_mirror.py tests/media/test_s3_mirror.py scripts/sync/sync_networks_streaming_links.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (pass)
+  - `pytest -q tests/media/test_s3_mirror.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py::TestSyncNetworksStreaming -q` (pass)
+- Bravo run impact after SVG support:
+  - Targeted run summary: `logo_assets_mirrored=9`, `logo_assets_failed=0`, `logo_assets_skipped=13`.
+  - Persisted Bravo assets now: `total_rows=30`, `mirrored=24`, `failed=5`, `skipped=1`.
+  - Remaining failed rows are legacy catalog URLs; failed set now narrowed to 5 (`logo_decode_failed`) and does not affect canonical logo + black/white variants.
+  - Cache behavior remains intact after SVG enablement:
+    - `brandfetch_calls=0`, `logopedia_calls=0`, `logo_assets_mirrored=0`, `logo_assets_failed=0`, `logo_assets_skipped=22` on subsequent rerun.
+
+Continuation (same session, 2026-02-24) — cleanup pass for superseded failed Logopedia SVG rows:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/sync/sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_networks_streaming_links.py`
+- Changes:
+  - Added row-level cleanup logic in sync:
+    - Detects failed `catalog` Logopedia raw SVG rows (`logo_decode_failed`) that have a mirrored raster variant (`/scale-to-width-down/1024`) for the same source URL lineage.
+    - Marks those rows as `mirror_status='skipped'` with `failure_reason='raster_variant_mirrored'`.
+  - Keeps remaining genuinely unresolved rows as failed.
+- Validation:
+  - `ruff check scripts/sync/sync_networks_streaming_links.py tests/scripts/test_sync_networks_streaming_links.py` (pass)
+  - `pytest -q tests/scripts/test_sync_networks_streaming_links.py -q` (pass)
+- Bravo targeted cleanup result:
+  - Before: `failed=5`, `mirrored=24`, `skipped=1`.
+  - After: `failed=3`, `mirrored=25`, `skipped=2`.
+  - New non-blocking cleanup marker rows: `failure_reason='raster_variant_mirrored'` count `1`.
+  - Remaining Bravo failed rows (3) are OLN legacy SVG files with no mirrored raster counterpart yet.
+
 Continuation (same session, 2026-02-24) — news feature hardening: async Google sync jobs, dedupe/pagination, canonical URLs, and mirror retry cooldowns.
 - Files:
   - `api/routers/admin_show_news.py`
@@ -2893,3 +3017,170 @@ Continuation (same session, 2026-02-24) — news feature hardening: async Google
   - generate/update thumbnail crop context and variants when available.
 - Validation:
   - `pytest -q tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_image_counts_fallback.py`
+
+Continuation (same session, 2026-02-24) — News hardening phase 2 (additional defects remediation).
+- Files:
+  - `api/routers/admin_show_news.py`
+  - `trr_backend/scraping/google_news_parser.py`
+  - `supabase/migrations/0140_google_news_sync_job_heartbeat.sql` (new)
+  - `tests/api/routers/test_admin_show_news.py`
+  - `tests/scraping/test_google_news_parser.py`
+- Changes:
+  - Mirror retry hardening:
+    - Added terminal mirror status (`missing_image_terminal`) for items with no source image.
+    - Increment mirror attempts on terminal transition and missing-data retry branches.
+    - Prevented repeat retries for terminal/no-source-image items.
+  - Async sync resilience:
+    - Added stale job reconciliation for queued/running jobs older than TTL (`15m`) with `job_orphaned_or_timed_out` error.
+    - Added heartbeat touch/update support in async sync lifecycle.
+    - Added additive migration column/index for job heartbeat scans.
+  - Tagging precision:
+    - Topic matching switched to boundary-aware normalized matching (prevents `cast`/`podcast` bleed).
+    - Person alias generation tightened (no broad first-name expansion; unique first-name alias only).
+  - Unified news facets:
+    - Added additive `/news` response `facets` (`sources`, `people`, `topics`, `seasons`) computed pre-pagination.
+  - Canonical URL normalization:
+    - Stable query-param ordering for stronger dedupe of equivalent URLs.
+- Validation:
+  - `ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (`23 passed`)
+
+Continuation (same session, 2026-02-24) — URL/Sync/Media hardening batch (person sources approved-only + Sync-by-Bravo signature/heartbeat).
+- Files:
+  - `api/main.py`
+  - `api/routers/admin_show_links.py`
+  - `api/routers/admin_show_bravo.py`
+  - `scripts/shows/backfill_bravo_person_source_links.py`
+  - `trr_backend/integrations/fandom.py`
+  - `supabase/migrations/0139_add_fandom_allowlist_table.sql` (new)
+  - `tests/api/routers/test_admin_show_links.py`
+  - `tests/api/routers/test_admin_show_bravo.py`
+  - `tests/integrations/fandom/test_fandom_search.py`
+- Changes:
+  - Added shared URL canonicalization and replaced raw lowercased URL keys in admin show link flows (create/patch/discovery/upsert).
+  - Added `wikia -> fandom` kind normalization for writes while preserving legacy-row reads.
+  - Added robust duplicate-detection helper (`23505`/constraint parsing fallback) and used it in link upsert + backfill script.
+  - Hardened person-link validation with per-source timeout envs and stronger IMDb/TMDb challenge classification (requires ID-consistent + owner signals).
+  - Cached fandom allowlist once per discovery pass and moved fandom candidate selection to scored best-candidate ranking.
+  - Made person-link cleanup atomic with transaction-scoped promote+delete.
+  - Added admin allowlist endpoints (`GET`/`PUT /api/v1/admin/fandom/allowlist`) and DB-backed allowlist load with file fallback cache.
+  - Renamed Bravo persistence helper to `_persist_discovered_links_from_bravo_sync` and preserved approved-only person-source behavior with explicit skip counters.
+  - Added additive `preview_signature` to Bravo preview/stream/commit contract and stale-signature `409` guard in commit.
+  - Added SSE `heartbeat` events for long-running cast-only preview streams.
+  - Made show-image candidate IDs deterministic via URL-hash and added retry-safe/idempotent stage guards in fandom profile import path.
+  - Enhanced backfill script telemetry with JSON summary output and explicit skip/failure-reason counters.
+- Validation:
+  - `ruff check api/main.py api/routers/admin_show_links.py api/routers/admin_show_bravo.py scripts/shows/backfill_bravo_person_source_links.py trr_backend/integrations/fandom.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py tests/integrations/fandom/test_fandom_search.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py tests/integrations/fandom/test_fandom_search.py` (`68 passed`)
+  - `python -m py_compile api/main.py api/routers/admin_show_links.py api/routers/admin_show_bravo.py scripts/shows/backfill_bravo_person_source_links.py trr_backend/integrations/fandom.py` (pass)
+
+Continuation (same session, 2026-02-24) — Reliable comment sync hardening (coverage endpoint + inline fallback cap).
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Added env-controlled inline comments-only fallback worker cap using `SOCIAL_INLINE_COMMENTS_WORKERS` (`default=1`, bounded `1..4`).
+  - Added additive season endpoint `GET /api/v1/admin/socials/seasons/{season_id}/analytics/comments-coverage` with scope/date/platform filters.
+  - Added repository coverage aggregation returning:
+    - `total_saved_comments`, `total_reported_comments`, `coverage_pct`, `up_to_date`, `stale_posts_count`, `posts_scanned`, `by_platform`, `evaluated_at`.
+  - Documented local pool sizing recommendation in `.env.example`:
+    - `TRR_DB_POOL_MINCONN=2`
+    - `TRR_DB_POOL_MAXCONN=24`
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py api/routers/socials.py trr_backend/db/pg.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py -k "coverage or ingest or comments"` (`35 passed, 59 deselected`)
+
+Continuation (same session, 2026-02-24) — News Stability Patch Set (remaining fixes).
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/scraping/google_news_parser.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scraping/test_google_news_parser.py`
+- Changes:
+  - Added env-configurable stale timeout reader in router:
+    - `GOOGLE_NEWS_SYNC_STALE_TIMEOUT_MINUTES` (default `15`, min `1`).
+  - Documented `GOOGLE_NEWS_SYNC_STALE_TIMEOUT_MINUTES` in `.env.example`.
+  - Kept stale-job reconcile contract stable (`job_orphaned_or_timed_out`) while using heartbeat-aware stale scan windows.
+  - Threaded optional `heartbeat_cb` through Google parser + mirror sync paths and invoked periodic touches during:
+    - topic candidate attempts,
+    - canonical URL probes,
+    - featured-image probes,
+    - mirror import loop (every 5 image imports).
+  - Hardened mirror terminal handling:
+    - when source image exists but `article_url` is missing, mark item terminal with existing additive status:
+      - `mirror_status="missing_image_terminal"`
+      - `last_mirror_error="Missing article URL required for mirroring"`
+      - `mirror_retry_after=null`.
+    - terminal states remain non-retryable via `_google_item_needs_mirror_retry`.
+  - Preserved additive `/news` + async sync contracts (no breaking route/field removals).
+- Validation:
+  - `ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (`28 passed`)
+
+Continuation (same session, 2026-02-24) — Social analytics 22-item hardening pass (backend segment).
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/db/pg.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0141_social_analytics_hot_path_indexes.sql` (new)
+- Changes:
+  - Raised default DB pool sizing for local/dev concurrency from `1..8` to `2..24` while preserving env override behavior.
+  - Added short TTL in-process analytics cache (`15s`) keyed by request-shape dimensions to reduce repeated recomputation under live polling.
+  - Added cached scrape-job feature-flag probing (`run_id` + queue columns) to remove repeated schema checks in `list_jobs`.
+  - Added `include_post_text` row-build flag so aggregate-only analytics paths avoid pulling full post text payloads; full row paths remain unchanged.
+  - Added per-request memoization for rule-based comment sentiment (`platform + source_id + normalized text hash`) to reduce repeated sentiment scoring cost.
+  - Added additive hot-path social indexes (`IF NOT EXISTS`) across runs/jobs/post/comment tables for season/run/scope/time and common account/parent filters.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/db/pg.py trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "analytics or runs or jobs or targets"` (`66 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py -k "runs or jobs or analytics or week"` (`28 passed`)
+
+Continuation (same session, 2026-02-24) — URL/Sync/Bravo stabilization patch (post-hardening bugfix pass).
+- Files:
+  - `api/routers/admin_show_links.py`
+  - `api/routers/admin_show_bravo.py`
+  - `scripts/shows/backfill_bravo_person_source_links.py`
+  - `tests/api/routers/test_admin_show_links.py`
+  - `tests/api/routers/test_admin_show_bravo.py`
+- Changes:
+  - Tightened IMDb/TMDb challenge-page validation to prevent false approvals when owner signal cannot be verified (challenge outcomes now classify as unverifiable/fetch_error unless identity is strongly confirmed).
+  - Reordered IMDb/TMDb validation flow so challenge detection can still run on challenge-like 4xx responses before generic invalid classification.
+  - Hardened cast-only commit contract: `preview_signature` is now required for cast-only commits (422 when missing), stale mismatches still return 409.
+  - Tightened cast-only preview reuse validation to always compare expected vs preview fandom candidate sets (including empty preview-set cases).
+  - Improved backfill script operability: direct script execution works without requiring manual `PYTHONPATH=.` bootstrapping.
+  - Added/updated regression tests for:
+    - IMDb/TMDb challenge strictness behavior.
+    - Fandom allowlist endpoint auth + normalization/persistence flows.
+    - Cast-only commit missing-signature rejection.
+    - Fandom stale-set preview validation behavior.
+- Validation:
+  - `ruff check api/routers/admin_show_links.py api/routers/admin_show_bravo.py scripts/shows/backfill_bravo_person_source_links.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py` (`72 passed`)
+  - `python -m py_compile api/routers/admin_show_links.py api/routers/admin_show_bravo.py scripts/shows/backfill_bravo_person_source_links.py` (pass)
+  - `python scripts/shows/backfill_bravo_person_source_links.py --help` from repo root (pass without `PYTHONPATH=.`)
+
+Continuation (same session, 2026-02-24) — Bravo video thumbnail quality + S3 mirroring.
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/scraping/bravo_parser.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scraping/test_bravo_parser.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+- Changes:
+  - Improved Bravo video thumbnail extraction quality:
+    - parses `data-srcset/srcset` and chooses highest descriptor (`w`/`x`) instead of first token,
+    - stores `original_image_url` on video items,
+    - upgrades video `image_url` from clip-page `og:image`/`twitter:image` during hydration.
+  - Added reusable Bravo video thumbnail mirror pipeline in show router:
+    - new helper `_sync_bravo_video_thumbnails(...)` mirrors to S3/Supabase through existing `import_images(...)`,
+    - persists additive video fields: `hosted_image_url`, `original_image_url`, `media_asset_id`, `thumbnail_sync_status`, `thumbnail_sync_error`,
+    - sets `image_url` to hosted URL on success.
+  - Bravo commit flow now runs video thumbnail sync before snapshot persist, and stores additive sync summary under `normalized.video_thumbnail_sync`.
+  - Added backfill endpoint:
+    - `POST /api/v1/admin/shows/{show_id}/bravo/videos/sync-thumbnails` (supports `{ force?: boolean }`).
+  - Kept existing Bravo read routes additive/backward-compatible.
+- Validation:
+  - `ruff check trr_backend/scraping/bravo_parser.py api/routers/admin_show_bravo.py tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (pass)
+  - `pytest -q tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (`52 passed`)

@@ -67,3 +67,25 @@ def test_is_allowlisted_fandom_domain_checks_loaded_allowlist() -> None:
         "https://teen-wolf.fandom.com/wiki/Heather_Gay",
         allowlist=allowlist,
     )
+
+
+def test_load_fandom_allowlist_prefers_db_source() -> None:
+    with patch(
+        "trr_backend.integrations.fandom._load_fandom_community_allowlist_from_db",
+        return_value=("real-housewives.fandom.com",),
+    ):
+        domains, source = fandom.load_fandom_community_allowlist_with_source()
+    assert domains == ("real-housewives.fandom.com",)
+    assert source == "database"
+
+
+def test_load_fandom_allowlist_falls_back_to_file_source(tmp_path: Path) -> None:
+    allowlist_file = tmp_path / "allowlist.txt"
+    allowlist_file.write_text("real-housewives.fandom.com\n", encoding="utf-8")
+    with patch(
+        "trr_backend.integrations.fandom._load_fandom_community_allowlist_from_db",
+        return_value=(),
+    ):
+        domains, source = fandom.load_fandom_community_allowlist_with_source(str(allowlist_file))
+    assert domains == ("real-housewives.fandom.com",)
+    assert source == "file"

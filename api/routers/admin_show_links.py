@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
 from functools import lru_cache
 from typing import Any, Literal
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 from uuid import UUID
 
 from bs4 import BeautifulSoup
@@ -19,16 +20,19 @@ from trr_backend.db import pg
 from trr_backend.ingestion.show_cast_matrix_scraper import (
     is_missing_fandom_page,
     is_missing_wikipedia_page,
-    try_fetch_html,
 )
 from trr_backend.integrations.fandom import (
     is_allowlisted_fandom_domain,
     load_fandom_community_allowlist,
+    load_fandom_community_allowlist_with_source,
+    normalize_fandom_community_domain,
+    refresh_fandom_community_allowlist_cache,
     search_allowlisted_fandom_wikis,
     search_real_housewives_wiki,
 )
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-links"])
+fandom_router = APIRouter(prefix="/admin/fandom", tags=["admin-fandom"])
 _BRAVO_VARIANT = "default"
 
 EntityType = Literal["show", "season", "person"]
@@ -65,12 +69,92 @@ class LinkPatchRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class FandomAllowlistUpdateRequest(BaseModel):
+    domains: list[str] = Field(default_factory=list)
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower().strip()).strip("-")
 
 
+def _normalize_link_kind(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "wikia":
+        return "fandom"
+    return normalized
+
+
+def _canonicalize_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return raw
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return raw
+
+    netloc = hostname
+    if parsed.port and not ((scheme == "http" and parsed.port == 80) or (scheme == "https" and parsed.port == 443)):
+        netloc = f"{netloc}:{parsed.port}"
+
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth = f"{auth}:{parsed.password}"
+        netloc = f"{auth}@{netloc}"
+
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+    return urlunparse((scheme, netloc, path, "", parsed.query, ""))
+
+
 def _url_key(value: str) -> str:
-    return value.strip().lower()
+    return _canonicalize_url(value).lower()
+
+
+def _source_timeout_seconds(source: str, *, default: float = 20.0) -> float:
+    env_key = f"TRR_LINK_TIMEOUT_{source.strip().upper()}_SECONDS"
+    raw = str(os.getenv(env_key) or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
+def _extract_constraint_name_from_error(error: Exception) -> str:
+    diag = getattr(error, "diag", None)
+    constraint = str(getattr(diag, "constraint_name", "") or "").strip()
+    if constraint:
+        return constraint
+    message = str(error or "")
+    match = re.search(r'constraint "?([a-zA-Z0-9_]+)"?', message, flags=re.IGNORECASE)
+    return str(match.group(1) if match else "").strip()
+
+
+def _is_duplicate_violation(error: Exception, *, constraint: str | None = None) -> bool:
+    code = str(getattr(error, "pgcode", "") or "").strip()
+    cause = getattr(error, "__cause__", None)
+    if not code and cause is not None:
+        code = str(getattr(cause, "pgcode", "") or "").strip()
+    message = str(error or "").lower()
+    is_duplicate = code == "23505" or "duplicate key value violates unique constraint" in message
+    if not is_duplicate:
+        return False
+    if not constraint:
+        return True
+    extracted = _extract_constraint_name_from_error(error).lower()
+    if extracted:
+        return extracted == constraint.lower()
+    return constraint.lower() in message
 
 
 def _upsert_link(
@@ -91,14 +175,16 @@ def _upsert_link(
     metadata: dict[str, Any] | None,
     actor: str,
 ) -> dict[str, Any]:
+    canonical_url = _canonicalize_url(url)
+    normalized_kind = _normalize_link_kind(link_kind)
     payload = {
         "show_id": show_id,
         "entity_type": entity_type,
         "entity_id": entity_id,
         "link_group": link_group,
-        "link_kind": link_kind,
-        "url": url,
-        "url_key": _url_key(url),
+        "link_kind": normalized_kind,
+        "url": canonical_url,
+        "url_key": _url_key(canonical_url),
         "label": label,
         "season_number": max(0, season_number),
         "status": status,
@@ -109,13 +195,32 @@ def _upsert_link(
         "created_by": actor,
         "updated_by": actor,
     }
-    response = (
-        db.schema("core")
-        .table("entity_links")
-        .upsert(payload, on_conflict="entity_type,entity_id,link_kind,season_number,url_key")
-        .execute()
-    )
-    rows = get_list_result(response, "upserting entity links")
+    try:
+        response = (
+            db.schema("core")
+            .table("entity_links")
+            .upsert(payload, on_conflict="entity_type,entity_id,link_kind,season_number,url_key")
+            .execute()
+        )
+        rows = get_list_result(response, "upserting entity links")
+    except Exception as exc:  # noqa: BLE001
+        if not _is_duplicate_violation(exc, constraint="entity_links_unique_active"):
+            raise
+        existing_response = (
+            db.schema("core")
+            .table("entity_links")
+            .select("*")
+            .eq("show_id", show_id)
+            .eq("entity_type", entity_type)
+            .eq("entity_id", entity_id)
+            .eq("link_kind", normalized_kind)
+            .eq("season_number", max(0, season_number))
+            .eq("url_key", payload["url_key"])
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = get_list_result(existing_response, "fetching existing entity links after duplicate")
     return rows[0] if rows else payload
 
 
@@ -211,7 +316,11 @@ def _extract_bravo_person_slug(value: str | None) -> str | None:
     return slug if slug else None
 
 
-def _fetch_html_with_status(url: str, *, timeout: int = 20) -> tuple[int | None, str | None, str | None, str | None]:
+def _fetch_html_with_status(
+    url: str,
+    *,
+    timeout: float = 20.0,
+) -> tuple[int | None, str | None, str | None, str | None]:
     request = urllib.request.Request(
         url,
         headers={
@@ -305,7 +414,7 @@ def _fetch_wikidata_summary(wikidata_id: str) -> tuple[dict[str, str] | None, bo
         headers={"accept": "application/json", "user-agent": "TRR-Backend/1.0"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=_source_timeout_seconds("wikidata")) as response:
             payload = json.loads((response.read() or b"{}").decode("utf-8", errors="replace"))
     except Exception:  # noqa: BLE001
         return None, True
@@ -457,7 +566,7 @@ def _fetch_wikipedia_page_summary(value: str) -> tuple[dict[str, str] | None, bo
         headers={"accept": "application/json", "user-agent": "TRR-Backend/1.0"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=_source_timeout_seconds("wikipedia")) as response:
             payload = json.loads((response.read() or b"{}").decode("utf-8", errors="replace"))
     except Exception:  # noqa: BLE001
         return None, True
@@ -491,40 +600,53 @@ def _validate_person_knowledge_url(
     *,
     kind: str,
     expected_name: str | None = None,
+    fandom_allowlist: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[str | None, Literal["valid", "invalid", "fetch_error"]]:
     candidate = str(url or "").strip()
     if not candidate:
         return None, "invalid"
-    normalized_kind = str(kind or "").strip().lower()
+    normalized_kind = _normalize_link_kind(kind)
     if not normalized_kind:
         return None, "invalid"
+    resolved_allowlist = fandom_allowlist if fandom_allowlist is not None else load_fandom_community_allowlist()
 
     if normalized_kind == "imdb":
         imdb_id = _extract_imdb_person_id(candidate)
         if not imdb_id:
             return None, "invalid"
         canonical_url = f"https://www.imdb.com/name/{imdb_id}/"
-        status_code, html, final_url, _ = _fetch_html_with_status(canonical_url)
+        status_code, html, final_url, _ = _fetch_html_with_status(
+            canonical_url,
+            timeout=_source_timeout_seconds("imdb"),
+        )
         if status_code is None:
             return None, "fetch_error"
         if status_code in {404, 410}:
             return None, "invalid"
         if status_code >= 500:
             return None, "fetch_error"
-        if status_code >= 400:
-            return None, "invalid"
         if not html:
-            return None, "invalid"
+            return (None, "fetch_error") if status_code >= 400 else (None, "invalid")
         resolved = final_url or canonical_url
         if _is_missing_imdb_person_page(html, resolved, imdb_id):
             return None, "invalid"
-        if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
-            if _is_access_challenge_page(
-                html,
-                status_code=status_code,
-                markers=_IMDB_CHALLENGE_PATTERNS,
-            ):
+        owner_match = _person_page_matches_expected_name(expected_name, html, resolved) if expected_name else True
+        is_challenge = _is_access_challenge_page(
+            html,
+            status_code=status_code,
+            markers=_IMDB_CHALLENGE_PATTERNS,
+        )
+        if is_challenge:
+            # Challenge pages are treated as valid only when identity is still strongly verifiable.
+            # If we expect a specific owner and cannot confirm it, keep the link unverifiable.
+            if expected_name and not owner_match:
+                return None, "fetch_error"
+            if not _is_missing_imdb_person_page(html, resolved, imdb_id):
                 return canonical_url, "valid"
+            return None, "fetch_error"
+        if status_code >= 400:
+            return None, "invalid"
+        if expected_name and not owner_match:
             return None, "invalid"
         return canonical_url, "valid"
 
@@ -533,27 +655,38 @@ def _validate_person_knowledge_url(
         if not tmdb_id:
             return None, "invalid"
         canonical_url = f"https://www.themoviedb.org/person/{tmdb_id}"
-        status_code, html, final_url, _ = _fetch_html_with_status(canonical_url)
+        status_code, html, final_url, _ = _fetch_html_with_status(
+            canonical_url,
+            timeout=_source_timeout_seconds("tmdb"),
+        )
         if status_code is None:
             return None, "fetch_error"
         if status_code in {404, 410}:
             return None, "invalid"
         if status_code >= 500:
             return None, "fetch_error"
-        if status_code >= 400:
-            return None, "invalid"
         if not html:
-            return None, "invalid"
+            return (None, "fetch_error") if status_code >= 400 else (None, "invalid")
         resolved = final_url or canonical_url
         if _is_missing_tmdb_person_page(html, resolved, tmdb_id):
             return None, "invalid"
-        if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
-            if _is_access_challenge_page(
-                html,
-                status_code=status_code,
-                markers=_TMDB_CHALLENGE_PATTERNS,
-            ):
+        owner_match = _person_page_matches_expected_name(expected_name, html, resolved) if expected_name else True
+        is_challenge = _is_access_challenge_page(
+            html,
+            status_code=status_code,
+            markers=_TMDB_CHALLENGE_PATTERNS,
+        )
+        if is_challenge:
+            # Challenge pages are treated as valid only when identity is still strongly verifiable.
+            # If we expect a specific owner and cannot confirm it, keep the link unverifiable.
+            if expected_name and not owner_match:
+                return None, "fetch_error"
+            if not _is_missing_tmdb_person_page(html, resolved, tmdb_id):
                 return canonical_url, "valid"
+            return None, "fetch_error"
+        if status_code >= 400:
+            return None, "invalid"
+        if expected_name and not owner_match:
             return None, "invalid"
         return canonical_url, "valid"
 
@@ -562,7 +695,10 @@ def _validate_person_knowledge_url(
         if not bravo_slug:
             return None, "invalid"
         canonical_url = f"https://www.bravotv.com/people/{bravo_slug}"
-        status_code, html, final_url, _ = _fetch_html_with_status(canonical_url)
+        status_code, html, final_url, _ = _fetch_html_with_status(
+            canonical_url,
+            timeout=_source_timeout_seconds("bravo"),
+        )
         if status_code is None:
             return None, "fetch_error"
         if status_code in {404, 410}:
@@ -604,23 +740,41 @@ def _validate_person_knowledge_url(
                 return None, "invalid"
             return str(summary.get("url") or candidate), "valid"
 
-    if normalized_kind in {"fandom", "wikia"} and not is_allowlisted_fandom_domain(
+    if normalized_kind == "fandom" and not is_allowlisted_fandom_domain(
         candidate,
-        allowlist=load_fandom_community_allowlist(),
+        allowlist=resolved_allowlist,
     ):
         return None, "invalid"
 
-    html, final_url, error = try_fetch_html(candidate)
+    timeout_source = (
+        "wikipedia"
+        if normalized_kind == "wikipedia"
+        else "fandom"
+        if normalized_kind == "fandom"
+        else "wikidata"
+    )
+    status_code, html, final_url, error = _fetch_html_with_status(
+        candidate,
+        timeout=_source_timeout_seconds(timeout_source),
+    )
+    if status_code is None:
+        return (None, "fetch_error") if error else (None, "invalid")
+    if status_code in {404, 410}:
+        return None, "invalid"
+    if status_code >= 500:
+        return None, "fetch_error"
+    if status_code >= 400:
+        return None, "invalid"
     if not html:
         return (None, "fetch_error") if error else (None, "invalid")
-    resolved = final_url or candidate
+    resolved = _canonicalize_url(final_url or candidate)
     if normalized_kind == "wikipedia" and is_missing_wikipedia_page(html, resolved):
         return None, "invalid"
-    if normalized_kind in {"fandom", "wikia"} and is_missing_fandom_page(html, resolved):
+    if normalized_kind == "fandom" and is_missing_fandom_page(html, resolved):
         return None, "invalid"
-    if normalized_kind in {"fandom", "wikia"} and not is_allowlisted_fandom_domain(
+    if normalized_kind == "fandom" and not is_allowlisted_fandom_domain(
         resolved,
-        allowlist=load_fandom_community_allowlist(),
+        allowlist=resolved_allowlist,
     ):
         return None, "invalid"
     if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
@@ -634,8 +788,14 @@ def _validated_person_knowledge_url(
     *,
     kind: str,
     expected_name: str | None = None,
+    fandom_allowlist: list[str] | tuple[str, ...] | None = None,
 ) -> str | None:
-    resolved, outcome = _validate_person_knowledge_url(url, kind=kind, expected_name=expected_name)
+    resolved, outcome = _validate_person_knowledge_url(
+        url,
+        kind=kind,
+        expected_name=expected_name,
+        fandom_allowlist=fandom_allowlist,
+    )
     if outcome != "valid":
         return None
     return resolved
@@ -961,6 +1121,7 @@ def _discover_fandom_candidates_for_person(
     name: str,
     seeded_fandom_url: str | None,
     is_bravo_show: bool,
+    fandom_allowlist: list[str] | tuple[str, ...],
 ) -> list[str]:
     candidates: list[str] = []
     if seeded_fandom_url:
@@ -974,7 +1135,7 @@ def _discover_fandom_candidates_for_person(
     candidates.extend(
         search_allowlisted_fandom_wikis(
             name,
-            allowlist=load_fandom_community_allowlist(),
+            allowlist=fandom_allowlist,
             max_results=5,
         )
     )
@@ -990,10 +1151,41 @@ def _discover_fandom_candidates_for_person(
     return deduped
 
 
+def _extract_person_name_from_fandom_url(url: str | None) -> str | None:
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if "/wiki/" not in parsed.path:
+        return None
+    slug = parsed.path.split("/wiki/", 1)[1].split("/", 1)[0]
+    if not slug:
+        return None
+    return unquote(slug).replace("_", " ").strip() or None
+
+
+def _score_fandom_candidate_url(url: str, *, expected_name: str) -> int:
+    candidate_name = _extract_person_name_from_fandom_url(url)
+    expected = _normalized_person_name(expected_name)
+    candidate = _normalized_person_name(candidate_name)
+    if not expected or not candidate:
+        return 0
+    if candidate == expected:
+        return 300
+    expected_tokens = {token for token in expected.split() if token}
+    candidate_tokens = {token for token in candidate.split() if token}
+    if expected_tokens and candidate_tokens and expected_tokens.issubset(candidate_tokens):
+        return 200
+    if expected_tokens and candidate_tokens and expected_tokens.intersection(candidate_tokens):
+        return 100
+    return 0
+
+
 def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
     show = pg.fetch_one("SELECT networks FROM core.shows WHERE id = %s", [show_id]) or {}
     networks = [str(value).strip().lower() for value in (show.get("networks") or []) if isinstance(value, str)]
     is_bravo_show = "bravo" in networks
+    fandom_allowlist = load_fandom_community_allowlist()
 
     housewife_friend_ids: set[str] = set()
     if is_bravo_show:
@@ -1057,6 +1249,7 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                 f"https://www.imdb.com/name/{imdb_id}/",
                 kind="imdb",
                 expected_name=name,
+                fandom_allowlist=fandom_allowlist,
             )
             if imdb_url and imdb_source:
                 found.append(
@@ -1074,6 +1267,7 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                 f"https://www.themoviedb.org/person/{tmdb_id}",
                 kind="tmdb",
                 expected_name=name,
+                fandom_allowlist=fandom_allowlist,
             )
             if tmdb_url and tmdb_source:
                 found.append(
@@ -1091,6 +1285,7 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                 f"https://www.wikidata.org/wiki/{wikidata_id}",
                 kind="wikidata",
                 expected_name=name if name else None,
+                fandom_allowlist=fandom_allowlist,
             )
             if wikidata_url and wikidata_source:
                 found.append(
@@ -1108,6 +1303,7 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                 f"https://en.wikipedia.org/wiki/{quote(name.replace(' ', '_'))}",
                 kind="wikipedia",
                 expected_name=name,
+                fandom_allowlist=fandom_allowlist,
             )
             if wikipedia_url:
                 found.append(
@@ -1124,17 +1320,21 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
             name=name,
             seeded_fandom_url=fandom_url if fandom_url else None,
             is_bravo_show=is_bravo_show,
+            fandom_allowlist=fandom_allowlist,
         )
-        for fandom_candidate in fandom_candidates:
-            if not is_allowlisted_fandom_domain(
-                fandom_candidate,
-                allowlist=load_fandom_community_allowlist(),
-            ):
+        ranked_fandom_candidates = sorted(
+            fandom_candidates,
+            key=lambda candidate_url: _score_fandom_candidate_url(candidate_url, expected_name=name),
+            reverse=True,
+        )
+        for fandom_candidate in ranked_fandom_candidates:
+            if not is_allowlisted_fandom_domain(fandom_candidate, allowlist=fandom_allowlist):
                 continue
             validated_fandom_url = _validated_person_knowledge_url(
                 fandom_candidate,
                 kind="fandom",
                 expected_name=name if name else None,
+                fandom_allowlist=fandom_allowlist,
             )
             if validated_fandom_url:
                 found.append(
@@ -1154,6 +1354,7 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
                     f"https://www.bravotv.com/people/{slug}",
                     kind="bravo_profile",
                     expected_name=name,
+                    fandom_allowlist=fandom_allowlist,
                 )
                 if bravo_profile_url:
                     found.append(
@@ -1192,6 +1393,7 @@ def _load_show_cast_names_by_person_id(show_id: str) -> dict[str, str]:
 def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
     supported_link_kinds = _PERSON_SOURCE_LINK_KINDS
     cast_people = _load_show_cast_names_by_person_id(show_id)
+    fandom_allowlist = load_fandom_community_allowlist()
     links = pg.fetch_all(
         """
         SELECT
@@ -1214,7 +1416,7 @@ def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
     for row in links:
         link_id = str(row.get("id") or "").strip()
         person_id = str(row.get("person_id") or "").strip()
-        link_kind = str(row.get("link_kind") or "").strip().lower()
+        link_kind = _normalize_link_kind(str(row.get("link_kind") or "").strip().lower())
         status = str(row.get("status") or "").strip().lower()
         url = str(row.get("url") or "").strip()
         if not link_id or not person_id or link_kind not in supported_link_kinds or not url:
@@ -1229,6 +1431,7 @@ def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
             url,
             kind=link_kind,
             expected_name=expected_name,
+            fandom_allowlist=fandom_allowlist,
         )
         if status == "pending":
             if outcome == "valid":
@@ -1253,47 +1456,76 @@ def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
     }
 
 
-def _delete_entity_links_by_id(link_ids: list[str]) -> int:
+def _delete_entity_links_by_id(link_ids: list[str], *, conn: Any | None = None) -> int:
     ids = [str(link_id).strip() for link_id in link_ids if str(link_id).strip()]
     if not ids:
         return 0
-    deleted_rows = pg.execute_returning(
-        """
-        DELETE FROM core.entity_links
-        WHERE id = ANY(%s::uuid[])
-        RETURNING id
-        """,
-        [ids],
-    )
+    if conn is not None:
+        with pg.db_cursor(conn=conn) as cur:
+            cur.execute(
+                """
+                DELETE FROM core.entity_links
+                WHERE id = ANY(%s::uuid[])
+                RETURNING id
+                """,
+                [ids],
+            )
+            deleted_rows = [dict(row) for row in cur.fetchall()]
+    else:
+        deleted_rows = pg.execute_returning(
+            """
+            DELETE FROM core.entity_links
+            WHERE id = ANY(%s::uuid[])
+            RETURNING id
+            """,
+            [ids],
+        )
     return len(deleted_rows)
 
 
-def _promote_pending_person_source_links(rows: list[dict[str, Any]]) -> int:
+def _promote_pending_person_source_links(rows: list[dict[str, Any]], *, conn: Any | None = None) -> int:
     promoted = 0
     for row in rows:
         link_id = str(row.get("id") or "").strip()
-        resolved_url = str(row.get("resolved_url") or row.get("url") or "").strip()
+        resolved_url = _canonicalize_url(str(row.get("resolved_url") or row.get("url") or "").strip())
         if not link_id or not resolved_url:
             continue
         try:
-            updated = pg.execute_returning(
-                """
-                UPDATE core.entity_links
-                SET
-                  status = 'approved',
-                  confidence = 0.95,
-                  url = %s,
-                  url_key = lower(%s),
-                  updated_at = NOW()
-                WHERE id = %s::uuid
-                RETURNING id
-                """,
-                [resolved_url, resolved_url, link_id],
-            )
+            if conn is not None:
+                with pg.db_cursor(conn=conn) as cur:
+                    cur.execute(
+                        """
+                        UPDATE core.entity_links
+                        SET
+                          status = 'approved',
+                          confidence = 0.95,
+                          url = %s,
+                          url_key = %s,
+                          updated_at = NOW()
+                        WHERE id = %s::uuid
+                        RETURNING id
+                        """,
+                        [resolved_url, _url_key(resolved_url), link_id],
+                    )
+                    updated = [dict(row) for row in cur.fetchall()]
+            else:
+                updated = pg.execute_returning(
+                    """
+                    UPDATE core.entity_links
+                    SET
+                      status = 'approved',
+                      confidence = 0.95,
+                      url = %s,
+                      url_key = %s,
+                      updated_at = NOW()
+                    WHERE id = %s::uuid
+                    RETURNING id
+                    """,
+                    [resolved_url, _url_key(resolved_url), link_id],
+                )
         except Exception as exc:  # noqa: BLE001
-            message = str(exc).lower()
-            if "duplicate key value violates unique constraint" in message and "entity_links_unique_active" in message:
-                _delete_entity_links_by_id([link_id])
+            if _is_duplicate_violation(exc, constraint="entity_links_unique_active"):
+                _delete_entity_links_by_id([link_id], conn=conn)
                 continue
             raise
         promoted += len(updated)
@@ -1304,15 +1536,72 @@ def _cleanup_invalid_person_knowledge_links(show_id: str) -> dict[str, int]:
     scan = _scan_invalid_person_knowledge_links(show_id)
     invalid_rows = scan.get("invalid_rows") if isinstance(scan.get("invalid_rows"), list) else []
     pending_promotions = scan.get("pending_promotions") if isinstance(scan.get("pending_promotions"), list) else []
-    promoted = _promote_pending_person_source_links(pending_promotions)
     invalid_ids = [str(row.get("id") or "").strip() for row in invalid_rows if row.get("id")]
-    deleted = _delete_entity_links_by_id(invalid_ids)
+
+    with pg.db_connection() as conn:
+        promoted = _promote_pending_person_source_links(pending_promotions, conn=conn)
+        deleted = _delete_entity_links_by_id(invalid_ids, conn=conn)
     return {
         "scanned": int(scan.get("scanned") or 0),
         "invalid": len(invalid_rows),
         "promoted": promoted,
         "deleted": deleted,
         "validation_failures": int(scan.get("validation_failures") or 0),
+    }
+
+
+@fandom_router.get("/allowlist")
+def get_fandom_allowlist(_: AdminUser) -> dict[str, Any]:
+    domains, source = load_fandom_community_allowlist_with_source()
+    return {
+        "domains": list(domains),
+        "source": source,
+        "count": len(domains),
+    }
+
+
+@fandom_router.put("/allowlist")
+def put_fandom_allowlist(payload: FandomAllowlistUpdateRequest, admin: AdminUser) -> dict[str, Any]:
+    actor = str(admin.get("email") or admin.get("id") or "admin")
+    normalized_domains: list[str] = []
+    for raw_domain in payload.domains:
+        normalized = normalize_fandom_community_domain(raw_domain)
+        if normalized and normalized not in normalized_domains:
+            normalized_domains.append(normalized)
+    if not normalized_domains:
+        raise HTTPException(status_code=400, detail="At least one valid fandom domain is required.")
+
+    try:
+        with pg.db_connection() as conn:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute(
+                    """
+                    UPDATE core.fandom_community_allowlist
+                    SET is_active = false, updated_at = NOW(), updated_by = %s
+                    """,
+                    [actor],
+                )
+                for domain in normalized_domains:
+                    cur.execute(
+                        """
+                        INSERT INTO core.fandom_community_allowlist (domain, is_active, updated_by, updated_at)
+                        VALUES (%s, true, %s, NOW())
+                        ON CONFLICT (domain)
+                        DO UPDATE SET
+                          is_active = EXCLUDED.is_active,
+                          updated_by = EXCLUDED.updated_by,
+                          updated_at = NOW()
+                        """,
+                        [domain, actor],
+                    )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Failed to update fandom allowlist: {exc}") from exc
+
+    refresh_fandom_community_allowlist_cache()
+    return {
+        "domains": normalized_domains,
+        "count": len(normalized_domains),
+        "updated_by": actor,
     }
 
 
@@ -1338,7 +1627,7 @@ def discover_show_links(
     by_group: dict[str, int] = {}
     for row in discovered:
         entity_type = str(row.get("entity_type") or "").strip().lower()
-        link_kind = str(row.get("link_kind") or "").strip().lower()
+        link_kind = _normalize_link_kind(str(row.get("link_kind") or "").strip().lower())
         parsed = urlparse(str(row["url"]))
         if not parsed.scheme.startswith("http"):
             continue
@@ -1360,7 +1649,7 @@ def discover_show_links(
             entity_type=entity_type or row["entity_type"],
             entity_id=str(row["entity_id"]),
             link_group=row["link_group"],
-            link_kind=link_kind or str(row["link_kind"]),
+            link_kind=link_kind or _normalize_link_kind(str(row["link_kind"])),
             url=str(row["url"]),
             label=(str(row.get("label")) if row.get("label") else None),
             season_number=int(row.get("season_number") or 0),
@@ -1437,7 +1726,7 @@ def create_show_link(
         entity_type=payload.entity_type,
         entity_id=str(payload.entity_id),
         link_group=payload.link_group,
-        link_kind=payload.link_kind.strip().lower(),
+        link_kind=_normalize_link_kind(payload.link_kind),
         url=str(payload.url),
         label=payload.label,
         season_number=int(payload.season_number or 0),
@@ -1477,7 +1766,11 @@ def patch_show_link(
 
     updates = payload.model_dump(exclude_unset=True)
     if "url" in updates and updates["url"] is not None:
-        updates["url_key"] = _url_key(str(updates["url"]))
+        canonical_url = _canonicalize_url(str(updates["url"]))
+        updates["url"] = canonical_url
+        updates["url_key"] = _url_key(canonical_url)
+    if "link_kind" in updates and updates["link_kind"] is not None:
+        updates["link_kind"] = _normalize_link_kind(str(updates["link_kind"]))
     updates["updated_by"] = actor
 
     response = (

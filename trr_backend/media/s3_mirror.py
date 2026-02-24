@@ -29,6 +29,15 @@ def _is_image_content_type(value: str | None) -> bool:
     return content_type.startswith("image/")
 
 
+def _looks_like_svg(data: bytes) -> bool:
+    if not data:
+        return False
+    head = data.lstrip()[:4096].lower()
+    if head.startswith(b"<svg"):
+        return True
+    return head.startswith(b"<?xml") and b"<svg" in head
+
+
 def _sniff_image_content_type(data: bytes) -> str | None:
     if not data:
         return None
@@ -40,7 +49,18 @@ def _sniff_image_content_type(data: bytes) -> str | None:
         return "image/gif"
     if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
         return "image/webp"
+    if _looks_like_svg(data):
+        return "image/svg+xml"
     return None
+
+
+def svg_rasterizer_available() -> bool:
+    try:
+        import cairosvg  # type: ignore
+
+        return bool(getattr(cairosvg, "svg2png", None))
+    except Exception:
+        return False
 
 
 def _is_http_url(value: str | None) -> bool:
@@ -442,9 +462,18 @@ def _ensure_png_bytes(
     if ct == "image/png":
         return data, "image/png", ".png"
 
-    try:
-        import io
+    # Prefer direct SVG rasterization when available.
+    if ct in {"image/svg+xml", "image/svg"} or _looks_like_svg(data):
+        try:
+            import cairosvg  # type: ignore
 
+            png_bytes = cairosvg.svg2png(bytestring=data)
+            if png_bytes:
+                return png_bytes, "image/png", ".png"
+        except Exception:
+            pass
+
+    try:
         from PIL import Image  # type: ignore
     except Exception:
         return None
