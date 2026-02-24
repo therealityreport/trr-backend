@@ -3184,3 +3184,35 @@ Continuation (same session, 2026-02-24) — Bravo video thumbnail quality + S3 m
 - Validation:
   - `ruff check trr_backend/scraping/bravo_parser.py api/routers/admin_show_bravo.py tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (pass)
   - `pytest -q tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (`52 passed`)
+
+Continuation (same session, 2026-02-24) — Cross-platform social sync hardening + async media mirror expansion.
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0145_cross_platform_media_mirror_fields_and_job_types.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_social_media_mirror_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_instagram_metadata_and_media.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Added cross-platform media mirror schema support for TikTok/YouTube/Twitter (hosted URLs, mirror status/error, attempt diagnostics) and expanded `social.scrape_jobs.job_type` constraint to include platform-specific mirror job types.
+  - Generalized mirror queue helpers and worker-stage execution so `stage=media_mirror` runs for Instagram, TikTok, YouTube, and Twitter with hosted-first thumbnail reads.
+  - Added generic requeue endpoint `POST /api/v1/admin/socials/seasons/{season_id}/{platform}/mirror/requeue` and retained Instagram alias for backward compatibility.
+  - Normalized account-scoped filters to `ltrim(lower(...), '@')` across load/coverage/row queries to avoid `@`/case drift misses.
+  - Hardened comment/reply completeness semantics across TikTok/YouTube/Twitter:
+    - deterministic fail reasons from scrapers,
+    - missing-mark only when fetch is complete,
+    - additive `refresh_post_comments(...)` completeness fields across all platforms,
+    - `max_comments_per_post=0` returns `is_complete=false` + `incomplete_reason='fetch_disabled'`.
+  - Enforced nested reply trimming for TikTok/YouTube using effective per-post reply limits.
+  - Added cross-platform mirror backfill script to enqueue (not inline upload) mirror jobs for recent windows.
+- Validation:
+  - `ruff check trr_backend/socials/tiktok/scraper.py trr_backend/socials/youtube/scraper.py trr_backend/socials/twitter/scraper.py trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `pytest -q tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py -k "instagram or tiktok or youtube or twitter or mirror or refresh_post_comments or coverage"` (`78 passed, 52 deselected`)
+  - `find /Users/thomashulihan/Projects/TRR/screenalytics/apps/api -name '*.py' -print0 | xargs -0 -n 1 python -m py_compile` (pass)
+  - `pytest -q /Users/thomashulihan/Projects/TRR/screenalytics/tests/unit -k "metadata or api"` (`4 passed`)
+  - `pnpm --dir /Users/thomashulihan/Projects/TRR/TRR-APP/apps/web test -- --runInBand season-social-analytics-section.test.tsx week-social-thumbnails.test.tsx` executed broad vitest run in this workspace (`181 files / 737 tests passed`).
