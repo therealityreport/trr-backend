@@ -6630,77 +6630,85 @@ def list_jobs(
     has_run_id = bool(features.get("has_run_id"))
     has_queue_fields = bool(features.get("has_queue_fields"))
 
-    select_run_id = "run_id::text as run_id" if has_run_id else "null::text as run_id"
-    select_attempt_count = "attempt_count" if has_queue_fields else "0::int as attempt_count"
-    select_max_attempts = "max_attempts" if has_queue_fields else "0::int as max_attempts"
-    select_priority = "priority" if has_queue_fields else "0::int as priority"
-    select_available_at = "available_at" if has_queue_fields else "null::timestamptz as available_at"
-    select_claimed_at = "claimed_at" if has_queue_fields else "null::timestamptz as claimed_at"
-    select_heartbeat_at = "heartbeat_at" if has_queue_fields else "null::timestamptz as heartbeat_at"
-    select_worker_id = "worker_id" if has_queue_fields else "null::text as worker_id"
-    select_last_error_code = "last_error_code" if has_queue_fields else "null::text as last_error_code"
-    select_last_error_class = "last_error_class" if has_queue_fields else "null::text as last_error_class"
+    select_run_id = "j.run_id::text as run_id" if has_run_id else "null::text as run_id"
+    select_attempt_count = "j.attempt_count" if has_queue_fields else "0::int as attempt_count"
+    select_max_attempts = "j.max_attempts" if has_queue_fields else "0::int as max_attempts"
+    select_priority = "j.priority" if has_queue_fields else "0::int as priority"
+    select_available_at = "j.available_at" if has_queue_fields else "null::timestamptz as available_at"
+    select_claimed_at = "j.claimed_at" if has_queue_fields else "null::timestamptz as claimed_at"
+    select_heartbeat_at = "j.heartbeat_at" if has_queue_fields else "null::timestamptz as heartbeat_at"
+    select_worker_id = "j.worker_id" if has_queue_fields else "null::text as worker_id"
+    select_last_error_code = "j.last_error_code" if has_queue_fields else "null::text as last_error_code"
+    select_last_error_class = "j.last_error_class" if has_queue_fields else "null::text as last_error_class"
 
-    sql = """
-        select
-          id::text,
-          """
-    sql += select_run_id
-    sql += """,
-          platform,
-          job_type,
-          status,
-          items_found,
-          error_message,
-          started_at,
-          completed_at,
-          created_at,
-          config,
-          metadata,
-          source_scope,
-          initiated_by,
-          """
-    sql += select_attempt_count
-    sql += """,
-          """
-    sql += select_max_attempts
-    sql += """,
-          """
-    sql += select_priority
-    sql += """,
-          """
-    sql += select_available_at
-    sql += """,
-          """
-    sql += select_claimed_at
-    sql += """,
-          """
-    sql += select_heartbeat_at
-    sql += """,
-          """
-    sql += select_worker_id
-    sql += """,
-          """
-    sql += select_last_error_code
-    sql += """,
-          """
-    sql += select_last_error_class
-    sql += """
-        from social.scrape_jobs
-        where season_id = %s
-    """
-    params: list[Any] = [season_id]
+    where_clauses = ["season_id = %s"]
+    where_params: list[Any] = [season_id]
     if run_id and has_run_id:
-        sql += " and run_id = %s"
-        params.append(run_id)
+        where_clauses.append("run_id = %s")
+        where_params.append(run_id)
     if status:
-        sql += " and status = %s"
-        params.append(status)
+        where_clauses.append("status = %s")
+        where_params.append(status)
     if platform:
-        sql += " and platform = %s"
-        params.append(platform)
-    sql += " order by created_at desc limit %s"
-    params.append(safe_limit)
+        where_clauses.append("platform = %s")
+        where_params.append(platform)
+    where_sql = " and ".join(where_clauses)
+
+    select_sql = f"""
+        select
+          j.id::text,
+          {select_run_id},
+          j.platform,
+          j.job_type,
+          j.status,
+          j.items_found,
+          j.error_message,
+          j.started_at,
+          j.completed_at,
+          j.created_at,
+          j.config,
+          j.metadata,
+          j.source_scope,
+          j.initiated_by,
+          {select_attempt_count},
+          {select_max_attempts},
+          {select_priority},
+          {select_available_at},
+          {select_claimed_at},
+          {select_heartbeat_at},
+          {select_worker_id},
+          {select_last_error_code},
+          {select_last_error_class}
+    """
+
+    # Unscoped polling is the hottest path; preselect IDs to avoid scanning heavy JSON columns
+    # before ORDER/LIMIT when no specific run_id is requested.
+    use_unscoped_fast_path = not (run_id and has_run_id)
+    if use_unscoped_fast_path:
+        sql = f"""
+            with candidate_jobs as (
+              select id
+              from social.scrape_jobs
+              where {where_sql}
+              order by created_at desc
+              limit %s
+            )
+            {select_sql}
+            from social.scrape_jobs j
+            join candidate_jobs c on c.id = j.id
+            order by j.created_at desc
+        """
+        params = [*where_params, safe_limit]
+    else:
+        sql = f"""
+            {select_sql}
+            from social.scrape_jobs j
+            where {where_sql}
+            order by j.created_at desc
+            limit %s
+        """
+        params = [*where_params, safe_limit]
+
     rows = pg.fetch_all(sql, params)
     for row in rows:
         metadata = row.get("metadata")

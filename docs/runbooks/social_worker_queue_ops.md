@@ -88,6 +88,21 @@ group by status
 order by status;
 ```
 
+### 3b) Queue distribution with stage compatibility fallback
+
+Some environments store stage both as a physical column and in `metadata.stage`.
+Use this query to avoid SQL drift across deployments:
+
+```sql
+select
+  coalesce(nullif(to_jsonb(j)->>'stage',''), nullif(j.metadata->>'stage',''), 'unknown') as stage_name,
+  j.status,
+  count(*) as jobs
+from social.scrape_jobs j
+group by 1,2
+order by 1,2;
+```
+
 ### 4) Jobs stuck queued beyond threshold
 
 ```sql

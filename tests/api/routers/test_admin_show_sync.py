@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -195,6 +196,8 @@ class TestSyncNetworksStreaming:
                                     "force": True,
                                     "limit": 50,
                                     "refresh_external_sources": True,
+                                    "entity_type": "production",
+                                    "entity_keys": ["shed media", "big head productions"],
                                     "batch_size": 20,
                                     "max_runtime_sec": 1200,
                                     "resume_run_id": "network-streaming-20260224T200000Z",
@@ -249,6 +252,9 @@ class TestSyncNetworksStreaming:
         assert "--batch-size" in (received["links"] or [])
         assert "--max-runtime-sec" in (received["links"] or [])
         assert "--resume-run-id" in (received["links"] or [])
+        assert "--entity-type" in (received["links"] or [])
+        assert "production" in (received["links"] or [])
+        assert (received["links"] or []).count("--entity-key") == 2
 
     def test_truncates_unresolved_logo_list_to_cap(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
@@ -689,6 +695,46 @@ class TestRefreshShow:
         assert '"topic": "shows"' in text
         assert '"provider": "mixed"' in text
 
+    def test_refresh_stream_emits_heartbeat_and_request_id(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+
+        mock_db = MagicMock()
+        show_resp = MagicMock()
+        show_resp.data = [{"id": str(uuid4())}]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        show_id = str(uuid4())
+
+        from api.routers.admin_show_sync import RefreshStepResult
+
+        def slow_ok_step(step_key, fn, argv):
+            time.sleep(0.05)
+            return RefreshStepResult(status="success", duration_ms=1, exit_code=0, error=None)
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync.STREAM_HEARTBEAT_INTERVAL_SECONDS", 0.01):
+                with patch("api.routers.admin_show_sync._run_script_step", side_effect=slow_ok_step):
+                    with client.stream(
+                        "POST",
+                        f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "x-trr-request-id": "req-refresh-stream-1",
+                        },
+                        json={"targets": ["details"]},
+                    ) as response:
+                        assert response.status_code == 200
+                        text = "\n".join(
+                            line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+                            for line in response.iter_lines()
+                        )
+
+        assert '"heartbeat": true' in text or '"heartbeat":true' in text
+        assert '"request_id": "req-refresh-stream-1"' in text or '"request_id":"req-refresh-stream-1"' in text
+
 
 class TestRefreshShowPhotosStream:
     def test_returns_401_without_auth(self, client):
@@ -767,3 +813,53 @@ class TestRefreshShowPhotosStream:
         assert "show_cast" not in table_calls
         assert '"season_number": 6' in response.text or '"season_number":6' in response.text
         assert '"live_counts"' in response.text
+
+    def test_refresh_photos_stream_echoes_request_id(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+        show_id = str(uuid4())
+
+        mock_db = MagicMock()
+        query = MagicMock()
+        query.select.return_value = query
+        query.eq.return_value = query
+        query.in_.return_value = query
+        query.order.return_value = query
+        query.limit.return_value = query
+
+        show_resp = MagicMock()
+        show_resp.error = None
+        show_resp.data = [
+            {
+                "id": show_id,
+                "name": "The Real Housewives of Test",
+                "imdb_id": None,
+                "tmdb_id": None,
+                "external_ids": {},
+            }
+        ]
+        appearances_resp = MagicMock()
+        appearances_resp.error = None
+        appearances_resp.data = []
+        query.execute.side_effect = [show_resp, appearances_resp]
+        mock_db.schema.return_value.table.return_value = query
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.post(
+                f"/api/v1/admin/shows/{show_id}/refresh-photos/stream",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "x-trr-request-id": "req-refresh-photos-1",
+                },
+                json={
+                    "season_number": 6,
+                    "skip_s3": True,
+                    "skip_auto_count": True,
+                    "skip_word_detection": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert '"request_id": "req-refresh-photos-1"' in response.text or (
+            '"request_id":"req-refresh-photos-1"' in response.text
+        )

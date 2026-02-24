@@ -68,6 +68,10 @@ REQUEST_HEADERS = {
     "accept": "application/json",
     "user-agent": "TRR-Backend/1.0",
 }
+WIKIDATA_CONNECT_TIMEOUT_SECONDS = 5.0
+WIKIDATA_READ_TIMEOUT_SECONDS = 20.0
+WIKIDATA_RETRY_ATTEMPTS = 2
+WIKIDATA_RETRY_BACKOFF_MS = 300
 
 
 class FatalSyncError(RuntimeError):
@@ -241,6 +245,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Gracefully stop after this runtime budget and return resumable cursor.",
     )
     parser.add_argument("--resume-run-id", type=str, default=None, help="Resume an existing run id from stored cursor.")
+    parser.add_argument(
+        "--entity-type",
+        type=str,
+        choices=("network", "streaming", "production"),
+        default=None,
+        help="Optionally process only one entity type.",
+    )
+    parser.add_argument(
+        "--entity-key",
+        action="append",
+        default=None,
+        help="Optionally process only these normalized entity keys (repeatable).",
+    )
     parser.add_argument(
         "--start-after",
         type=str,
@@ -599,13 +616,10 @@ def _fetch_wikidata_entity(item_id: str) -> dict[str, Any] | None:
     if not WIKIDATA_ITEM_RE.match(item_id):
         return None
 
-    response = requests.get(
+    payload = _request_json_with_retry(
         WIKIDATA_ENTITY_URL.format(item_id=item_id),
-        headers=REQUEST_HEADERS,
-        timeout=20,
+        params=None,
     )
-    response.raise_for_status()
-    payload = response.json()
     entities = payload.get("entities")
     if not isinstance(entities, dict):
         return None
@@ -618,9 +632,8 @@ def _search_wikidata_item(name: str) -> str | None:
     if not candidate:
         return None
 
-    response = requests.get(
+    payload = _request_json_with_retry(
         WIKIDATA_SEARCH_URL,
-        headers=REQUEST_HEADERS,
         params={
             "action": "wbsearchentities",
             "format": "json",
@@ -629,10 +642,7 @@ def _search_wikidata_item(name: str) -> str | None:
             "limit": 10,
             "search": candidate,
         },
-        timeout=20,
     )
-    response.raise_for_status()
-    payload = response.json()
     rows = payload.get("search")
     if not isinstance(rows, list) or not rows:
         return None
@@ -650,6 +660,46 @@ def _search_wikidata_item(name: str) -> str | None:
             best_score = score
             best = item_id
     return best
+
+
+def _request_json_with_retry(url: str, *, params: dict[str, Any] | None) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(WIKIDATA_RETRY_ATTEMPTS):
+        try:
+            response = requests.get(
+                url,
+                headers=REQUEST_HEADERS,
+                params=params,
+                timeout=(WIKIDATA_CONNECT_TIMEOUT_SECONDS, WIKIDATA_READ_TIMEOUT_SECONDS),
+            )
+            if response.status_code in {429} or response.status_code >= 500:
+                if attempt + 1 < WIKIDATA_RETRY_ATTEMPTS:
+                    if WIKIDATA_RETRY_BACKOFF_MS > 0:
+                        time.sleep(WIKIDATA_RETRY_BACKOFF_MS / 1000)
+                    continue
+                response.raise_for_status()
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            raise RuntimeError("wikidata_invalid_json")
+        except (requests.ConnectTimeout, requests.ReadTimeout, requests.Timeout) as exc:
+            last_error = exc
+            if attempt + 1 < WIKIDATA_RETRY_ATTEMPTS:
+                if WIKIDATA_RETRY_BACKOFF_MS > 0:
+                    time.sleep(WIKIDATA_RETRY_BACKOFF_MS / 1000)
+                continue
+            raise
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt + 1 < WIKIDATA_RETRY_ATTEMPTS:
+                if WIKIDATA_RETRY_BACKOFF_MS > 0:
+                    time.sleep(WIKIDATA_RETRY_BACKOFF_MS / 1000)
+                continue
+            raise
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("wikidata_request_failed")
 
 
 def _extract_enwiki_url(entity: dict[str, Any]) -> str | None:
@@ -1036,21 +1086,29 @@ def _build_production_inventory(db, *, added_show_ids: set[str]) -> dict[str, In
     return inventory
 
 
-def _load_used_inventory(db) -> dict[tuple[str, str], InventoryEntity]:
+def _load_used_inventory(
+    db,
+    *,
+    include_types: set[str] | None = None,
+) -> dict[tuple[str, str], InventoryEntity]:
     added_show_ids = _collect_added_show_ids(db)
     inventory: dict[tuple[str, str], InventoryEntity] = {}
+    selected_types = include_types or {"network", "streaming", "production"}
 
-    networks = _build_network_inventory(db, added_show_ids=added_show_ids)
-    for key, entity in networks.items():
-        inventory[("network", key)] = entity
+    if "network" in selected_types:
+        networks = _build_network_inventory(db, added_show_ids=added_show_ids)
+        for key, entity in networks.items():
+            inventory[("network", key)] = entity
 
-    providers = _build_provider_inventory(db, added_show_ids=added_show_ids)
-    for key, entity in providers.items():
-        inventory[("streaming", key)] = entity
+    if "streaming" in selected_types:
+        providers = _build_provider_inventory(db, added_show_ids=added_show_ids)
+        for key, entity in providers.items():
+            inventory[("streaming", key)] = entity
 
-    productions = _build_production_inventory(db, added_show_ids=added_show_ids)
-    for key, entity in productions.items():
-        inventory[("production", key)] = entity
+    if "production" in selected_types:
+        productions = _build_production_inventory(db, added_show_ids=added_show_ids)
+        for key, entity in productions.items():
+            inventory[("production", key)] = entity
 
     return inventory
 
@@ -1140,6 +1198,7 @@ def _load_production_imdb_hints_by_key(
     db,
     *,
     max_requests: int = 200,
+    target_entity_keys: set[str] | None = None,
 ) -> dict[str, dict[str, list[str]]]:
     production_names_by_id = _load_production_names_by_id(db)
     hints: dict[str, dict[str, set[str]]] = {}
@@ -1169,6 +1228,13 @@ def _load_production_imdb_hints_by_key(
             if not key:
                 continue
             target_names_by_key.setdefault(key, set()).add(name)
+
+        if target_entity_keys:
+            target_names_by_key = {
+                key: values
+                for key, values in target_names_by_key.items()
+                if key in target_entity_keys
+            }
 
         if not target_names_by_key:
             continue
@@ -1249,13 +1315,25 @@ def _load_production_imdb_hints_by_key(
     return out
 
 
-def _build_sync_context(db) -> SyncRunContext:
+def _build_sync_context(
+    db,
+    *,
+    include_network_hints: bool = True,
+    include_streaming_hints: bool = True,
+    include_production_hints: bool = True,
+    production_entity_keys: set[str] | None = None,
+) -> SyncRunContext:
     return SyncRunContext(
         tmdb_api_key=resolve_api_key(),
         tmdb_bearer_token=resolve_bearer_token(),
-        tmdb_network_ids_by_key=_collect_tmdb_network_ids_by_key(db),
-        provider_imdb_ids_by_provider_id=_load_provider_imdb_ids_by_provider_id(db),
-        production_imdb_hints_by_key=_load_production_imdb_hints_by_key(db),
+        tmdb_network_ids_by_key=_collect_tmdb_network_ids_by_key(db) if include_network_hints else {},
+        provider_imdb_ids_by_provider_id=_load_provider_imdb_ids_by_provider_id(db) if include_streaming_hints else {},
+        production_imdb_hints_by_key=_load_production_imdb_hints_by_key(
+            db,
+            target_entity_keys=production_entity_keys,
+        )
+        if include_production_hints
+        else {},
         svg_rasterizer_available=svg_rasterizer_available(),
     )
 
@@ -1358,6 +1436,10 @@ def _load_unresolved_keys(db, *, used_keys: set[tuple[str, str]]) -> set[tuple[s
 
 def _reason_from_exception(exc: Exception) -> str:
     text = _normalize_text(str(exc)).lower()
+    if text.startswith("brandfetch_"):
+        return text
+    if text.startswith("logopedia_"):
+        return text
     if "brandfetch_auth_missing" in text:
         return "brandfetch_auth_missing"
     if "brandfetch_not_found" in text:
@@ -3079,6 +3161,22 @@ def _select_entities(
     return selected
 
 
+def _filter_entities_by_target(
+    entities: list[InventoryEntity],
+    *,
+    entity_type: str | None,
+    entity_keys: list[str] | None,
+) -> list[InventoryEntity]:
+    normalized_type = _normalize_text(entity_type).lower()
+    normalized_keys = {_name_key(value) for value in (entity_keys or []) if _name_key(value)}
+    return [
+        row
+        for row in entities
+        if (not normalized_type or row.entity_type == normalized_type)
+        and (not normalized_keys or row.entity_key in normalized_keys)
+    ]
+
+
 def run_sync(args: argparse.Namespace) -> SyncSummary:
     load_env()
     db = create_supabase_admin_client()
@@ -3088,22 +3186,38 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
     summary.run_id = run_id
     summary.run_status = "running"
     started_at_iso = _now_iso()
-    context = _build_sync_context(db)
-    summary.svg_rasterizer_available = bool(context.svg_rasterizer_available)
 
-    inventory = _load_used_inventory(db)
-    network_lookup = _load_dimension_lookup(db, table="networks", id_field="id", name_field="name")
-    provider_lookup = _load_dimension_lookup(
-        db,
-        table="watch_providers",
-        id_field="provider_id",
-        name_field="provider_name",
+    requested_entity_type = _normalize_text(getattr(args, "entity_type", None)).lower()
+    requested_inventory_types = (
+        {requested_entity_type}
+        if requested_entity_type in {"network", "streaming", "production"}
+        else None
     )
-    production_lookup = _load_dimension_lookup(
-        db,
-        table="production_companies",
-        id_field="id",
-        name_field="name",
+    inventory = _load_used_inventory(db, include_types=requested_inventory_types)
+    network_lookup = (
+        _load_dimension_lookup(db, table="networks", id_field="id", name_field="name")
+        if requested_inventory_types is None or "network" in requested_inventory_types
+        else {}
+    )
+    provider_lookup = (
+        _load_dimension_lookup(
+            db,
+            table="watch_providers",
+            id_field="provider_id",
+            name_field="provider_name",
+        )
+        if requested_inventory_types is None or "streaming" in requested_inventory_types
+        else {}
+    )
+    production_lookup = (
+        _load_dimension_lookup(
+            db,
+            table="production_companies",
+            id_field="id",
+            name_field="name",
+        )
+        if requested_inventory_types is None or "production" in requested_inventory_types
+        else {}
     )
     overrides = _load_overrides(db)
 
@@ -3114,6 +3228,25 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
         unresolved_keys=unresolved_keys,
         limit=args.limit,
     )
+    selected_entities = _filter_entities_by_target(
+        selected_entities,
+        entity_type=getattr(args, "entity_type", None),
+        entity_keys=getattr(args, "entity_key", None),
+    )
+    selected_types = {row.entity_type for row in selected_entities}
+    production_entity_keys = {row.entity_key for row in selected_entities if row.entity_type == "production"}
+    include_production_hints = "production" in selected_types and (
+        bool(getattr(args, "refresh_external_sources", False))
+        or not bool(getattr(args, "unresolved_only", False))
+    )
+    context = _build_sync_context(
+        db,
+        include_network_hints="network" in selected_types,
+        include_streaming_hints="streaming" in selected_types,
+        include_production_hints=include_production_hints,
+        production_entity_keys=production_entity_keys,
+    )
+    summary.svg_rasterizer_available = bool(context.svg_rasterizer_available)
 
     start_after = _parse_start_after(args.start_after)
     if args.resume_run_id and not start_after:
@@ -3125,6 +3258,7 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
     runtime_started = time.perf_counter()
     last_cursor: tuple[str, str] | None = start_after
     fatal_error: str | None = None
+    interrupted = False
 
     if not args.dry_run:
         _upsert_sync_run_state(
@@ -3138,70 +3272,78 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
             error_message=None,
         )
 
-    for idx, entity in enumerate(entities):
-        elapsed = time.perf_counter() - runtime_started
-        if elapsed >= max_runtime_sec:
-            summary.run_status = "stopped"
-            summary.resume_cursor_entity_type = last_cursor[0] if last_cursor else None
-            summary.resume_cursor_entity_key = last_cursor[1] if last_cursor else None
-            break
+    try:
+        for idx, entity in enumerate(entities):
+            elapsed = time.perf_counter() - runtime_started
+            if elapsed >= max_runtime_sec:
+                summary.run_status = "stopped"
+                summary.resume_cursor_entity_type = last_cursor[0] if last_cursor else None
+                summary.resume_cursor_entity_key = last_cursor[1] if last_cursor else None
+                break
 
-        pair = (entity.entity_type, entity.entity_key)
-        if entity.entity_type == "network":
-            core_row = network_lookup.get(entity.entity_key)
-        elif entity.entity_type == "streaming":
-            core_row = provider_lookup.get(entity.entity_key)
-        else:
-            core_row = production_lookup.get(entity.entity_key)
-        override = overrides.get(pair)
-        try:
-            _process_entity(
-                db,
-                entity=entity,
-                core_row=core_row,
-                override=override,
-                run_id=run_id,
-                args=args,
-                summary=summary,
-                s3_client=s3_client,
-                context=context,
-            )
-        except FatalSyncError as exc:
-            summary.failures += 1
-            summary.run_status = "failed"
-            fatal_error = str(exc)
-            summary.resume_cursor_entity_type = entity.entity_type
-            summary.resume_cursor_entity_key = entity.entity_key
-            last_cursor = (entity.entity_type, entity.entity_key)
-            if not args.dry_run:
+            pair = (entity.entity_type, entity.entity_key)
+            if entity.entity_type == "network":
+                core_row = network_lookup.get(entity.entity_key)
+            elif entity.entity_type == "streaming":
+                core_row = provider_lookup.get(entity.entity_key)
+            else:
+                core_row = production_lookup.get(entity.entity_key)
+            override = overrides.get(pair)
+            try:
+                _process_entity(
+                    db,
+                    entity=entity,
+                    core_row=core_row,
+                    override=override,
+                    run_id=run_id,
+                    args=args,
+                    summary=summary,
+                    s3_client=s3_client,
+                    context=context,
+                )
+            except FatalSyncError as exc:
+                summary.failures += 1
+                summary.run_status = "failed"
+                fatal_error = str(exc)
+                summary.resume_cursor_entity_type = entity.entity_type
+                summary.resume_cursor_entity_key = entity.entity_key
+                last_cursor = (entity.entity_type, entity.entity_key)
+                if not args.dry_run:
+                    _upsert_sync_run_state(
+                        db,
+                        run_id=run_id,
+                        status="failed",
+                        summary=summary,
+                        cursor=last_cursor,
+                        started_at=started_at_iso,
+                        finished_at=_now_iso(),
+                        error_message=fatal_error,
+                    )
+                break
+
+            last_cursor = pair
+            if not args.dry_run and ((idx + 1) % batch_size == 0):
                 _upsert_sync_run_state(
                     db,
                     run_id=run_id,
-                    status="failed",
+                    status="running",
                     summary=summary,
                     cursor=last_cursor,
                     started_at=started_at_iso,
-                    finished_at=_now_iso(),
-                    error_message=fatal_error,
+                    finished_at=None,
+                    error_message=None,
                 )
-            break
+    except KeyboardInterrupt:
+        interrupted = True
+        summary.run_status = "failed"
+        summary.failures += 1
+        fatal_error = "keyboard_interrupt"
+        summary.resume_cursor_entity_type = last_cursor[0] if last_cursor else None
+        summary.resume_cursor_entity_key = last_cursor[1] if last_cursor else None
 
-        last_cursor = pair
-        if not args.dry_run and ((idx + 1) % batch_size == 0):
-            _upsert_sync_run_state(
-                db,
-                run_id=run_id,
-                status="running",
-                summary=summary,
-                cursor=last_cursor,
-                started_at=started_at_iso,
-                finished_at=None,
-                error_message=None,
-            )
-
-    if not args.dry_run:
+    if not args.dry_run and not interrupted:
         _refresh_completion_snapshot(db, inventory=inventory, summary=summary)
-    else:
+    elif args.dry_run:
         summary.completion_total = len(inventory)
         summary.completion_resolved = 0
         summary.completion_unresolved = len(inventory)

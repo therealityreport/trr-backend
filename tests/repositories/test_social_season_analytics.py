@@ -1824,6 +1824,77 @@ def test_list_runs_applies_filters_and_order(monkeypatch) -> None:
     assert params == ["season-1", "completed", "bravo", "123e4567-e89b-12d3-a456-426614174000", 25]
 
 
+def test_list_jobs_uses_candidate_cte_for_unscoped_queries(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return [
+            {
+                "id": "job-1",
+                "run_id": "run-1",
+                "platform": "youtube",
+                "job_type": "comments",
+                "status": "running",
+                "items_found": 0,
+                "error_message": "network timeout",
+                "metadata": {},
+                "last_error_code": "network",
+                "last_error_class": "TimeoutError",
+            }
+        ]
+
+    monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    rows = social_repo.list_jobs("season-1", limit=100, status="running", platform="youtube")
+
+    assert rows and rows[0]["job_error_code"] == "NETWORK"
+    sql = " ".join(str(captured["sql"]).lower().split())
+    params = captured["params"]
+    assert "with candidate_jobs as (" in sql
+    assert "from social.scrape_jobs where season_id = %s and status = %s and platform = %s" in sql
+    assert "join candidate_jobs c on c.id = j.id" in sql
+    assert "order by j.created_at desc" in sql
+    assert params == ["season-1", "running", "youtube", 100]
+
+
+def test_list_jobs_uses_direct_query_for_run_scoped_queries(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return [
+            {
+                "id": "job-1",
+                "metadata": {},
+                "last_error_code": None,
+                "error_message": None,
+                "last_error_class": None,
+            }
+        ]
+
+    monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": False})
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    social_repo.list_jobs(
+        "season-1",
+        limit=50,
+        run_id="123e4567-e89b-12d3-a456-426614174000",
+        status="queued",
+        platform="instagram",
+    )
+
+    sql = " ".join(str(captured["sql"]).lower().split())
+    params = captured["params"]
+    assert "with candidate_jobs as (" not in sql
+    assert "from social.scrape_jobs j where season_id = %s and run_id = %s and status = %s and platform = %s" in sql
+    assert "order by j.created_at desc limit %s" in sql
+    assert params == ["season-1", "123e4567-e89b-12d3-a456-426614174000", "queued", "instagram", 50]
+
+
 def test_decide_comment_refresh_matrix() -> None:
     now = datetime(2026, 2, 17, 15, 0, tzinfo=UTC)
     fresh_snapshot = social_repo.CommentLifecycleSnapshot(

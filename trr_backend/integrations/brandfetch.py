@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
@@ -8,6 +9,10 @@ from urllib.parse import urlparse
 import requests
 
 BRANDFETCH_API_BASE_URL = "https://api.brandfetch.io/v2"
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_READ_TIMEOUT_SECONDS = 20.0
+DEFAULT_RETRY_ATTEMPTS = 2
+DEFAULT_RETRY_BACKOFF_MS = 300
 
 
 class BrandfetchError(RuntimeError):
@@ -62,7 +67,41 @@ def _timeout_seconds(timeout_seconds: float | None = None) -> float:
                 return parsed
         except ValueError:
             pass
-    return 20.0
+    return DEFAULT_READ_TIMEOUT_SECONDS
+
+
+def _timeout_tuple(timeout_seconds: float | None = None) -> tuple[float, float]:
+    read_timeout = _timeout_seconds(timeout_seconds)
+    connect_timeout = min(DEFAULT_CONNECT_TIMEOUT_SECONDS, read_timeout)
+    return connect_timeout, read_timeout
+
+
+def _retry_attempts() -> int:
+    raw = _normalize_text(os.getenv("BRANDFETCH_RETRY_ATTEMPTS"))
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return min(parsed, 5)
+        except ValueError:
+            pass
+    return DEFAULT_RETRY_ATTEMPTS
+
+
+def _retry_backoff_ms() -> int:
+    raw = _normalize_text(os.getenv("BRANDFETCH_RETRY_BACKOFF_MS"))
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed >= 0:
+                return min(parsed, 5_000)
+        except ValueError:
+            pass
+    return DEFAULT_RETRY_BACKOFF_MS
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code == 429 or status_code >= 500
 
 
 def _format_rank(fmt: Mapping[str, Any]) -> tuple[int, int]:
@@ -103,23 +142,51 @@ def fetch_brandfetch_logo_candidates(
         raise BrandfetchRequestError("brandfetch_invalid_domain")
 
     key = _resolve_api_key(api_key)
-    timeout = _timeout_seconds(timeout_seconds)
+    timeout = _timeout_tuple(timeout_seconds)
+    retry_attempts = _retry_attempts()
+    retry_backoff_ms = _retry_backoff_ms()
 
     session = session or requests.Session()
     url = f"{BRANDFETCH_API_BASE_URL}/brands/{normalized_domain}"
 
-    try:
-        response = session.get(
-            url,
-            headers={
-                "accept": "application/json",
-                "authorization": f"Bearer {key}",
-                "user-agent": "TRR-Backend/1.0",
-            },
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
-        raise BrandfetchRequestError(f"brandfetch_request_failed: {exc}") from exc
+    response: requests.Response | None = None
+    last_error: BrandfetchRequestError | None = None
+    for attempt in range(retry_attempts):
+        try:
+            response = session.get(
+                url,
+                headers={
+                    "accept": "application/json",
+                    "authorization": f"Bearer {key}",
+                    "user-agent": "TRR-Backend/1.0",
+                },
+                timeout=timeout,
+            )
+        except (requests.ConnectTimeout, requests.ReadTimeout, requests.Timeout) as exc:
+            last_error = BrandfetchRequestError("brandfetch_timeout")
+            if attempt + 1 < retry_attempts:
+                if retry_backoff_ms > 0:
+                    time.sleep(retry_backoff_ms / 1000)
+                continue
+            raise last_error from exc
+        except requests.RequestException as exc:
+            last_error = BrandfetchRequestError("brandfetch_request_failed")
+            if attempt + 1 < retry_attempts:
+                if retry_backoff_ms > 0:
+                    time.sleep(retry_backoff_ms / 1000)
+                continue
+            raise last_error from exc
+
+        if _is_retryable_status(response.status_code) and attempt + 1 < retry_attempts:
+            if retry_backoff_ms > 0:
+                time.sleep(retry_backoff_ms / 1000)
+            continue
+        break
+
+    if response is None:
+        if last_error is not None:
+            raise last_error
+        raise BrandfetchRequestError("brandfetch_request_failed")
 
     if response.status_code in {401, 403}:
         raise BrandfetchAuthError("brandfetch_auth_missing")

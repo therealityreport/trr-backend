@@ -2011,6 +2011,17 @@ async def refresh_person_images_stream(
                 payload["detail"] = detail
             return f"event: error\ndata: {json.dumps(payload)}\n\n"
 
+        yield progress(
+            {
+                "stage": "starting",
+                "message": "Initializing refresh stream...",
+                "current": 0,
+                "total": 0,
+                "heartbeat": True,
+                "elapsed_ms": 0,
+            }
+        )
+
         # 1. Get person
         try:
             person = _get_person_details(db, person_id_str)
@@ -2417,7 +2428,9 @@ async def refresh_person_images_stream(
             try:
                 from trr_backend.clients.screenalytics import (
                     ScreenalyticsClientError,
+                    ScreenalyticsUnavailableError,
                     count_people,
+                    get_screenalytics_unavailable_state,
                     is_screenalytics_configured,
                 )
                 from trr_backend.repositories.cast_photo_tags import (
@@ -2431,130 +2444,168 @@ async def refresh_person_images_stream(
                 )
 
                 if is_screenalytics_configured():
-                    candidate_sources = [s for s in sources if s in ALL_SOURCES]
-                    cast_rows = (
-                        db.schema("core")
-                        .table("cast_photos")
-                        .select(
-                            "id, hosted_url, hosted_content_type, url, image_url, thumb_url, "
-                            "source_page_url, people_names, source, metadata"
-                        )
-                        .eq("person_id", person_id_str)
-                        .in_("source", candidate_sources)
-                        .execute()
-                        .data
-                        or []
-                    )
-                    tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in cast_rows if row.get("id")])
-                    media_rows = _fetch_person_media_link_rows(db, person_id_str)
-
-                    to_process: list[dict[str, Any]] = []
-                    for row in cast_rows:
-                        tag_row = tag_rows.get(str(row["id"]))
-                        if has_manual_tags(tag_row):
-                            continue
-                        if tag_row and tag_row.get("people_count") is not None:
-                            continue
-                        urls = _pick_autocount_urls(row)
-                        if not urls:
-                            continue
-                        to_process.append(
+                    unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
+                    if unavailable:
+                        yield progress(
                             {
-                                "origin": "cast_photos",
-                                "id": str(row["id"]),
-                                "urls": urls,
-                                "tag_row": tag_row,
-                                "row": row,
+                                "stage": "auto_count",
+                                "message": "Skipping auto-count (Screenalytics unavailable).",
+                                "current": 0,
+                                "total": 0,
+                                "skip_reason": "service_unavailable",
+                                "service_unavailable": True,
+                                "retry_after_s": retry_after_s,
+                                "detail": unavailable_reason,
                             }
                         )
-
-                    for row in media_rows:
-                        context = row.get("context") if isinstance(row.get("context"), dict) else {}
-                        if has_manual_people_tags(context):
-                            continue
-                        if has_people_count(context):
-                            continue
-                        urls = _build_media_link_autocount_urls(row)
-                        if not urls:
-                            continue
-                        to_process.append(
-                            {
-                                "origin": "media_links",
-                                "id": str(row["id"]),
-                                "urls": urls,
-                                "context": dict(context or {}),
-                            }
+                    else:
+                        candidate_sources = [s for s in sources if s in ALL_SOURCES]
+                        cast_rows = (
+                            db.schema("core")
+                            .table("cast_photos")
+                            .select(
+                                "id, hosted_url, hosted_content_type, url, image_url, thumb_url, "
+                                "source_page_url, people_names, source, metadata"
+                            )
+                            .eq("person_id", person_id_str)
+                            .in_("source", candidate_sources)
+                            .execute()
+                            .data
+                            or []
                         )
+                        tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in cast_rows if row.get("id")])
+                        media_rows = _fetch_person_media_link_rows(db, person_id_str)
 
-                    total_to_count = len(to_process)
-                    yield progress(
-                        {
-                            "stage": "auto_count",
-                            "message": "Auto-counting people in images...",
-                            "current": 0,
-                            "total": total_to_count,
-                        }
-                    )
-                    for idx, entry in enumerate(to_process, start=1):
-                        auto_counts_attempted += 1
-                        result = None
-                        last_error: ScreenalyticsClientError | None = None
-                        for url in entry["urls"]:
-                            try:
-                                result = count_people(url)
-                                break
-                            except ScreenalyticsClientError as exc:
-                                last_error = exc
-                        try:
-                            if result is None:
-                                raise last_error or ScreenalyticsClientError("Unable to auto-count image")
-                            if entry["origin"] == "cast_photos":
-                                tag_row = entry.get("tag_row")
-                                upsert_cast_photo_tags(
-                                    db,
-                                    cast_photo_id=entry["id"],
-                                    people_names=tag_row.get("people_names") if tag_row else None,
-                                    people_ids=tag_row.get("people_ids") if tag_row else None,
-                                    people_count=result.people_count,
-                                    people_count_source="auto",
-                                    detector=result.detector,
-                                    updated_by_firebase_uid="system:auto",
-                                )
-                                crop_payload = _apply_auto_crop_payload(result)
-                                if crop_payload is not None:
-                                    metadata = dict(entry["row"].get("metadata") or {})
-                                    if not _is_manual_thumbnail_crop(metadata.get("thumbnail_crop")):
-                                        metadata["thumbnail_crop"] = crop_payload
-                                        db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
-                                            "id", entry["id"]
-                                        ).execute()
-                            else:
-                                context = dict(entry.get("context") or {})
-                                context["people_count"] = result.people_count
-                                context["people_count_source"] = "auto"
-                                context["people_count_detector"] = result.detector
-                                crop_payload = _apply_auto_crop_payload(result)
-                                if crop_payload is not None and not _is_manual_thumbnail_crop(
-                                    context.get("thumbnail_crop")
-                                ):
-                                    context["thumbnail_crop"] = crop_payload
-                                db.schema("core").table("media_links").update(
-                                    {"context": context, "updated_at": datetime.now(UTC).isoformat()}
-                                ).eq("id", entry["id"]).execute()
-                            auto_counts_succeeded += 1
-                        except Exception as exc:  # noqa: BLE001
-                            auto_counts_failed += 1
-                            errors.append(f"Auto-count {entry['id']}: {exc}")
-
-                        if idx <= 20 or idx % 5 == 0 or idx == total_to_count:
-                            yield progress(
+                        to_process: list[dict[str, Any]] = []
+                        for row in cast_rows:
+                            tag_row = tag_rows.get(str(row["id"]))
+                            if has_manual_tags(tag_row):
+                                continue
+                            if tag_row and tag_row.get("people_count") is not None:
+                                continue
+                            urls = _pick_autocount_urls(row)
+                            if not urls:
+                                continue
+                            to_process.append(
                                 {
-                                    "stage": "auto_count",
-                                    "message": "Auto-counting people in images...",
-                                    "current": idx,
-                                    "total": total_to_count,
+                                    "origin": "cast_photos",
+                                    "id": str(row["id"]),
+                                    "urls": urls,
+                                    "tag_row": tag_row,
+                                    "row": row,
                                 }
                             )
+
+                        for row in media_rows:
+                            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+                            if has_manual_people_tags(context):
+                                continue
+                            if has_people_count(context):
+                                continue
+                            urls = _build_media_link_autocount_urls(row)
+                            if not urls:
+                                continue
+                            to_process.append(
+                                {
+                                    "origin": "media_links",
+                                    "id": str(row["id"]),
+                                    "urls": urls,
+                                    "context": dict(context or {}),
+                                }
+                            )
+
+                        total_to_count = len(to_process)
+                        yield progress(
+                            {
+                                "stage": "auto_count",
+                                "message": "Auto-counting people in images...",
+                                "current": 0,
+                                "total": total_to_count,
+                            }
+                        )
+                        service_unavailable_error: ScreenalyticsUnavailableError | None = None
+                        for idx, entry in enumerate(to_process, start=1):
+                            auto_counts_attempted += 1
+                            result = None
+                            last_error: ScreenalyticsClientError | None = None
+                            for url in entry["urls"]:
+                                try:
+                                    result = count_people(url)
+                                    break
+                                except ScreenalyticsUnavailableError as exc:
+                                    service_unavailable_error = exc
+                                    last_error = exc
+                                    break
+                                except ScreenalyticsClientError as exc:
+                                    last_error = exc
+                            if service_unavailable_error is not None:
+                                auto_counts_failed += 1
+                                retry_after = max(int(service_unavailable_error.retry_after_s), 1)
+                                detail = str(service_unavailable_error) or "Screenalytics unavailable"
+                                errors.append(f"Auto-count service unavailable: {detail}")
+                                yield progress(
+                                    {
+                                        "stage": "auto_count",
+                                        "message": "Auto-count paused (Screenalytics unavailable).",
+                                        "current": max(0, idx - 1),
+                                        "total": total_to_count,
+                                        "skip_reason": "service_unavailable",
+                                        "service_unavailable": True,
+                                        "retry_after_s": retry_after,
+                                        "detail": detail,
+                                    }
+                                )
+                                break
+                            try:
+                                if result is None:
+                                    raise last_error or ScreenalyticsClientError("Unable to auto-count image")
+                                if entry["origin"] == "cast_photos":
+                                    tag_row = entry.get("tag_row")
+                                    upsert_cast_photo_tags(
+                                        db,
+                                        cast_photo_id=entry["id"],
+                                        people_names=tag_row.get("people_names") if tag_row else None,
+                                        people_ids=tag_row.get("people_ids") if tag_row else None,
+                                        people_count=result.people_count,
+                                        people_count_source="auto",
+                                        detector=result.detector,
+                                        updated_by_firebase_uid="system:auto",
+                                    )
+                                    crop_payload = _apply_auto_crop_payload(result)
+                                    if crop_payload is not None:
+                                        metadata = dict(entry["row"].get("metadata") or {})
+                                        if not _is_manual_thumbnail_crop(metadata.get("thumbnail_crop")):
+                                            metadata["thumbnail_crop"] = crop_payload
+                                            db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
+                                                "id", entry["id"]
+                                            ).execute()
+                                else:
+                                    context = dict(entry.get("context") or {})
+                                    context["people_count"] = result.people_count
+                                    context["people_count_source"] = "auto"
+                                    context["people_count_detector"] = result.detector
+                                    crop_payload = _apply_auto_crop_payload(result)
+                                    if crop_payload is not None and not _is_manual_thumbnail_crop(
+                                        context.get("thumbnail_crop")
+                                    ):
+                                        context["thumbnail_crop"] = crop_payload
+                                    db.schema("core").table("media_links").update(
+                                        {"context": context, "updated_at": datetime.now(UTC).isoformat()}
+                                    ).eq("id", entry["id"]).execute()
+                                auto_counts_succeeded += 1
+                            except Exception as exc:  # noqa: BLE001
+                                auto_counts_failed += 1
+                                errors.append(f"Auto-count {entry['id']}: {exc}")
+
+                            if idx <= 20 or idx % 5 == 0 or idx == total_to_count:
+                                yield progress(
+                                    {
+                                        "stage": "auto_count",
+                                        "message": "Auto-counting people in images...",
+                                        "current": idx,
+                                        "total": total_to_count,
+                                    }
+                                )
                 else:
                     yield progress(
                         {
@@ -2562,6 +2613,7 @@ async def refresh_person_images_stream(
                             "message": "Skipping auto-count (not configured).",
                             "current": 0,
                             "total": 0,
+                            "skip_reason": "not_configured",
                         }
                     )
             except Exception as exc:  # noqa: BLE001
@@ -2715,119 +2767,159 @@ async def refresh_person_images_stream(
             try:
                 from trr_backend.clients.screenalytics import (
                     ScreenalyticsClientError,
+                    ScreenalyticsUnavailableError,
                     count_people,
+                    get_screenalytics_unavailable_state,
                     is_screenalytics_configured,
                 )
 
                 if is_screenalytics_configured():
-                    candidate_sources = [s for s in sources if s in ALL_SOURCES]
-                    cast_rows = (
-                        db.schema("core")
-                        .table("cast_photos")
-                        .select("id, hosted_url, url, image_url, thumb_url, source_page_url, source, metadata")
-                        .eq("person_id", person_id_str)
-                        .in_("source", candidate_sources)
-                        .execute()
-                        .data
-                        or []
-                    )
-                    media_rows = _fetch_person_media_link_rows(db, person_id_str)
-
-                    to_process_crop: list[dict[str, Any]] = []
-                    for row in cast_rows:
-                        metadata = dict(row.get("metadata") or {})
-                        existing_crop = metadata.get("thumbnail_crop")
-                        if _is_manual_thumbnail_crop(existing_crop):
-                            centering_skipped_manual += 1
-                            continue
-                        if not _should_recenter_auto_crop(existing_crop, force=False):
-                            continue
-                        urls = _pick_autocount_urls(row)
-                        if not urls:
-                            continue
-                        to_process_crop.append(
+                    unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
+                    if unavailable:
+                        yield progress(
                             {
-                                "origin": "cast_photos",
-                                "id": str(row["id"]),
-                                "urls": urls,
-                                "metadata": metadata,
+                                "stage": "centering_cropping",
+                                "message": "Skipping centering/cropping (Screenalytics unavailable).",
+                                "current": 0,
+                                "total": 0,
+                                "skip_reason": "service_unavailable",
+                                "service_unavailable": True,
+                                "retry_after_s": retry_after_s,
+                                "detail": unavailable_reason,
                             }
                         )
-
-                    for row in media_rows:
-                        context = dict(row.get("context") or {})
-                        existing_crop = context.get("thumbnail_crop")
-                        if _is_manual_thumbnail_crop(existing_crop):
-                            centering_skipped_manual += 1
-                            continue
-                        if not _should_recenter_auto_crop(existing_crop, force=False):
-                            continue
-                        urls = _build_media_link_autocount_urls(row)
-                        if not urls:
-                            continue
-                        to_process_crop.append(
-                            {
-                                "origin": "media_links",
-                                "id": str(row["id"]),
-                                "urls": urls,
-                                "context": context,
-                            }
+                    else:
+                        candidate_sources = [s for s in sources if s in ALL_SOURCES]
+                        cast_rows = (
+                            db.schema("core")
+                            .table("cast_photos")
+                            .select("id, hosted_url, url, image_url, thumb_url, source_page_url, source, metadata")
+                            .eq("person_id", person_id_str)
+                            .in_("source", candidate_sources)
+                            .execute()
+                            .data
+                            or []
                         )
+                        media_rows = _fetch_person_media_link_rows(db, person_id_str)
 
-                    total_crop = len(to_process_crop)
-                    yield progress(
-                        {
-                            "stage": "centering_cropping",
-                            "message": "Centering/cropping thumbnails...",
-                            "current": 0,
-                            "total": total_crop,
-                        }
-                    )
-                    for idx, entry in enumerate(to_process_crop, start=1):
-                        centering_attempted += 1
-                        result = None
-                        last_error: ScreenalyticsClientError | None = None
-                        for url in entry["urls"]:
-                            try:
-                                result = count_people(url)
-                                break
-                            except ScreenalyticsClientError as exc:
-                                last_error = exc
-                        try:
-                            if result is None:
-                                raise last_error or ScreenalyticsClientError("Unable to center/crop image")
-                            crop_payload = _apply_auto_crop_payload(result)
-                            if crop_payload is None:
-                                raise ScreenalyticsClientError("No detections available for centering/cropping")
-                            if entry["origin"] == "cast_photos":
-                                metadata = dict(entry["metadata"] or {})
-                                metadata["thumbnail_crop"] = crop_payload
-                                db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
-                                    "id", entry["id"]
-                                ).execute()
-                            else:
-                                context = dict(entry["context"] or {})
-                                context["thumbnail_crop"] = crop_payload
-                                db.schema("core").table("media_links").update(
-                                    {
-                                        "context": context,
-                                        "updated_at": datetime.now(UTC).isoformat(),
-                                    }
-                                ).eq("id", entry["id"]).execute()
-                            centering_succeeded += 1
-                        except Exception as exc:  # noqa: BLE001
-                            centering_failed += 1
-                            errors.append(f"Centering {entry['id']}: {exc}")
-
-                        if idx <= 20 or idx % 5 == 0 or idx == total_crop:
-                            yield progress(
+                        to_process_crop: list[dict[str, Any]] = []
+                        for row in cast_rows:
+                            metadata = dict(row.get("metadata") or {})
+                            existing_crop = metadata.get("thumbnail_crop")
+                            if _is_manual_thumbnail_crop(existing_crop):
+                                centering_skipped_manual += 1
+                                continue
+                            if not _should_recenter_auto_crop(existing_crop, force=False):
+                                continue
+                            urls = _pick_autocount_urls(row)
+                            if not urls:
+                                continue
+                            to_process_crop.append(
                                 {
-                                    "stage": "centering_cropping",
-                                    "message": "Centering/cropping thumbnails...",
-                                    "current": idx,
-                                    "total": total_crop,
+                                    "origin": "cast_photos",
+                                    "id": str(row["id"]),
+                                    "urls": urls,
+                                    "metadata": metadata,
                                 }
                             )
+
+                        for row in media_rows:
+                            context = dict(row.get("context") or {})
+                            existing_crop = context.get("thumbnail_crop")
+                            if _is_manual_thumbnail_crop(existing_crop):
+                                centering_skipped_manual += 1
+                                continue
+                            if not _should_recenter_auto_crop(existing_crop, force=False):
+                                continue
+                            urls = _build_media_link_autocount_urls(row)
+                            if not urls:
+                                continue
+                            to_process_crop.append(
+                                {
+                                    "origin": "media_links",
+                                    "id": str(row["id"]),
+                                    "urls": urls,
+                                    "context": context,
+                                }
+                            )
+
+                        total_crop = len(to_process_crop)
+                        yield progress(
+                            {
+                                "stage": "centering_cropping",
+                                "message": "Centering/cropping thumbnails...",
+                                "current": 0,
+                                "total": total_crop,
+                            }
+                        )
+                        service_unavailable_error: ScreenalyticsUnavailableError | None = None
+                        for idx, entry in enumerate(to_process_crop, start=1):
+                            centering_attempted += 1
+                            result = None
+                            last_error: ScreenalyticsClientError | None = None
+                            for url in entry["urls"]:
+                                try:
+                                    result = count_people(url)
+                                    break
+                                except ScreenalyticsUnavailableError as exc:
+                                    service_unavailable_error = exc
+                                    last_error = exc
+                                    break
+                                except ScreenalyticsClientError as exc:
+                                    last_error = exc
+                            if service_unavailable_error is not None:
+                                centering_failed += 1
+                                retry_after = max(int(service_unavailable_error.retry_after_s), 1)
+                                detail = str(service_unavailable_error) or "Screenalytics unavailable"
+                                errors.append(f"Centering service unavailable: {detail}")
+                                yield progress(
+                                    {
+                                        "stage": "centering_cropping",
+                                        "message": "Centering/cropping paused (Screenalytics unavailable).",
+                                        "current": max(0, idx - 1),
+                                        "total": total_crop,
+                                        "skip_reason": "service_unavailable",
+                                        "service_unavailable": True,
+                                        "retry_after_s": retry_after,
+                                        "detail": detail,
+                                    }
+                                )
+                                break
+                            try:
+                                if result is None:
+                                    raise last_error or ScreenalyticsClientError("Unable to center/crop image")
+                                crop_payload = _apply_auto_crop_payload(result)
+                                if crop_payload is None:
+                                    raise ScreenalyticsClientError("No detections available for centering/cropping")
+                                if entry["origin"] == "cast_photos":
+                                    metadata = dict(entry["metadata"] or {})
+                                    metadata["thumbnail_crop"] = crop_payload
+                                    db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
+                                        "id", entry["id"]
+                                    ).execute()
+                                else:
+                                    context = dict(entry["context"] or {})
+                                    context["thumbnail_crop"] = crop_payload
+                                    db.schema("core").table("media_links").update(
+                                        {
+                                            "context": context,
+                                            "updated_at": datetime.now(UTC).isoformat(),
+                                        }
+                                    ).eq("id", entry["id"]).execute()
+                                centering_succeeded += 1
+                            except Exception as exc:  # noqa: BLE001
+                                centering_failed += 1
+                                errors.append(f"Centering {entry['id']}: {exc}")
+
+                            if idx <= 20 or idx % 5 == 0 or idx == total_crop:
+                                yield progress(
+                                    {
+                                        "stage": "centering_cropping",
+                                        "message": "Centering/cropping thumbnails...",
+                                        "current": idx,
+                                        "total": total_crop,
+                                    }
+                                )
                 else:
                     yield progress(
                         {
@@ -2835,6 +2927,7 @@ async def refresh_person_images_stream(
                             "message": "Skipping centering/cropping (not configured).",
                             "current": 0,
                             "total": 0,
+                            "skip_reason": "not_configured",
                         }
                     )
             except Exception as exc:  # noqa: BLE001
