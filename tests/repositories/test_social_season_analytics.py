@@ -393,9 +393,9 @@ def test_rows_for_platform_twitter_bravo_uses_parent_post_scoping(monkeypatch) -
     assert "child.reply_to_tweet_id = parent.tweet_id" in sql
     assert "and t.is_reply = false" in sql
     assert "and t.is_reply = true" in sql
-    assert "lower(coalesce(nullif(p.username, ''), p.source_account, '')) = any(%s)" in sql
-    assert "lower(coalesce(nullif(t.username, ''), t.source_account, '')) = any(%s)" in sql
-    assert "lower(coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '')) = any(%s)" in sql
+    assert "ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)" in sql
+    assert "ltrim(lower(coalesce(nullif(t.username, ''), nullif(t.source_account, ''), '')), '@') = any(%s)" in sql
+    assert "ltrim(lower(coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '')), '@') = any(%s)" in sql
     assert "t.tweet_id in (select tweet_id from legacy_thread_replies)" in sql
     assert "and t.created_at >= %s" in sql
     assert "and t.created_at <= %s" in sql
@@ -1654,6 +1654,113 @@ def test_refresh_post_comments_youtube_reports_comment_count_sync(monkeypatch) -
         max_comments_per_post=0,
     )
     assert payload["youtube_comment_count_synced"] == 1
+
+
+def test_refresh_post_comments_tiktok_returns_additive_completeness_fields(monkeypatch) -> None:
+    marked_missing: list[str] = []
+    monkeypatch.setattr(
+        social_repo,
+        "get_season_context",
+        lambda _season_id: SeasonContext(
+            season_id="season-1",
+            show_id="show-1",
+            show_name="Test Show",
+            season_number=6,
+            anchor_date=date(2025, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {"id": "tt-db-1", "account": "bravotv"},
+    )
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_count_stored_comments", lambda *_args, **_kwargs: {"tt-db-1": 0})
+    monkeypatch.setattr(
+        social_repo,
+        "_mark_missing_comments_for_anchor",
+        lambda **kwargs: marked_missing.append(str(kwargs.get("anchor_id"))) or 0,
+    )
+
+    class _FakeTikTokScraper:
+        comments_auth_failed = False
+        last_comment_fetch_reason = ""
+        _last_api_fail_reason = ""
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def fetch_comments(self, *args, **kwargs):
+            del args, kwargs
+            self.last_comment_fetch_reason = "api_status_fail"
+            self._last_api_fail_reason = "api_status_fail"
+            return []
+
+    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", _FakeTikTokScraper)
+
+    payload = social_repo.refresh_post_comments(
+        "season-1",
+        platform="tiktok",
+        source_id="777",
+        max_comments_per_post=25,
+        fetch_replies=True,
+    )
+
+    assert payload["fetch_failed"] is False
+    assert payload["is_complete"] is False
+    assert payload["incomplete_reason"] == "api_status_fail"
+    assert payload["comment_fail_reasons"] == ["api_status_fail"]
+    assert payload["comments_marked_missing"] == 0
+    assert marked_missing == []
+
+
+def test_refresh_post_comments_twitter_zero_limit_sets_fetch_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "get_season_context",
+        lambda _season_id: SeasonContext(
+            season_id="season-1",
+            show_id="show-1",
+            show_name="Test Show",
+            season_number=6,
+            anchor_date=date(2025, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {"tweet_id": "123", "account": "bravotv"},
+    )
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_count_stored_replies", lambda *_args, **_kwargs: {"123": 2})
+    monkeypatch.setattr(social_repo, "_load_twitter_auth", lambda: ({}, "bearer"))
+    monkeypatch.setattr(social_repo, "_load_twikit_credentials", lambda: {})
+
+    class _FakeTwitterScraper:
+        comments_auth_failed = False
+        last_reply_fetch_reason = ""
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def fetch_tweet_replies(self, *args, **kwargs):
+            raise AssertionError("fetch_tweet_replies should not be called when max_comments_per_post=0")
+
+    monkeypatch.setattr("trr_backend.socials.twitter.TwitterScraper", _FakeTwitterScraper)
+
+    payload = social_repo.refresh_post_comments(
+        "season-1",
+        platform="twitter",
+        source_id="123",
+        max_comments_per_post=0,
+        fetch_replies=True,
+    )
+
+    assert payload["comments_fetched"] == 0
+    assert payload["fetch_failed"] is False
+    assert payload["is_complete"] is False
+    assert payload["incomplete_reason"] == "fetch_disabled"
+    assert payload["comment_fail_reasons"] == ["fetch_disabled"]
 
 
 def test_backfill_youtube_comment_counts_for_season_scopes_rows(monkeypatch) -> None:

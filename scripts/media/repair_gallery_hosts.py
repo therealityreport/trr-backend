@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,6 +66,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         type=float,
         default=20.0,
         help="HTTP timeout seconds for hosted/source reachability checks.",
+    )
+    parser.add_argument(
+        "--retry-attempts",
+        type=int,
+        default=2,
+        help="Retry attempts for transient probe failures (default: 2).",
+    )
+    parser.add_argument(
+        "--retry-backoff-ms",
+        type=int,
+        default=500,
+        help="Backoff in milliseconds between transient retries (default: 500).",
+    )
+    parser.add_argument(
+        "--confirm-unreachable-pass",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run a second confirmation probe before marking broken_unreachable (default: true).",
     )
     parser.add_argument("--output-json", type=str, default=None, help="Optional output report path.")
     parser.add_argument("--verbose", action="store_true", help="Verbose logs.")
@@ -155,6 +174,88 @@ def _check_url_reachability(
     if response.status_code in {200, 206}:
         return True, f"http_{response.status_code}"
     return False, f"http_{response.status_code}"
+
+
+def _is_transient_failure_reason(reason: str) -> bool:
+    normalized = (reason or "").strip().lower()
+    if normalized.startswith("http_"):
+        code_raw = normalized.split("_", 1)[1]
+        if code_raw.isdigit():
+            code = int(code_raw)
+            if code == 429:
+                return True
+            if 500 <= code <= 599:
+                return True
+        return False
+    if normalized.startswith("request_failed:"):
+        transient_exception_names = {
+            "timeout",
+            "connecttimeout",
+            "readtimeout",
+            "connectionerror",
+            "chunkedencodingerror",
+            "ssLError".lower(),
+            "proxyerror",
+            "toomanyredirects",
+        }
+        exc_name = normalized.split(":", 1)[1].strip().lower()
+        return exc_name in transient_exception_names
+    return False
+
+
+@dataclass(frozen=True)
+class ReachabilityProbeResult:
+    ok: bool
+    reason: str
+    attempts: int
+    transient_failure: bool
+
+
+def _probe_url_reachability(
+    *,
+    url: str | None,
+    source: str,
+    timeout: float,
+    source_page_url: str | None,
+    retry_attempts: int,
+    retry_backoff_ms: int,
+) -> ReachabilityProbeResult:
+    attempts = max(1, int(retry_attempts))
+    backoff_seconds = max(0.0, float(retry_backoff_ms) / 1000.0)
+    last_reason = "unknown"
+
+    for idx in range(attempts):
+        ok, reason = _check_url_reachability(
+            url=url,
+            source=source,
+            timeout=timeout,
+            source_page_url=source_page_url,
+        )
+        if ok:
+            return ReachabilityProbeResult(
+                ok=True,
+                reason=reason,
+                attempts=idx + 1,
+                transient_failure=False,
+            )
+        last_reason = reason
+        is_transient = _is_transient_failure_reason(reason)
+        if not is_transient:
+            return ReachabilityProbeResult(
+                ok=False,
+                reason=reason,
+                attempts=idx + 1,
+                transient_failure=False,
+            )
+        if idx < attempts - 1 and backoff_seconds > 0:
+            time.sleep(backoff_seconds)
+
+    return ReachabilityProbeResult(
+        ok=False,
+        reason=last_reason,
+        attempts=attempts,
+        transient_failure=_is_transient_failure_reason(last_reason),
+    )
 
 
 def _resolve_show_person_ids(db, show_ids: list[str]) -> set[str]:
@@ -426,6 +527,9 @@ def repair_gallery_hosts(
     limit: int | None,
     apply_updates: bool,
     timeout: float,
+    retry_attempts: int,
+    retry_backoff_ms: int,
+    confirm_unreachable_pass: bool,
     verbose: bool,
 ) -> dict[str, Any]:
     candidates = _collect_candidates(
@@ -448,31 +552,35 @@ def repair_gallery_hosts(
 
     for candidate in candidates:
         try:
-            hosted_ok, hosted_reason = _check_url_reachability(
+            hosted_probe = _probe_url_reachability(
                 url=candidate.hosted_url,
                 source=candidate.source,
                 timeout=timeout,
                 source_page_url=candidate.source_page_url,
+                retry_attempts=retry_attempts,
+                retry_backoff_ms=retry_backoff_ms,
             )
-            if hosted_ok:
+            if hosted_probe.ok:
                 summary["ok"] += 1
                 details.append(
                     {
                         "id": candidate.row_id,
                         "kind": candidate.kind,
                         "status": "ok",
-                        "reason": hosted_reason,
+                        "reason": hosted_probe.reason,
                     }
                 )
                 continue
 
-            source_ok, source_reason = _check_url_reachability(
+            source_probe = _probe_url_reachability(
                 url=candidate.source_url,
                 source=candidate.source,
                 timeout=timeout,
                 source_page_url=candidate.source_page_url,
+                retry_attempts=retry_attempts,
+                retry_backoff_ms=retry_backoff_ms,
             )
-            if source_ok:
+            if source_probe.ok:
                 summary["repaired"] += 1
                 repaired_ids.append(candidate.row_id)
                 details.append(
@@ -480,16 +588,77 @@ def repair_gallery_hosts(
                         "id": candidate.row_id,
                         "kind": candidate.kind,
                         "status": "repaired",
-                        "reason": hosted_reason,
+                        "reason": f"hosted={hosted_probe.reason};source={source_probe.reason}",
                     }
                 )
                 if apply_updates:
                     _repair_candidate(db, candidate, verbose=verbose)
                 continue
 
+            confirmation_probe: ReachabilityProbeResult | None = None
+            if (
+                confirm_unreachable_pass
+                and not hosted_probe.transient_failure
+                and not source_probe.transient_failure
+            ):
+                confirmation_probe = _probe_url_reachability(
+                    url=candidate.source_url,
+                    source=candidate.source,
+                    timeout=timeout,
+                    source_page_url=candidate.source_page_url,
+                    retry_attempts=retry_attempts,
+                    retry_backoff_ms=retry_backoff_ms,
+                )
+                if confirmation_probe.ok:
+                    summary["repaired"] += 1
+                    repaired_ids.append(candidate.row_id)
+                    details.append(
+                        {
+                            "id": candidate.row_id,
+                            "kind": candidate.kind,
+                            "status": "repaired",
+                            "reason": (
+                                "hosted="
+                                f"{hosted_probe.reason};source={source_probe.reason};"
+                                f"confirm_source={confirmation_probe.reason}"
+                            ),
+                        }
+                    )
+                    if apply_updates:
+                        _repair_candidate(db, candidate, verbose=verbose)
+                    continue
+
+            if (
+                hosted_probe.transient_failure
+                or source_probe.transient_failure
+                or (confirmation_probe is not None and confirmation_probe.transient_failure)
+            ):
+                reason_parts = [
+                    f"hosted={hosted_probe.reason}",
+                    f"source={source_probe.reason}",
+                ]
+                if confirmation_probe is not None:
+                    reason_parts.append(f"confirm_source={confirmation_probe.reason}")
+                reason_parts.append("classification=indeterminate_transient")
+                reason = ";".join(reason_parts)
+                summary["error"] += 1
+                error_ids.append(candidate.row_id)
+                details.append(
+                    {
+                        "id": candidate.row_id,
+                        "kind": candidate.kind,
+                        "status": "error",
+                        "reason": reason,
+                    }
+                )
+                continue
+
             summary["broken_unreachable"] += 1
             broken_ids.append(candidate.row_id)
-            reason = f"hosted={hosted_reason};source={source_reason}"
+            reason_parts = [f"hosted={hosted_probe.reason}", f"source={source_probe.reason}"]
+            if confirmation_probe is not None:
+                reason_parts.append(f"confirm_source={confirmation_probe.reason}")
+            reason = ";".join(reason_parts)
             details.append(
                 {
                     "id": candidate.row_id,
@@ -544,6 +713,9 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         apply_updates=bool(args.apply),
         timeout=float(args.timeout),
+        retry_attempts=int(args.retry_attempts),
+        retry_backoff_ms=int(args.retry_backoff_ms),
+        confirm_unreachable_pass=bool(args.confirm_unreachable_pass),
         verbose=bool(args.verbose),
     )
 

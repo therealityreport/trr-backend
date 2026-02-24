@@ -3115,7 +3115,7 @@ def _platform_source_id(platform: str, post_row: dict[str, Any]) -> str:
     source_col = PLATFORM_SOURCE_ID_COLUMN.get(normalized_platform)
     if not source_col:
         return ""
-    return str(post_row.get(source_col) or "").strip()
+    return str(post_row.get(source_col) or post_row.get("source_id") or "").strip()
 
 
 def _platform_post_needs_media_mirror(platform: str, post_row: dict[str, Any]) -> bool:
@@ -3165,13 +3165,25 @@ def _update_platform_post_media_mirror_fields(
         assignments.append(f"{column} = %s")
         params.append(value)
 
-    if hosted_thumbnail_url is not FIELD_UNSET and _platform_posts_has_column(normalized_platform, "hosted_thumbnail_url"):
+    if (
+        hosted_thumbnail_url is not FIELD_UNSET
+        and _platform_posts_has_column(normalized_platform, "hosted_thumbnail_url")
+    ):
         _add("hosted_thumbnail_url", hosted_thumbnail_url)
-    if hosted_media_urls is not FIELD_UNSET and _platform_posts_has_column(normalized_platform, "hosted_media_urls"):
+    if (
+        hosted_media_urls is not FIELD_UNSET
+        and _platform_posts_has_column(normalized_platform, "hosted_media_urls")
+    ):
         _add("hosted_media_urls", list(hosted_media_urls or []))
-    if media_mirror_status is not FIELD_UNSET and _platform_posts_has_column(normalized_platform, "media_mirror_status"):
+    if (
+        media_mirror_status is not FIELD_UNSET
+        and _platform_posts_has_column(normalized_platform, "media_mirror_status")
+    ):
         _add("media_mirror_status", media_mirror_status)
-    if media_mirror_error is not FIELD_UNSET and _platform_posts_has_column(normalized_platform, "media_mirror_error"):
+    if (
+        media_mirror_error is not FIELD_UNSET
+        and _platform_posts_has_column(normalized_platform, "media_mirror_error")
+    ):
         _add("media_mirror_error", media_mirror_error)
     if (
         media_mirror_attempt_count is not FIELD_UNSET
@@ -5634,7 +5646,11 @@ def _run_platform_media_mirror_stage(
         if normalized_platform == "twitter"
         else "coalesce(nullif(p.thumbnail_url, ''), '') as thumbnail_url"
     )
-    media_urls_expr = "p.media_urls as media_urls" if _platform_posts_has_column(normalized_platform, "media_urls") else "'[]'::jsonb as media_urls"
+    media_urls_expr = (
+        "p.media_urls as media_urls"
+        if _platform_posts_has_column(normalized_platform, "media_urls")
+        else "'[]'::jsonb as media_urls"
+    )
 
     post_row = pg.fetch_one(
         f"""
@@ -9325,7 +9341,9 @@ def _week_detail_instagram(
 
     account_handles_list = sorted(account_handles)
     account_filter = (
-        "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)" if account_handles_list else ""
+        "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
+        if account_handles_list
+        else ""
     )
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
@@ -9495,7 +9513,9 @@ def _week_detail_tiktok(
     thumbnail_expr = _platform_thumbnail_expr("p", "tiktok")
     account_handles_list = sorted(account_handles)
     account_filter = (
-        "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)" if account_handles_list else ""
+        "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
+        if account_handles_list
+        else ""
     )
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
@@ -9798,7 +9818,9 @@ def _week_detail_twitter(
 
     account_handles_list = sorted(account_handles)
     account_filter = (
-        "and ltrim(lower(coalesce(nullif(t.username, ''), nullif(t.source_account, ''), '')), '@') = any(%s)" if account_handles_list else ""
+        "and ltrim(lower(coalesce(nullif(t.username, ''), nullif(t.source_account, ''), '')), '@') = any(%s)"
+        if account_handles_list
+        else ""
     )
     posts_params = [season_id, start_dt, end_dt]
     if account_handles_list:
