@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
 import re
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
 from api.routers import admin_show_bravo
 from trr_backend.db import pg
-from trr_backend.scraping.google_news_parser import fetch_google_news
+from trr_backend.scraping.google_news_parser import fetch_google_news, normalize_article_url
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,15 @@ _BRAVO_SOURCE_ID = "bravo"
 _GOOGLE_SOURCE_ID = "google_news"
 _DEFAULT_VARIANT = "default"
 _STALE_WINDOW_MINUTES = 30
+_GOOGLE_FEATURED_IMAGE_MAX_PROBES = 8
+_GOOGLE_CANONICAL_URL_MAX_PROBES = 25
+_MIRROR_RETRY_COOLDOWN_MINUTES = 180
+_MIRROR_MAX_ATTEMPTS = 3
+_GOOGLE_SYNC_JOB_STATUS_QUEUED = "queued"
+_GOOGLE_SYNC_JOB_STATUS_RUNNING = "running"
+_GOOGLE_SYNC_JOB_STATUS_COMPLETED = "completed"
+_GOOGLE_SYNC_JOB_STATUS_FAILED = "failed"
+_NEWS_DEFAULT_LIMIT = 50
 _TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "casting": ("cast", "housewife", "friend of", "joins", "joined", "returning", "returns"),
     "reunion": ("reunion", "part 1", "part 2", "part 3", "sit-down"),
@@ -43,6 +54,9 @@ _GOOGLE_NEWS_IMAGE_CAPTION = "Google News featured image"
 
 class GoogleNewsSyncRequest(BaseModel):
     force: bool = False
+    async_mode: bool = Field(default=False, alias="async")
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
 
 def _to_iso_now() -> str:
@@ -182,6 +196,37 @@ def _normalize_name(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
 
 
+_NICKNAME_EQUIVALENTS: dict[str, tuple[str, ...]] = {
+    "liz": ("elizabeth",),
+    "beth": ("elizabeth",),
+    "jen": ("jennifer",),
+    "jenny": ("jennifer",),
+    "kathy": ("kathryn", "katherine"),
+    "kat": ("kathryn", "katherine"),
+    "andy": ("andrew",),
+    "mike": ("michael",),
+    "chris": ("christopher",),
+}
+
+
+def _build_name_aliases(person_name: str) -> list[str]:
+    normalized = _normalize_name(person_name)
+    if not normalized:
+        return []
+    tokens = [token for token in normalized.split(" ") if token]
+    aliases = {normalized}
+    if len(tokens) >= 2:
+        aliases.add(f"{tokens[0]} {tokens[-1]}")
+    if tokens:
+        first = tokens[0]
+        last = tokens[-1] if len(tokens) >= 2 else ""
+        for expanded in _NICKNAME_EQUIVALENTS.get(first, ()):
+            if last:
+                aliases.add(f"{expanded} {last}")
+            aliases.add(expanded)
+    return sorted(alias for alias in aliases if alias)
+
+
 def _show_name_and_aliases(show_id: str) -> tuple[str, list[str]]:
     row = pg.fetch_one("SELECT * FROM core.shows WHERE id = %s", [show_id])
     if not row:
@@ -244,6 +289,7 @@ def _build_show_cast_index(show_id: str) -> list[dict[str, Any]]:
                 "person_id": person_id,
                 "person_name": person_name,
                 "normalized_name": _normalize_name(person_name),
+                "name_aliases": _build_name_aliases(person_name),
             }
         )
     return out
@@ -255,11 +301,15 @@ def _infer_person_tags(text: str, cast_index: list[dict[str, Any]]) -> list[dict
         return []
     tags: list[dict[str, Any]] = []
     for ref in cast_index:
-        token = str(ref.get("normalized_name") or "").strip()
-        if not token:
+        alias_tokens = ref.get("name_aliases")
+        candidate_aliases = (
+            [str(alias).strip() for alias in alias_tokens if str(alias).strip()]
+            if isinstance(alias_tokens, list)
+            else [str(ref.get("normalized_name") or "").strip()]
+        )
+        if not candidate_aliases:
             continue
-        pattern = rf"(^|\s){re.escape(token)}($|\s)"
-        if not re.search(pattern, normalized):
+        if not any(re.search(rf"(^|\s){re.escape(alias)}($|\s)", normalized) for alias in candidate_aliases):
             continue
         tags.append(
             {
@@ -271,10 +321,38 @@ def _infer_person_tags(text: str, cast_index: list[dict[str, Any]]) -> list[dict
     return tags
 
 
-def _infer_topic_tags(text: str) -> list[str]:
+def _load_topic_keyword_map() -> dict[str, tuple[str, ...]]:
+    try:
+        rows = pg.fetch_all(
+            """
+            SELECT topic_key, keywords
+            FROM core.news_topic_taxonomy
+            WHERE enabled = TRUE
+            ORDER BY topic_key
+            """
+        )
+    except Exception:  # noqa: BLE001
+        return _TOPIC_KEYWORDS
+    if not rows:
+        return _TOPIC_KEYWORDS
+    parsed: dict[str, tuple[str, ...]] = {}
+    for row in rows:
+        topic_key = str(row.get("topic_key") or "").strip().lower()
+        if not topic_key:
+            continue
+        raw_keywords = row.get("keywords")
+        keywords = tuple(str(token).strip().lower() for token in (raw_keywords or []) if str(token).strip())
+        if not keywords:
+            continue
+        parsed[topic_key] = keywords
+    return parsed or _TOPIC_KEYWORDS
+
+
+def _infer_topic_tags(text: str, *, topic_keywords: dict[str, tuple[str, ...]] | None = None) -> list[str]:
     haystack = text.lower()
     tags: list[str] = []
-    for topic, keywords in _TOPIC_KEYWORDS.items():
+    keywords_by_topic = topic_keywords or _TOPIC_KEYWORDS
+    for topic, keywords in keywords_by_topic.items():
         if any(keyword in haystack for keyword in keywords):
             tags.append(topic)
     return tags
@@ -413,8 +491,9 @@ def _infer_season_matches(
 def _normalize_google_news_items(
     *,
     items: list[dict[str, Any]],
-    cast_index: list[dict[str, Any]],
+    cast_index: list[dict[str, Any]] | None,
     season_windows: dict[int, tuple[date, date]],
+    topic_keywords: dict[str, tuple[str, ...]] | None = None,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for raw in items:
@@ -426,13 +505,15 @@ def _normalize_google_news_items(
         text_for_inference = f"{headline or ''} {summary or ''}".strip()
         raw_person_tags = raw.get("person_tags")
         person_tags = (
-            raw_person_tags if isinstance(raw_person_tags, list) else _infer_person_tags(text_for_inference, cast_index)
+            raw_person_tags
+            if isinstance(raw_person_tags, list)
+            else _infer_person_tags(text_for_inference, cast_index or [])
         )
         raw_topic_tags = raw.get("topic_tags")
         topic_tags = (
             [str(tag).strip() for tag in raw_topic_tags if str(tag).strip()]
             if isinstance(raw_topic_tags, list)
-            else _infer_topic_tags(text_for_inference)
+            else _infer_topic_tags(text_for_inference, topic_keywords=topic_keywords)
         )
         raw_season_matches = raw.get("season_matches")
         season_matches = (
@@ -445,10 +526,28 @@ def _normalize_google_news_items(
             )
         )
         published_at = str(raw.get("published_at") or "").strip() or None
+        canonical_article_url = (
+            normalize_article_url(str(raw.get("canonical_article_url") or "").strip())
+            or normalize_article_url(article_url)
+            or article_url
+        )
         image_url = str(raw.get("image_url") or "").strip() or None
         original_image_url = str(raw.get("original_image_url") or "").strip() or image_url
         hosted_image_url = str(raw.get("hosted_image_url") or "").strip() or None
         media_asset_id = str(raw.get("media_asset_id") or "").strip() or None
+        mirror_attempt_count_raw = raw.get("mirror_attempt_count")
+        try:
+            mirror_attempt_count = max(0, int(mirror_attempt_count_raw or 0))
+        except (TypeError, ValueError):
+            mirror_attempt_count = 0
+        mirror_status = str(raw.get("mirror_status") or "").strip().lower()
+        if not mirror_status:
+            if hosted_image_url:
+                mirror_status = "synced"
+            elif image_url or original_image_url:
+                mirror_status = "pending"
+            else:
+                mirror_status = "missing_image"
         feed_rank_raw = raw.get("feed_rank")
         try:
             feed_rank = int(feed_rank_raw)
@@ -459,12 +558,19 @@ def _normalize_google_news_items(
                 "source_id": _GOOGLE_SOURCE_ID,
                 "headline": headline,
                 "article_url": article_url,
+                "canonical_article_url": canonical_article_url,
                 "summary": summary,
                 "image_url": image_url,
                 "original_image_url": original_image_url,
                 "hosted_image_url": hosted_image_url,
                 "media_asset_id": media_asset_id,
                 "featured_image_synced": bool(raw.get("featured_image_synced")) or bool(hosted_image_url),
+                "mirror_status": mirror_status,
+                "mirror_attempt_count": mirror_attempt_count,
+                "last_mirror_attempt_at": (str(raw.get("last_mirror_attempt_at") or "").strip() or None),
+                "last_mirror_success_at": (str(raw.get("last_mirror_success_at") or "").strip() or None),
+                "last_mirror_error": (str(raw.get("last_mirror_error") or "").strip() or None),
+                "mirror_retry_after": (str(raw.get("mirror_retry_after") or "").strip() or None),
                 "published_at": published_at,
                 "publisher_name": (str(raw.get("publisher_name") or "").strip() or None),
                 "publisher_domain": (str(raw.get("publisher_domain") or "").strip() or None),
@@ -481,6 +587,7 @@ def _normalize_bravo_news_items(
     *,
     items: list[dict[str, Any]],
     season_windows: dict[int, tuple[date, date]],
+    topic_keywords: dict[str, tuple[str, ...]] | None = None,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for raw in items:
@@ -495,12 +602,13 @@ def _normalize_bravo_news_items(
                 "source_id": _BRAVO_SOURCE_ID,
                 "headline": headline,
                 "article_url": article_url,
+                "canonical_article_url": normalize_article_url(article_url) or article_url,
                 "image_url": (str(raw.get("image_url") or "").strip() or None),
                 "published_at": (str(raw.get("published_at") or "").strip() or None),
                 "publisher_name": "BravoTV",
                 "publisher_domain": "bravotv.com",
                 "person_tags": raw.get("person_tags") if isinstance(raw.get("person_tags"), list) else [],
-                "topic_tags": _infer_topic_tags(text_for_inference),
+                "topic_tags": _infer_topic_tags(text_for_inference, topic_keywords=topic_keywords),
                 "season_matches": _infer_season_matches(
                     text=text_for_inference,
                     published_at=(str(raw.get("published_at") or "").strip() or None),
@@ -508,18 +616,29 @@ def _normalize_bravo_news_items(
                     explicit_season_number=explicit_season,
                 ),
                 "feed_rank": None,
+                "mirror_status": "external",
+                "mirror_attempt_count": 0,
             }
         )
     return normalized
 
 
 def _parse_sources(value: str | None) -> list[str]:
-    if not value:
+    if value is None:
+        return [_BRAVO_SOURCE_ID, _GOOGLE_SOURCE_ID]
+    if not value.strip():
         return [_BRAVO_SOURCE_ID, _GOOGLE_SOURCE_ID]
     parsed = [token.strip().lower() for token in value.split(",") if token.strip()]
+    if not parsed:
+        return [_BRAVO_SOURCE_ID, _GOOGLE_SOURCE_ID]
     allowed = {_BRAVO_SOURCE_ID, _GOOGLE_SOURCE_ID}
-    selected = [token for token in parsed if token in allowed]
-    return selected or [_BRAVO_SOURCE_ID, _GOOGLE_SOURCE_ID]
+    invalid = sorted({token for token in parsed if token not in allowed})
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid sources filter: {', '.join(invalid)}. Allowed values: bravo, google_news",
+        )
+    return parsed
 
 
 def _apply_news_filters(
@@ -527,6 +646,7 @@ def _apply_news_filters(
     items: list[dict[str, Any]],
     person_id: str | None,
     source_filter: str | None,
+    source_contains: str | None,
     topic_filter: str | None,
     season_number: int | None,
 ) -> list[dict[str, Any]]:
@@ -550,8 +670,14 @@ def _apply_news_filters(
                 str(item.get("publisher_name") or "").strip().lower(),
                 str(item.get("publisher_domain") or "").strip().lower(),
             }
-            or source_token in str(item.get("publisher_name") or "").strip().lower()
-            or source_token in str(item.get("publisher_domain") or "").strip().lower()
+        ]
+    if source_contains:
+        source_partial = source_contains.strip().lower()
+        out = [
+            item
+            for item in out
+            if source_partial in str(item.get("publisher_name") or "").strip().lower()
+            or source_partial in str(item.get("publisher_domain") or "").strip().lower()
         ]
     if topic_filter:
         topic_token = topic_filter.strip().lower()
@@ -572,6 +698,77 @@ def _apply_news_filters(
     return out
 
 
+def _apply_news_time_window(
+    *,
+    items: list[dict[str, Any]],
+    since: datetime | None,
+    until: datetime | None,
+) -> list[dict[str, Any]]:
+    if since is None and until is None:
+        return items
+    since_utc = since.astimezone(UTC) if since else None
+    until_utc = until.astimezone(UTC) if until else None
+    out: list[dict[str, Any]] = []
+    for item in items:
+        parsed = _parse_datetime(item.get("published_at"))
+        if not parsed:
+            continue
+        parsed_utc = parsed.astimezone(UTC)
+        if since_utc and parsed_utc < since_utc:
+            continue
+        if until_utc and parsed_utc > until_utc:
+            continue
+        out.append(item)
+    return out
+
+
+def _dedupe_item_key(item: dict[str, Any]) -> str:
+    canonical = normalize_article_url(str(item.get("canonical_article_url") or "").strip() or None)
+    if canonical:
+        return f"url:{canonical}"
+    article = normalize_article_url(str(item.get("article_url") or "").strip() or None)
+    if article:
+        return f"url:{article}"
+    headline = str(item.get("headline") or "").strip().lower()
+    publisher = str(item.get("publisher_domain") or item.get("publisher_name") or "").strip().lower()
+    published_at = str(item.get("published_at") or "").strip()
+    return f"fallback:{headline}|{publisher}|{published_at}"
+
+
+def _dedupe_item_quality(item: dict[str, Any]) -> tuple[int, int, float]:
+    hosted = 1 if str(item.get("hosted_image_url") or "").strip() else 0
+    has_image = 1 if str(item.get("image_url") or "").strip() else 0
+    published = _parse_datetime(item.get("published_at"))
+    published_score = published.timestamp() if published else 0.0
+    return (hosted, has_image, published_score)
+
+
+def _dedupe_news_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[str, dict[str, Any]] = {}
+    for item in items:
+        key = _dedupe_item_key(item)
+        existing = by_key.get(key)
+        if existing is None or _dedupe_item_quality(item) > _dedupe_item_quality(existing):
+            by_key[key] = item
+    return list(by_key.values())
+
+
+def _compute_quality_score(item: dict[str, Any]) -> float:
+    published = _parse_datetime(item.get("published_at"))
+    age_days = 365.0
+    if published:
+        age_days = max(0.0, (datetime.now(UTC) - published.astimezone(UTC)).total_seconds() / 86400.0)
+    recency_component = max(0.0, 100.0 - (age_days * 2.5))
+    source_component = 8.0 if item.get("source_id") == _GOOGLE_SOURCE_ID else 6.0
+    rank_component = 0.0
+    if item.get("source_id") == _GOOGLE_SOURCE_ID:
+        try:
+            rank_component = max(0.0, 12.0 - float(int(item.get("feed_rank") or 0)))
+        except (TypeError, ValueError):
+            rank_component = 0.0
+    return round(recency_component + source_component + rank_component, 2)
+
+
 def _sort_news(items: list[dict[str, Any]], *, mode: Literal["trending", "latest"]) -> list[dict[str, Any]]:
     def _published_sort_value(item: dict[str, Any]) -> float:
         parsed = _parse_datetime(item.get("published_at"))
@@ -579,7 +776,7 @@ def _sort_news(items: list[dict[str, Any]], *, mode: Literal["trending", "latest
 
     if mode == "latest":
         sorted_items = sorted(items, key=lambda item: _published_sort_value(item), reverse=True)
-        return [{**item, "trending_rank": None} for item in sorted_items]
+        return [{**item, "trending_rank": None, "quality_score": _compute_quality_score(item)} for item in sorted_items]
 
     def _key(item: dict[str, Any]) -> tuple[int, int, float]:
         is_google = item.get("source_id") == _GOOGLE_SOURCE_ID
@@ -590,7 +787,41 @@ def _sort_news(items: list[dict[str, Any]], *, mode: Literal["trending", "latest
         return (bucket, 10**9, -_published_sort_value(item))
 
     sorted_items = sorted(items, key=_key)
-    return [{**item, "trending_rank": index + 1} for index, item in enumerate(sorted_items)]
+    return [
+        {**item, "trending_rank": index + 1, "quality_score": _compute_quality_score(item)}
+        for index, item in enumerate(sorted_items)
+    ]
+
+
+def _encode_news_cursor(offset: int) -> str:
+    payload = json.dumps({"o": max(0, int(offset))}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_news_cursor(cursor: str | None) -> int:
+    if not cursor:
+        return 0
+    try:
+        padded = cursor + ("=" * (-len(cursor) % 4))
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+        payload = json.loads(decoded.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="Invalid cursor") from exc
+    try:
+        offset = int(payload.get("o") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid cursor") from exc
+    return max(0, offset)
+
+
+def _paginate_news(items: list[dict[str, Any]], *, limit: int | None, cursor: str | None) -> tuple[list[dict[str, Any]], str | None]:
+    if limit is None:
+        return items, None
+    offset = _decode_news_cursor(cursor)
+    page = items[offset : offset + limit]
+    next_offset = offset + len(page)
+    next_cursor = _encode_news_cursor(next_offset) if next_offset < len(items) else None
+    return page, next_cursor
 
 
 def _is_snapshot_fresh(snapshot: dict[str, Any] | None) -> bool:
@@ -613,19 +844,43 @@ def _snapshot_needs_google_image_backfill(snapshot: dict[str, Any] | None) -> bo
     news_items = normalized.get("news") if isinstance(normalized, dict) else None
     if not isinstance(news_items, list) or not news_items:
         return False
+    now = datetime.now(UTC)
     for item in news_items:
         if not isinstance(item, dict):
             continue
-        image_url = str(item.get("image_url") or "").strip()
-        hosted_image_url = str(item.get("hosted_image_url") or "").strip()
-        original_image_url = str(item.get("original_image_url") or "").strip()
-        # Retry sync when an item has no image at all, or only external image URLs
-        # that were never mirrored to hosted storage.
-        if not image_url and not hosted_image_url and not original_image_url:
-            return True
-        if not hosted_image_url and (image_url or original_image_url):
-            return True
+        if not _google_item_needs_mirror_retry(item, now=now):
+            continue
+        return True
     return False
+
+
+def _google_item_needs_mirror_retry(item: dict[str, Any], *, now: datetime) -> bool:
+    image_url = str(item.get("image_url") or "").strip()
+    hosted_image_url = str(item.get("hosted_image_url") or "").strip()
+    original_image_url = str(item.get("original_image_url") or "").strip()
+    mirror_status = str(item.get("mirror_status") or "").strip().lower()
+    try:
+        attempt_count = max(0, int(item.get("mirror_attempt_count") or 0))
+    except (TypeError, ValueError):
+        attempt_count = 0
+    retry_after = _parse_datetime(item.get("mirror_retry_after"))
+
+    if hosted_image_url:
+        return False
+    if attempt_count >= _MIRROR_MAX_ATTEMPTS:
+        return False
+    if retry_after and retry_after.astimezone(UTC) > now.astimezone(UTC):
+        return False
+
+    if image_url or original_image_url:
+        return True
+    if mirror_status in {"missing_image", "pending", "failed"}:
+        return True
+    return False
+
+
+def _mirror_retry_after_iso(*, now: datetime) -> str:
+    return (now + timedelta(minutes=_MIRROR_RETRY_COOLDOWN_MINUTES)).isoformat()
 
 
 def _sync_google_news_featured_images(
@@ -638,14 +893,35 @@ def _sync_google_news_featured_images(
     # Reuse the Bravo media import path so Google featured images are mirrored to S3/Supabase too.
     from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
 
+    now = datetime.now(UTC)
+    now_iso = now.isoformat()
     indexed_by_image_url: dict[str, list[tuple[int, str]]] = {}
+    skipped_cooldown = 0
+
     for index, item in enumerate(items):
         article_url = str(item.get("article_url") or "").strip()
         image_url = str(item.get("image_url") or "").strip()
-        if not article_url or not image_url:
+        hosted_image_url = str(item.get("hosted_image_url") or "").strip()
+        if hosted_image_url:
+            item["mirror_status"] = "synced"
             continue
+        if not _google_item_needs_mirror_retry(item, now=now):
+            skipped_cooldown += 1
+            continue
+        if not article_url or not image_url:
+            item["mirror_status"] = "missing_image"
+            item["last_mirror_attempt_at"] = now_iso
+            item["mirror_retry_after"] = _mirror_retry_after_iso(now=now)
+            continue
+        try:
+            previous_attempts = max(0, int(item.get("mirror_attempt_count") or 0))
+        except (TypeError, ValueError):
+            previous_attempts = 0
+        item["mirror_attempt_count"] = previous_attempts + 1
+        item["last_mirror_attempt_at"] = now_iso
         item["original_image_url"] = str(item.get("original_image_url") or image_url).strip()
         item["featured_image_synced"] = bool(item.get("featured_image_synced"))
+        item["mirror_status"] = "running"
         indexed_by_image_url.setdefault(image_url, []).append((index, article_url))
 
     imported = 0
@@ -680,16 +956,30 @@ def _sync_google_news_featured_images(
             import_result = import_images(import_request, db, admin_user)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{source_article_url}: {exc}")
+            for item_index, _ in references:
+                item = items[item_index]
+                item["mirror_status"] = "failed"
+                item["last_mirror_error"] = str(exc)
+                item["mirror_retry_after"] = _mirror_retry_after_iso(now=now)
             continue
 
         imported += int(import_result.imported)
         skipped += int(import_result.skipped_duplicates)
         for error in import_result.errors:
             errors.append(f"{source_article_url}: {error}")
+        if import_result.errors:
+            for item_index, _ in references:
+                item = items[item_index]
+                item["last_mirror_error"] = "; ".join(import_result.errors)
 
         first_asset = import_result.assets[0] if import_result.assets else None
         hosted_url = str(first_asset.hosted_url).strip() if first_asset and first_asset.hosted_url else ""
         if not hosted_url:
+            for item_index, _ in references:
+                item = items[item_index]
+                item["mirror_status"] = "failed"
+                item["last_mirror_error"] = str(item.get("last_mirror_error") or "Media import produced no hosted URL")
+                item["mirror_retry_after"] = _mirror_retry_after_iso(now=now)
             continue
         media_asset_id = str(first_asset.id).strip() if first_asset and first_asset.id else None
         mirrored += 1
@@ -700,6 +990,10 @@ def _sync_google_news_featured_images(
             item["image_url"] = hosted_url
             item["media_asset_id"] = media_asset_id
             item["featured_image_synced"] = True
+            item["mirror_status"] = "synced"
+            item["last_mirror_success_at"] = now_iso
+            item["last_mirror_error"] = None
+            item["mirror_retry_after"] = None
             linked_items += 1
 
     return {
@@ -708,6 +1002,7 @@ def _sync_google_news_featured_images(
         "skipped": skipped,
         "mirrored": mirrored,
         "linked_items": linked_items,
+        "skipped_cooldown": skipped_cooldown,
         "errors": errors,
     }
 

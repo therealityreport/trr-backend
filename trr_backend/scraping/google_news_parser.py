@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import quote_plus, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -21,6 +21,19 @@ _DEFAULT_HEADERS = {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     ),
+}
+_DEFAULT_MAX_FEATURED_IMAGE_PROBES = 8
+_DEFAULT_MAX_CANONICAL_URL_PROBES = 25
+_TRACKING_QUERY_PREFIXES = ("utm_", "ga_", "fbclid", "gclid", "mc_", "igshid")
+_TRACKING_QUERY_KEYS = {
+    "oc",
+    "ceid",
+    "hl",
+    "gl",
+    "cmpid",
+    "ref",
+    "rss",
+    "output",
 }
 
 
@@ -38,6 +51,30 @@ def _http_url(value: str | None) -> str | None:
     if not parsed.netloc:
         return None
     return cleaned
+
+
+def normalize_article_url(value: str | None) -> str | None:
+    resolved = _http_url(value)
+    if not resolved:
+        return None
+    parsed = urlparse(resolved)
+    scheme = parsed.scheme.lower()
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host.removeprefix("www.")
+    path = parsed.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    filtered_query = []
+    for key, val in parse_qsl(parsed.query, keep_blank_values=False):
+        lowered = key.lower()
+        if lowered in _TRACKING_QUERY_KEYS:
+            continue
+        if any(lowered.startswith(prefix) for prefix in _TRACKING_QUERY_PREFIXES):
+            continue
+        filtered_query.append((key, val))
+    normalized_query = urlencode(filtered_query, doseq=True)
+    return urlunparse((scheme, host, path, "", normalized_query, ""))
 
 
 def _local_name(tag: str) -> str:
@@ -160,6 +197,12 @@ def _resolve_featured_image(article_url: str, *, timeout: float) -> str | None:
     return _extract_featured_image_from_html(response.text, page_url=page_url)
 
 
+def _resolve_canonical_article_url(article_url: str, *, timeout: float) -> str | None:
+    response = requests.get(article_url, headers=_DEFAULT_HEADERS, timeout=timeout, allow_redirects=True)
+    response.raise_for_status()
+    return normalize_article_url(str(response.url or article_url))
+
+
 def _enrich_items_with_featured_images(
     items: list[dict[str, Any]],
     *,
@@ -192,6 +235,50 @@ def _enrich_items_with_featured_images(
         item["image_url"] = resolved
         filled += 1
     return (filled, probes, errors)
+
+
+def _enrich_items_with_canonical_urls(
+    items: list[dict[str, Any]],
+    *,
+    timeout: float,
+    max_probes: int = _DEFAULT_MAX_CANONICAL_URL_PROBES,
+) -> tuple[int, int, list[str]]:
+    if max_probes <= 0:
+        return (0, 0, [])
+    resolved_count = 0
+    probes = 0
+    errors: list[str] = []
+    for item in items:
+        article_url = _http_url(str(item.get("article_url") or "").strip() or None)
+        if not article_url:
+            continue
+        normalized_existing = normalize_article_url(str(item.get("canonical_article_url") or "").strip() or None)
+        if normalized_existing:
+            item["canonical_article_url"] = normalized_existing
+            continue
+        normalized_article = normalize_article_url(article_url)
+        if normalized_article and "news.google.com" not in normalized_article:
+            item["canonical_article_url"] = normalized_article
+            continue
+        if probes >= max_probes:
+            if normalized_article:
+                item["canonical_article_url"] = normalized_article
+            continue
+        probes += 1
+        try:
+            canonical = _resolve_canonical_article_url(article_url, timeout=timeout)
+        except requests.RequestException as exc:
+            errors.append(f"{article_url}: {exc}")
+            if normalized_article:
+                item["canonical_article_url"] = normalized_article
+            continue
+        if canonical:
+            item["canonical_article_url"] = canonical
+            resolved_count += 1
+            continue
+        if normalized_article:
+            item["canonical_article_url"] = normalized_article
+    return (resolved_count, probes, errors)
 
 
 def parse_rss_items(xml_text: str) -> list[dict[str, Any]]:
@@ -237,6 +324,7 @@ def parse_rss_items(xml_text: str) -> list[dict[str, Any]]:
             {
                 "headline": title,
                 "article_url": link.strip(),
+                "canonical_article_url": normalize_article_url(link.strip()),
                 "published_at": _parse_pubdate(_child_text(item, "pubDate")),
                 "publisher_name": source_name,
                 "publisher_url": source_url,
@@ -329,6 +417,8 @@ def fetch_google_news(
     show_name: str,
     show_aliases: Sequence[str] | None = None,
     timeout: float = 20.0,
+    max_featured_image_probes: int = _DEFAULT_MAX_FEATURED_IMAGE_PROBES,
+    max_canonical_url_probes: int = _DEFAULT_MAX_CANONICAL_URL_PROBES,
 ) -> dict[str, Any]:
     topic_candidates = topic_url_to_rss_candidates(topic_url)
     attempted_feeds: list[str] = []
@@ -342,9 +432,15 @@ def fetch_google_news(
             errors.append(f"{candidate}: {exc}")
             continue
         if items:
+            canonical_urls_resolved, canonical_urls_probed, canonical_url_errors = _enrich_items_with_canonical_urls(
+                items,
+                timeout=timeout,
+                max_probes=max_canonical_url_probes,
+            )
             featured_images_added, featured_images_probed, featured_image_errors = _enrich_items_with_featured_images(
                 items,
                 timeout=timeout,
+                max_probes=max_featured_image_probes,
             )
             return {
                 "items": items,
@@ -355,6 +451,9 @@ def fetch_google_news(
                 "featured_images_added": featured_images_added,
                 "featured_images_probed": featured_images_probed,
                 "featured_image_errors": featured_image_errors,
+                "canonical_urls_resolved": canonical_urls_resolved,
+                "canonical_urls_probed": canonical_urls_probed,
+                "canonical_url_errors": canonical_url_errors,
             }
 
     fallback_url = build_search_rss_url(show_name, show_aliases)
@@ -364,9 +463,15 @@ def fetch_google_news(
     except (ET.ParseError, requests.RequestException) as exc:
         errors.append(f"{fallback_url}: {exc}")
         raise RuntimeError("Failed to fetch Google News RSS feed") from exc
+    canonical_urls_resolved, canonical_urls_probed, canonical_url_errors = _enrich_items_with_canonical_urls(
+        fallback_items,
+        timeout=timeout,
+        max_probes=max_canonical_url_probes,
+    )
     featured_images_added, featured_images_probed, featured_image_errors = _enrich_items_with_featured_images(
         fallback_items,
         timeout=timeout,
+        max_probes=max_featured_image_probes,
     )
 
     return {
@@ -378,4 +483,7 @@ def fetch_google_news(
         "featured_images_added": featured_images_added,
         "featured_images_probed": featured_images_probed,
         "featured_image_errors": featured_image_errors,
+        "canonical_urls_resolved": canonical_urls_resolved,
+        "canonical_urls_probed": canonical_urls_probed,
+        "canonical_url_errors": canonical_url_errors,
     }

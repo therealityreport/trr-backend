@@ -2,6 +2,59 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-24) — Instagram scraper + async S3 mirror hardening (queue-backed)
+
+- February 24, 2026: Implemented additional Instagram reliability hardening and async mirror queue plumbing with additive diagnostics.
+  - Files:
+    - `trr_backend/socials/instagram/scraper.py`
+    - `trr_backend/socials/instagram/permalink_metadata.py`
+    - `trr_backend/repositories/social_season_analytics.py`
+    - `api/routers/socials.py`
+    - `scripts/socials/backfill_instagram_metadata_and_media.py`
+    - `scripts/socials/worker.py`
+    - `supabase/migrations/0137_instagram_media_mirror_diagnostics.sql` (new)
+    - `tests/socials/test_comment_scraper_fixes.py`
+    - `tests/socials/test_instagram_permalink_metadata.py`
+    - `tests/repositories/test_social_season_analytics.py`
+    - `tests/api/routers/test_socials_season_analytics.py`
+    - `tests/scripts/test_backfill_instagram_metadata_and_media.py` (new)
+  - Changes:
+    - Scraper failure semantics:
+      - `fetch_comments(...)` now marks invalid shortcodes with `last_comment_fetch_reason='invalid_shortcode'`.
+      - `comments_auth_failed` reset at fetch start.
+      - comments/replies endpoint payload `status != "ok"` is treated as logical failure (`api_status_fail`), including auth/challenge classification.
+      - request-error logging path no longer assumes a response object exists.
+      - post/comment timestamp formatting normalized to UTC.
+    - Permalink metadata hardening:
+      - strict shortcode validation (`^[A-Za-z0-9_-]{5,32}$`) for direct shortcode and URL extraction.
+      - malformed shortcode/url now fails fast (`None`) instead of passing through raw text.
+      - `data-sjs` wrapped JSON payload decoding retained and validated.
+    - Async media mirroring design in ingest:
+      - posts stage now persists post/comment data first and enqueues `instagram_media_mirror` jobs instead of inline S3 upload.
+      - media-mirror job stage execution added to worker pipeline (`stage=media_mirror`).
+      - mirror downloader streams to temp file with max-byte guard and retry/backoff classification (timeout/429/5xx retryable; permanent failures non-retryable).
+      - shortcode fallback key hardening to avoid `"unknown"` collisions (`unknown-{id/hash}`).
+    - Existing-post robustness:
+      - Instagram account matching now normalizes leading `@` on DB side (`ltrim(..., '@')`).
+    - Lifecycle consistency:
+      - zero-comment refresh (`max_comments_per_post=0`) now reports `fetch_disabled`, `is_complete=false`, and avoids false completeness.
+    - Backfill behavior:
+      - backfill script switched to enqueue mirror jobs (no inline uploads).
+      - thumbnail-only rows with complete hosted coverage are no longer treated as perpetually missing when status is unset.
+    - Additive API/admin fields:
+      - new endpoint: `POST /api/v1/admin/socials/seasons/{season_id}/instagram/mirror/requeue`
+      - Instagram week/post detail payloads now include:
+        - `media_mirror_attempt_count`
+        - `media_mirror_last_attempt_at`
+        - `media_mirror_last_job_id`
+  - Validation:
+    - Targeted lint:
+      - `ruff check trr_backend/socials/instagram/scraper.py trr_backend/socials/instagram/permalink_metadata.py trr_backend/repositories/social_season_analytics.py api/routers/socials.py scripts/socials/backfill_instagram_metadata_and_media.py tests/socials/test_comment_scraper_fixes.py tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/scripts/test_backfill_instagram_metadata_and_media.py` (pass)
+    - Targeted tests:
+      - `pytest -q tests/socials/test_comment_scraper_fixes.py tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/scripts/test_backfill_instagram_metadata_and_media.py -k "instagram or refresh_post_comments or mirror"` (`40 passed, 88 deselected`)
+    - Full-suite note:
+      - `pytest -q --maxfail=1` stopped on an unrelated pre-existing failure in `tests/api/routers/test_admin_show_sync.py::TestSyncNetworksStreaming::test_runs_three_steps_and_aggregates_metrics` (expected `failures=4`, got `8`).
+
 ## Latest Update (2026-02-24) — Global original-integrity audit/repair script (IMDb strict hash)
 
 - February 24, 2026: Added an operational script to verify hosted/source integrity and apply repairs only for provable mismatches.
