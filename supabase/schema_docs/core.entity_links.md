@@ -30,7 +30,7 @@ id
 
 ## Unique Constraints
 
-- entity_type, entity_id, link_kind, season_number, url_key
+- show_id, entity_type, entity_id, link_kind, season_number, url_key
 
 ## Foreign Keys
 
@@ -43,7 +43,7 @@ id
 - entity_links_pkey (unique): id
 - entity_links_show_id_idx (non-unique): show_id
 - entity_links_status_idx (non-unique): status
-- entity_links_unique_active (unique): entity_type, entity_id, link_kind, season_number, url_key
+- entity_links_unique_active (unique): show_id, entity_type, entity_id, link_kind, season_number, url_key
 
 ## RLS Enabled
 

@@ -167,6 +167,7 @@
   ],
   "unique_constraints": [
     [
+      "show_id",
       "entity_type",
       "entity_id",
       "link_kind",
@@ -219,6 +220,7 @@
     {
       "name": "entity_links_unique_active",
       "columns": [
+        "show_id",
         "entity_type",
         "entity_id",
         "link_kind",
@@ -226,7 +228,7 @@
         "url_key"
       ],
       "unique": true,
-      "definition": "CREATE UNIQUE INDEX entity_links_unique_active ON core.entity_links USING btree (entity_type, entity_id, link_kind, season_number, url_key)"
+      "definition": "CREATE UNIQUE INDEX entity_links_unique_active ON core.entity_links USING btree (show_id, entity_type, entity_id, link_kind, season_number, url_key)"
     }
   ],
   "rls_enabled": true,
