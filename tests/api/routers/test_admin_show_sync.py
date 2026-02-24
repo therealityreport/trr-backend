@@ -149,6 +149,10 @@ class TestSyncNetworksStreaming:
             print("logos_mirrored=4")
             print("variants_black_mirrored=3")
             print("variants_white_mirrored=2")
+            print("logo_assets_discovered=25")
+            print("logo_assets_mirrored=14")
+            print("logo_assets_skipped=8")
+            print("logo_assets_failed=3")
             print("completion_total=40")
             print("completion_resolved=39")
             print("completion_unresolved=1")
@@ -183,6 +187,10 @@ class TestSyncNetworksStreaming:
         assert payload["logos_mirrored"] == 9
         assert payload["variants_black_mirrored"] == 3
         assert payload["variants_white_mirrored"] == 2
+        assert payload["logo_assets_discovered"] == 25
+        assert payload["logo_assets_mirrored"] == 14
+        assert payload["logo_assets_skipped"] == 8
+        assert payload["logo_assets_failed"] == 3
         assert payload["completion_total"] == 40
         assert payload["completion_resolved"] == 39
         assert payload["completion_unresolved"] == 1
@@ -385,9 +393,7 @@ class TestNetworksStreamingOverrides:
         override_id = str(uuid4())
 
         mock_db = MagicMock()
-        delete_query = (
-            mock_db.schema.return_value.table.return_value.delete.return_value.eq.return_value
-        )
+        delete_query = mock_db.schema.return_value.table.return_value.delete.return_value.eq.return_value
         delete_response = MagicMock()
         delete_response.error = None
         delete_response.data = []
@@ -425,6 +431,54 @@ class TestRefreshShow:
 
         assert response.status_code == 404
 
+    def test_returns_409_when_cast_refresh_missing_show_imdb_id(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+
+        show_id = str(uuid4())
+        mock_db = MagicMock()
+        show_resp = MagicMock()
+        show_resp.data = [{"id": show_id, "imdb_id": None, "external_ids": {}}]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync.sync_show_cast.main") as p_show_cast:
+                response = client.post(
+                    f"/api/v1/admin/shows/{show_id}/refresh",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"targets": ["cast_credits"]},
+                )
+
+        assert response.status_code == 409
+        assert "missing an IMDb ID" in response.json().get("detail", "")
+        p_show_cast.assert_not_called()
+
+    def test_refresh_stream_returns_409_when_cast_refresh_missing_show_imdb_id(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+
+        show_id = str(uuid4())
+        mock_db = MagicMock()
+        show_resp = MagicMock()
+        show_resp.data = [{"id": show_id, "imdb_id": None, "external_ids": {}}]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync.sync_show_cast.main") as p_show_cast:
+                response = client.post(
+                    f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"targets": ["cast_credits"]},
+                )
+
+        assert response.status_code == 409
+        assert "missing an IMDb ID" in response.json().get("detail", "")
+        p_show_cast.assert_not_called()
+
     def test_calls_script_mains_for_targets(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         token = _make_admin_token("test-secret")
@@ -432,7 +486,7 @@ class TestRefreshShow:
         # Mock DB show exists
         mock_db = MagicMock()
         show_resp = MagicMock()
-        show_resp.data = [{"id": str(uuid4())}]
+        show_resp.data = [{"id": str(uuid4()), "imdb_id": "tt1234567", "external_ids": {}}]
         show_resp.error = None
         query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
         query.execute.return_value = show_resp

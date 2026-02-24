@@ -16,34 +16,68 @@ from api.routers.admin_show_links import (
 def test_discover_show_links_uses_default_bravo_snapshot_variant() -> None:
     show_id = str(uuid4())
     with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
-        fetch_one.side_effect = [
-            {
-                "id": show_id,
-                "name": "The Real Housewives of Salt Lake City",
-                "networks": ["bravo"],
-                "wikidata_id": None,
-                "external_ids": {},
-            },
-            {
-                "payload": {
-                    "normalized": {
-                        "news_show": [
-                            {
-                                "headline": "Cast announcement",
-                                "article_url": "https://www.bravotv.com/the-daily-dish/cast-news",
-                                "season_number": 6,
-                            }
-                        ]
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Real Housewives of Salt Lake City",
+                    "networks": ["bravo"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {
+                    "payload": {
+                        "normalized": {
+                            "news_show": [
+                                {
+                                    "headline": "Cast announcement",
+                                    "article_url": "https://www.bravotv.com/the-daily-dish/cast-news",
+                                    "season_number": 6,
+                                }
+                            ]
+                        }
                     }
-                }
-            },
-        ]
+                },
+            ]
 
-        links = _discover_show_links(show_id)
+            links = _discover_show_links(show_id)
 
     snapshot_call = fetch_one.call_args_list[1]
     assert snapshot_call.args[1] == [show_id, "default"]
     assert any(link.get("link_kind") == "cast_announcement" for link in links)
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "fandom"
+        and str(link.get("url") or "").startswith("https://real-housewives.fandom.com/wiki/")
+        for link in links
+    )
+
+
+def test_discover_show_links_prefers_existing_show_level_fandom_links() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch(
+            "api.routers.admin_show_links.pg.fetch_all",
+            return_value=[
+                {"url": "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"},
+            ],
+        ):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Real Housewives of Salt Lake City",
+                    "networks": ["bravo"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"payload": {"normalized": {}}},
+            ]
+            links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    assert len(fandom_links) == 1
+    assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+    assert fandom_links[0]["source"] == "core.entity_links"
 
 
 def test_discover_people_links_adds_bravo_profile_for_housewife_friend_on_bravo_show() -> None:
@@ -94,6 +128,7 @@ def test_discover_people_links_skips_missing_wikipedia_and_fandom_pages() -> Non
                     }
                 ],
             ]
+
             def _validate(url: str, kind: str, expected_name: str | None = None) -> str | None:
                 if kind == "bravo_profile":
                     return url
@@ -372,6 +407,26 @@ def test_validate_person_knowledge_url_rejects_nonexistent_imdb_page() -> None:
     assert outcome == "invalid"
 
 
+def test_validate_person_knowledge_url_accepts_imdb_access_challenge_for_canonical_id() -> None:
+    html = """
+    <html>
+      <head><title>IMDb Security Challenge</title></head>
+      <body>JavaScript is disabled. Please enable JavaScript. Reference ID: abc123</body>
+    </html>
+    """
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(202, html, "https://www.imdb.com/name/nm1234567/", None),
+    ):
+        resolved, outcome = _validate_person_knowledge_url(
+            "nm1234567",
+            kind="imdb",
+            expected_name="Ashley Gay",
+        )
+    assert resolved == "https://www.imdb.com/name/nm1234567/"
+    assert outcome == "valid"
+
+
 def test_validate_person_knowledge_url_returns_fetch_error_for_tmdb_fetch_failures() -> None:
     with patch(
         "api.routers.admin_show_links._fetch_html_with_status",
@@ -514,6 +569,7 @@ def test_cleanup_invalid_person_knowledge_links_deletes_all_statuses_and_non_cas
 
     assert result["scanned"] == 4
     assert result["invalid"] == 4
+    assert result["promoted"] == 0
     assert result["deleted"] == 4
     assert result["validation_failures"] == 0
     sql, params = execute_returning.call_args.args
@@ -576,6 +632,77 @@ def test_cleanup_invalid_person_knowledge_links_keeps_rows_on_validation_fetch_e
 
     assert result["scanned"] == 1
     assert result["invalid"] == 0
+    assert result["promoted"] == 0
     assert result["deleted"] == 0
     assert result["validation_failures"] == 1
     execute_returning.assert_not_called()
+
+
+def test_cleanup_invalid_person_knowledge_links_promotes_pending_valid_rows() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    link_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links._load_show_cast_names_by_person_id") as cast_lookup:
+        cast_lookup.return_value = {person_id: "Heather Gay"}
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": link_id,
+                    "person_id": person_id,
+                    "link_kind": "imdb",
+                    "status": "pending",
+                    "url": "https://www.imdb.com/name/nm1234567/",
+                }
+            ]
+            with patch(
+                "api.routers.admin_show_links._validate_person_knowledge_url",
+                return_value=("https://www.imdb.com/name/nm1234567/", "valid"),
+            ):
+                with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
+                    execute_returning.return_value = [{"id": link_id}]
+                    result = _cleanup_invalid_person_knowledge_links(show_id)
+
+    assert result["scanned"] == 1
+    assert result["invalid"] == 0
+    assert result["promoted"] == 1
+    assert result["deleted"] == 0
+    assert result["validation_failures"] == 0
+    sql, params = execute_returning.call_args.args
+    assert "UPDATE core.entity_links" in sql
+    assert params == ["https://www.imdb.com/name/nm1234567/", "https://www.imdb.com/name/nm1234567/", link_id]
+
+
+def test_cleanup_invalid_person_knowledge_links_deletes_pending_rows_on_fetch_error() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    link_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links._load_show_cast_names_by_person_id") as cast_lookup:
+        cast_lookup.return_value = {person_id: "Heather Gay"}
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": link_id,
+                    "person_id": person_id,
+                    "link_kind": "tmdb",
+                    "status": "pending",
+                    "url": "https://www.themoviedb.org/person/12345",
+                }
+            ]
+            with patch(
+                "api.routers.admin_show_links._validate_person_knowledge_url",
+                return_value=(None, "fetch_error"),
+            ):
+                with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
+                    execute_returning.return_value = [{"id": link_id}]
+                    result = _cleanup_invalid_person_knowledge_links(show_id)
+
+    assert result["scanned"] == 1
+    assert result["invalid"] == 1
+    assert result["promoted"] == 0
+    assert result["deleted"] == 1
+    assert result["validation_failures"] == 1
+    sql, params = execute_returning.call_args.args
+    assert "DELETE FROM core.entity_links" in sql
+    assert params == [[link_id]]

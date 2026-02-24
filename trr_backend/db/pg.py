@@ -2,19 +2,41 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import os
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from threading import Lock
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
-import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.pool import ThreadedConnectionPool
 
-from trr_backend.db.connection import resolve_database_url
+from trr_backend.db.connection import resolve_database_url_candidates
 
 if TYPE_CHECKING:
     from psycopg2.extensions import connection as connection_type
     from psycopg2.extensions import cursor as cursor_type
+
+DEFAULT_POOL_MINCONN = 1
+DEFAULT_POOL_MAXCONN = 8
+
+_pool: ThreadedConnectionPool | None = None
+_active_pool_dsn: str | None = None
+_pool_lock = Lock()
+
+T = TypeVar("T")
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, parsed)
 
 
 def _sslmode_for_url(url: str) -> str | None:
@@ -25,22 +47,137 @@ def _sslmode_for_url(url: str) -> str | None:
     return None
 
 
+def _error_message(error: Exception) -> str:
+    return str(error).strip().lower()
+
+
+def _is_transient_transport_error(error: Exception) -> bool:
+    message = _error_message(error)
+    if not message:
+        return False
+    markers = (
+        "enotfound",
+        "could not translate host name",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "nodename nor servname provided",
+        "ssl syscall error: eof detected",
+        "server closed the connection unexpectedly",
+        "connection reset by peer",
+        "connection refused",
+        "connection timed out",
+        "terminating connection due to administrator command",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _build_pool_for_url(url: str) -> ThreadedConnectionPool:
+    minconn = _env_int("TRR_DB_POOL_MINCONN", DEFAULT_POOL_MINCONN)
+    maxconn = _env_int("TRR_DB_POOL_MAXCONN", DEFAULT_POOL_MAXCONN)
+    maxconn = max(minconn, maxconn)
+
+    sslmode = _sslmode_for_url(url)
+    connect_kwargs: dict[str, Any] = {"dsn": url}
+    if sslmode:
+        connect_kwargs["sslmode"] = sslmode
+
+    return ThreadedConnectionPool(minconn=minconn, maxconn=maxconn, **connect_kwargs)
+
+
+def _reset_pool_locked() -> None:
+    global _pool, _active_pool_dsn
+    if _pool is not None:
+        _pool.closeall()
+    _pool = None
+    _active_pool_dsn = None
+
+
+def _get_pool() -> ThreadedConnectionPool:
+    global _pool, _active_pool_dsn
+    if _pool is not None:
+        return _pool
+
+    with _pool_lock:
+        if _pool is not None:
+            return _pool
+
+        init_errors: list[Exception] = []
+        candidates = resolve_database_url_candidates()
+        for index, candidate in enumerate(candidates):
+            try:
+                _pool = _build_pool_for_url(candidate)
+                _active_pool_dsn = candidate
+                return _pool
+            except Exception as error:
+                init_errors.append(error)
+                has_more = index < len(candidates) - 1
+                if has_more and _is_transient_transport_error(error):
+                    continue
+                raise
+
+        if init_errors:
+            raise init_errors[-1]
+        raise RuntimeError("Database pool initialization failed: no database URL candidates available")
+
+
+def reset_pool() -> None:
+    """Reset the shared pool; used for transient transport recovery."""
+    with _pool_lock:
+        _reset_pool_locked()
+
+
+def close_pool() -> None:
+    """Close all pooled connections. Intended for tests/process shutdown."""
+    reset_pool()
+
+
+def current_pool_dsn() -> str | None:
+    """Return the currently active pool DSN for diagnostics."""
+    return _active_pool_dsn
+
+
+def _should_retry_query(error: Exception, *, attempt: int) -> bool:
+    return attempt == 0 and _is_transient_transport_error(error)
+
+
+def _run_with_transient_retry(operation: Callable[[], T]) -> T:
+    for attempt in range(2):
+        try:
+            return operation()
+        except Exception as error:
+            if not _should_retry_query(error, attempt=attempt):
+                raise
+            reset_pool()
+    raise RuntimeError("unreachable")
+
+
+def _get_connection_with_retry() -> tuple[ThreadedConnectionPool, connection_type]:
+    for attempt in range(2):
+        pool = _get_pool()
+        try:
+            conn = pool.getconn()
+            return pool, conn
+        except Exception as error:
+            if not _should_retry_query(error, attempt=attempt):
+                raise
+            reset_pool()
+    raise RuntimeError("unreachable")
+
+
 @contextmanager
 def db_connection():
-    url = resolve_database_url()
-    sslmode = _sslmode_for_url(url)
-    if sslmode:
-        conn = psycopg2.connect(url, sslmode=sslmode)
-    else:
-        conn = psycopg2.connect(url)
+    pool, conn = _get_connection_with_retry()
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 
 @contextmanager
@@ -77,23 +214,32 @@ def fetch_one_with_cursor(
 
 
 def fetch_all(query: str, params: Iterable[Any] | None = None) -> list[dict[str, Any]]:
-    with db_cursor() as cur:
-        return fetch_all_with_cursor(cur, query, params)
+    def _run() -> list[dict[str, Any]]:
+        with db_cursor() as cur:
+            return fetch_all_with_cursor(cur, query, params)
+
+    return _run_with_transient_retry(_run)
 
 
 def fetch_one(query: str, params: Iterable[Any] | None = None) -> dict[str, Any] | None:
-    with db_cursor() as cur:
-        return fetch_one_with_cursor(cur, query, params)
+    def _run() -> dict[str, Any] | None:
+        with db_cursor() as cur:
+            return fetch_one_with_cursor(cur, query, params)
+
+    return _run_with_transient_retry(_run)
 
 
 def execute_returning(
     query: str,
     params: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    with db_cursor() as cur:
-        cur.execute(query, params or [])
-        rows = cur.fetchall()
-        return [dict(row) for row in rows]
+    def _run() -> list[dict[str, Any]]:
+        with db_cursor() as cur:
+            cur.execute(query, params or [])
+            rows = cur.fetchall()
+            return [dict(row) for row in rows]
+
+    return _run_with_transient_retry(_run)
 
 
 def execute_values_returning(
@@ -104,10 +250,19 @@ def execute_values_returning(
 ) -> list[dict[str, Any]]:
     if not rows:
         return []
-    with db_cursor(conn=conn) as cur:
-        execute_values(cur, query, rows)
-        result = cur.fetchall()
-        return [dict(row) for row in result]
+    if conn is not None:
+        with db_cursor(conn=conn) as cur:
+            execute_values(cur, query, rows)
+            result = cur.fetchall()
+            return [dict(row) for row in result]
+
+    def _run() -> list[dict[str, Any]]:
+        with db_cursor() as cur:
+            execute_values(cur, query, rows)
+            result = cur.fetchall()
+            return [dict(row) for row in result]
+
+    return _run_with_transient_retry(_run)
 
 
 def execute_values_no_return(
@@ -118,5 +273,13 @@ def execute_values_no_return(
 ) -> None:
     if not rows:
         return
-    with db_cursor(conn=conn) as cur:
-        execute_values(cur, query, rows)
+    if conn is not None:
+        with db_cursor(conn=conn) as cur:
+            execute_values(cur, query, rows)
+        return
+
+    def _run() -> None:
+        with db_cursor() as cur:
+            execute_values(cur, query, rows)
+
+    _run_with_transient_retry(_run)

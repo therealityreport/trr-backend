@@ -57,10 +57,7 @@ def _intersects(a: FaceBbox, b: FaceBbox) -> bool:
 
 def _contains(container: FaceBbox, inner: FaceBbox) -> bool:
     return (
-        container.x1 <= inner.x1
-        and container.y1 <= inner.y1
-        and container.x2 >= inner.x2
-        and container.y2 >= inner.y2
+        container.x1 <= inner.x1 and container.y1 <= inner.y1 and container.x2 >= inner.x2 and container.y2 >= inner.y2
     )
 
 
@@ -269,14 +266,16 @@ def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> P
             kind = det.get("kind")
             if isinstance(bbox, list) and len(bbox) >= 4:
                 try:
-                    detections.append(FaceBbox(
-                        x1=float(bbox[0]),
-                        y1=float(bbox[1]),
-                        x2=float(bbox[2]),
-                        y2=float(bbox[3]),
-                        confidence=float(conf) if isinstance(conf, (int, float)) else 0.0,
-                        kind=str(kind).lower() if isinstance(kind, str) else "face",
-                    ))
+                    detections.append(
+                        FaceBbox(
+                            x1=float(bbox[0]),
+                            y1=float(bbox[1]),
+                            x2=float(bbox[2]),
+                            y2=float(bbox[3]),
+                            confidence=float(conf) if isinstance(conf, (int, float)) else 0.0,
+                            kind=str(kind).lower() if isinstance(kind, str) else "face",
+                        )
+                    )
                 except (ValueError, TypeError):
                     continue
 

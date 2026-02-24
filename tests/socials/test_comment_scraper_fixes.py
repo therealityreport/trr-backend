@@ -346,13 +346,7 @@ def test_twitter_reply_fetch_retries_with_missing_feature_flags(monkeypatch: pyt
     )
     second = _FakeResponse(
         status_code=200,
-        payload={
-            "data": {
-                "threaded_conversation_with_injections_v2": {
-                    "instructions": []
-                }
-            }
-        },
+        payload={"data": {"threaded_conversation_with_injections_v2": {"instructions": []}}},
     )
 
     responses = [first, second]
@@ -532,6 +526,81 @@ def test_instagram_fetch_comments_paginates_with_headload_flag(monkeypatch: pyte
     assert len(comments) == 2
     assert len(seen_params) == 2
     assert seen_params[1].get("min_id") == "cursor-1"
+
+
+def test_instagram_fetch_comments_resets_sticky_auth_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "ok"})
+    scraper.comments_auth_failed = True
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(
+        scraper,
+        "_get",
+        lambda *_args, **_kwargs: _FakeResponse(
+            status_code=200,
+            payload={"status": "ok", "comments": [], "has_more_comments": False},
+            headers={"content-type": "application/json"},
+        ),
+    )
+
+    comments = scraper.fetch_comments("ABC123", fetch_replies=False, delay=0)
+    assert comments == []
+    assert scraper.comments_auth_failed is False
+
+
+def test_instagram_fetch_comments_sets_api_status_fail_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "ok"})
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(
+        scraper,
+        "_get",
+        lambda *_args, **_kwargs: _FakeResponse(
+            status_code=200,
+            payload={"status": "fail", "message": "login required"},
+            headers={"content-type": "application/json"},
+        ),
+    )
+
+    comments = scraper.fetch_comments("ABC123", fetch_replies=False, delay=0)
+    assert comments == []
+    assert scraper.last_comment_fetch_reason == "api_status_fail"
+    assert scraper.comments_auth_failed is True
+
+
+def test_instagram_fetch_comment_replies_sets_api_status_fail_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "ok"})
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(
+        scraper,
+        "_get",
+        lambda *_args, **_kwargs: _FakeResponse(
+            status_code=200,
+            payload={"status": "fail", "message": "challenge required"},
+            headers={"content-type": "application/json"},
+        ),
+    )
+    replies = scraper._fetch_comment_replies("123", "comment-1", "ABC123", "https://www.instagram.com/p/ABC123/", 0)  # noqa: SLF001
+    assert replies == []
+    assert scraper.last_comment_fetch_reason == "api_status_fail"
+    assert scraper.comments_auth_failed is True
+
+
+def test_instagram_fetch_comments_handles_request_error_without_response_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "ok"})
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+
+    def _raise_request_error(*_args, **_kwargs):
+        raise requests.RequestException("timeout")
+
+    monkeypatch.setattr(scraper, "_get", _raise_request_error)
+    comments = scraper.fetch_comments("ABC123", fetch_replies=False, delay=0)
+    assert comments == []
+    assert scraper.last_comment_fetch_reason == "request_error"
 
 
 def test_tiktok_parse_post_item_populates_media_urls_and_thumbnail() -> None:

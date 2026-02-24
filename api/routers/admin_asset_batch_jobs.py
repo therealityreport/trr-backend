@@ -74,29 +74,152 @@ def _parse_season_number(value: Any) -> int | None:
     return None
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _build_resize_center_fallback_crop_payload() -> dict[str, Any]:
+    return {
+        "x": 50.0,
+        "y": 32.0,
+        "zoom": 1.0,
+        "mode": "auto",
+        "strategy": "resize_center_fallback_v1",
+    }
+
+
+def _normalize_crop_payload(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        x = float(value.get("x"))
+        y = float(value.get("y"))
+        zoom = float(value.get("zoom"))
+    except (TypeError, ValueError):
+        return None
+    mode_raw = str(value.get("mode") or "auto").strip().lower()
+    mode = "manual" if mode_raw == "manual" else "auto"
+    payload: dict[str, Any] = {
+        "x": _clamp(x, 0.0, 100.0),
+        "y": _clamp(y, 0.0, 100.0),
+        "zoom": _clamp(zoom, 1.0, 4.0),
+        "mode": mode,
+    }
+    strategy = value.get("strategy")
+    if isinstance(strategy, str) and strategy.strip():
+        payload["strategy"] = strategy.strip()
+    return payload
+
+
+def _find_manual_then_auto_crop(candidates: list[Any]) -> tuple[dict[str, Any] | None, str | None]:
+    manual: dict[str, Any] | None = None
+    auto: dict[str, Any] | None = None
+    for candidate in candidates:
+        crop = _normalize_crop_payload(candidate)
+        if not crop:
+            continue
+        if str(crop.get("mode") or "").lower() == "manual":
+            manual = crop
+            break
+        if auto is None:
+            auto = crop
+    if manual is not None:
+        return manual, "manual"
+    if auto is not None:
+        return auto, "auto"
+    return None, None
+
+
+def _lookup_cast_photo_crop_payload(
+    db: SupabaseAdminClient,
+    target_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    response = db.schema("core").table("cast_photos").select("id,metadata").eq("id", target_id).limit(1).execute()
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(str(response.error))
+    rows = response.data or []
+    if not rows:
+        return None, None
+    metadata = rows[0].get("metadata") if isinstance(rows[0].get("metadata"), dict) else {}
+    crop = metadata.get("thumbnail_crop") if isinstance(metadata, dict) else None
+    return _find_manual_then_auto_crop([crop])
+
+
+def _lookup_media_asset_crop_payload(
+    db: SupabaseAdminClient,
+    target_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    link_resp = (
+        db.schema("core").table("media_links").select("id,context").eq("media_asset_id", target_id).limit(250).execute()
+    )
+    if hasattr(link_resp, "error") and link_resp.error:
+        raise RuntimeError(str(link_resp.error))
+    link_context_crops = [
+        row.get("context", {}).get("thumbnail_crop")
+        for row in (link_resp.data or [])
+        if isinstance(row, dict) and isinstance(row.get("context"), dict)
+    ]
+    crop, source = _find_manual_then_auto_crop(link_context_crops)
+    if crop is not None:
+        return crop, source
+
+    asset_resp = db.schema("core").table("media_assets").select("id,metadata").eq("id", target_id).limit(1).execute()
+    if hasattr(asset_resp, "error") and asset_resp.error:
+        raise RuntimeError(str(asset_resp.error))
+    rows = asset_resp.data or []
+    if not rows:
+        return None, None
+    metadata = rows[0].get("metadata") if isinstance(rows[0].get("metadata"), dict) else {}
+    return _find_manual_then_auto_crop([metadata.get("thumbnail_crop") if isinstance(metadata, dict) else None])
+
+
+def _lookup_resize_crop_payload(
+    *,
+    origin: BatchTargetOrigin,
+    target_id: str,
+    db: SupabaseAdminClient,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if origin == "cast_photos":
+        return _lookup_cast_photo_crop_payload(db, target_id)
+    return _lookup_media_asset_crop_payload(db, target_id)
+
+
+def _resolve_resize_crop_payload(
+    *,
+    origin: BatchTargetOrigin,
+    target_id: str,
+    force: bool,
+    db: SupabaseAdminClient,
+) -> tuple[dict[str, Any], str]:
+    existing_crop, existing_source = _lookup_resize_crop_payload(origin=origin, target_id=target_id, db=db)
+    if existing_crop is not None:
+        return existing_crop, existing_source or "existing"
+
+    target_uuid = UUID(target_id)
+    try:
+        if origin == "cast_photos":
+            auto_count_cast_photo(target_uuid, force=force, db=db, _=None)
+        else:
+            auto_count_media_asset(target_uuid, force=force, db=db, _=None)
+    except Exception:
+        pass
+
+    detected_crop, detected_source = _lookup_resize_crop_payload(origin=origin, target_id=target_id, db=db)
+    if detected_crop is not None:
+        return detected_crop, f"auto_detect:{detected_source or 'auto'}"
+
+    return _build_resize_center_fallback_crop_payload(), "fallback"
+
+
 def _fetch_target_scope_fields(
     db: SupabaseAdminClient,
     origin: BatchTargetOrigin,
     target_id: str,
 ) -> tuple[str | None, int | None, str | None]:
     if origin == "cast_photos":
-        response = (
-            db.schema("core")
-            .table("cast_photos")
-            .select("id,metadata")
-            .eq("id", target_id)
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("cast_photos").select("id,metadata").eq("id", target_id).limit(1).execute()
     else:
-        response = (
-            db.schema("core")
-            .table("media_assets")
-            .select("id,metadata")
-            .eq("id", target_id)
-            .limit(1)
-            .execute()
-        )
+        response = db.schema("core").table("media_assets").select("id,metadata").eq("id", target_id).limit(1).execute()
 
     if hasattr(response, "error") and response.error:
         raise RuntimeError(str(response.error))
@@ -122,7 +245,7 @@ def _execute_target_operation(
     operation: BatchJobOperation,
     force: bool,
     db: SupabaseAdminClient,
-) -> None:
+) -> dict[str, Any] | None:
     target_uuid = UUID(target_id)
 
     if origin == "cast_photos":
@@ -139,7 +262,19 @@ def _execute_target_operation(
                 db=db,
                 _=None,
             )
-            return
+            crop_payload, crop_source = _resolve_resize_crop_payload(
+                origin=origin,
+                target_id=target_id,
+                force=force,
+                db=db,
+            )
+            generate_variants_for_cast_photo(
+                target_uuid,
+                payload=GenerateCastPhotoVariantsRequest(force=force, crop=crop_payload),
+                db=db,
+                _=None,
+            )
+            return {"crop_source": crop_source}
 
     if origin == "media_assets":
         if operation in {"count", "crop"}:
@@ -155,7 +290,19 @@ def _execute_target_operation(
                 db=db,
                 _=None,
             )
-            return
+            crop_payload, crop_source = _resolve_resize_crop_payload(
+                origin=origin,
+                target_id=target_id,
+                force=force,
+                db=db,
+            )
+            generate_variants_for_media_asset(
+                target_uuid,
+                payload=GenerateMediaAssetVariantsRequest(force=force, crop=crop_payload),
+                db=db,
+                _=None,
+            )
+            return {"crop_source": crop_source}
 
     raise RuntimeError(f"Unsupported target operation: {origin}/{operation}")
 
@@ -383,7 +530,7 @@ def _stream_batch_jobs(
 
                 attempted += 1
                 try:
-                    _execute_target_operation(
+                    operation_result = _execute_target_operation(
                         origin=origin,
                         target_id=target_id,
                         operation=operation,
@@ -392,17 +539,24 @@ def _stream_batch_jobs(
                     )
                     succeeded += 1
                     operation_counts[operation]["succeeded"] += 1
+                    crop_source = operation_result.get("crop_source") if isinstance(operation_result, dict) else None
+                    detail_suffix = (
+                        f" (crop source: {crop_source})."
+                        if operation == "resize" and isinstance(crop_source, str) and crop_source
+                        else "."
+                    )
                     yield emit_progress(
                         {
                             "show_id": show_id_str,
                             "season_number": season_number,
                             "stage": "batch_jobs",
-                            "message": f"{operation} succeeded for {target_id}.",
+                            "message": f"{operation} succeeded for {target_id}{detail_suffix}",
                             "current": current,
                             "total": total,
                             "operation": operation,
                             "origin": origin,
                             "target_id": target_id,
+                            **({"crop_source": crop_source} if crop_source else {}),
                         },
                     )
                 except ValueError:

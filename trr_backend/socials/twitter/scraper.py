@@ -120,8 +120,7 @@ class TwitterScraper:
 
     # Public bearer token used by Twitter's web app (not a secret).
     PUBLIC_BEARER_TOKEN = (
-        "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
-        "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+        "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
     )
 
     MAX_RETRIES = 3
@@ -460,7 +459,7 @@ class TwitterScraper:
         # Extract media
         media_urls = []
         entities = tweet_data.get("extended_entities", {}) or tweet_data.get("entities", {})
-        for media in (entities.get("media", []) if isinstance(entities, dict) else []):
+        for media in entities.get("media", []) if isinstance(entities, dict) else []:
             media_url = media.get("media_url_https") or media.get("media_url")
             if media_url:
                 media_urls.append(media_url)
@@ -533,12 +532,7 @@ class TwitterScraper:
             logger.error("Failed to parse __NEXT_DATA__ JSON")
             return []
 
-        entries = (
-            next_data.get("props", {})
-            .get("pageProps", {})
-            .get("timeline", {})
-            .get("entries", [])
-        )
+        entries = next_data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
 
         tweets = []
         for entry in entries:
@@ -629,20 +623,14 @@ class TwitterScraper:
                     if cursor:
                         results = await cursor.next()
                     else:
-                        results = await client.search_tweet(
-                            search_query, "Latest", count=20
-                        )
+                        results = await client.search_tweet(search_query, "Latest", count=20)
                 except Exception as exc:
                     # Retry once on first page (transient 404s from Twitter)
                     if page == 1:
-                        logger.warning(
-                            f"twikit search page 1 failed ({exc}); retrying in 5s..."
-                        )
+                        logger.warning(f"twikit search page 1 failed ({exc}); retrying in 5s...")
                         await asyncio.sleep(5)
                         try:
-                            results = await client.search_tweet(
-                                search_query, "Latest", count=20
-                            )
+                            results = await client.search_tweet(search_query, "Latest", count=20)
                         except Exception as retry_exc:
                             logger.error(f"twikit retry also failed: {retry_exc}")
                             break
@@ -655,9 +643,7 @@ class TwitterScraper:
 
                 for t in results:
                     try:
-                        created_at_dt = datetime.strptime(
-                            t.created_at, "%a %b %d %H:%M:%S %z %Y"
-                        )
+                        created_at_dt = datetime.strptime(t.created_at, "%a %b %d %H:%M:%S %z %Y")
                         created_at = int(created_at_dt.timestamp())
                         date_time = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
                     except (ValueError, TypeError):
@@ -678,22 +664,14 @@ class TwitterScraper:
                         replies=t.reply_count or 0,
                         quotes=t.quote_count or 0,
                         views=t.view_count or 0,
-                        url=f"https://x.com/{t.user.screen_name}/status/{t.id}"
-                        if t.user
-                        else "",
+                        url=f"https://x.com/{t.user.screen_name}/status/{t.id}" if t.user else "",
                         username=t.user.screen_name if t.user else "",
                         display_name=t.user.name if t.user else "",
-                        user_verified=bool(
-                            getattr(t.user, "is_blue_verified", False)
-                        )
-                        if t.user
-                        else False,
+                        user_verified=bool(getattr(t.user, "is_blue_verified", False)) if t.user else False,
                         is_reply=bool(t.in_reply_to),
                         is_retweet=bool(getattr(t, "retweeted_tweet", None)),
                         is_quote=bool(getattr(t, "quoted_tweet", None)),
-                        reply_to_tweet_id=str(t.in_reply_to)
-                        if t.in_reply_to
-                        else None,
+                        reply_to_tweet_id=str(t.in_reply_to) if t.in_reply_to else None,
                         quoted_tweet_id=None,
                         media_urls=[],
                         show_id=config.show_id,
@@ -1040,9 +1018,7 @@ class TwitterScraper:
                 from_match = re.search(r"from:(\w+)", config.query)
                 if from_match:
                     username = from_match.group(1)
-                    logger.info(
-                        f"Falling back to syndication API for @{username}"
-                    )
+                    logger.info(f"Falling back to syndication API for @{username}")
                     tweets = self._scrape_syndication(username, config)
                     retrieval_mode = "syndication"
                 elif not self._twikit_credentials:

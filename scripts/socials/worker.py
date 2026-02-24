@@ -139,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage",
-        choices=["any", "posts", "comments"],
+        choices=["any", "posts", "comments", "media_mirror"],
         default="any",
         help="Optional stage filter when claiming jobs",
     )

@@ -180,13 +180,9 @@ def mirror_media_asset(
                 hosted_url=str(patch.get("hosted_url") or ""),
                 hosted_bytes=int(patch.get("hosted_bytes") or 0),
                 hosted_content_type=(
-                    str(patch.get("hosted_content_type"))
-                    if patch.get("hosted_content_type") is not None
-                    else None
+                    str(patch.get("hosted_content_type")) if patch.get("hosted_content_type") is not None else None
                 ),
-                hosted_etag=(
-                    str(patch.get("hosted_etag")) if patch.get("hosted_etag") is not None else None
-                ),
+                hosted_etag=(str(patch.get("hosted_etag")) if patch.get("hosted_etag") is not None else None),
                 width=int(patch.get("width")) if patch.get("width") is not None else None,
                 height=int(patch.get("height")) if patch.get("height") is not None else None,
                 completed_at=now_iso,

@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 import requests
 
 _DATA_SJS_RE = re.compile(r"<script[^>]*data-sjs[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+_WRAPPED_JSON_CALL_RE = re.compile(r"^[A-Za-z0-9_$.]+\([^,]*,\s*(\{.*\})\s*\)\s*;?$", re.DOTALL)
+_SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]{5,32}$")
 _DURATION_RE = re.compile(
     r'mediaPresentationDuration="PT(?:(?P<h>\d+)H)?(?:(?P<m>\d+)M)?(?:(?P<s>\d+(?:\.\d+)?)S)?"',
     re.IGNORECASE,
@@ -58,17 +60,52 @@ def _normalize_unique(values: list[str]) -> list[str]:
     return out
 
 
-def _extract_shortcode(shortcode_or_url: str) -> str:
+def _extract_shortcode_and_route(shortcode_or_url: str) -> tuple[str, str]:
     text = str(shortcode_or_url or "").strip()
     if not text:
-        return ""
+        return "", "p"
     if "/" not in text:
-        return text
+        return (text, "p") if _SHORTCODE_RE.match(text) else ("", "p")
     parsed = urlparse(text)
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) >= 2 and parts[0] in {"p", "reel", "tv"}:
-        return parts[1]
-    return text
+        candidate = str(parts[1] or "").strip()
+        return (candidate, parts[0]) if _SHORTCODE_RE.match(candidate) else ("", parts[0])
+    return "", "p"
+
+
+def _extract_shortcode(shortcode_or_url: str) -> str:
+    shortcode, _route = _extract_shortcode_and_route(shortcode_or_url)
+    return shortcode
+
+
+def _decode_data_sjs_payload(body: str) -> dict[str, Any] | None:
+    stripped = str(body or "").strip()
+    if not stripped:
+        return None
+
+    candidates: list[str] = [stripped]
+    if stripped.endswith(";"):
+        candidates.append(stripped[:-1].strip())
+    if stripped.startswith("for (;;);"):
+        candidates.append(stripped[len("for (;;);") :].strip())
+    wrapped = _WRAPPED_JSON_CALL_RE.match(stripped)
+    if wrapped:
+        candidates.append(str(wrapped.group(1) or "").strip())
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = candidate.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def _iter_data_sjs_payloads(html: str) -> list[dict[str, Any]]:
@@ -79,11 +116,8 @@ def _iter_data_sjs_payloads(html: str) -> list[dict[str, Any]]:
         body = (match.group(1) or "").strip()
         if not body:
             continue
-        try:
-            parsed = json.loads(body)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
+        parsed = _decode_data_sjs_payload(body)
+        if parsed is not None:
             payloads.append(parsed)
     return payloads
 
@@ -116,19 +150,32 @@ def fetch_permalink_media_item(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    shortcode = _extract_shortcode(shortcode_or_url)
+    shortcode, preferred_route = _extract_shortcode_and_route(shortcode_or_url)
     if not shortcode:
         return None
-    url = f"https://www.instagram.com/p/{shortcode}/"
     req_headers = {**_DEFAULT_HEADERS, **(headers or {})}
     client = session or requests.Session()
-    response = client.get(url, headers=req_headers, cookies=(cookies or None), timeout=timeout)
-    response.raise_for_status()
-    payloads = _iter_data_sjs_payloads(response.text or "")
-    for payload in payloads:
-        found = _find_shortcode_media_item(payload)
-        if found is not None:
-            return found
+    routes = [preferred_route, *[route for route in ("p", "reel", "tv") if route != preferred_route]]
+    last_request_error: requests.RequestException | None = None
+    had_success_response = False
+    for route in routes:
+        url = f"https://www.instagram.com/{route}/{shortcode}/"
+        try:
+            response = client.get(url, headers=req_headers, cookies=(cookies or None), timeout=timeout)
+            response.raise_for_status()
+            had_success_response = True
+        except requests.RequestException as exc:
+            last_request_error = exc
+            continue
+
+        payloads = _iter_data_sjs_payloads(response.text or "")
+        for payload in payloads:
+            found = _find_shortcode_media_item(payload)
+            if found is not None:
+                return found
+
+    if not had_success_response and last_request_error is not None:
+        raise last_request_error
     return None
 
 

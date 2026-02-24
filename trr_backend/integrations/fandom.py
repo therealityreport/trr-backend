@@ -509,9 +509,7 @@ def is_allowlisted_fandom_domain(
         return False
     raw_allowlist = allowlist if allowlist is not None else load_fandom_community_allowlist()
     normalized_allowlist = {
-        domain
-        for domain in (_normalize_fandom_community_domain(item) for item in raw_allowlist)
-        if domain
+        domain for domain in (_normalize_fandom_community_domain(item) for item in raw_allowlist) if domain
     }
     return normalized in normalized_allowlist
 

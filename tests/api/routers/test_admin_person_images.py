@@ -306,6 +306,57 @@ class TestRefreshPersonImages:
         assert mock_fetch_all.call_count == 1
         assert mock_fetch_all.call_args.kwargs["sources"] == ["imdb", "fandom"]
 
+
+def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatch):
+    mock_db = MagicMock()
+
+    cast_query = MagicMock()
+    cast_query.select.return_value = cast_query
+    cast_query.eq.return_value = cast_query
+    cast_query.in_.return_value = cast_query
+    cast_query.limit.return_value = cast_query
+    cast_query.not_ = MagicMock()
+    cast_query.not_.is_.return_value = cast_query
+
+    cast_response = MagicMock()
+    cast_response.error = None
+    cast_response.data = [
+        {
+            "id": str(uuid4()),
+            "source": "imdb",
+            "hosted_url": "https://cdn.example.com/photo.jpg",
+            "metadata": {},
+        }
+    ]
+    cast_query.execute.return_value = cast_response
+    mock_db.schema.return_value.table.return_value = cast_query
+
+    with patch(
+        "api.routers.admin_person_images._fetch_person_media_link_rows",
+        return_value=[],
+    ):
+        with patch(
+            "api.routers.admin_image_counts.auto_count_cast_photo",
+            side_effect=RuntimeError("detector unavailable"),
+        ):
+            with patch("trr_backend.media.image_variants.generate_cast_photo_variants") as generate_cast_variants:
+                result = admin_person_images._resize_person_gallery_images(
+                    mock_db,
+                    person_id=str(uuid4()),
+                    sources=["imdb"],
+                    force=True,
+                )
+
+    assert result[0] == 1
+    assert result[1] == 1
+    assert result[2] == 0
+    assert result[3] == 1
+    assert result[4] == 1
+    assert result[5] == 0
+    assert generate_cast_variants.call_count == 2
+    assert generate_cast_variants.call_args_list[0].kwargs["crop"] is None
+    assert generate_cast_variants.call_args_list[1].kwargs["crop"]["strategy"] == "resize_center_fallback_v1"
+
     def test_stream_emits_resizing_stage_and_complete_counters(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         person_id = str(uuid4())
@@ -377,6 +428,104 @@ class TestRefreshPersonImages:
             "resized": complete_data["resize_succeeded"],
         }
 
+    def test_stream_honors_skip_flags_for_ingest_only_mode(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Skip Flags Person",
+            "external_ids": {"imdb": "nm7654321"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_person_images._refresh_tmdb_profile", return_value=None):
+                with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
+                    with patch(
+                        "api.routers.admin_person_images._enrich_cast_photos_with_episode_metadata",
+                        return_value=(0, 0),
+                    ):
+                        with patch(
+                            "api.routers.admin_person_images._apply_show_context_to_photos",
+                            return_value=(0, 0),
+                        ):
+                            with patch(
+                                "api.routers.admin_person_images._get_known_source_total",
+                                return_value=None,
+                            ):
+                                with patch(
+                                    "trr_backend.ingestion.cast_photo_sources.fetch_imdb_cast_photos",
+                                    return_value=[
+                                        {
+                                            "person_id": person_id,
+                                            "source": "imdb",
+                                            "url": "https://images.example.com/imdb.jpg",
+                                            "source_image_id": "imdb-1",
+                                        }
+                                    ],
+                                ):
+                                    with patch(
+                                        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+                                        return_value=[{"id": "cast-photo-1"}],
+                                    ):
+                                        with patch(
+                                            "api.routers.admin_person_images._resize_person_gallery_images"
+                                        ) as resize_mock:
+                                            with patch(
+                                                "trr_backend.clients.screenalytics.is_screenalytics_configured"
+                                            ) as screen_cfg_mock:
+                                                with patch(
+                                                    "trr_backend.vision.text_overlay.is_text_overlay_detection_configured"
+                                                ) as text_cfg_mock:
+                                                    response = client.post(
+                                                        f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                                                        json={
+                                                            "sources": ["imdb"],
+                                                            "skip_mirror": True,
+                                                            "skip_auto_count": True,
+                                                            "skip_word_detection": True,
+                                                            "skip_centering": True,
+                                                            "skip_resize": True,
+                                                        },
+                                                        headers={"Authorization": f"Bearer {token}"},
+                                                    )
+
+        assert response.status_code == 200
+        normalized_payload = response.text.replace("\r\n", "\n")
+        complete_index = normalized_payload.rfind("event: complete")
+        assert complete_index >= 0
+        data_index = normalized_payload.find("data:", complete_index)
+        assert data_index >= 0
+        json_start = normalized_payload.find("{", data_index)
+        assert json_start >= 0
+        json_end = normalized_payload.find("\n\n", json_start)
+        if json_end == -1:
+            json_end = len(normalized_payload)
+        complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+
+        assert complete_data["photos_fetched"] == 1
+        assert complete_data["photos_upserted"] == 1
+        assert complete_data["auto_counts_attempted"] == 0
+        assert complete_data["text_overlay_attempted"] == 0
+        assert complete_data["centering_attempted"] == 0
+        assert complete_data["resize_attempted"] == 0
+        assert complete_data["live_counts"]["counted"] == 0
+        assert complete_data["live_counts"]["cropped"] == 0
+        assert complete_data["live_counts"]["id_text"] == 0
+        assert complete_data["live_counts"]["resized"] == 0
+
+        resize_mock.assert_not_called()
+        screen_cfg_mock.assert_not_called()
+        text_cfg_mock.assert_not_called()
+
     def test_stream_skips_imdb_when_source_already_fully_mirrored(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         person_id = str(uuid4())
@@ -447,10 +596,14 @@ class TestRefreshPersonImages:
                             "api.routers.admin_person_images._recenter_person_gallery_images",
                             return_value=(0, 0, 0, 0),
                         ):
-                            response = client.post(
-                                f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
-                                headers={"Authorization": f"Bearer {token}"},
-                            )
+                            with patch(
+                                "api.routers.admin_person_images._resize_person_gallery_images",
+                                return_value=(4, 3, 1, 2, 2, 0),
+                            ):
+                                response = client.post(
+                                    f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                )
 
         assert response.status_code == 200
         normalized_payload = response.text.replace("\r\n", "\n")
@@ -474,8 +627,11 @@ class TestRefreshPersonImages:
             "counted": complete_data["auto_counts_succeeded"],
             "cropped": complete_data["centering_succeeded"],
             "id_text": complete_data["text_overlay_succeeded"],
-            "resized": 0,
+            "resized": complete_data["resize_succeeded"],
         }
+        assert complete_data["resize_attempted"] == 4
+        assert complete_data["resize_succeeded"] == 3
+        assert complete_data["resize_crop_attempted"] == 2
 
 
 class TestUpdateFacebankSeed:

@@ -70,9 +70,7 @@ def _normalize_text(value: str | None) -> str:
 
 
 def _strip_accents(value: str) -> str:
-    return "".join(
-        ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)
-    )
+    return "".join(ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch))
 
 
 def _slugify(value: str) -> str:

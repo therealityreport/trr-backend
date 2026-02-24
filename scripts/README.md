@@ -68,13 +68,22 @@ PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --verbos
 - Supports overrides via `admin.network_streaming_overrides` and tracks per-entity completion in:
   - `admin.network_streaming_completion`
   - `admin.network_streaming_completion_attempts`
-- Mirrors missing base logos and generates black/white transparent variants (`hosted_logo_black_*`, `hosted_logo_white_*`).
+- Mirrors and persists all discovered logo candidates (deterministic per-source caps + URL/SHA dedupe) in:
+  - `admin.network_streaming_logo_assets`
+- Keeps canonical logo serving fields on `core.networks` / `core.watch_providers` unchanged for primary color + black/white variants:
+  - `hosted_logo_*`
+  - `hosted_logo_black_*`
+  - `hosted_logo_white_*`
 - Use `--unresolved-only` to re-run just unresolved entities from completion state.
 - Prints both machine-readable counters and unresolved logo rows:
   - `completion_total=<count>`
   - `completion_resolved=<count>`
   - `completion_unresolved=<count>`
   - `completion_percent=<0-100>`
+  - `logo_assets_discovered=<count>`
+  - `logo_assets_mirrored=<count>`
+  - `logo_assets_skipped=<count>`
+  - `logo_assets_failed=<count>`
   - `unresolved_logos=<count>`
   - `unresolved_logo={\"type\":\"network|streaming\",\"id\":\"...\",\"name\":\"...\",\"reason\":\"...\"}`
 
@@ -110,6 +119,20 @@ PYTHONPATH=. python scripts/sync/sync_cast_photos.py --all --verbose
 
 ```bash
 PYTHONPATH=. python scripts/sync/sync_show_complete.py --imdb-id tt1234567 --verbose
+```
+
+### 7) Download scraped images locally (no DB import)
+
+```bash
+PYTHONPATH=. python scripts/import/download_scraped_images_local.py \
+  --url "https://deadline.com/..." \
+  --output-dir "~/Downloads/Bachelorette"
+```
+
+Wrapper alias:
+
+```bash
+PYTHONPATH=. python scripts/download_scraped_images_local.py --url "https://deadline.com/..."
 ```
 
 ## Utilities & Validation

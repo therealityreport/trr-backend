@@ -16,6 +16,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from time import perf_counter
 from typing import Any, Literal
 from uuid import UUID
 
@@ -815,12 +816,27 @@ async def get_season_targets(
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_targets
 
+    started_at = perf_counter()
     try:
-        return get_targets(str(season_id), source_scope=source_scope)
+        payload = get_targets(str(season_id), source_scope=source_scope)
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.info(
+            "Social targets request completed: season=%s source_scope=%s duration_ms=%s",
+            season_id,
+            source_scope,
+            duration_ms,
+        )
+        return payload
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Failed to read season social targets: season=%s", season_id)
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.exception(
+            "Failed to read season social targets: season=%s source_scope=%s duration_ms=%s",
+            season_id,
+            source_scope,
+            duration_ms,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1022,6 +1038,7 @@ async def get_season_ingest_runs(
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_runs
 
+    started_at = perf_counter()
     try:
         runs = list_runs(
             str(season_id),
@@ -1029,13 +1046,71 @@ async def get_season_ingest_runs(
             status=status,
             source_scope=source_scope,
         )
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.info(
+            "Social ingest runs request completed: season=%s source_scope=%s status=%s limit=%s duration_ms=%s",
+            season_id,
+            source_scope,
+            status,
+            limit,
+            duration_ms,
+        )
         return {
             "season_id": str(season_id),
             "filters": {"status": status, "source_scope": source_scope},
             "runs": runs,
         }
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Failed to list social runs: season=%s", season_id)
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.exception(
+            "Failed to list social runs: season=%s source_scope=%s status=%s limit=%s duration_ms=%s",
+            season_id,
+            source_scope,
+            status,
+            limit,
+            duration_ms,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/seasons/{season_id}/ingest/runs/summary")
+async def get_season_ingest_runs_summary(
+    season_id: UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+    source_scope: Literal["bravo", "creator", "community"] | None = Query(default=None),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import list_run_summaries
+
+    started_at = perf_counter()
+    try:
+        summaries = list_run_summaries(
+            str(season_id),
+            limit=limit,
+            source_scope=source_scope,
+        )
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.info(
+            "Social ingest run summary request completed: season=%s source_scope=%s limit=%s duration_ms=%s",
+            season_id,
+            source_scope,
+            limit,
+            duration_ms,
+        )
+        return {
+            "season_id": str(season_id),
+            "filters": {"source_scope": source_scope, "limit": limit},
+            "summaries": summaries,
+        }
+    except Exception as exc:  # noqa: BLE001
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.exception(
+            "Failed to list social run summaries: season=%s source_scope=%s limit=%s duration_ms=%s",
+            season_id,
+            source_scope,
+            limit,
+            duration_ms,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1064,6 +1139,10 @@ async def get_season_analytics(
     timezone: str = Query(default="America/New_York"),
     week: int | None = Query(default=None, ge=0, le=200),
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
+    include: str | None = Query(
+        default=None,
+        description="Comma-separated include list: rows,flags,schedule,benchmark",
+    ),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_analytics
@@ -1071,20 +1150,50 @@ async def get_season_analytics(
     parsed_platforms = None
     if platforms and platforms.strip():
         parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
+    include_set: set[str] | None = None
+    if include and include.strip():
+        include_set = {item.strip().lower() for item in include.split(",") if item.strip()}
 
+    started_at = perf_counter()
     try:
-        return get_analytics(
+        include_rows = bool(include_set and "rows" in include_set)
+        include_flags = include_set is None or "flags" in include_set
+        include_schedule = include_set is None or "schedule" in include_set
+        include_benchmark = include_set is None or "benchmark" in include_set
+        payload = get_analytics(
             str(season_id),
             platforms=parsed_platforms,
             timezone=timezone,
             week=week,
             source_scope=source_scope,
-            include_rows=False,
+            include_rows=include_rows,
+            include_jobs=False,
+            include_flags=include_flags,
+            include_schedule=include_schedule,
+            include_benchmark=include_benchmark,
         )
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.info(
+            "Social analytics request completed: season=%s source_scope=%s week=%s platforms=%s duration_ms=%s",
+            season_id,
+            source_scope,
+            week,
+            ",".join(parsed_platforms) if parsed_platforms else "all",
+            duration_ms,
+        )
+        return payload
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Failed to compute social analytics: season=%s", season_id)
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.exception(
+            "Failed to compute social analytics: season=%s source_scope=%s week=%s platforms=%s duration_ms=%s",
+            season_id,
+            source_scope,
+            week,
+            ",".join(parsed_platforms) if parsed_platforms else "all",
+            duration_ms,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

@@ -40,9 +40,7 @@ def test_preview_person_returns_profile_payload(monkeypatch) -> None:
     people_resp = MagicMock()
     people_resp.data = [{"id": person_id, "full_name": "Lisa Barlow"}]
     people_resp.error = None
-    people_query = (
-        mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
-    )
+    people_query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
     people_query.execute.return_value = people_resp
 
     with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -60,7 +58,10 @@ def test_preview_person_returns_profile_payload(monkeypatch) -> None:
         ):
             with patch(
                 "api.routers.admin_fandom_sync.fetch_fandom_person_html",
-                return_value=("<html><h1>Lisa Barlow</h1></html>", "https://real-housewives.fandom.com/wiki/Lisa_Barlow"),
+                return_value=(
+                    "<html><h1>Lisa Barlow</h1></html>",
+                    "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+                ),
             ):
                 with patch(
                     "api.routers.admin_fandom_sync.parse_fandom_person_html",

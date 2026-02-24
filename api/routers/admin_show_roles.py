@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from typing import Any
 from uuid import UUID
 
@@ -48,6 +50,13 @@ _SYNC_SOURCE_CAST = "cast_matrix_sync"
 _SYNC_SOURCE_RELATIONSHIP = "cast_matrix_relationship_sync"
 _SYNC_SOURCE_KID = "cast_matrix_kid_sync"
 _ALL_SYNC_SOURCES = [_SYNC_SOURCE_CAST, _SYNC_SOURCE_RELATIONSHIP, _SYNC_SOURCE_KID]
+CAST_ROLE_MEMBERS_PERF_LOGS_ENABLED = (
+    re.match(
+        r"^(1|true)$",
+        str(os.getenv("TRR_CAST_ROLE_MEMBERS_PERF_LOGS", "0")).strip().lower(),
+    )
+    is not None
+)
 
 
 class RoleCreateRequest(BaseModel):
@@ -225,10 +234,7 @@ def _ensure_canonical_roles(
             "updated_by": actor,
         }
         response = (
-            db.schema("core")
-            .table("show_role_catalog")
-            .upsert(row, on_conflict="show_id,normalized_name")
-            .execute()
+            db.schema("core").table("show_role_catalog").upsert(row, on_conflict="show_id,normalized_name").execute()
         )
         get_list_result(response, "upserting canonical show role")
 
@@ -728,9 +734,7 @@ def sync_cast_matrix_for_show(
     by_norm_name, person_names_by_id = _build_person_lookup(cast_people)
 
     season_filter = {
-        int(season)
-        for season in payload.season_numbers
-        if isinstance(season, int) and season > 0 and season <= 200
+        int(season) for season in payload.season_numbers if isinstance(season, int) and season > 0 and season <= 200
     }
 
     cast_assignments, housewife_friend_person_ids, unmatched_cast_names = _build_role_matrix_assignments(
@@ -829,9 +833,7 @@ def sync_cast_matrix_for_show(
             if row.get("person_id")
         }
         all_housewife_friend_ids = {
-            person_id
-            for person_id in [*housewife_friend_person_ids, *existing_housewife_friend_ids]
-            if person_id
+            person_id for person_id in [*housewife_friend_person_ids, *existing_housewife_friend_ids] if person_id
         }
 
         bravo_links_upserted, profile_links_by_person = _upsert_bravo_profile_links(
@@ -943,12 +945,7 @@ def create_show_role(
         "created_by": actor,
         "updated_by": actor,
     }
-    response = (
-        db.schema("core")
-        .table("show_role_catalog")
-        .upsert(row, on_conflict="show_id,normalized_name")
-        .execute()
-    )
+    response = db.schema("core").table("show_role_catalog").upsert(row, on_conflict="show_id,normalized_name").execute()
     rows = get_list_result(response, "upserting show role")
     return rows[0] if rows else row
 
@@ -1096,6 +1093,10 @@ def list_cast_with_roles(
     has_image: bool | None = Query(default=None),
     archive_mode: str = Query(default="all"),
 ) -> list[dict[str, Any]]:
+    request_started_at = time.perf_counter()
+    base_rows_query_ms = 0.0
+    role_aggregate_query_ms = 0.0
+    scoped_totals_query_ms = 0.0
     show_id_str = str(show_id)
     if not _show_exists(show_id_str):
         raise HTTPException(status_code=404, detail="Show not found")
@@ -1106,6 +1107,7 @@ def list_cast_with_roles(
     season_numbers = [int(value) for value in (seasons or "").split(",") if value.strip().isdigit()]
     role_names = [value.strip().lower() for value in (roles or "").split(",") if value.strip()]
 
+    rows_query_started_at = time.perf_counter()
     rows = pg.fetch_all(
         """
         SELECT
@@ -1121,8 +1123,9 @@ def list_cast_with_roles(
           cp.display_url AS photo_url
         FROM core.v_show_cast_roles_enriched c
         LEFT JOIN LATERAL (
-          SELECT display_url
-          FROM core.v_cast_photos p
+          SELECT
+            COALESCE(p.hosted_url, p.image_url, p.url, p.thumb_url) AS display_url
+          FROM core.cast_photos p
           WHERE p.person_id = c.person_id
           ORDER BY p.gallery_index ASC NULLS LAST
           LIMIT 1
@@ -1131,55 +1134,74 @@ def list_cast_with_roles(
         """,
         [show_id_str],
     )
+    base_rows_query_ms = (time.perf_counter() - rows_query_started_at) * 1000.0
 
-    role_rows = pg.fetch_all(
-        """
-        SELECT
-          sra.person_id::text AS person_id,
-          sra.season_number,
-          rc.name AS role_name
-        FROM core.show_cast_role_assignments sra
-        JOIN core.show_role_catalog rc ON rc.id = sra.role_id
-        WHERE sra.show_id = %s
-          AND rc.is_active = true
-        """,
-        [show_id_str],
-    )
+    role_rows_query_started_at = time.perf_counter()
+    if season_numbers:
+        role_rows = pg.fetch_all(
+            """
+            SELECT
+              sra.person_id::text AS person_id,
+              array_remove(array_agg(DISTINCT rc.name), NULL) AS role_names,
+              array_remove(array_agg(DISTINCT sra.season_number), NULL) AS assignment_seasons
+            FROM core.show_cast_role_assignments sra
+            JOIN core.show_role_catalog rc ON rc.id = sra.role_id
+            WHERE sra.show_id = %s
+              AND rc.is_active = true
+              AND (sra.season_number = ANY(%s::int[]) OR sra.season_number = 0)
+            GROUP BY sra.person_id
+            """,
+            [show_id_str, season_numbers],
+        )
+    else:
+        role_rows = pg.fetch_all(
+            """
+            SELECT
+              sra.person_id::text AS person_id,
+              array_remove(array_agg(DISTINCT rc.name), NULL) AS role_names,
+              array_remove(array_agg(DISTINCT sra.season_number), NULL) AS assignment_seasons
+            FROM core.show_cast_role_assignments sra
+            JOIN core.show_role_catalog rc ON rc.id = sra.role_id
+            WHERE sra.show_id = %s
+              AND rc.is_active = true
+            GROUP BY sra.person_id
+            """,
+            [show_id_str],
+        )
+    role_aggregate_query_ms = (time.perf_counter() - role_rows_query_started_at) * 1000.0
 
     role_map: dict[str, set[str]] = {}
     role_season_map: dict[str, set[int]] = {}
     for row in role_rows:
         person_id = str(row.get("person_id") or "").strip()
-        role_name = str(row.get("role_name") or "").strip()
-        season_number = int(row.get("season_number") or 0)
-        if not person_id or not role_name:
+        if not person_id:
             continue
-        if season_numbers and season_number not in season_numbers and season_number != 0:
-            continue
-        role_map.setdefault(person_id, set()).add(role_name)
-        role_season_map.setdefault(person_id, set()).add(season_number)
+        role_names_for_person = {
+            str(value).strip()
+            for value in (row.get("role_names") or [])
+            if isinstance(value, str) and str(value).strip()
+        }
+        assignment_seasons = {int(value) for value in (row.get("assignment_seasons") or []) if isinstance(value, int)}
+        if role_names_for_person:
+            role_map[person_id] = role_names_for_person
+        if assignment_seasons:
+            role_season_map[person_id] = assignment_seasons
 
     filtered: list[dict[str, Any]] = []
     for row in rows:
         person_id = str(row.get("person_id") or "")
         fallback_roles = [
-            str(value).strip()
-            for value in (row.get("roles") or [])
-            if isinstance(value, str) and str(value).strip()
+            str(value).strip() for value in (row.get("roles") or []) if isinstance(value, str) and str(value).strip()
         ]
         selected_roles = sorted(role_map.get(person_id, set())) if person_id in role_map else fallback_roles
         row["roles"] = selected_roles
 
         row_roles_lc = [value.lower() for value in selected_roles]
         episode_seasons = [
-            int(value)
-            for value in (row.get("season_numbers") or [])
-            if isinstance(value, int) and value > 0
+            int(value) for value in (row.get("season_numbers") or []) if isinstance(value, int) and value > 0
         ]
         matched_assignment_seasons = {
-            int(value)
-            for value in role_season_map.get(person_id, set())
-            if isinstance(value, int) and value > 0
+            int(value) for value in role_season_map.get(person_id, set()) if isinstance(value, int) and value > 0
         }
         combined_seasons = sorted({*episode_seasons, *matched_assignment_seasons})
 
@@ -1209,11 +1231,10 @@ def list_cast_with_roles(
 
     if season_numbers and filtered:
         scoped_person_ids = [
-            str(row.get("person_id") or "").strip()
-            for row in filtered
-            if str(row.get("person_id") or "").strip()
+            str(row.get("person_id") or "").strip() for row in filtered if str(row.get("person_id") or "").strip()
         ]
         if scoped_person_ids:
+            scoped_totals_query_started_at = time.perf_counter()
             scoped_rows = pg.fetch_all(
                 """
                 SELECT
@@ -1228,6 +1249,7 @@ def list_cast_with_roles(
                 """,
                 [show_id_str, scoped_person_ids, season_numbers],
             )
+            scoped_totals_query_ms = (time.perf_counter() - scoped_totals_query_started_at) * 1000.0
             scoped_totals = {
                 str(item.get("person_id") or "").strip(): int(item.get("total_episodes") or 0)
                 for item in scoped_rows
@@ -1246,5 +1268,21 @@ def list_cast_with_roles(
         filtered.sort(key=lambda item: int(item.get("latest_season") or 0), reverse=reverse)
     else:
         filtered.sort(key=lambda item: int(item.get("total_episodes") or 0), reverse=reverse)
+
+    if CAST_ROLE_MEMBERS_PERF_LOGS_ENABLED:
+        total_query_ms = (time.perf_counter() - request_started_at) * 1000.0
+        logger.info(
+            "cast-role-members timings show_id=%s rows=%d filtered=%d seasons=%d role_filters=%d "
+            "base_rows_ms=%.1f role_aggregate_ms=%.1f scoped_totals_ms=%.1f total_ms=%.1f",
+            show_id_str,
+            len(rows),
+            len(filtered),
+            len(season_numbers),
+            len(role_names),
+            base_rows_query_ms,
+            role_aggregate_query_ms,
+            scoped_totals_query_ms,
+            total_query_ms,
+        )
 
     return filtered

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import importlib
 
-_mod = importlib.import_module("scripts.media.backfill_media_asset_variants")
+_mod = importlib.import_module("scripts.sync.sync_show_logos")
 for _k, _v in _mod.__dict__.items():
     if _k.startswith("__"):
         continue

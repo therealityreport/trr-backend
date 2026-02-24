@@ -6,17 +6,24 @@ import hashlib
 import json
 import logging
 import re
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
+from time import perf_counter
 from typing import Any, Literal
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient, get_list_result
-from trr_backend.scraping.bravo_parser import parse_bravo_show_bundle
+from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
+from trr_backend.ingestion.show_cast_matrix_scraper import is_missing_fandom_page
+from trr_backend.integrations.fandom import is_allowlisted_fandom_domain, load_fandom_community_allowlist
+from trr_backend.repositories.cast_fandom import upsert_cast_fandom
+from trr_backend.scraping.bravo_parser import parse_bravo_show_bundle, probe_bravo_person_url_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +39,16 @@ _BRAVO_PROBE_REASON_MISSING = "missing"
 _BRAVO_PROBE_CHECKED_AT_KEY = "bravo_probe_checked_at"
 _BRAVO_PROBE_SOURCE_KEY = "bravo_probe_source"
 _BRAVO_PROBE_SOURCE_VALUE = "bravo_import_commit"
+_FANDOM_PROBE_STATE_KEY = "fandom_probe_state"
+_FANDOM_PROBE_STATE_NA = "na"
+_FANDOM_PROBE_REASON_KEY = "fandom_probe_reason"
+_FANDOM_PROBE_REASON_MISSING = "missing"
+_FANDOM_PROBE_CHECKED_AT_KEY = "fandom_probe_checked_at"
+_FANDOM_PROBE_SOURCE_KEY = "fandom_probe_source"
+_FANDOM_PROBE_SOURCE_VALUE = "bravo_import_commit"
+_DEFAULT_FANDOM_COMMUNITY_DOMAIN = "real-housewives.fandom.com"
+_BRAVO_CAST_ONLY_PREVIEW_WORKER_LIMIT = 3
+_BRAVO_SLOW_CANDIDATE_WARN_MS = 3500
 _CAST_ANNOUNCEMENT_RE = re.compile(
     r"\b(cast|friend\s*[- ]?of|full\s*[- ]?time|housewife|joins|joined|returning|returns)\b",
     re.IGNORECASE,
@@ -44,6 +61,7 @@ class BravoPreviewRequest(BaseModel):
     include_videos: bool = True
     include_news: bool = True
     person_url_candidates: list[HttpUrl] = Field(default_factory=list)
+    cast_only: bool = False
     season_number: int | None = Field(default=None, ge=1, le=200)
 
 
@@ -76,6 +94,7 @@ class BravoCommitRequest(BaseModel):
     cast_only: bool = False
     season_number: int | None = Field(default=None, ge=1, le=200)
     sync_cast_matrix: bool = True
+    preview_result: dict[str, Any] | None = None
 
 
 def _to_iso_now() -> str:
@@ -174,12 +193,7 @@ def _assert_show_sync_ready_for_bravo(db: SupabaseAdminClient, show_id: str) -> 
     if not cast_ready:
         try:
             fallback_response = (
-                db.schema("core")
-                .table("show_cast")
-                .select("person_id")
-                .eq("show_id", show_id)
-                .limit(1)
-                .execute()
+                db.schema("core").table("show_cast").select("person_id").eq("show_id", show_id).limit(1).execute()
             )
             cast_ready = bool(fallback_response.data) and not getattr(fallback_response, "error", None)
         except Exception:
@@ -247,6 +261,320 @@ def _build_cast_candidate_person_urls(show_cast: list[dict[str, str]]) -> list[s
     return urls
 
 
+def _normalize_fandom_domain(value: str | None) -> str | None:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    host = parsed.netloc or parsed.path
+    host = host.strip().lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
+
+
+def _normalize_fandom_url(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    path = parsed.path.rstrip("/") or "/"
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+
+def _extract_fandom_domain_from_url(value: str | None) -> str | None:
+    normalized_url = _normalize_fandom_url(value)
+    if not normalized_url:
+        return None
+    return _normalize_fandom_domain(urlparse(normalized_url).netloc)
+
+
+def _build_fandom_person_candidate_url(*, domain: str, person_name: str | None) -> str | None:
+    cleaned_name = str(person_name or "").strip()
+    if not cleaned_name:
+        return None
+    title = re.sub(r"\s+", "_", cleaned_name)
+    if not title:
+        return None
+    return f"https://{domain}/wiki/{quote(title)}"
+
+
+def _load_fandom_probe_domains(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+) -> list[str]:
+    allowlist = load_fandom_community_allowlist()
+    rows = (
+        db.schema("core")
+        .table("entity_links")
+        .select("url, entity_type, season_number, status")
+        .eq("show_id", show_id)
+        .in_("entity_type", ["show", "season"])
+        .in_("link_kind", ["fandom", "wikia"])
+        .limit(500)
+        .execute()
+    )
+    domains: list[str] = []
+    seen_domains: set[str] = set()
+    if not getattr(rows, "error", None):
+        for row in rows.data or []:
+            status = str(row.get("status") or "").strip().lower()
+            if status == "rejected":
+                continue
+            domain = _extract_fandom_domain_from_url(str(row.get("url") or "").strip())
+            if not domain:
+                continue
+            if not is_allowlisted_fandom_domain(domain, allowlist=allowlist):
+                continue
+            if domain in seen_domains:
+                continue
+            seen_domains.add(domain)
+            domains.append(domain)
+
+    fallback_domain = _DEFAULT_FANDOM_COMMUNITY_DOMAIN
+    if not domains and is_allowlisted_fandom_domain(fallback_domain, allowlist=allowlist):
+        domains.append(fallback_domain)
+    return domains
+
+
+def _build_cast_candidate_fandom_urls(
+    show_cast: list[dict[str, str]],
+    *,
+    community_domains: list[str],
+) -> tuple[list[str], dict[str, str], dict[str, str]]:
+    urls: list[str] = []
+    candidate_url_to_person_id: dict[str, str] = {}
+    candidate_name_by_url: dict[str, str] = {}
+    seen_urls: set[str] = set()
+    for row in show_cast:
+        person_id = str(row.get("person_id") or "").strip()
+        person_name = str(row.get("person_name") or "").strip()
+        if not person_id or not person_name:
+            continue
+        for domain in community_domains:
+            candidate_url = _build_fandom_person_candidate_url(domain=domain, person_name=person_name)
+            normalized_candidate_url = _normalize_fandom_url(candidate_url)
+            if not normalized_candidate_url or normalized_candidate_url in seen_urls:
+                continue
+            seen_urls.add(normalized_candidate_url)
+            urls.append(candidate_url or normalized_candidate_url)
+            candidate_url_to_person_id[normalized_candidate_url] = person_id
+            candidate_name_by_url[normalized_candidate_url] = person_name
+    return urls, candidate_url_to_person_id, candidate_name_by_url
+
+
+def _extract_person_name_from_fandom_url(url: str | None) -> str | None:
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if "/wiki/" not in parsed.path:
+        return None
+    slug = parsed.path.split("/wiki/", 1)[1].split("/", 1)[0]
+    if not slug:
+        return None
+    return unquote(slug).replace("_", " ").strip() or None
+
+
+def _normalize_name_token(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _fandom_name_matches(expected_name: str | None, candidate_name: str | None) -> bool:
+    expected = _normalize_name_token(expected_name)
+    candidate = _normalize_name_token(candidate_name)
+    if not expected or not candidate:
+        return False
+    if expected == candidate:
+        return True
+    expected_parts = expected.split()
+    candidate_parts = candidate.split()
+    if not expected_parts or not candidate_parts:
+        return False
+    expected_last = expected_parts[-1]
+    candidate_last = candidate_parts[-1]
+    expected_first = expected_parts[0]
+    candidate_first = candidate_parts[0]
+    if expected_last != candidate_last:
+        return False
+    return (
+        expected_first == candidate_first
+        or expected_first.startswith(candidate_first)
+        or candidate_first.startswith(expected_first)
+    )
+
+
+def _parse_fandom_preview_person(
+    *,
+    cast_fandom: dict[str, Any],
+    photos: list[dict[str, Any]],
+    page_url: str,
+) -> dict[str, Any]:
+    name = str(cast_fandom.get("full_name") or cast_fandom.get("page_title") or "").strip() or None
+    bio = str(cast_fandom.get("casting_summary") or cast_fandom.get("summary") or "").strip() or None
+    hero_image_url: str | None = None
+    for photo in photos:
+        if not isinstance(photo, dict):
+            continue
+        context_type = str(photo.get("context_type") or "").strip().lower()
+        context_section = str(photo.get("context_section") or "").strip().lower()
+        if context_type == "hero" or context_section == "infobox":
+            hero_image_url = str(photo.get("image_url_canonical") or photo.get("image_url") or "").strip() or None
+            if hero_image_url:
+                break
+    if not hero_image_url:
+        for photo in photos:
+            if not isinstance(photo, dict):
+                continue
+            candidate = str(photo.get("image_url_canonical") or photo.get("image_url") or "").strip()
+            if candidate:
+                hero_image_url = candidate
+                break
+    return {
+        "canonical_url": page_url,
+        "name": name,
+        "bio": bio,
+        "hero_image_url": hero_image_url,
+        "social_links": {},
+    }
+
+
+def _select_fandom_profile_image_url(photos: list[dict[str, Any]]) -> str | None:
+    for photo in photos:
+        if not isinstance(photo, dict):
+            continue
+        context_type = str(photo.get("context_type") or "").strip().lower()
+        context_section = str(photo.get("context_section") or "").strip().lower()
+        if context_type == "hero" or context_section == "infobox":
+            candidate = str(photo.get("image_url_canonical") or photo.get("image_url") or "").strip()
+            if candidate:
+                return candidate
+    for photo in photos:
+        if not isinstance(photo, dict):
+            continue
+        candidate = str(photo.get("image_url_canonical") or photo.get("image_url") or "").strip()
+        if candidate:
+            return candidate
+    return None
+
+
+def _probe_single_fandom_candidate(
+    candidate_url: str,
+    *,
+    expected_name: str | None,
+) -> dict[str, Any]:
+    normalized_candidate_url = _normalize_fandom_url(candidate_url) or candidate_url
+    try:
+        html, final_url = fetch_fandom_person_html(candidate_url)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "candidate_url": normalized_candidate_url,
+            "url": normalized_candidate_url,
+            "status": "error",
+            "error": str(exc) or "request_failed",
+        }
+
+    resolved_url = _normalize_fandom_url(final_url) or normalized_candidate_url
+    if is_missing_fandom_page(html, resolved_url):
+        return {
+            "candidate_url": normalized_candidate_url,
+            "url": resolved_url,
+            "status": "missing",
+        }
+
+    try:
+        cast_fandom, photos = parse_fandom_person_html(html, source_url=resolved_url)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "candidate_url": normalized_candidate_url,
+            "url": resolved_url,
+            "status": "error",
+            "error": str(exc) or "parse_failed",
+        }
+
+    if not isinstance(cast_fandom, dict) or not cast_fandom:
+        return {
+            "candidate_url": normalized_candidate_url,
+            "url": resolved_url,
+            "status": "missing",
+        }
+
+    page_owner_name = _extract_person_name_from_fandom_url(resolved_url)
+    full_name = str(cast_fandom.get("full_name") or "").strip()
+    page_title = str(cast_fandom.get("page_title") or "").strip()
+    if expected_name and not any(
+        _fandom_name_matches(expected_name, candidate_name)
+        for candidate_name in (page_owner_name, full_name, page_title)
+        if candidate_name
+    ):
+        return {
+            "candidate_url": normalized_candidate_url,
+            "url": resolved_url,
+            "status": "missing",
+            "error": "person_name_mismatch",
+        }
+
+    preview_person = _parse_fandom_preview_person(
+        cast_fandom=cast_fandom,
+        photos=photos if isinstance(photos, list) else [],
+        page_url=resolved_url,
+    )
+    return {
+        "candidate_url": normalized_candidate_url,
+        "url": resolved_url,
+        "status": "ok",
+        "person": preview_person,
+        "cast_fandom": cast_fandom,
+        "photos": photos if isinstance(photos, list) else [],
+    }
+
+
+def _probe_fandom_person_url_candidates(
+    candidate_urls: list[str],
+    *,
+    candidate_name_by_url: dict[str, str],
+    max_people: int,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for raw_candidate_url in candidate_urls[: max(0, max_people)]:
+        candidate_url = str(raw_candidate_url).strip()
+        if not candidate_url:
+            continue
+        normalized_candidate_url = _normalize_fandom_url(candidate_url) or candidate_url
+        probe = _probe_single_fandom_candidate(
+            candidate_url,
+            expected_name=candidate_name_by_url.get(normalized_candidate_url, ""),
+        )
+        status = str(probe.get("status") or "").strip().lower()
+        if status not in {"ok", "missing", "error"}:
+            continue
+        result: dict[str, Any] = {
+            "candidate_url": normalized_candidate_url,
+            "url": str(probe.get("url") or normalized_candidate_url).strip() or normalized_candidate_url,
+            "status": status,
+        }
+        name_value = candidate_name_by_url.get(normalized_candidate_url, "")
+        if name_value:
+            result["name"] = name_value
+        error_value = str(probe.get("error") or "").strip()
+        if error_value:
+            result["error"] = error_value
+        person = probe.get("person") if isinstance(probe.get("person"), dict) else None
+        if person:
+            result["person"] = person
+        cast_fandom = probe.get("cast_fandom") if isinstance(probe.get("cast_fandom"), dict) else None
+        if cast_fandom:
+            result["cast_fandom"] = cast_fandom
+        photos = probe.get("photos") if isinstance(probe.get("photos"), list) else None
+        if photos:
+            result["photos"] = photos
+        out.append(result)
+    return out
+
+
 def _merge_person_url_candidates(*groups: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -260,6 +588,63 @@ def _merge_person_url_candidates(*groups: list[str]) -> list[str]:
     return out
 
 
+def _sse_event(event_type: str, payload: dict[str, Any]) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+
+def _sse_error_stream(payload: dict[str, Any]) -> StreamingResponse:
+    def _iter() -> Any:
+        yield _sse_event("error", payload)
+
+    return StreamingResponse(_iter(), media_type="text/event-stream")
+
+
+def _probe_single_bravo_candidate(
+    candidate_url: str,
+    *,
+    include_related_content: bool,
+    hydrate_related_dates: bool,
+) -> dict[str, Any]:
+    for probe in probe_bravo_person_url_candidates(
+        [candidate_url],
+        max_people=1,
+        include_related_content=include_related_content,
+        hydrate_related_dates=hydrate_related_dates,
+    ):
+        return probe
+    return {
+        "candidate_url": candidate_url,
+        "url": candidate_url,
+        "status": "error",
+        "error": "probe_failed_no_result",
+    }
+
+
+def _summarize_candidate_results(person_candidate_results: list[dict[str, Any]]) -> dict[str, int]:
+    tested = len(person_candidate_results)
+    valid = sum(
+        1
+        for result in person_candidate_results
+        if isinstance(result, dict) and str(result.get("status") or "").strip().lower() == "ok"
+    )
+    missing = sum(
+        1
+        for result in person_candidate_results
+        if isinstance(result, dict) and str(result.get("status") or "").strip().lower() == "missing"
+    )
+    errors = sum(
+        1
+        for result in person_candidate_results
+        if isinstance(result, dict) and str(result.get("status") or "").strip().lower() == "error"
+    )
+    return {
+        "tested": tested,
+        "valid": valid,
+        "missing": missing,
+        "errors": errors,
+    }
+
+
 def _normalize_person_url(value: str | None) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -271,6 +656,164 @@ def _normalize_person_url(value: str | None) -> str | None:
     if not path:
         path = "/"
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+
+def _normalize_show_url(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    path = parsed.path.rstrip("/") or "/"
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+
+def _normalize_candidate_url_set(urls: list[str]) -> set[str]:
+    normalized: set[str] = set()
+    for raw in urls:
+        value = _normalize_person_url(raw)
+        if value:
+            normalized.add(value)
+    return normalized
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def _build_bundle_from_preview_result(preview_result: dict[str, Any]) -> dict[str, Any]:
+    show_value = preview_result.get("show")
+    people_value = preview_result.get("people")
+    videos_value = preview_result.get("videos")
+    news_value = preview_result.get("news")
+    image_candidates_value = preview_result.get("image_candidates")
+    discovered_person_urls_value = preview_result.get("discovered_person_urls")
+    person_candidate_results_value = preview_result.get("person_candidate_results")
+    fandom_candidate_results_value = preview_result.get("fandom_candidate_results")
+    fandom_domains_used_value = preview_result.get("fandom_domains_used")
+
+    return {
+        "show": show_value if isinstance(show_value, dict) else {},
+        "people": people_value if isinstance(people_value, list) else [],
+        "videos": videos_value if isinstance(videos_value, list) else [],
+        "news": news_value if isinstance(news_value, list) else [],
+        "image_candidates": image_candidates_value if isinstance(image_candidates_value, list) else [],
+        "discovered_person_urls": (
+            discovered_person_urls_value if isinstance(discovered_person_urls_value, list) else []
+        ),
+        "person_candidate_results": (
+            person_candidate_results_value if isinstance(person_candidate_results_value, list) else []
+        ),
+        "fandom_candidate_results": (
+            fandom_candidate_results_value if isinstance(fandom_candidate_results_value, list) else []
+        ),
+        "fandom_domains_used": fandom_domains_used_value if isinstance(fandom_domains_used_value, list) else [],
+        "raw": preview_result.get("raw") if isinstance(preview_result.get("raw"), dict) else preview_result,
+    }
+
+
+def _extract_preview_candidate_urls(preview_result: dict[str, Any]) -> list[str]:
+    explicit = preview_result.get("cast_candidate_urls_tested")
+    if isinstance(explicit, list):
+        values = [str(item).strip() for item in explicit if str(item).strip()]
+        if values:
+            return values
+    candidate_results = preview_result.get("person_candidate_results")
+    if isinstance(candidate_results, list):
+        urls: list[str] = []
+        for row in candidate_results:
+            if not isinstance(row, dict):
+                continue
+            url = str(row.get("url") or "").strip()
+            if url:
+                urls.append(url)
+        if urls:
+            return urls
+    return []
+
+
+def _extract_preview_fandom_candidate_urls(preview_result: dict[str, Any]) -> list[str]:
+    explicit = preview_result.get("fandom_candidate_urls_tested")
+    if isinstance(explicit, list):
+        values = [str(item).strip() for item in explicit if str(item).strip()]
+        if values:
+            return values
+    candidate_results = preview_result.get("fandom_candidate_results")
+    if isinstance(candidate_results, list):
+        urls: list[str] = []
+        for row in candidate_results:
+            if not isinstance(row, dict):
+                continue
+            candidate_url = str(row.get("candidate_url") or "").strip()
+            if candidate_url:
+                urls.append(candidate_url)
+                continue
+            url = str(row.get("url") or "").strip()
+            if url:
+                urls.append(url)
+        if urls:
+            return urls
+    return []
+
+
+def _validate_cast_only_preview_reuse_or_raise(
+    *,
+    preview_result: dict[str, Any],
+    show_url: str,
+    season_number: int | None,
+    expected_candidate_urls: list[str],
+    expected_fandom_candidate_urls: list[str] | None = None,
+) -> None:
+    preview_show = preview_result.get("show") if isinstance(preview_result.get("show"), dict) else {}
+    preview_show_url = (
+        str(preview_result.get("show_url") or "").strip() or str(preview_show.get("canonical_url") or "").strip()
+    )
+    normalized_preview_show_url = _normalize_show_url(preview_show_url)
+    normalized_request_show_url = _normalize_show_url(show_url)
+    if (
+        not normalized_preview_show_url
+        or not normalized_request_show_url
+        or normalized_preview_show_url != normalized_request_show_url
+    ):
+        raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
+
+    expected_set = _normalize_candidate_url_set(expected_candidate_urls)
+    preview_set = _normalize_candidate_url_set(_extract_preview_candidate_urls(preview_result))
+    if expected_set != preview_set:
+        raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
+
+    if expected_fandom_candidate_urls is not None:
+        expected_fandom_set = {
+            value for value in (_normalize_fandom_url(raw) for raw in expected_fandom_candidate_urls) if value
+        }
+        preview_fandom_urls = _extract_preview_fandom_candidate_urls(preview_result)
+        if preview_fandom_urls:
+            preview_fandom_set = {
+                value for value in (_normalize_fandom_url(raw) for raw in preview_fandom_urls) if value
+            }
+            if expected_fandom_set != preview_fandom_set:
+                raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
+
+    preview_season_number = _coerce_optional_int(preview_result.get("season_filter"))
+    if preview_season_number != season_number:
+        raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
+
+    preview_cast_only = preview_result.get("cast_only")
+    if preview_cast_only is not None and bool(preview_cast_only) is False:
+        raise HTTPException(status_code=409, detail="Preview stale. Re-run preview.")
 
 
 def _is_bravo_profile_na_marker(status: str, metadata: dict[str, Any] | None) -> bool:
@@ -347,6 +890,7 @@ def _filter_explicit_person_url_candidates(
     *,
     cast_url_lookup: dict[str, str],
     link_state_by_person_id: dict[str, dict[str, Any]],
+    suppress_link_state: bool = True,
 ) -> list[str]:
     filtered: list[str] = []
     seen: set[str] = set()
@@ -356,7 +900,7 @@ def _filter_explicit_person_url_candidates(
         if not value or not normalized or normalized in seen:
             continue
         person_id = cast_url_lookup.get(normalized)
-        if person_id:
+        if suppress_link_state and person_id:
             state = link_state_by_person_id.get(person_id) or {}
             if bool(state.get("has_non_rejected")) or bool(state.get("has_na")):
                 continue
@@ -449,6 +993,185 @@ def _persist_missing_bravo_profile_markers(
         state["has_na"] = True
         link_state_by_person_id[person_id] = state
 
+    return marked
+
+
+def _is_fandom_profile_na_marker(status: str, metadata: dict[str, Any] | None) -> bool:
+    if status != "rejected":
+        return False
+    probe_state = str((metadata or {}).get(_FANDOM_PROBE_STATE_KEY) or "").strip().lower()
+    return probe_state == _FANDOM_PROBE_STATE_NA
+
+
+def _load_fandom_link_state_by_person_id(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    cast_person_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not cast_person_ids:
+        return {}
+    response = (
+        db.schema("core")
+        .table("entity_links")
+        .select("entity_id, url, status, metadata")
+        .eq("show_id", show_id)
+        .eq("entity_type", "person")
+        .in_("link_kind", ["fandom", "wikia"])
+        .in_("entity_id", cast_person_ids)
+        .limit(5000)
+        .execute()
+    )
+    if getattr(response, "error", None):
+        return {}
+
+    by_person_id: dict[str, dict[str, Any]] = {}
+    for row in response.data or []:
+        person_id = str(row.get("entity_id") or "").strip()
+        if not person_id:
+            continue
+        status = str(row.get("status") or "pending").strip().lower()
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        normalized_url = _normalize_fandom_url(str(row.get("url") or ""))
+        state = by_person_id.setdefault(
+            person_id,
+            {
+                "has_non_rejected": False,
+                "has_na": False,
+                "url_keys": set(),
+            },
+        )
+        if status != "rejected":
+            state["has_non_rejected"] = True
+        if _is_fandom_profile_na_marker(status, metadata):
+            state["has_na"] = True
+        if normalized_url:
+            state["url_keys"].add(normalized_url)
+    return by_person_id
+
+
+def _persist_valid_fandom_profile_links(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    actor: str,
+    fandom_candidate_results: list[dict[str, Any]],
+    candidate_url_to_person_id: dict[str, str],
+    cast_person_name_by_id: dict[str, str],
+    link_state_by_person_id: dict[str, dict[str, Any]],
+) -> int:
+    from api.routers import admin_show_links
+
+    upserted = 0
+    seen_rows: set[tuple[str, str]] = set()
+    for result in fandom_candidate_results:
+        if not isinstance(result, dict):
+            continue
+        status = str(result.get("status") or "").strip().lower()
+        if status != "ok":
+            continue
+        candidate_url = _normalize_fandom_url(str(result.get("candidate_url") or "").strip())
+        resolved_url = _normalize_fandom_url(str(result.get("url") or "").strip())
+        if not candidate_url or not resolved_url:
+            continue
+        person_id = candidate_url_to_person_id.get(candidate_url)
+        if not person_id:
+            continue
+        key = (person_id, resolved_url)
+        if key in seen_rows:
+            continue
+        seen_rows.add(key)
+        person_name = cast_person_name_by_id.get(person_id, "").strip()
+        admin_show_links._upsert_link(
+            db,
+            show_id=show_id,
+            entity_type="person",
+            entity_id=person_id,
+            link_group="knowledge",
+            link_kind="fandom",
+            url=resolved_url,
+            label=f"{person_name} Fandom page" if person_name else "Fandom page",
+            season_number=0,
+            status="approved",
+            confidence=0.95,
+            source="bravo_fandom_probe",
+            discovered_by="bravo_fandom_probe",
+            metadata={
+                _FANDOM_PROBE_CHECKED_AT_KEY: _to_iso_now(),
+                _FANDOM_PROBE_SOURCE_KEY: _FANDOM_PROBE_SOURCE_VALUE,
+            },
+            actor=actor,
+        )
+        state = link_state_by_person_id.setdefault(person_id, {"has_non_rejected": False, "has_na": False})
+        state["has_non_rejected"] = True
+        upserted += 1
+    return upserted
+
+
+def _persist_missing_fandom_profile_markers(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    actor: str,
+    fandom_candidate_results: list[dict[str, Any]],
+    candidate_url_to_person_id: dict[str, str],
+    cast_person_name_by_id: dict[str, str],
+    link_state_by_person_id: dict[str, dict[str, Any]],
+) -> int:
+    from api.routers import admin_show_links
+
+    marked = 0
+    seen_rows: set[tuple[str, str]] = set()
+    for result in fandom_candidate_results:
+        if not isinstance(result, dict):
+            continue
+        status = str(result.get("status") or "").strip().lower()
+        if status != "missing":
+            continue
+        candidate_url = _normalize_fandom_url(str(result.get("candidate_url") or "").strip())
+        marker_url = _normalize_fandom_url(str(result.get("url") or "").strip()) or candidate_url
+        if not candidate_url or not marker_url:
+            continue
+        person_id = candidate_url_to_person_id.get(candidate_url)
+        if not person_id:
+            continue
+        dedupe_key = (person_id, marker_url)
+        if dedupe_key in seen_rows:
+            continue
+        seen_rows.add(dedupe_key)
+        state = link_state_by_person_id.get(person_id) or {}
+        existing_urls = state.get("url_keys") if isinstance(state.get("url_keys"), set) else set()
+        if marker_url in existing_urls:
+            continue
+        person_name = cast_person_name_by_id.get(person_id, "").strip()
+        admin_show_links._upsert_link(
+            db,
+            show_id=show_id,
+            entity_type="person",
+            entity_id=person_id,
+            link_group="knowledge",
+            link_kind="fandom",
+            url=marker_url,
+            label=f"{person_name} Fandom page (N/A)" if person_name else "Fandom page (N/A)",
+            season_number=0,
+            status="rejected",
+            confidence=0.95,
+            source=_FANDOM_PROBE_SOURCE_VALUE,
+            discovered_by=_FANDOM_PROBE_SOURCE_VALUE,
+            metadata={
+                _FANDOM_PROBE_STATE_KEY: _FANDOM_PROBE_STATE_NA,
+                _FANDOM_PROBE_REASON_KEY: _FANDOM_PROBE_REASON_MISSING,
+                _FANDOM_PROBE_CHECKED_AT_KEY: _to_iso_now(),
+                _FANDOM_PROBE_SOURCE_KEY: _FANDOM_PROBE_SOURCE_VALUE,
+            },
+            actor=actor,
+        )
+        state["has_na"] = True
+        if not isinstance(state.get("url_keys"), set):
+            state["url_keys"] = set()
+        state["url_keys"].add(marker_url)
+        link_state_by_person_id[person_id] = state
+        marked += 1
     return marked
 
 
@@ -795,9 +1518,7 @@ def _normalize_social_external_ids(incoming: dict[str, str]) -> dict[str, str]:
 
 
 def _has_existing_external_id(out: dict[str, Any], key: str) -> bool:
-    if key in _SOCIAL_PLATFORMS or (
-        key.endswith("_id") and key[:-3] in _SOCIAL_PLATFORMS
-    ):
+    if key in _SOCIAL_PLATFORMS or (key.endswith("_id") and key[:-3] in _SOCIAL_PLATFORMS):
         platform = key[:-3] if key.endswith("_id") else key
         for candidate in (platform, f"{platform}_id"):
             existing = out.get(candidate)
@@ -827,13 +1548,9 @@ def _merge_external_ids_fill_missing(existing: Any, incoming: dict[str, str]) ->
     for platform in _SOCIAL_PLATFORMS:
         legacy = out.get(platform)
         canonical = out.get(f"{platform}_id")
-        if isinstance(legacy, str) and legacy.strip() and not (
-            isinstance(canonical, str) and canonical.strip()
-        ):
+        if isinstance(legacy, str) and legacy.strip() and not (isinstance(canonical, str) and canonical.strip()):
             out[f"{platform}_id"] = legacy.strip()
-        if isinstance(canonical, str) and canonical.strip() and not (
-            isinstance(legacy, str) and legacy.strip()
-        ):
+        if isinstance(canonical, str) and canonical.strip() and not (isinstance(legacy, str) and legacy.strip()):
             out[platform] = canonical.strip()
     return out
 
@@ -875,6 +1592,7 @@ def _persist_person_profile(
     bio: str | None,
     hero_image_url: str | None,
     social_links: dict[str, str],
+    source: str = "bravo",
 ) -> None:
     response = (
         db.schema("core")
@@ -891,15 +1609,95 @@ def _persist_person_profile(
 
     row = response.data[0]
     payload = {
-        "biography": _merge_source_value(row.get("biography"), "bravo", bio),
-        "homepage": _merge_source_value(row.get("homepage"), "bravo", person_url),
-        "profile_image_url": _merge_source_value(row.get("profile_image_url"), "bravo", hero_image_url),
+        "biography": _merge_source_value(row.get("biography"), source, bio),
+        "homepage": _merge_source_value(row.get("homepage"), source, person_url),
+        "profile_image_url": _merge_source_value(row.get("profile_image_url"), source, hero_image_url),
         "external_ids": _merge_external_ids_fill_missing(row.get("external_ids"), social_links),
     }
 
     update_resp = db.schema("core").table("people").update(payload).eq("id", person_id).execute()
     if getattr(update_resp, "error", None):
         raise HTTPException(status_code=502, detail=f"Failed to update person {person_id}")
+
+
+def _import_person_profile_image(
+    *,
+    db: SupabaseAdminClient,
+    admin_user: dict[str, Any],
+    show_id: str,
+    season_id: str | None,
+    season_number: int | None,
+    person_id: str,
+    person_url: str,
+    image_url: str,
+    person_name: str | None,
+    source_label: str,
+    context_section: str,
+) -> dict[str, Any]:
+    from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
+
+    asset_label = f"{source_label} profile picture"
+    if season_number is not None:
+        import_request = ImportRequest(
+            entity_type="season",
+            show_id=UUID(show_id),
+            season_id=UUID(season_id) if season_id else None,
+            season_number=season_number,
+            source_url=person_url,
+            images=[
+                ImportImageItem(
+                    candidate_id=f"{source_label.lower()}-person-hero-{person_id}",
+                    url=image_url,
+                    caption=f"{asset_label}{f' ({person_name})' if person_name else ''}",
+                    kind="promo",
+                    person_ids=[UUID(person_id)],
+                    context_section=context_section,
+                    context_type="profile_picture",
+                    asset_name=asset_label,
+                )
+            ],
+        )
+    else:
+        import_request = ImportRequest(
+            entity_type="person",
+            person_id=UUID(person_id),
+            source_url=person_url,
+            images=[
+                ImportImageItem(
+                    candidate_id=f"{source_label.lower()}-person-hero-{person_id}",
+                    url=image_url,
+                    caption=f"{asset_label}{f' ({person_name})' if person_name else ''}",
+                    kind="promo",
+                    context_section=context_section,
+                    context_type="profile_picture",
+                    asset_name=asset_label,
+                )
+            ],
+        )
+    import_result = import_images(import_request, db, admin_user)
+    asset_ids: list[str] = []
+    hosted_urls: list[str] = []
+    for raw_asset in list(getattr(import_result, "assets", []) or []):
+        if isinstance(raw_asset, dict):
+            asset_id = raw_asset.get("id")
+            hosted_url = raw_asset.get("hosted_url")
+        else:
+            asset_id = getattr(raw_asset, "id", None)
+            hosted_url = getattr(raw_asset, "hosted_url", None)
+        asset_id_str = str(asset_id or "").strip()
+        if asset_id_str and asset_id_str not in asset_ids:
+            asset_ids.append(asset_id_str)
+        hosted_url_str = str(hosted_url or "").strip()
+        if hosted_url_str and hosted_url_str not in hosted_urls:
+            hosted_urls.append(hosted_url_str)
+    return {
+        "imported": int(import_result.imported),
+        "skipped": int(import_result.skipped_duplicates),
+        "errors": list(import_result.errors),
+        "asset_ids": asset_ids,
+        "hosted_urls": hosted_urls,
+        "primary_hosted_url": hosted_urls[0] if hosted_urls else None,
+    }
 
 
 def _import_bravo_person_image(
@@ -914,53 +1712,244 @@ def _import_bravo_person_image(
     hero_image_url: str,
     person_name: str | None,
 ) -> dict[str, Any]:
-    from api.routers.admin_scrape import ImportImageItem, ImportRequest, import_images
+    return _import_person_profile_image(
+        db=db,
+        admin_user=admin_user,
+        show_id=show_id,
+        season_id=season_id,
+        season_number=season_number,
+        person_id=person_id,
+        person_url=person_url,
+        image_url=hero_image_url,
+        person_name=person_name,
+        source_label="Bravo",
+        context_section="bravo_profile",
+    )
 
-    # Bravo person hero/profile images should be treated as season promos while also
-    # linking into each person's gallery.
-    if season_number is not None:
-        import_request = ImportRequest(
-            entity_type="season",
-            show_id=UUID(show_id),
-            season_id=UUID(season_id) if season_id else None,
-            season_number=season_number,
-            source_url=person_url,
-            images=[
-                ImportImageItem(
-                    candidate_id=f"bravo-person-hero-{person_id}",
-                    url=hero_image_url,
-                    caption=f"Bravo profile picture{f' ({person_name})' if person_name else ''}",
-                    kind="promo",
-                    person_ids=[UUID(person_id)],
-                    context_section="bravo_profile",
-                    context_type="profile_picture",
-                    asset_name="Bravo profile picture",
-                )
-            ],
-        )
-    else:
-        import_request = ImportRequest(
-            entity_type="person",
-            person_id=UUID(person_id),
-            source_url=person_url,
-            images=[
-                ImportImageItem(
-                    candidate_id=f"bravo-person-hero-{person_id}",
-                    url=hero_image_url,
-                    caption=f"Bravo profile picture{f' ({person_name})' if person_name else ''}",
-                    kind="promo",
-                    context_section="bravo_profile",
-                    context_type="profile_picture",
-                    asset_name="Bravo profile picture",
-                )
-            ],
-        )
-    import_result = import_images(import_request, db, admin_user)
+
+def _import_fandom_person_image(
+    *,
+    db: SupabaseAdminClient,
+    admin_user: dict[str, Any],
+    show_id: str,
+    season_id: str | None,
+    season_number: int | None,
+    person_id: str,
+    person_url: str,
+    image_url: str,
+    person_name: str | None,
+) -> dict[str, Any]:
+    return _import_person_profile_image(
+        db=db,
+        admin_user=admin_user,
+        show_id=show_id,
+        season_id=season_id,
+        season_number=season_number,
+        person_id=person_id,
+        person_url=person_url,
+        image_url=image_url,
+        person_name=person_name,
+        source_label="Fandom",
+        context_section="fandom_profile",
+    )
+
+
+def _default_profile_thumbnail_crop() -> dict[str, Any]:
     return {
-        "imported": int(import_result.imported),
-        "skipped": int(import_result.skipped_duplicates),
-        "errors": list(import_result.errors),
+        "x": 50,
+        "y": 32,
+        "zoom": 1,
+        "mode": "auto",
     }
+
+
+def _build_profile_link_context(
+    *,
+    existing: Any,
+    person_url: str,
+    season_number: int | None,
+    context_section: str,
+) -> dict[str, Any]:
+    context = dict(existing) if isinstance(existing, dict) else {}
+    context.setdefault("context_section", context_section)
+    context.setdefault("context_type", "profile_picture")
+    if isinstance(person_url, str) and person_url.strip():
+        context.setdefault("source_url", person_url.strip())
+    if isinstance(season_number, int):
+        context["season_number"] = int(season_number)
+
+    crop = context.get("thumbnail_crop")
+    if not isinstance(crop, dict):
+        context["thumbnail_crop"] = _default_profile_thumbnail_crop()
+    return context
+
+
+def _promote_profile_media_link(
+    *,
+    db: SupabaseAdminClient,
+    person_id: str,
+    person_url: str,
+    media_asset_id: str,
+    season_number: int | None,
+    context_section: str,
+) -> None:
+    from trr_backend.media.user_uploads import set_primary_media_link
+
+    media_asset_id_str = str(media_asset_id or "").strip()
+    if not media_asset_id_str:
+        return
+
+    gallery_existing_resp = (
+        db.schema("core")
+        .table("media_links")
+        .select("id, context, position")
+        .eq("entity_type", "person")
+        .eq("entity_id", person_id)
+        .eq("kind", "gallery")
+        .eq("media_asset_id", media_asset_id_str)
+        .limit(1)
+        .execute()
+    )
+    if getattr(gallery_existing_resp, "error", None):
+        raise HTTPException(status_code=502, detail=f"Failed to load gallery media link for person {person_id}")
+    gallery_existing = gallery_existing_resp.data[0] if gallery_existing_resp.data else {}
+    gallery_context = _build_profile_link_context(
+        existing=gallery_existing.get("context"),
+        person_url=person_url,
+        season_number=season_number,
+        context_section=context_section,
+    )
+    gallery_position = gallery_existing.get("position") if isinstance(gallery_existing, dict) else None
+    if not isinstance(gallery_position, int):
+        gallery_position = 0
+    gallery_upsert_resp = (
+        db.schema("core")
+        .table("media_links")
+        .upsert(
+            {
+                "entity_type": "person",
+                "entity_id": person_id,
+                "media_asset_id": media_asset_id_str,
+                "kind": "gallery",
+                "position": gallery_position,
+                "is_primary": False,
+                "context": gallery_context,
+            },
+            on_conflict="entity_type,entity_id,kind,media_asset_id",
+        )
+        .execute()
+    )
+    if getattr(gallery_upsert_resp, "error", None):
+        raise HTTPException(status_code=502, detail=f"Failed to upsert gallery media link for person {person_id}")
+
+    profile_existing_resp = (
+        db.schema("core")
+        .table("media_links")
+        .select("id, context")
+        .eq("entity_type", "person")
+        .eq("entity_id", person_id)
+        .eq("kind", "profile")
+        .eq("media_asset_id", media_asset_id_str)
+        .limit(1)
+        .execute()
+    )
+    if getattr(profile_existing_resp, "error", None):
+        raise HTTPException(status_code=502, detail=f"Failed to load profile media link for person {person_id}")
+    profile_existing = profile_existing_resp.data[0] if profile_existing_resp.data else {}
+    profile_context = _build_profile_link_context(
+        existing=profile_existing.get("context"),
+        person_url=person_url,
+        season_number=season_number,
+        context_section=context_section,
+    )
+    profile_upsert_resp = (
+        db.schema("core")
+        .table("media_links")
+        .upsert(
+            {
+                "entity_type": "person",
+                "entity_id": person_id,
+                "media_asset_id": media_asset_id_str,
+                "kind": "profile",
+                "position": 0,
+                "is_primary": True,
+                "context": profile_context,
+            },
+            on_conflict="entity_type,entity_id,kind,media_asset_id",
+        )
+        .execute()
+    )
+    if getattr(profile_upsert_resp, "error", None):
+        raise HTTPException(status_code=502, detail=f"Failed to upsert profile media link for person {person_id}")
+
+    profile_link_resp = (
+        db.schema("core")
+        .table("media_links")
+        .select("id")
+        .eq("entity_type", "person")
+        .eq("entity_id", person_id)
+        .eq("kind", "profile")
+        .eq("media_asset_id", media_asset_id_str)
+        .limit(1)
+        .execute()
+    )
+    if getattr(profile_link_resp, "error", None):
+        raise HTTPException(status_code=502, detail=f"Failed to resolve profile media link for person {person_id}")
+    if not profile_link_resp.data:
+        raise HTTPException(status_code=502, detail=f"Profile media link missing for person {person_id}")
+    profile_link_id = str(profile_link_resp.data[0].get("id") or "").strip()
+    if not profile_link_id:
+        raise HTTPException(status_code=502, detail=f"Profile media link id missing for person {person_id}")
+
+    try:
+        set_primary_media_link(
+            db,
+            entity_type="person",
+            entity_id=person_id,
+            kind="profile",
+            media_link_id=profile_link_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to set primary profile media link for person {person_id}",
+        ) from exc
+
+
+def _promote_bravo_profile_media_link(
+    *,
+    db: SupabaseAdminClient,
+    person_id: str,
+    person_url: str,
+    media_asset_id: str,
+    season_number: int | None,
+) -> None:
+    _promote_profile_media_link(
+        db=db,
+        person_id=person_id,
+        person_url=person_url,
+        media_asset_id=media_asset_id,
+        season_number=season_number,
+        context_section="bravo_profile",
+    )
+
+
+def _promote_fandom_profile_media_link(
+    *,
+    db: SupabaseAdminClient,
+    person_id: str,
+    person_url: str,
+    media_asset_id: str,
+    season_number: int | None,
+) -> None:
+    _promote_profile_media_link(
+        db=db,
+        person_id=person_id,
+        person_url=person_url,
+        media_asset_id=media_asset_id,
+        season_number=season_number,
+        context_section="fandom_profile",
+    )
 
 
 def _fetch_show_snapshot(db: SupabaseAdminClient, show_id: str) -> dict[str, Any]:
@@ -1287,10 +2276,7 @@ def _get_or_create_show_role_id(
         "updated_by": actor,
     }
     upsert_response = (
-        db.schema("core")
-        .table("show_role_catalog")
-        .upsert(row, on_conflict="show_id,normalized_name")
-        .execute()
+        db.schema("core").table("show_role_catalog").upsert(row, on_conflict="show_id,normalized_name").execute()
     )
     rows = get_list_result(upsert_response, "upserting show role from bravo sync")
     if rows and rows[0].get("id"):
@@ -1333,22 +2319,33 @@ def _persist_pending_links_from_bravo_sync(
         parsed = urlparse(url)
         if not url or not parsed.scheme.startswith("http"):
             continue
+        entity_type = str(row.get("entity_type") or "show").strip().lower()
+        link_kind = str(row.get("link_kind") or "other").strip().lower()
         row_status = str(row.get("status") or "").strip().lower()
-        status = row_status if row_status in {"pending", "approved", "rejected"} else "pending"
+        is_person_source = entity_type == "person" and link_kind in admin_show_links._PERSON_SOURCE_LINK_KINDS
+        if is_person_source and row_status != "approved":
+            continue
+        status = (
+            "approved"
+            if is_person_source
+            else (row_status if row_status in {"pending", "approved", "rejected"} else "pending")
+        )
         confidence_raw = row.get("confidence")
         if isinstance(confidence_raw, (int, float)):
             confidence = float(confidence_raw)
         else:
-            confidence = 0.95 if status == "approved" else (
-                0.75 if str(row.get("link_group") or "") == "cast_announcements" else 0.65
+            confidence = (
+                0.95
+                if status == "approved"
+                else (0.75 if str(row.get("link_group") or "") == "cast_announcements" else 0.65)
             )
         admin_show_links._upsert_link(
             db,
             show_id=show_id,
-            entity_type=str(row.get("entity_type") or "show"),
+            entity_type=entity_type,
             entity_id=str(row.get("entity_id") or show_id),
             link_group=str(row.get("link_group") or "other"),
-            link_kind=str(row.get("link_kind") or "other"),
+            link_kind=link_kind,
             url=url,
             label=(str(row.get("label")) if row.get("label") else None),
             season_number=int(row.get("season_number") or 0),
@@ -1371,11 +2368,7 @@ def _persist_cast_role_suggestions_from_bravo_sync(
     fallback_season_number: int | None,
     actor: str,
 ) -> dict[str, int]:
-    news_items = (
-        normalized_bundle.get("news_show")
-        if isinstance(normalized_bundle.get("news_show"), list)
-        else []
-    )
+    news_items = normalized_bundle.get("news_show") if isinstance(normalized_bundle.get("news_show"), list) else []
     if not news_items:
         return {"role_suggestions": 0, "role_assignments": 0, "announcement_people": 0}
 
@@ -1402,9 +2395,7 @@ def _persist_cast_role_suggestions_from_bravo_sync(
         )
         if season_number not in season_id_cache:
             season_id_cache[season_number] = (
-                _resolve_season_id(db, show_id=show_id, season_number=season_number)
-                if season_number > 0
-                else None
+                _resolve_season_id(db, show_id=show_id, season_number=season_number) if season_number > 0 else None
             )
         season_id = season_id_cache[season_number]
         article_url = str(item.get("article_url") or "").strip() or None
@@ -1483,17 +2474,25 @@ def preview_bravo_import(
         cast_person_ids=cast_person_ids,
     )
     cast_url_lookup = _build_cast_person_url_lookup(show_cast)
-    cast_candidate_urls, _eligible_url_to_person_id = _build_eligible_cast_candidate_person_urls(
-        show_cast,
-        link_state_by_person_id=link_state_by_person_id,
-    )
+    if payload.cast_only:
+        cast_candidate_urls = _build_cast_candidate_person_urls(show_cast)
+    else:
+        cast_candidate_urls, _eligible_url_to_person_id = _build_eligible_cast_candidate_person_urls(
+            show_cast,
+            link_state_by_person_id=link_state_by_person_id,
+        )
     explicit_candidate_urls = [str(url) for url in payload.person_url_candidates]
     filtered_explicit_candidate_urls = _filter_explicit_person_url_candidates(
         explicit_candidate_urls,
         cast_url_lookup=cast_url_lookup,
         link_state_by_person_id=link_state_by_person_id,
+        suppress_link_state=not payload.cast_only,
     )
     person_url_candidates = _merge_person_url_candidates(filtered_explicit_candidate_urls, cast_candidate_urls)
+    fandom_domains = _load_fandom_probe_domains(db, show_id=show_id_str)
+    fandom_candidate_urls, _fandom_candidate_url_to_person_id, fandom_candidate_name_by_url = (
+        _build_cast_candidate_fandom_urls(show_cast, community_domains=fandom_domains)
+    )
 
     bundle = parse_bravo_show_bundle(
         str(payload.show_url),
@@ -1502,24 +2501,571 @@ def preview_bravo_import(
         include_news=payload.include_news,
         person_url_candidates=person_url_candidates,
         max_people=max(40, len(person_url_candidates)),
+        candidate_people_only=payload.cast_only,
+        include_person_related_content=not payload.cast_only,
+        hydrate_person_related_dates=not payload.cast_only,
     )
     bundle = _filter_bundle_by_season(bundle, payload.season_number)
+    person_candidate_results = (
+        bundle.get("person_candidate_results") if isinstance(bundle.get("person_candidate_results"), list) else []
+    )
+    summary = _summarize_candidate_results(person_candidate_results)
+    fandom_candidate_results = (
+        _probe_fandom_person_url_candidates(
+            fandom_candidate_urls,
+            candidate_name_by_url=fandom_candidate_name_by_url,
+            max_people=max(40, len(fandom_candidate_urls)),
+        )
+        if payload.include_people and fandom_candidate_urls
+        else []
+    )
+    fandom_summary = _summarize_candidate_results(fandom_candidate_results)
+    fandom_people = [
+        result.get("person")
+        for result in fandom_candidate_results
+        if isinstance(result, dict)
+        and str(result.get("status") or "").strip().lower() == "ok"
+        and isinstance(result.get("person"), dict)
+    ]
 
     return {
         "show": bundle.get("show") or {},
         "people": bundle.get("people") or [],
+        "fandom_people": fandom_people,
         "videos": bundle.get("videos") or [],
         "news": bundle.get("news") or [],
         "image_candidates": bundle.get("image_candidates") or [],
         "discovered_person_urls": bundle.get("discovered_person_urls") or [],
-        "person_candidate_results": bundle.get("person_candidate_results") or [],
+        "person_candidate_results": person_candidate_results,
+        "bravo_candidates_tested": summary["tested"],
+        "bravo_candidates_valid": summary["valid"],
+        "bravo_candidates_missing": summary["missing"],
+        "bravo_candidates_errors": summary["errors"],
+        "fandom_domains_used": fandom_domains,
+        "fandom_candidate_urls_tested": fandom_candidate_urls,
+        "fandom_candidate_results": fandom_candidate_results,
+        "fandom_candidates_tested": fandom_summary["tested"],
+        "fandom_candidates_valid": fandom_summary["valid"],
+        "fandom_candidates_missing": fandom_summary["missing"],
+        "fandom_candidates_errors": fandom_summary["errors"],
         "skipped_existing_bravo_profiles": sum(
             1 for state in link_state_by_person_id.values() if bool(state.get("has_non_rejected"))
         ),
         "skipped_na_profiles": sum(1 for state in link_state_by_person_id.values() if bool(state.get("has_na"))),
         "cast_candidate_urls_tested": person_url_candidates,
         "cast_candidate_person_names": cast_person_name_by_id,
+        "show_url": str(payload.show_url),
+        "cast_only": payload.cast_only,
+        "season_filter": payload.season_number,
     }
+
+
+@router.post("/{show_id}/import-bravo/preview/stream")
+def preview_bravo_import_stream(
+    show_id: UUID,
+    payload: BravoPreviewRequest,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> StreamingResponse:
+    show_id_str = str(show_id)
+    if not _show_exists(db, show_id_str):
+        return _sse_error_stream(
+            {
+                "error": f"Show {show_id_str} not found",
+                "status": 404,
+            }
+        )
+    try:
+        _assert_show_sync_ready_for_bravo(db, show_id_str)
+    except HTTPException as exc:
+        return _sse_error_stream(
+            {
+                "error": "Show is not ready for Bravo import",
+                "detail": exc.detail,
+                "status": exc.status_code,
+            }
+        )
+
+    show_cast = _build_show_cast_index(db, show_id_str)
+    cast_person_ids = sorted({str(row.get("person_id") or "").strip() for row in show_cast if row.get("person_id")})
+    cast_person_name_by_id = {
+        str(row.get("person_id") or "").strip(): str(row.get("person_name") or "").strip()
+        for row in show_cast
+        if row.get("person_id")
+    }
+    link_state_by_person_id = _load_bravo_profile_link_state_by_person_id(
+        db,
+        show_id=show_id_str,
+        cast_person_ids=cast_person_ids,
+    )
+    cast_url_lookup = _build_cast_person_url_lookup(show_cast)
+    if payload.cast_only:
+        cast_candidate_urls = _build_cast_candidate_person_urls(show_cast)
+    else:
+        cast_candidate_urls, _eligible_url_to_person_id = _build_eligible_cast_candidate_person_urls(
+            show_cast,
+            link_state_by_person_id=link_state_by_person_id,
+        )
+    explicit_candidate_urls = [str(url) for url in payload.person_url_candidates]
+    filtered_explicit_candidate_urls = _filter_explicit_person_url_candidates(
+        explicit_candidate_urls,
+        cast_url_lookup=cast_url_lookup,
+        link_state_by_person_id=link_state_by_person_id,
+        suppress_link_state=not payload.cast_only,
+    )
+    person_url_candidates = _merge_person_url_candidates(filtered_explicit_candidate_urls, cast_candidate_urls)
+    fandom_domains = _load_fandom_probe_domains(db, show_id=show_id_str)
+    fandom_candidate_urls, _fandom_candidate_url_to_person_id, fandom_candidate_name_by_url = (
+        _build_cast_candidate_fandom_urls(show_cast, community_domains=fandom_domains)
+    )
+    max_people = max(40, len(person_url_candidates), len(fandom_candidate_urls))
+
+    candidate_name_by_url: dict[str, str] = {}
+    for candidate_url in person_url_candidates:
+        normalized = _normalize_person_url(candidate_url)
+        if not normalized:
+            continue
+        person_id = cast_url_lookup.get(normalized)
+        person_name = cast_person_name_by_id.get(person_id or "", "").strip()
+        if person_name:
+            candidate_name_by_url[normalized] = person_name
+
+    candidate_rows = [
+        {
+            "url": candidate_url,
+            "name": candidate_name_by_url.get(_normalize_person_url(candidate_url) or "", "") or None,
+        }
+        for candidate_url in person_url_candidates
+    ]
+    fandom_candidate_rows = [
+        {
+            "url": candidate_url,
+            "name": fandom_candidate_name_by_url.get(_normalize_fandom_url(candidate_url) or "", "") or None,
+        }
+        for candidate_url in fandom_candidate_urls
+    ]
+
+    def event_stream() -> Any:
+        try:
+            yield _sse_event(
+                "start",
+                {
+                    "candidates": candidate_rows,
+                    "total": len(candidate_rows),
+                    "source": "bravo",
+                    "fandom_candidates": fandom_candidate_rows,
+                    "fandom_total": len(fandom_candidate_rows),
+                    "fandom_domains_used": fandom_domains,
+                    "cast_only": payload.cast_only,
+                },
+            )
+
+            base_bundle = parse_bravo_show_bundle(
+                str(payload.show_url),
+                include_people=False,
+                include_videos=payload.include_videos,
+                include_news=payload.include_news,
+                person_url_candidates=person_url_candidates,
+                max_people=max_people,
+                candidate_people_only=payload.cast_only,
+            )
+            base_bundle = _filter_bundle_by_season(base_bundle, payload.season_number)
+
+            people: list[dict[str, Any]] = []
+            person_candidate_results: list[dict[str, Any]] = []
+            candidate_elapsed_ms_values: list[int] = []
+            fandom_people: list[dict[str, Any]] = []
+            fandom_candidate_results: list[dict[str, Any]] = []
+
+            if payload.include_people:
+                candidate_sequence = person_url_candidates[: max(0, max_people)]
+                if payload.cast_only and candidate_sequence:
+                    max_workers = min(_BRAVO_CAST_ONLY_PREVIEW_WORKER_LIMIT, len(candidate_sequence))
+                    started_at = perf_counter()
+                    pending: dict[Future[dict[str, Any]], tuple[str, int, float]] = {}
+                    next_candidate_idx = 0
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        while next_candidate_idx < len(candidate_sequence) and len(pending) < max_workers:
+                            candidate_url = candidate_sequence[next_candidate_idx]
+                            candidate_index = next_candidate_idx + 1
+                            normalized_candidate_url = _normalize_person_url(candidate_url)
+                            candidate_name = candidate_name_by_url.get(normalized_candidate_url or "", "")
+                            future = executor.submit(
+                                _probe_single_bravo_candidate,
+                                candidate_url,
+                                include_related_content=False,
+                                hydrate_related_dates=False,
+                            )
+                            pending[future] = (candidate_url, candidate_index, perf_counter())
+                            current_summary = _summarize_candidate_results(person_candidate_results)
+                            yield _sse_event(
+                                "progress",
+                                {
+                                    "source": "bravo",
+                                    "url": candidate_url,
+                                    "name": candidate_name or None,
+                                    "status": "in_progress",
+                                    "candidate_index": candidate_index,
+                                    "bravo_candidates_tested": current_summary["tested"],
+                                    "bravo_candidates_valid": current_summary["valid"],
+                                    "bravo_candidates_missing": current_summary["missing"],
+                                    "bravo_candidates_errors": current_summary["errors"],
+                                    "live_counts": {
+                                        "tested": current_summary["tested"],
+                                        "valid": current_summary["valid"],
+                                        "missing": current_summary["missing"],
+                                        "errors": current_summary["errors"],
+                                    },
+                                },
+                            )
+                            next_candidate_idx += 1
+
+                        while pending:
+                            done, _ = wait(list(pending.keys()), return_when=FIRST_COMPLETED)
+                            for future in done:
+                                submitted_candidate_url, candidate_index, candidate_started_at = pending.pop(future)
+                                candidate_elapsed_ms = max(0, int((perf_counter() - candidate_started_at) * 1000))
+                                candidate_elapsed_ms_values.append(candidate_elapsed_ms)
+                                try:
+                                    probe = future.result()
+                                except Exception as exc:  # noqa: BLE001
+                                    probe = {
+                                        "candidate_url": submitted_candidate_url,
+                                        "url": submitted_candidate_url,
+                                        "status": "error",
+                                        "error": str(exc),
+                                    }
+                                status = str(probe.get("status") or "").strip().lower()
+                                if status not in {"ok", "missing", "error"}:
+                                    status = "error"
+
+                                candidate_url = str(
+                                    probe.get("candidate_url") or probe.get("url") or submitted_candidate_url
+                                ).strip()
+                                result_url = str(probe.get("url") or candidate_url).strip()
+                                if not candidate_url:
+                                    continue
+
+                                person = probe.get("person") if isinstance(probe.get("person"), dict) else None
+                                if status == "ok" and person:
+                                    people.append(person)
+
+                                result: dict[str, Any] = {
+                                    "url": result_url or candidate_url,
+                                    "status": status,
+                                }
+                                error_value = str(probe.get("error") or "").strip()
+                                if error_value:
+                                    result["error"] = error_value
+                                person_candidate_results.append(result)
+
+                                summary = _summarize_candidate_results(person_candidate_results)
+                                normalized_candidate_url = _normalize_person_url(candidate_url)
+                                normalized_result_url = _normalize_person_url(result_url)
+                                name = candidate_name_by_url.get(
+                                    normalized_candidate_url or "",
+                                    "",
+                                ) or candidate_name_by_url.get(normalized_result_url or "", "")
+
+                                progress_payload: dict[str, Any] = {
+                                    "source": "bravo",
+                                    "url": candidate_url,
+                                    "name": name or None,
+                                    "status": status,
+                                    "candidate_index": candidate_index,
+                                    "elapsed_ms": candidate_elapsed_ms,
+                                    "bravo_candidates_tested": summary["tested"],
+                                    "bravo_candidates_valid": summary["valid"],
+                                    "bravo_candidates_missing": summary["missing"],
+                                    "bravo_candidates_errors": summary["errors"],
+                                    "live_counts": {
+                                        "tested": summary["tested"],
+                                        "valid": summary["valid"],
+                                        "missing": summary["missing"],
+                                        "errors": summary["errors"],
+                                    },
+                                }
+                                if error_value:
+                                    progress_payload["error"] = error_value
+                                if person:
+                                    progress_payload["person"] = person
+
+                                if candidate_elapsed_ms >= _BRAVO_SLOW_CANDIDATE_WARN_MS:
+                                    logger.warning(
+                                        (
+                                            "Slow cast-only bravo probe candidate "
+                                            "show_id=%s candidate_index=%s elapsed_ms=%s url=%s"
+                                        ),
+                                        show_id_str,
+                                        candidate_index,
+                                        candidate_elapsed_ms,
+                                        candidate_url,
+                                    )
+
+                                yield _sse_event("progress", progress_payload)
+
+                                if next_candidate_idx < len(candidate_sequence):
+                                    next_candidate_url = candidate_sequence[next_candidate_idx]
+                                    next_candidate_index = next_candidate_idx + 1
+                                    normalized_next_candidate_url = _normalize_person_url(next_candidate_url)
+                                    next_candidate_name = candidate_name_by_url.get(
+                                        normalized_next_candidate_url or "",
+                                        "",
+                                    )
+                                    next_future = executor.submit(
+                                        _probe_single_bravo_candidate,
+                                        next_candidate_url,
+                                        include_related_content=False,
+                                        hydrate_related_dates=False,
+                                    )
+                                    pending[next_future] = (
+                                        next_candidate_url,
+                                        next_candidate_index,
+                                        perf_counter(),
+                                    )
+                                    yield _sse_event(
+                                        "progress",
+                                        {
+                                            "source": "bravo",
+                                            "url": next_candidate_url,
+                                            "name": next_candidate_name or None,
+                                            "status": "in_progress",
+                                            "candidate_index": next_candidate_index,
+                                            "bravo_candidates_tested": summary["tested"],
+                                            "bravo_candidates_valid": summary["valid"],
+                                            "bravo_candidates_missing": summary["missing"],
+                                            "bravo_candidates_errors": summary["errors"],
+                                            "live_counts": {
+                                                "tested": summary["tested"],
+                                                "valid": summary["valid"],
+                                                "missing": summary["missing"],
+                                                "errors": summary["errors"],
+                                            },
+                                        },
+                                    )
+                                    next_candidate_idx += 1
+
+                    if candidate_elapsed_ms_values:
+                        sorted_elapsed_ms = sorted(candidate_elapsed_ms_values)
+                        avg_elapsed_ms = int(sum(sorted_elapsed_ms) / len(sorted_elapsed_ms))
+                        p95_index = int((len(sorted_elapsed_ms) - 1) * 0.95)
+                        p95_elapsed_ms = sorted_elapsed_ms[p95_index]
+                        logger.info(
+                            (
+                                "Cast-only bravo preview stream completed "
+                                "show_id=%s candidates=%s elapsed_total_ms=%s "
+                                "avg_candidate_ms=%s p95_candidate_ms=%s"
+                            ),
+                            show_id_str,
+                            len(candidate_elapsed_ms_values),
+                            int((perf_counter() - started_at) * 1000),
+                            avg_elapsed_ms,
+                            p95_elapsed_ms,
+                        )
+                else:
+                    for probe in probe_bravo_person_url_candidates(
+                        candidate_sequence,
+                        max_people=max_people,
+                        include_related_content=not payload.cast_only,
+                        hydrate_related_dates=not payload.cast_only,
+                    ):
+                        status = str(probe.get("status") or "").strip().lower()
+                        if status not in {"ok", "missing", "error"}:
+                            continue
+
+                        candidate_url = str(probe.get("candidate_url") or probe.get("url") or "").strip()
+                        result_url = str(probe.get("url") or candidate_url).strip()
+                        if not candidate_url:
+                            continue
+
+                        person = probe.get("person") if isinstance(probe.get("person"), dict) else None
+                        if status == "ok" and person:
+                            people.append(person)
+
+                        result = {
+                            "url": result_url or candidate_url,
+                            "status": status,
+                        }
+                        error_value = str(probe.get("error") or "").strip()
+                        if error_value:
+                            result["error"] = error_value
+                        person_candidate_results.append(result)
+
+                        summary = _summarize_candidate_results(person_candidate_results)
+                        normalized_candidate_url = _normalize_person_url(candidate_url)
+                        normalized_result_url = _normalize_person_url(result_url)
+                        name = candidate_name_by_url.get(
+                            normalized_candidate_url or "",
+                            "",
+                        ) or candidate_name_by_url.get(normalized_result_url or "", "")
+
+                        progress_payload: dict[str, Any] = {
+                            "source": "bravo",
+                            "url": candidate_url,
+                            "name": name or None,
+                            "status": status,
+                            "bravo_candidates_tested": summary["tested"],
+                            "bravo_candidates_valid": summary["valid"],
+                            "bravo_candidates_missing": summary["missing"],
+                            "bravo_candidates_errors": summary["errors"],
+                            "live_counts": {
+                                "tested": summary["tested"],
+                                "valid": summary["valid"],
+                                "missing": summary["missing"],
+                                "errors": summary["errors"],
+                            },
+                        }
+                        if error_value:
+                            progress_payload["error"] = error_value
+                        if person:
+                            progress_payload["person"] = person
+
+                        yield _sse_event("progress", progress_payload)
+
+                if fandom_candidate_urls:
+                    fandom_sequence = fandom_candidate_urls[: max(0, max_people)]
+                    for candidate_index, candidate_url in enumerate(fandom_sequence, start=1):
+                        normalized_candidate_url = _normalize_fandom_url(candidate_url) or candidate_url
+                        candidate_name = fandom_candidate_name_by_url.get(normalized_candidate_url, "")
+                        bravo_summary = _summarize_candidate_results(person_candidate_results)
+                        fandom_summary = _summarize_candidate_results(fandom_candidate_results)
+                        yield _sse_event(
+                            "progress",
+                            {
+                                "source": "fandom",
+                                "url": candidate_url,
+                                "name": candidate_name or None,
+                                "status": "in_progress",
+                                "candidate_index": candidate_index,
+                                "bravo_candidates_tested": bravo_summary["tested"],
+                                "bravo_candidates_valid": bravo_summary["valid"],
+                                "bravo_candidates_missing": bravo_summary["missing"],
+                                "bravo_candidates_errors": bravo_summary["errors"],
+                                "fandom_candidates_tested": fandom_summary["tested"],
+                                "fandom_candidates_valid": fandom_summary["valid"],
+                                "fandom_candidates_missing": fandom_summary["missing"],
+                                "fandom_candidates_errors": fandom_summary["errors"],
+                                "live_counts": {
+                                    "tested": fandom_summary["tested"],
+                                    "valid": fandom_summary["valid"],
+                                    "missing": fandom_summary["missing"],
+                                    "errors": fandom_summary["errors"],
+                                },
+                            },
+                        )
+                        candidate_started_at = perf_counter()
+                        probe = _probe_single_fandom_candidate(
+                            candidate_url,
+                            expected_name=candidate_name or None,
+                        )
+                        candidate_elapsed_ms = max(0, int((perf_counter() - candidate_started_at) * 1000))
+                        status = str(probe.get("status") or "").strip().lower()
+                        if status not in {"ok", "missing", "error"}:
+                            status = "error"
+                        result_url = str(probe.get("url") or candidate_url).strip() or candidate_url
+                        result: dict[str, Any] = {
+                            "candidate_url": normalized_candidate_url,
+                            "url": result_url,
+                            "status": status,
+                        }
+                        if candidate_name:
+                            result["name"] = candidate_name
+                        error_value = str(probe.get("error") or "").strip()
+                        if error_value:
+                            result["error"] = error_value
+                        person = probe.get("person") if isinstance(probe.get("person"), dict) else None
+                        cast_fandom = probe.get("cast_fandom") if isinstance(probe.get("cast_fandom"), dict) else None
+                        photos = probe.get("photos") if isinstance(probe.get("photos"), list) else None
+                        if person:
+                            result["person"] = person
+                        if cast_fandom:
+                            result["cast_fandom"] = cast_fandom
+                        if photos:
+                            result["photos"] = photos
+                        fandom_candidate_results.append(result)
+                        if status == "ok" and person:
+                            fandom_people.append(person)
+
+                        bravo_summary = _summarize_candidate_results(person_candidate_results)
+                        fandom_summary = _summarize_candidate_results(fandom_candidate_results)
+                        progress_payload: dict[str, Any] = {
+                            "source": "fandom",
+                            "url": candidate_url,
+                            "name": candidate_name or None,
+                            "status": status,
+                            "candidate_index": candidate_index,
+                            "elapsed_ms": candidate_elapsed_ms,
+                            "bravo_candidates_tested": bravo_summary["tested"],
+                            "bravo_candidates_valid": bravo_summary["valid"],
+                            "bravo_candidates_missing": bravo_summary["missing"],
+                            "bravo_candidates_errors": bravo_summary["errors"],
+                            "fandom_candidates_tested": fandom_summary["tested"],
+                            "fandom_candidates_valid": fandom_summary["valid"],
+                            "fandom_candidates_missing": fandom_summary["missing"],
+                            "fandom_candidates_errors": fandom_summary["errors"],
+                            "live_counts": {
+                                "tested": fandom_summary["tested"],
+                                "valid": fandom_summary["valid"],
+                                "missing": fandom_summary["missing"],
+                                "errors": fandom_summary["errors"],
+                            },
+                        }
+                        if error_value:
+                            progress_payload["error"] = error_value
+                        if person:
+                            progress_payload["person"] = person
+                        yield _sse_event("progress", progress_payload)
+
+            summary = _summarize_candidate_results(person_candidate_results)
+            fandom_summary = _summarize_candidate_results(fandom_candidate_results)
+            resolved_person_urls = _merge_person_url_candidates(
+                [str(person.get("canonical_url") or "").strip() for person in people if isinstance(person, dict)]
+            )
+            complete_payload = {
+                "show": base_bundle.get("show") or {},
+                "people": people,
+                "fandom_people": fandom_people,
+                "videos": base_bundle.get("videos") or [],
+                "news": base_bundle.get("news") or [],
+                "image_candidates": base_bundle.get("image_candidates") or [],
+                "discovered_person_urls": resolved_person_urls if payload.include_people else person_url_candidates,
+                "person_candidate_results": person_candidate_results,
+                "bravo_candidates_tested": summary["tested"],
+                "bravo_candidates_valid": summary["valid"],
+                "bravo_candidates_missing": summary["missing"],
+                "bravo_candidates_errors": summary["errors"],
+                "fandom_domains_used": fandom_domains,
+                "fandom_candidate_urls_tested": fandom_candidate_urls,
+                "fandom_candidate_results": fandom_candidate_results,
+                "fandom_candidates_tested": fandom_summary["tested"],
+                "fandom_candidates_valid": fandom_summary["valid"],
+                "fandom_candidates_missing": fandom_summary["missing"],
+                "fandom_candidates_errors": fandom_summary["errors"],
+                "skipped_existing_bravo_profiles": sum(
+                    1 for state in link_state_by_person_id.values() if bool(state.get("has_non_rejected"))
+                ),
+                "skipped_na_profiles": sum(
+                    1 for state in link_state_by_person_id.values() if bool(state.get("has_na"))
+                ),
+                "cast_candidate_urls_tested": person_url_candidates,
+                "cast_candidate_person_names": cast_person_name_by_id,
+                "show_url": str(payload.show_url),
+                "cast_only": payload.cast_only,
+                "season_filter": payload.season_number,
+            }
+            yield _sse_event("complete", complete_payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Bravo preview stream failed for show %s", show_id_str)
+            yield _sse_event(
+                "error",
+                {
+                    "error": "Bravo preview stream failed",
+                    "detail": str(exc),
+                    "status": 500,
+                },
+            )
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.post("/{show_id}/import-bravo/commit")
@@ -1546,41 +3092,74 @@ def commit_bravo_import(
         cast_person_ids=cast_person_ids,
     )
     cast_url_lookup = _build_cast_person_url_lookup(show_cast)
-    cast_candidate_urls, eligible_candidate_url_to_person_id = _build_eligible_cast_candidate_person_urls(
-        show_cast,
-        link_state_by_person_id=link_state_by_person_id,
-    )
+    if payload.cast_only:
+        cast_candidate_urls = _build_cast_candidate_person_urls(show_cast)
+        eligible_candidate_url_to_person_id = dict(cast_url_lookup)
+    else:
+        cast_candidate_urls, eligible_candidate_url_to_person_id = _build_eligible_cast_candidate_person_urls(
+            show_cast,
+            link_state_by_person_id=link_state_by_person_id,
+        )
     explicit_candidate_urls = [str(url) for url in payload.person_url_candidates]
     filtered_explicit_candidate_urls = _filter_explicit_person_url_candidates(
         explicit_candidate_urls,
         cast_url_lookup=cast_url_lookup,
         link_state_by_person_id=link_state_by_person_id,
+        suppress_link_state=not payload.cast_only,
     )
     person_url_candidates = _merge_person_url_candidates(filtered_explicit_candidate_urls, cast_candidate_urls)
-
-    bundle = parse_bravo_show_bundle(
-        str(payload.show_url),
-        include_people=True,
-        include_videos=not payload.cast_only,
-        include_news=not payload.cast_only,
-        person_url_candidates=person_url_candidates,
-        max_people=max(40, len(person_url_candidates)),
+    fandom_domains = _load_fandom_probe_domains(db, show_id=show_id_str)
+    fandom_candidate_urls, fandom_candidate_url_to_person_id, fandom_candidate_name_by_url = (
+        _build_cast_candidate_fandom_urls(show_cast, community_domains=fandom_domains)
     )
+    fandom_link_state_by_person_id = _load_fandom_link_state_by_person_id(
+        db,
+        show_id=show_id_str,
+        cast_person_ids=cast_person_ids,
+    )
+
+    if payload.cast_only and isinstance(payload.preview_result, dict):
+        _validate_cast_only_preview_reuse_or_raise(
+            preview_result=payload.preview_result,
+            show_url=str(payload.show_url),
+            season_number=payload.season_number,
+            expected_candidate_urls=person_url_candidates,
+            expected_fandom_candidate_urls=fandom_candidate_urls,
+        )
+        bundle = _build_bundle_from_preview_result(payload.preview_result)
+    else:
+        bundle = parse_bravo_show_bundle(
+            str(payload.show_url),
+            include_people=True,
+            include_videos=not payload.cast_only,
+            include_news=not payload.cast_only,
+            person_url_candidates=person_url_candidates,
+            max_people=max(40, len(person_url_candidates)),
+            candidate_people_only=payload.cast_only,
+            include_person_related_content=not payload.cast_only,
+            hydrate_person_related_dates=not payload.cast_only,
+        )
     bundle = _filter_bundle_by_season(bundle, payload.season_number)
     person_candidate_results = (
         bundle.get("person_candidate_results") if isinstance(bundle.get("person_candidate_results"), list) else []
     )
-    bravo_candidates_tested = len(person_candidate_results)
-    bravo_candidates_valid = sum(
-        1
-        for result in person_candidate_results
-        if isinstance(result, dict) and str(result.get("status") or "").strip().lower() == "ok"
+    summary = _summarize_candidate_results(person_candidate_results)
+    bravo_candidates_tested = summary["tested"]
+    bravo_candidates_valid = summary["valid"]
+    bravo_candidates_missing = summary["missing"]
+    fandom_candidate_results = (
+        bundle.get("fandom_candidate_results") if isinstance(bundle.get("fandom_candidate_results"), list) else []
     )
-    bravo_candidates_missing = sum(
-        1
-        for result in person_candidate_results
-        if isinstance(result, dict) and str(result.get("status") or "").strip().lower() == "missing"
-    )
+    if not fandom_candidate_results:
+        fandom_candidate_results = _probe_fandom_person_url_candidates(
+            fandom_candidate_urls,
+            candidate_name_by_url=fandom_candidate_name_by_url,
+            max_people=max(40, len(fandom_candidate_urls)),
+        )
+    fandom_summary = _summarize_candidate_results(fandom_candidate_results)
+    fandom_candidates_tested = fandom_summary["tested"]
+    fandom_candidates_valid = fandom_summary["valid"]
+    fandom_candidates_missing = fandom_summary["missing"]
     missing_candidate_urls = [
         str(result.get("url") or "").strip()
         for result in person_candidate_results
@@ -1665,6 +3244,8 @@ def commit_bravo_import(
                 "airs_text": show_airs,
             },
             "season_filter": payload.season_number,
+            "fandom_domains_used": fandom_domains,
+            "fandom_candidate_results": fandom_candidate_results,
         },
         "raw": bundle.get("raw") or bundle,
         "person_url_map": person_url_map,
@@ -1683,11 +3264,7 @@ def commit_bravo_import(
             )
         else:
             _persist_show_description(db, show_id_str, show_description)
-    actor = str(
-        (admin_user or {}).get("email")
-        or (admin_user or {}).get("id")
-        or "admin"
-    )
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
     bravo_na_marked = _persist_missing_bravo_profile_markers(
         db,
         show_id=show_id_str,
@@ -1696,6 +3273,24 @@ def commit_bravo_import(
         candidate_url_to_person_id=eligible_candidate_url_to_person_id,
         cast_person_name_by_id=cast_person_name_by_id,
         link_state_by_person_id=link_state_by_person_id,
+    )
+    fandom_links_upserted = _persist_valid_fandom_profile_links(
+        db,
+        show_id=show_id_str,
+        actor=actor,
+        fandom_candidate_results=fandom_candidate_results,
+        candidate_url_to_person_id=fandom_candidate_url_to_person_id,
+        cast_person_name_by_id=cast_person_name_by_id,
+        link_state_by_person_id=fandom_link_state_by_person_id,
+    )
+    fandom_na_marked = _persist_missing_fandom_profile_markers(
+        db,
+        show_id=show_id_str,
+        actor=actor,
+        fandom_candidate_results=fandom_candidate_results,
+        candidate_url_to_person_id=fandom_candidate_url_to_person_id,
+        cast_person_name_by_id=cast_person_name_by_id,
+        link_state_by_person_id=fandom_link_state_by_person_id,
     )
     discovered_links = 0
     role_suggestion_stats = {
@@ -1743,7 +3338,10 @@ def commit_bravo_import(
     unmatched_people: list[str] = []
     imported_person_images = 0
     skipped_person_images = 0
+    fandom_profiles_upserted = 0
+    fandom_fallback_images_imported = 0
     person_image_import_errors: list[str] = []
+    profile_image_promoted_by_person_id: dict[str, bool] = {}
 
     for person in bundle.get("people") or []:
         if not isinstance(person, dict):
@@ -1755,6 +3353,7 @@ def commit_bravo_import(
         if not person_id:
             unmatched_people.append(person_url)
             continue
+        profile_image_promoted_by_person_id.setdefault(person_id, False)
 
         person_payload = {
             "source": _BRAVO_SOURCE_ID,
@@ -1785,9 +3384,7 @@ def commit_bravo_import(
             person_id=person_id,
             person_url=person_url,
             bio=person.get("bio") if isinstance(person.get("bio"), str) else None,
-            hero_image_url=(
-                person.get("hero_image_url") if isinstance(person.get("hero_image_url"), str) else None
-            ),
+            hero_image_url=(person.get("hero_image_url") if isinstance(person.get("hero_image_url"), str) else None),
             social_links={str(k): str(v) for k, v in social_links.items() if isinstance(v, str)},
         )
 
@@ -1805,6 +3402,28 @@ def commit_bravo_import(
                     hero_image_url=hero_image_url.strip(),
                     person_name=person.get("name") if isinstance(person.get("name"), str) else None,
                 )
+                for asset_id in person_import_result.get("asset_ids") or []:
+                    if not isinstance(asset_id, str) or not asset_id.strip():
+                        continue
+                    _promote_bravo_profile_media_link(
+                        db=db,
+                        person_id=person_id,
+                        person_url=person_url,
+                        media_asset_id=asset_id.strip(),
+                        season_number=payload.season_number,
+                    )
+                    profile_image_promoted_by_person_id[person_id] = True
+                hosted_profile_url = person_import_result.get("primary_hosted_url")
+                if isinstance(hosted_profile_url, str) and hosted_profile_url.strip():
+                    _persist_person_profile(
+                        db,
+                        person_id=person_id,
+                        person_url=person_url,
+                        bio=person.get("bio") if isinstance(person.get("bio"), str) else None,
+                        hero_image_url=hosted_profile_url.strip(),
+                        social_links={str(k): str(v) for k, v in social_links.items() if isinstance(v, str)},
+                    )
+                    profile_image_promoted_by_person_id[person_id] = True
                 imported_person_images += int(person_import_result.get("imported") or 0)
                 skipped_person_images += int(person_import_result.get("skipped") or 0)
                 person_image_import_errors.extend(
@@ -1818,6 +3437,102 @@ def commit_bravo_import(
                 logger.exception("Bravo person image import failed for person_id=%s", person_id)
                 person_image_import_errors.append(f"{person_id}: {exc}")
         updated_people += 1
+
+    for result in fandom_candidate_results:
+        if not isinstance(result, dict):
+            continue
+        status = str(result.get("status") or "").strip().lower()
+        if status != "ok":
+            continue
+        candidate_url = _normalize_fandom_url(str(result.get("candidate_url") or "").strip())
+        if not candidate_url:
+            continue
+        person_id = fandom_candidate_url_to_person_id.get(candidate_url)
+        if not person_id:
+            continue
+        person_url = _normalize_fandom_url(str(result.get("url") or "").strip()) or candidate_url
+        person_name = cast_person_name_by_id.get(person_id) or (
+            str((result.get("person") or {}).get("name") or "").strip()
+            if isinstance(result.get("person"), dict)
+            else ""
+        )
+        cast_fandom_payload = result.get("cast_fandom") if isinstance(result.get("cast_fandom"), dict) else None
+        if cast_fandom_payload:
+            try:
+                row = dict(cast_fandom_payload)
+                row["person_id"] = person_id
+                row["source"] = "fandom"
+                upsert_cast_fandom(db, row)
+                fandom_profiles_upserted += 1
+                row_bio_raw = row.get("casting_summary") or row.get("summary")
+                row_bio = str(row_bio_raw).strip() if isinstance(row_bio_raw, str) and row_bio_raw.strip() else None
+                _persist_person_profile(
+                    db,
+                    person_id=person_id,
+                    person_url=person_url,
+                    bio=row_bio,
+                    hero_image_url=None,
+                    social_links={},
+                    source="fandom",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Fandom profile upsert failed for person_id=%s", person_id)
+                person_image_import_errors.append(f"{person_id}: fandom_profile_upsert_failed: {exc}")
+
+        if profile_image_promoted_by_person_id.get(person_id):
+            continue
+        photos = result.get("photos") if isinstance(result.get("photos"), list) else []
+        fallback_image_url = _select_fandom_profile_image_url(photos)
+        if not fallback_image_url:
+            continue
+        try:
+            fandom_import_result = _import_fandom_person_image(
+                db=db,
+                admin_user=admin_user,
+                show_id=show_id_str,
+                season_id=season_id,
+                season_number=payload.season_number,
+                person_id=person_id,
+                person_url=person_url,
+                image_url=fallback_image_url,
+                person_name=person_name or None,
+            )
+            for asset_id in fandom_import_result.get("asset_ids") or []:
+                if not isinstance(asset_id, str) or not asset_id.strip():
+                    continue
+                _promote_fandom_profile_media_link(
+                    db=db,
+                    person_id=person_id,
+                    person_url=person_url,
+                    media_asset_id=asset_id.strip(),
+                    season_number=payload.season_number,
+                )
+                profile_image_promoted_by_person_id[person_id] = True
+            hosted_profile_url = fandom_import_result.get("primary_hosted_url")
+            if isinstance(hosted_profile_url, str) and hosted_profile_url.strip():
+                _persist_person_profile(
+                    db,
+                    person_id=person_id,
+                    person_url=person_url,
+                    bio=None,
+                    hero_image_url=hosted_profile_url.strip(),
+                    social_links={},
+                    source="fandom",
+                )
+                profile_image_promoted_by_person_id[person_id] = True
+            imported_person_images += int(fandom_import_result.get("imported") or 0)
+            skipped_person_images += int(fandom_import_result.get("skipped") or 0)
+            fandom_fallback_images_imported += int(fandom_import_result.get("imported") or 0)
+            person_image_import_errors.extend(
+                [
+                    str(error)
+                    for error in (fandom_import_result.get("errors") or [])
+                    if isinstance(error, str) and error.strip()
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Fandom fallback image import failed for person_id=%s", person_id)
+            person_image_import_errors.append(f"{person_id}: fandom_fallback_import_failed: {exc}")
 
     imported_show_images = 0
     imported_show_images_skipped = 0
@@ -1914,9 +3629,19 @@ def commit_bravo_import(
             "bravo_candidates_valid": bravo_candidates_valid,
             "bravo_candidates_missing": bravo_candidates_missing,
             "bravo_na_marked": bravo_na_marked,
+            "fandom_candidates_tested": fandom_candidates_tested,
+            "fandom_candidates_valid": fandom_candidates_valid,
+            "fandom_candidates_missing": fandom_candidates_missing,
+            "fandom_candidates_errors": fandom_summary["errors"],
+            "fandom_profiles_upserted": fandom_profiles_upserted,
+            "fandom_links_upserted": fandom_links_upserted,
+            "fandom_na_marked": fandom_na_marked,
+            "fandom_fallback_images_imported": fandom_fallback_images_imported,
         },
         "unmatched_person_urls": unmatched_people,
         "person_candidate_results": person_candidate_results,
+        "fandom_candidate_results": fandom_candidate_results,
+        "fandom_domains_used": fandom_domains,
         "image_import_errors": image_import_errors,
         "person_image_import_errors": person_image_import_errors,
     }

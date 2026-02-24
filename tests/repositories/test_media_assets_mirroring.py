@@ -291,9 +291,7 @@ def test_update_asset_with_mirror_result_persists_dimensions() -> None:
     mock_response = MagicMock()
     mock_response.data = [{"id": "asset-1"}]
     mock_response.error = None
-    db.schema.return_value.table.return_value.update.return_value.eq.return_value.execute.return_value = (
-        mock_response
-    )
+    db.schema.return_value.table.return_value.update.return_value.eq.return_value.execute.return_value = mock_response
 
     update_asset_with_mirror_result(
         db,

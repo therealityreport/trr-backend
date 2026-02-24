@@ -126,6 +126,7 @@ def _show_exists(show_id: str) -> bool:
 
 _IMDB_PERSON_ID_RE = re.compile(r"nm\d+")
 _TMDB_PERSON_ID_RE = re.compile(r"\d+")
+_PERSON_SOURCE_LINK_KINDS = {"wikipedia", "wikidata", "fandom", "wikia", "imdb", "tmdb", "bravo_profile"}
 _IMDB_MISSING_PATTERNS = (
     "404 error",
     "requested url was not found",
@@ -141,6 +142,20 @@ _BRAVO_MISSING_PATTERNS = (
     "page not found",
     "we couldn't find this page",
     "oops",
+)
+_IMDB_CHALLENGE_PATTERNS = (
+    "javascript is disabled",
+    "please enable javascript",
+    "reference id:",
+    "security challenge",
+    "captcha",
+)
+_TMDB_CHALLENGE_PATTERNS = (
+    "verify you are human",
+    "just a moment",
+    "cloudflare",
+    "captcha",
+    "please enable javascript",
 )
 
 
@@ -247,6 +262,26 @@ def _is_missing_bravo_person_page(html: str, resolved_url: str) -> bool:
         return True
     lowered = (html or "").casefold()
     return any(marker in lowered for marker in _BRAVO_MISSING_PATTERNS)
+
+
+def _is_access_challenge_page(html: str, *, status_code: int | None, markers: tuple[str, ...]) -> bool:
+    lowered = (html or "").casefold()
+    if not lowered:
+        return False
+    if not any(marker in lowered for marker in markers):
+        return False
+    if status_code in {202, 401, 403, 429, 503}:
+        return True
+    return any(
+        marker in lowered
+        for marker in (
+            "captcha",
+            "cloudflare",
+            "verify you are human",
+            "security challenge",
+            "reference id:",
+        )
+    )
 
 
 @lru_cache(maxsize=256)
@@ -484,6 +519,12 @@ def _validate_person_knowledge_url(
         if _is_missing_imdb_person_page(html, resolved, imdb_id):
             return None, "invalid"
         if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
+            if _is_access_challenge_page(
+                html,
+                status_code=status_code,
+                markers=_IMDB_CHALLENGE_PATTERNS,
+            ):
+                return canonical_url, "valid"
             return None, "invalid"
         return canonical_url, "valid"
 
@@ -507,6 +548,12 @@ def _validate_person_knowledge_url(
         if _is_missing_tmdb_person_page(html, resolved, tmdb_id):
             return None, "invalid"
         if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
+            if _is_access_challenge_page(
+                html,
+                status_code=status_code,
+                markers=_TMDB_CHALLENGE_PATTERNS,
+            ):
+                return canonical_url, "valid"
             return None, "invalid"
         return canonical_url, "valid"
 
@@ -610,6 +657,7 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
     show_slug = _slug(show_name)
     networks = [str(n).strip().lower() for n in (show.get("networks") or []) if isinstance(n, str)]
     external_ids = show.get("external_ids") if isinstance(show.get("external_ids"), dict) else {}
+    fandom_allowlist = load_fandom_community_allowlist()
 
     discovered: list[dict[str, Any]] = []
 
@@ -638,6 +686,52 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
                 "source": "derived",
             }
         )
+        existing_show_fandom_links = pg.fetch_all(
+            """
+            SELECT url
+            FROM core.entity_links
+            WHERE show_id = %s
+              AND entity_type = 'show'
+              AND season_number = 0
+              AND lower(link_kind) IN ('fandom', 'wikia')
+              AND lower(status) <> 'rejected'
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+            LIMIT 10
+            """,
+            [show_id],
+        )
+        fandom_urls: list[tuple[str, str]] = []
+        seen_fandom_urls: set[str] = set()
+        for row in existing_show_fandom_links:
+            raw_url = str(row.get("url") or "").strip()
+            if not raw_url:
+                continue
+            parsed = urlparse(raw_url)
+            if not parsed.scheme.startswith("http"):
+                continue
+            if not is_allowlisted_fandom_domain(raw_url, allowlist=fandom_allowlist):
+                continue
+            normalized = raw_url.rstrip("/")
+            if normalized in seen_fandom_urls:
+                continue
+            seen_fandom_urls.add(normalized)
+            fandom_urls.append((normalized, "core.entity_links"))
+        if not fandom_urls:
+            derived_fandom_url = f"https://real-housewives.fandom.com/wiki/{quote(show_name.replace(' ', '_'))}"
+            fandom_urls.append((derived_fandom_url, "derived"))
+        for fandom_url, fandom_source in fandom_urls:
+            discovered.append(
+                {
+                    "entity_type": "show",
+                    "entity_id": show_id,
+                    "season_number": 0,
+                    "link_group": "knowledge",
+                    "link_kind": "fandom",
+                    "label": "Fandom",
+                    "url": fandom_url,
+                    "source": fandom_source,
+                }
+            )
 
     wikidata_id = str(show.get("wikidata_id") or "").strip()
     if wikidata_id:
@@ -913,9 +1007,7 @@ def _discover_people_links(show_id: str) -> list[dict[str, Any]]:
             """,
             [show_id],
         )
-        housewife_friend_ids = {
-            str(row.get("person_id") or "").strip() for row in role_rows if row.get("person_id")
-        }
+        housewife_friend_ids = {str(row.get("person_id") or "").strip() for row in role_rows if row.get("person_id")}
 
     rows = pg.fetch_all(
         """
@@ -1098,7 +1190,7 @@ def _load_show_cast_names_by_person_id(show_id: str) -> dict[str, str]:
 
 
 def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
-    supported_link_kinds = {"wikipedia", "wikidata", "fandom", "wikia", "imdb", "tmdb", "bravo_profile"}
+    supported_link_kinds = _PERSON_SOURCE_LINK_KINDS
     cast_people = _load_show_cast_names_by_person_id(show_id)
     links = pg.fetch_all(
         """
@@ -1117,11 +1209,13 @@ def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
     )
 
     invalid_rows: list[dict[str, Any]] = []
+    pending_promotions: list[dict[str, Any]] = []
     validation_failures = 0
     for row in links:
         link_id = str(row.get("id") or "").strip()
         person_id = str(row.get("person_id") or "").strip()
         link_kind = str(row.get("link_kind") or "").strip().lower()
+        status = str(row.get("status") or "").strip().lower()
         url = str(row.get("url") or "").strip()
         if not link_id or not person_id or link_kind not in supported_link_kinds or not url:
             continue
@@ -1131,11 +1225,19 @@ def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
             invalid_rows.append({**row, "reason": "person_not_in_show_cast"})
             continue
 
-        _resolved, outcome = _validate_person_knowledge_url(
+        resolved, outcome = _validate_person_knowledge_url(
             url,
             kind=link_kind,
             expected_name=expected_name,
         )
+        if status == "pending":
+            if outcome == "valid":
+                pending_promotions.append({**row, "resolved_url": resolved or url})
+            else:
+                invalid_rows.append({**row, "reason": "pending_not_allowed_for_person_source"})
+                if outcome == "fetch_error":
+                    validation_failures += 1
+            continue
         if outcome == "fetch_error":
             validation_failures += 1
             continue
@@ -1146,6 +1248,7 @@ def _scan_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
         "scanned_rows": links,
         "scanned": len(links),
         "invalid_rows": invalid_rows,
+        "pending_promotions": pending_promotions,
         "validation_failures": validation_failures,
     }
 
@@ -1165,14 +1268,49 @@ def _delete_entity_links_by_id(link_ids: list[str]) -> int:
     return len(deleted_rows)
 
 
+def _promote_pending_person_source_links(rows: list[dict[str, Any]]) -> int:
+    promoted = 0
+    for row in rows:
+        link_id = str(row.get("id") or "").strip()
+        resolved_url = str(row.get("resolved_url") or row.get("url") or "").strip()
+        if not link_id or not resolved_url:
+            continue
+        try:
+            updated = pg.execute_returning(
+                """
+                UPDATE core.entity_links
+                SET
+                  status = 'approved',
+                  confidence = 0.95,
+                  url = %s,
+                  url_key = lower(%s),
+                  updated_at = NOW()
+                WHERE id = %s::uuid
+                RETURNING id
+                """,
+                [resolved_url, resolved_url, link_id],
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc).lower()
+            if "duplicate key value violates unique constraint" in message and "entity_links_unique_active" in message:
+                _delete_entity_links_by_id([link_id])
+                continue
+            raise
+        promoted += len(updated)
+    return promoted
+
+
 def _cleanup_invalid_person_knowledge_links(show_id: str) -> dict[str, int]:
     scan = _scan_invalid_person_knowledge_links(show_id)
     invalid_rows = scan.get("invalid_rows") if isinstance(scan.get("invalid_rows"), list) else []
+    pending_promotions = scan.get("pending_promotions") if isinstance(scan.get("pending_promotions"), list) else []
+    promoted = _promote_pending_person_source_links(pending_promotions)
     invalid_ids = [str(row.get("id") or "").strip() for row in invalid_rows if row.get("id")]
     deleted = _delete_entity_links_by_id(invalid_ids)
     return {
         "scanned": int(scan.get("scanned") or 0),
         "invalid": len(invalid_rows),
+        "promoted": promoted,
         "deleted": deleted,
         "validation_failures": int(scan.get("validation_failures") or 0),
     }
@@ -1199,22 +1337,30 @@ def discover_show_links(
     upserted = 0
     by_group: dict[str, int] = {}
     for row in discovered:
+        entity_type = str(row.get("entity_type") or "").strip().lower()
+        link_kind = str(row.get("link_kind") or "").strip().lower()
         parsed = urlparse(str(row["url"]))
         if not parsed.scheme.startswith("http"):
             continue
-        status = str(row.get("status") or "pending")
+        row_status = str(row.get("status") or "pending").strip().lower()
+        status = row_status if row_status in {"pending", "approved", "rejected"} else "pending"
+        if entity_type == "person" and link_kind in _PERSON_SOURCE_LINK_KINDS and status != "approved":
+            continue
         confidence_raw = row.get("confidence")
         if isinstance(confidence_raw, (int, float)):
             confidence = float(confidence_raw)
         else:
-            confidence = 0.9 if status == "approved" else 0.65
+            if entity_type == "person" and link_kind in _PERSON_SOURCE_LINK_KINDS:
+                confidence = 0.95
+            else:
+                confidence = 0.9 if status == "approved" else 0.65
         _upsert_link(
             db,
             show_id=show_id_str,
-            entity_type=row["entity_type"],
+            entity_type=entity_type or row["entity_type"],
             entity_id=str(row["entity_id"]),
             link_group=row["link_group"],
-            link_kind=str(row["link_kind"]),
+            link_kind=link_kind or str(row["link_kind"]),
             url=str(row["url"]),
             label=(str(row.get("label")) if row.get("label") else None),
             season_number=int(row.get("season_number") or 0),
@@ -1228,7 +1374,7 @@ def discover_show_links(
         upserted += 1
         by_group[row["link_group"]] = by_group.get(row["link_group"], 0) + 1
 
-    invalid_people_cleanup = {"deleted": 0, "validation_failures": 0}
+    invalid_people_cleanup = {"deleted": 0, "promoted": 0, "validation_failures": 0}
     if payload.include_people:
         invalid_people_cleanup = _cleanup_invalid_person_knowledge_links(show_id_str)
 
@@ -1237,9 +1383,8 @@ def discover_show_links(
         "discovered": upserted,
         "counts_by_group": by_group,
         "invalid_people_links_deleted": int(invalid_people_cleanup.get("deleted") or 0),
-        "invalid_people_links_validation_failures": int(
-            invalid_people_cleanup.get("validation_failures") or 0
-        ),
+        "pending_person_source_links_promoted": int(invalid_people_cleanup.get("promoted") or 0),
+        "invalid_people_links_validation_failures": int(invalid_people_cleanup.get("validation_failures") or 0),
     }
 
 
@@ -1267,7 +1412,7 @@ def list_show_links(
         f"""
         SELECT *
         FROM core.entity_links
-        WHERE {' AND '.join(clauses)}
+        WHERE {" AND ".join(clauses)}
         ORDER BY link_group, season_number DESC, created_at DESC
         """,
         params,
@@ -1355,12 +1500,7 @@ def delete_show_link(
     _: AdminUser,
 ) -> dict[str, Any]:
     response = (
-        db.schema("core")
-        .table("entity_links")
-        .delete()
-        .eq("id", str(link_id))
-        .eq("show_id", str(show_id))
-        .execute()
+        db.schema("core").table("entity_links").delete().eq("id", str(link_id)).eq("show_id", str(show_id)).execute()
     )
     rows = get_list_result(response, "deleting entity link")
     if not rows:

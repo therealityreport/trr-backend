@@ -173,6 +173,50 @@ def test_parse_person_page_excludes_global_footer_social_handles(monkeypatch: py
     assert "bravotv" not in person["social_links"].values()
 
 
+def test_parse_person_page_profile_essentials_mode_skips_related_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    person_url = "https://www.bravotv.com/people/andy-cohen"
+    requested_urls: list[str] = []
+
+    def _mock_get(url: str, **_: object) -> _FakeResponse:
+        requested_urls.append(url)
+        if url != person_url:
+            raise requests.RequestException(f"unexpected url: {url}")
+        return _FakeResponse(
+            url=url,
+            text="""
+                <html>
+                  <head>
+                    <meta property="og:title" content="Andy Cohen" />
+                    <meta property="og:description" content="Andy bio text" />
+                    <meta property="og:image" content="/images/andy.jpg" />
+                  </head>
+                  <body>
+                    <a href="https://www.instagram.com/bravoandy">IG</a>
+                    <a href="/people/andy-cohen/videos/clip-1">Video</a>
+                    <a href="/the-daily-dish/andy-story">Story</a>
+                  </body>
+                </html>
+            """,
+        )
+
+    monkeypatch.setattr(bravo_parser.requests, "get", _mock_get)
+
+    person = bravo_parser.parse_person_page(
+        person_url,
+        include_related_content=False,
+        hydrate_related_dates=False,
+    )
+
+    assert requested_urls == [person_url]
+    assert person["name"] == "Andy Cohen"
+    assert person["bio"] == "Andy bio text"
+    assert person["hero_image_url"] == "https://www.bravotv.com/images/andy.jpg"
+    assert person["videos"] == []
+    assert person["news"] == []
+
+
 def test_parse_show_page_extracts_day_time_airs_text(monkeypatch: pytest.MonkeyPatch) -> None:
     show_url = "https://www.bravotv.com/summer-house"
 
@@ -239,6 +283,113 @@ def test_parse_show_page_image_candidates_exclude_video_and_news_cards(
     assert "https://www.bravotv.com/images/news-thumb.jpg" not in image_urls
 
 
+def test_parse_bravo_show_bundle_candidate_people_only_uses_explicit_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    show_url = "https://www.bravotv.com/the-valley"
+    explicit_person_url = "https://www.bravotv.com/people/andy-cohen"
+
+    monkeypatch.setattr(
+        bravo_parser.requests,
+        "get",
+        _mock_get_factory(
+            {
+                show_url: """
+                    <html>
+                      <head>
+                        <meta property=\"og:title\" content=\"The Valley\" />
+                        <meta property=\"og:description\" content=\"Description\" />
+                      </head>
+                      <body>
+                        <a href=\"/people/discovered-only\">Discovered Person</a>
+                      </body>
+                    </html>
+                """,
+                explicit_person_url: """
+                    <html>
+                      <head>
+                        <meta property=\"og:title\" content=\"Andy Cohen\" />
+                        <meta property=\"og:description\" content=\"Bio text\" />
+                        <meta property=\"og:image\" content=\"/images/andy.jpg\" />
+                      </head>
+                      <body>
+                        <a href=\"https://www.instagram.com/bravoandy\">IG</a>
+                      </body>
+                    </html>
+                """,
+            }
+        ),
+    )
+
+    bundle = bravo_parser.parse_bravo_show_bundle(
+        show_url,
+        include_videos=False,
+        include_news=False,
+        person_url_candidates=[explicit_person_url],
+        candidate_people_only=True,
+    )
+
+    assert [result["url"] for result in bundle["person_candidate_results"]] == [explicit_person_url]
+    assert [result["status"] for result in bundle["person_candidate_results"]] == ["ok"]
+    assert [person["canonical_url"] for person in bundle["people"]] == [explicit_person_url]
+
+
+def test_parse_bravo_show_bundle_default_merges_candidates_with_discovered_people(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    show_url = "https://www.bravotv.com/the-valley"
+    explicit_person_url = "https://www.bravotv.com/people/andy-cohen"
+    discovered_person_url = "https://www.bravotv.com/people/discovered-only"
+
+    monkeypatch.setattr(
+        bravo_parser.requests,
+        "get",
+        _mock_get_factory(
+            {
+                show_url: """
+                    <html>
+                      <head>
+                        <meta property=\"og:title\" content=\"The Valley\" />
+                        <meta property=\"og:description\" content=\"Description\" />
+                      </head>
+                      <body>
+                        <a href=\"/people/discovered-only\">Discovered Person</a>
+                      </body>
+                    </html>
+                """,
+                explicit_person_url: """
+                    <html>
+                      <head>
+                        <meta property=\"og:title\" content=\"Andy Cohen\" />
+                        <meta property=\"og:description\" content=\"Bio text\" />
+                      </head>
+                      <body></body>
+                    </html>
+                """,
+                discovered_person_url: """
+                    <html>
+                      <head>
+                        <meta property=\"og:title\" content=\"Discovered Person\" />
+                        <meta property=\"og:description\" content=\"Bio text\" />
+                      </head>
+                      <body></body>
+                    </html>
+                """,
+            }
+        ),
+    )
+
+    bundle = bravo_parser.parse_bravo_show_bundle(
+        show_url,
+        include_videos=False,
+        include_news=False,
+        person_url_candidates=[explicit_person_url],
+    )
+
+    result_urls = {result["url"] for result in bundle["person_candidate_results"]}
+    assert result_urls == {explicit_person_url, discovered_person_url}
+
+
 def test_parse_bravo_show_bundle_includes_candidate_people_and_skips_not_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,3 +453,101 @@ def test_parse_bravo_show_bundle_includes_candidate_people_and_skips_not_found(
     status_by_url = {row["url"]: row["status"] for row in results}
     assert status_by_url[valid_person_url] == "ok"
     assert status_by_url[invalid_person_url] == "missing"
+
+
+def test_probe_bravo_person_url_candidates_yields_deterministic_order_and_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    andy_url = "https://www.bravotv.com/people/andy-cohen"
+    missing_url = "https://www.bravotv.com/people/not-found"
+    error_url = "https://www.bravotv.com/people/network-error"
+
+    def _fake_parse(url: str) -> dict[str, object]:
+        if url == missing_url:
+            raise requests.RequestException(f"Bravo person page not found: {url}")
+        if url == error_url:
+            raise requests.RequestException("upstream timeout")
+        return {
+            "canonical_url": url,
+            "name": "Resolved Person",
+        }
+
+    monkeypatch.setattr(bravo_parser, "parse_person_page", _fake_parse)
+
+    probes = list(
+        bravo_parser.probe_bravo_person_url_candidates(
+            [andy_url, missing_url, error_url],
+            max_people=10,
+        )
+    )
+
+    assert [probe["candidate_url"] for probe in probes] == [andy_url, missing_url, error_url]
+    assert [probe["status"] for probe in probes] == ["ok", "missing", "error"]
+    assert probes[0]["url"] == andy_url
+    assert probes[1]["url"] == missing_url
+    assert probes[2]["url"] == error_url
+
+
+def test_probe_bravo_person_url_candidates_respects_max_people_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed_urls: list[str] = []
+
+    def _fake_parse(url: str) -> dict[str, object]:
+        parsed_urls.append(url)
+        return {
+            "canonical_url": url,
+            "name": "Resolved Person",
+        }
+
+    monkeypatch.setattr(bravo_parser, "parse_person_page", _fake_parse)
+
+    probes = list(
+        bravo_parser.probe_bravo_person_url_candidates(
+            [
+                "https://www.bravotv.com/people/a",
+                "https://www.bravotv.com/people/b",
+                "https://www.bravotv.com/people/c",
+            ],
+            max_people=2,
+        )
+    )
+
+    assert len(probes) == 2
+    assert parsed_urls == [
+        "https://www.bravotv.com/people/a",
+        "https://www.bravotv.com/people/b",
+    ]
+
+
+def test_probe_bravo_person_url_candidates_passes_lightweight_parse_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called_kwargs: list[dict[str, object]] = []
+
+    def _fake_parse(url: str, **kwargs: object) -> dict[str, object]:
+        called_kwargs.append(dict(kwargs))
+        return {
+            "canonical_url": url,
+            "name": "Resolved Person",
+        }
+
+    monkeypatch.setattr(bravo_parser, "parse_person_page", _fake_parse)
+
+    probes = list(
+        bravo_parser.probe_bravo_person_url_candidates(
+            ["https://www.bravotv.com/people/a"],
+            max_people=1,
+            include_related_content=False,
+            hydrate_related_dates=False,
+        )
+    )
+
+    assert len(probes) == 1
+    assert probes[0]["status"] == "ok"
+    assert called_kwargs == [
+        {
+            "include_related_content": False,
+            "hydrate_related_dates": False,
+        }
+    ]

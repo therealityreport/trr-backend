@@ -177,7 +177,7 @@ def test_scrape_msn_uses_detail_api_for_images_and_context(monkeypatch) -> None:
         "abstract": "A cast reveal for the upcoming season.",
         "publishedDateTime": "2025-12-29T18:44:37Z",
         "body": (
-            '<h2>Reza Farahan</h2>'
+            "<h2>Reza Farahan</h2>"
             '<img data-reference="image" data-document-id="cms/api/amp/image/AA1Tfmxs">'
             "<p>After years of ups and downs, Reza is ready for this new chapter.</p>"
         ),
@@ -204,7 +204,9 @@ def test_scrape_msn_uses_detail_api_for_images_and_context(monkeypatch) -> None:
 
     monkeypatch.setattr(scraper.requests, "get", lambda *args, **kwargs: FakeGetResponse())
 
-    result = scrape_url_for_images("https://www.msn.com/en-us/entertainment/news/the-valley-persian-style-cast-previews-age-appropriate-drama/ar-AA1TfjXH")
+    result = scrape_url_for_images(
+        "https://www.msn.com/en-us/entertainment/news/the-valley-persian-style-cast-previews-age-appropriate-drama/ar-AA1TfjXH"
+    )
 
     assert result.error is None
     assert result.total_found == 1

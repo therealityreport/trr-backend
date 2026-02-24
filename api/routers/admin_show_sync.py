@@ -17,10 +17,10 @@ import time
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -32,6 +32,7 @@ import scripts.sync.sync_seasons as sync_seasons
 import scripts.sync.sync_seasons_episodes as sync_seasons_episodes
 import scripts.sync.sync_show_cast as sync_show_cast
 import scripts.sync.sync_show_images as sync_show_images
+import scripts.sync.sync_show_logos as sync_show_logos
 import scripts.sync.sync_shows as sync_shows
 import scripts.sync.sync_shows_all as sync_shows_all
 import scripts.sync.sync_tmdb_show_entities as sync_tmdb_show_entities
@@ -121,6 +122,134 @@ def _get_known_person_source_total(
     return None
 
 
+def _extract_tag_people_titles(metadata: dict[str, Any]) -> tuple[list[str], list[str], list[str], list[str]]:
+    tags = metadata.get("tags") if isinstance(metadata.get("tags"), dict) else {}
+    people = tags.get("people") if isinstance(tags.get("people"), list) else []
+    titles = tags.get("titles") if isinstance(tags.get("titles"), list) else []
+
+    people_names: list[str] = []
+    people_ids: list[str] = []
+    for item in people:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        imdb_id = str(item.get("imdb_id") or "").strip()
+        if name:
+            people_names.append(name)
+        if imdb_id:
+            people_ids.append(imdb_id)
+
+    title_names: list[str] = []
+    title_ids: list[str] = []
+    for item in titles:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        imdb_id = str(item.get("imdb_id") or "").strip()
+        if title:
+            title_names.append(title)
+        if imdb_id:
+            title_ids.append(imdb_id)
+
+    return (
+        list(dict.fromkeys(people_names)),
+        list(dict.fromkeys(people_ids)),
+        list(dict.fromkeys(title_names)),
+        list(dict.fromkeys(title_ids)),
+    )
+
+
+def _normalize_imdb_media_kind(image_type: str | None, fallback_kind: str = "media") -> str:
+    normalized = str(image_type or "").strip().lower()
+    if not normalized:
+        return fallback_kind
+    if "still" in normalized or "frame" in normalized:
+        return "episode_still"
+    if "poster" in normalized:
+        return "poster"
+    if "publicity" in normalized:
+        return "promo"
+    return fallback_kind
+
+
+def _enrich_imdb_mediaindex_rows_with_episode_context(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    show_name: str | None,
+    show_imdb_id: str | None,
+    rows: list[dict[str, Any]],
+) -> None:
+    if not rows:
+        return
+
+    imdb_title_ids: list[str] = []
+    for row in rows:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        _, _, _, title_ids = _extract_tag_people_titles(metadata)
+        imdb_title_ids.extend(title_ids)
+    imdb_title_ids = list(dict.fromkeys([value for value in imdb_title_ids if value]))
+
+    episodes_by_imdb: dict[str, dict[str, Any]] = {}
+    if imdb_title_ids:
+        for i in range(0, len(imdb_title_ids), 100):
+            chunk = imdb_title_ids[i : i + 100]
+            response = (
+                db.schema("core")
+                .table("episodes")
+                .select("id,imdb_episode_id,title,episode_number,season_number,air_date,show_id,show_name")
+                .eq("show_id", show_id)
+                .in_("imdb_episode_id", chunk)
+                .execute()
+            )
+            if hasattr(response, "error") and response.error:
+                logger.warning("IMDb mediaindex episode lookup failed for show %s: %s", show_id, response.error)
+                continue
+            for episode in response.data or []:
+                imdb_episode_id = str(episode.get("imdb_episode_id") or "").strip()
+                if imdb_episode_id:
+                    episodes_by_imdb[imdb_episode_id] = episode
+
+    for row in rows:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        people_names, people_ids, title_names, title_ids = _extract_tag_people_titles(metadata)
+        if people_names:
+            metadata["people_names"] = people_names
+        if people_ids:
+            metadata["people_imdb_ids"] = people_ids
+        if title_names:
+            metadata["title_names"] = title_names
+        if title_ids:
+            metadata["title_imdb_ids"] = title_ids
+
+        image_type = str(metadata.get("imdb_image_type") or row.get("image_type") or "").strip() or None
+        if image_type:
+            metadata["imdb_image_type"] = image_type
+            row["image_type"] = image_type
+            row["kind"] = _normalize_imdb_media_kind(image_type, str(row.get("kind") or "media"))
+
+        metadata.setdefault("show_id", show_id)
+        if show_name:
+            metadata.setdefault("show_name", show_name)
+        if show_imdb_id:
+            metadata.setdefault("show_imdb_id", show_imdb_id)
+
+        for title_id in title_ids:
+            episode = episodes_by_imdb.get(title_id)
+            if not episode:
+                continue
+            metadata["episode_id"] = episode.get("id")
+            metadata["episode_imdb_id"] = episode.get("imdb_episode_id")
+            metadata["episode_title"] = episode.get("title")
+            metadata["episode_number"] = episode.get("episode_number")
+            metadata["season_number"] = episode.get("season_number")
+            metadata["episode_air_date"] = episode.get("air_date")
+            row["kind"] = "episode_still"
+            break
+
+        row["metadata"] = metadata
+
+
 class SyncFromListsRequest(BaseModel):
     imdb_lists: list[str] | None = Field(default=None, description="IMDb list URLs.")
     tmdb_lists: list[str] | None = Field(default=None, description="TMDb list ids or URLs.")
@@ -160,7 +289,7 @@ class SyncNetworksStreamingStepResult(BaseModel):
 
 
 class SyncNetworksStreamingUnresolvedLogo(BaseModel):
-    type: Literal["network", "streaming"]
+    type: Literal["network", "streaming", "production"]
     id: str
     name: str
     reason: str
@@ -178,6 +307,14 @@ class SyncNetworksStreamingResponse(BaseModel):
     logos_mirrored: int
     variants_black_mirrored: int
     variants_white_mirrored: int
+    logo_assets_discovered: int
+    logo_assets_mirrored: int
+    logo_assets_skipped: int
+    logo_assets_failed: int
+    show_logos_discovered: int
+    show_logos_imported: int
+    show_logos_skipped: int
+    show_logo_failures: int
     completion_total: int
     completion_resolved: int
     completion_unresolved: int
@@ -193,7 +330,7 @@ class SyncNetworksStreamingResponse(BaseModel):
 
 class NetworksStreamingOverride(BaseModel):
     id: str
-    entity_type: Literal["network", "streaming"]
+    entity_type: Literal["network", "streaming", "production"]
     entity_key: str
     display_name_override: str | None = None
     wikidata_id_override: str | None = None
@@ -209,7 +346,7 @@ class NetworksStreamingOverride(BaseModel):
 
 
 class UpsertNetworksStreamingOverrideRequest(BaseModel):
-    entity_type: Literal["network", "streaming"]
+    entity_type: Literal["network", "streaming", "production"]
     entity_key: str
     display_name_override: str | None = None
     wikidata_id_override: str | None = None
@@ -222,7 +359,7 @@ class UpsertNetworksStreamingOverrideRequest(BaseModel):
 
 
 class PatchNetworksStreamingOverrideRequest(BaseModel):
-    entity_type: Literal["network", "streaming"] | None = None
+    entity_type: Literal["network", "streaming", "production"] | None = None
     entity_key: str | None = None
     display_name_override: str | None = None
     wikidata_id_override: str | None = None
@@ -385,6 +522,25 @@ def _schema_requirements() -> dict[tuple[str, str], set[str]]:
             "link_enriched_at",
             "link_enrichment_source",
         },
+        ("core", "production_companies"): {
+            "id",
+            "name",
+            "logo_path",
+            "hosted_logo_key",
+            "hosted_logo_url",
+            "hosted_logo_sha256",
+            "hosted_logo_black_key",
+            "hosted_logo_black_url",
+            "hosted_logo_black_sha256",
+            "hosted_logo_white_key",
+            "hosted_logo_white_url",
+            "hosted_logo_white_sha256",
+            "wikidata_id",
+            "wikipedia_url",
+            "wikimedia_logo_file",
+            "link_enriched_at",
+            "link_enrichment_source",
+        },
         ("admin", "covered_shows"): {
             "trr_show_id",
         },
@@ -416,6 +572,24 @@ def _schema_requirements() -> dict[tuple[str, str], set[str]]:
             "source",
             "outcome",
             "attempted_at",
+        },
+        ("admin", "network_streaming_logo_assets"): {
+            "id",
+            "entity_type",
+            "entity_key",
+            "source",
+            "source_url",
+            "source_rank",
+            "run_id",
+            "hosted_logo_url",
+            "hosted_logo_sha256",
+            "hosted_logo_content_type",
+            "hosted_logo_bytes",
+            "hosted_logo_etag",
+            "base_logo_format",
+            "mirror_status",
+            "is_primary",
+            "updated_at",
         },
     }
 
@@ -550,9 +724,7 @@ def _run_script_step_with_metrics(
             "",
         )
 
-    output = "\n".join(
-        [stdout_buffer.getvalue().strip(), stderr_buffer.getvalue().strip()]
-    ).strip()
+    output = "\n".join([stdout_buffer.getvalue().strip(), stderr_buffer.getvalue().strip()]).strip()
     metrics = {key: _extract_metric_int(output, key) for key in metric_keys}
     duration_ms = int((time.perf_counter() - started) * 1000)
     if int(code) == 0:
@@ -597,6 +769,14 @@ def sync_networks_streaming(
             logos_mirrored=0,
             variants_black_mirrored=0,
             variants_white_mirrored=0,
+            logo_assets_discovered=0,
+            logo_assets_mirrored=0,
+            logo_assets_skipped=0,
+            logo_assets_failed=0,
+            show_logos_discovered=0,
+            show_logos_imported=0,
+            show_logos_skipped=0,
+            show_logo_failures=0,
             completion_total=0,
             completion_resolved=0,
             completion_unresolved=0,
@@ -634,6 +814,10 @@ def sync_networks_streaming(
     if payload.skip_s3:
         links_args.append("--skip-s3")
 
+    show_logos_args = list(common_args)
+    if payload.skip_s3:
+        show_logos_args.append("--skip-s3")
+
     tmdb_entities, _ = _run_script_step_with_metrics(
         "tmdb_show_entities",
         sync_tmdb_show_entities.main,
@@ -658,6 +842,10 @@ def sync_networks_streaming(
             "logos_mirrored",
             "variants_black_mirrored",
             "variants_white_mirrored",
+            "logo_assets_discovered",
+            "logo_assets_mirrored",
+            "logo_assets_skipped",
+            "logo_assets_failed",
             "completion_total",
             "completion_resolved",
             "completion_unresolved",
@@ -666,16 +854,28 @@ def sync_networks_streaming(
             "failures",
         ],
     )
+    show_logos, _ = _run_script_step_with_metrics(
+        "show_logos",
+        sync_show_logos.main,
+        show_logos_args,
+        [
+            "show_logos_discovered",
+            "show_logos_imported",
+            "show_logos_skipped",
+            "show_logo_failures",
+            "failures",
+        ],
+    )
 
     steps = {
         "tmdb_show_entities": tmdb_entities,
         "tmdb_watch_providers": tmdb_watch_providers,
         "network_streaming_links": network_streaming_links,
+        "show_logos": show_logos,
     }
 
-    entities_synced = (
-        tmdb_entities.metrics.get("networks_upserted", 0)
-        + tmdb_entities.metrics.get("production_companies_upserted", 0)
+    entities_synced = tmdb_entities.metrics.get("networks_upserted", 0) + tmdb_entities.metrics.get(
+        "production_companies_upserted", 0
     )
     providers_synced = tmdb_watch_providers.metrics.get("providers_upserted", 0)
     links_enriched = network_streaming_links.metrics.get("links_enriched", 0)
@@ -686,6 +886,14 @@ def sync_networks_streaming(
     )
     variants_black_mirrored = network_streaming_links.metrics.get("variants_black_mirrored", 0)
     variants_white_mirrored = network_streaming_links.metrics.get("variants_white_mirrored", 0)
+    logo_assets_discovered = network_streaming_links.metrics.get("logo_assets_discovered", 0)
+    logo_assets_mirrored = network_streaming_links.metrics.get("logo_assets_mirrored", 0)
+    logo_assets_skipped = network_streaming_links.metrics.get("logo_assets_skipped", 0)
+    logo_assets_failed = network_streaming_links.metrics.get("logo_assets_failed", 0)
+    show_logos_discovered = show_logos.metrics.get("show_logos_discovered", 0)
+    show_logos_imported = show_logos.metrics.get("show_logos_imported", 0)
+    show_logos_skipped = show_logos.metrics.get("show_logos_skipped", 0)
+    show_logo_failures = show_logos.metrics.get("show_logo_failures", 0)
     completion_total = network_streaming_links.metrics.get("completion_total", 0)
     completion_resolved = network_streaming_links.metrics.get("completion_resolved", 0)
     completion_unresolved = network_streaming_links.metrics.get("completion_unresolved", 0)
@@ -699,6 +907,7 @@ def sync_networks_streaming(
         tmdb_entities.metrics.get("failures", 0)
         + tmdb_watch_providers.metrics.get("failures", 0)
         + network_streaming_links.metrics.get("failures", 0)
+        + show_logos.metrics.get("failures", 0)
     )
     completion_gate_passed = completion_unresolved == 0
     if not completion_gate_passed:
@@ -711,6 +920,14 @@ def sync_networks_streaming(
         logos_mirrored=logos_mirrored,
         variants_black_mirrored=variants_black_mirrored,
         variants_white_mirrored=variants_white_mirrored,
+        logo_assets_discovered=logo_assets_discovered,
+        logo_assets_mirrored=logo_assets_mirrored,
+        logo_assets_skipped=logo_assets_skipped,
+        logo_assets_failed=logo_assets_failed,
+        show_logos_discovered=show_logos_discovered,
+        show_logos_imported=show_logos_imported,
+        show_logos_skipped=show_logos_skipped,
+        show_logo_failures=show_logo_failures,
         completion_total=completion_total,
         completion_resolved=completion_resolved,
         completion_unresolved=completion_unresolved,
@@ -727,7 +944,7 @@ def sync_networks_streaming(
 
 @router.get("/networks-streaming/overrides", response_model=list[NetworksStreamingOverride])
 def list_networks_streaming_overrides(
-    entity_type: Literal["network", "streaming"] | None = None,
+    entity_type: Literal["network", "streaming", "production"] | None = None,
     active_only: bool = True,
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
@@ -756,10 +973,15 @@ def create_networks_streaming_override(
     if not patch.get("entity_type") or not patch.get("entity_key"):
         raise HTTPException(status_code=400, detail="entity_type and entity_key are required")
 
-    response = db.schema("admin").table("network_streaming_overrides").upsert(
-        patch,
-        on_conflict="entity_type,entity_key",
-    ).execute()
+    response = (
+        db.schema("admin")
+        .table("network_streaming_overrides")
+        .upsert(
+            patch,
+            on_conflict="entity_type,entity_key",
+        )
+        .execute()
+    )
     if hasattr(response, "error") and response.error:
         raise HTTPException(status_code=502, detail=f"Failed to upsert override: {response.error}")
     rows = response.data or []
@@ -779,11 +1001,7 @@ def patch_networks_streaming_override(
     patch["updated_by"] = str(getattr(admin, "email", "") or "")
     patch["updated_at"] = datetime.now(tz=UTC).isoformat()
     response = (
-        db.schema("admin")
-        .table("network_streaming_overrides")
-        .update(patch)
-        .eq("id", str(override_id))
-        .execute()
+        db.schema("admin").table("network_streaming_overrides").update(patch).eq("id", str(override_id)).execute()
     )
     if hasattr(response, "error") and response.error:
         raise HTTPException(status_code=502, detail=f"Failed to update override: {response.error}")
@@ -913,6 +1131,25 @@ def _combine_step_results(results: list[tuple[str, RefreshStepResult]]) -> Refre
     )
 
 
+def _resolve_show_imdb_id(show_row: dict[str, Any] | None) -> str | None:
+    if not isinstance(show_row, dict):
+        return None
+    external_ids = show_row.get("external_ids") if isinstance(show_row.get("external_ids"), dict) else {}
+    return str(show_row.get("imdb_id") or external_ids.get("imdb_id") or external_ids.get("imdb") or "").strip() or None
+
+
+def _ensure_cast_refresh_imdb_id(show_row: dict[str, Any] | None, show_id: str) -> None:
+    if _resolve_show_imdb_id(show_row):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Show {show_id} is missing an IMDb ID. "
+            "Cast refresh requires imdb_id or external_ids.imdb/external_ids.imdb_id."
+        ),
+    )
+
+
 @router.post("/{show_id}/refresh", response_model=ShowRefreshResponse)
 def refresh_show(
     show_id: UUID,
@@ -926,11 +1163,14 @@ def refresh_show(
 
     show_id_str = str(show_id)
     # Preflight: ensure show exists
-    show_resp = db.schema("core").table("shows").select("id").eq("id", show_id_str).limit(1).execute()
+    show_resp = (
+        db.schema("core").table("shows").select("id,imdb_id,external_ids").eq("id", show_id_str).limit(1).execute()
+    )
     if hasattr(show_resp, "error") and show_resp.error:
         raise HTTPException(status_code=502, detail="Database error fetching show")
     if not show_resp.data:
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+    show_row = show_resp.data[0] or {}
 
     # De-dupe targets while preserving order
     ordered: list[ShowRefreshTarget] = []
@@ -940,6 +1180,9 @@ def refresh_show(
             continue
         seen.add(target)
         ordered.append(target)
+
+    if "cast_credits" in ordered:
+        _ensure_cast_refresh_imdb_id(show_row, show_id_str)
 
     results: dict[str, RefreshStepResult] = {}
 
@@ -1031,11 +1274,14 @@ def refresh_show_stream(
     """
 
     show_id_str = str(show_id)
-    show_resp = db.schema("core").table("shows").select("id").eq("id", show_id_str).limit(1).execute()
+    show_resp = (
+        db.schema("core").table("shows").select("id,imdb_id,external_ids").eq("id", show_id_str).limit(1).execute()
+    )
     if hasattr(show_resp, "error") and show_resp.error:
         raise HTTPException(status_code=502, detail="Database error fetching show")
     if not show_resp.data:
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+    show_row = show_resp.data[0] or {}
 
     ordered: list[ShowRefreshTarget] = []
     seen: set[str] = set()
@@ -1044,6 +1290,9 @@ def refresh_show_stream(
             continue
         seen.add(target)
         ordered.append(target)
+
+    if "cast_credits" in ordered:
+        _ensure_cast_refresh_imdb_id(show_row, show_id_str)
 
     # Expand targets into concrete steps so the progress bar can update while work runs.
     # Keys are stored in results to match the non-stream endpoint's structure where possible.
@@ -1369,16 +1618,10 @@ def refresh_show_photos_stream(
         def build_live_counts() -> dict[str, int]:
             return {
                 "synced": int(
-                    show_images_upserted
-                    + season_images_upserted
-                    + episode_images_upserted
-                    + cast_photos_upserted
+                    show_images_upserted + season_images_upserted + episode_images_upserted + cast_photos_upserted
                 ),
                 "mirrored": int(
-                    show_images_mirrored
-                    + season_images_mirrored
-                    + episode_images_mirrored
-                    + cast_photos_mirrored
+                    show_images_mirrored + season_images_mirrored + episode_images_mirrored + cast_photos_mirrored
                 ),
                 "counted": int(auto_counts_succeeded),
                 "cropped": 0,
@@ -1463,6 +1706,13 @@ def refresh_show_photos_stream(
                         include_tags=True,
                     )
                     if rows:
+                        _enrich_imdb_mediaindex_rows_with_episode_context(
+                            db,
+                            show_id=show_id_str,
+                            show_name=show_name,
+                            show_imdb_id=show_imdb_id,
+                            rows=rows,
+                        )
                         upsert_show_images(db, rows)
                         show_images_upserted += len(rows)
                         sources_used.add("imdb")
@@ -1892,11 +2142,7 @@ def refresh_show_photos_stream(
                 chunk = person_ids[i : i + 200]
                 try:
                     resp = (
-                        db.schema("core")
-                        .table("people")
-                        .select("id,full_name,external_ids")
-                        .in_("id", chunk)
-                        .execute()
+                        db.schema("core").table("people").select("id,full_name,external_ids").in_("id", chunk).execute()
                     )
                 except Exception:  # noqa: BLE001
                     errors.append("People lookup: query failed")
@@ -1991,9 +2237,7 @@ def refresh_show_photos_stream(
                 if imdb_pid:
                     source_total = _get_known_person_source_total("imdb", str(imdb_pid), None)
                     mirrored_count = (
-                        _count_mirrored_cast_photos_for_source(db, pid, "imdb")
-                        if source_total is not None
-                        else None
+                        _count_mirrored_cast_photos_for_source(db, pid, "imdb") if source_total is not None else None
                     )
                     if (
                         source_total is not None
@@ -2013,8 +2257,7 @@ def refresh_show_photos_stream(
                         yield progress(
                             stage="sync_imdb",
                             message=(
-                                "Skipping IMDb cast photos "
-                                f"({pid}): already mirrored {mirrored_count}/{source_total}."
+                                f"Skipping IMDb cast photos ({pid}): already mirrored {mirrored_count}/{source_total}."
                             ),
                             stage_current=stage_done,
                             stage_total=fetch_units,
@@ -2068,9 +2311,7 @@ def refresh_show_photos_stream(
                 if tmdb_pid:
                     source_total = _get_known_person_source_total("tmdb", None, int(tmdb_pid))
                     mirrored_count = (
-                        _count_mirrored_cast_photos_for_source(db, pid, "tmdb")
-                        if source_total is not None
-                        else None
+                        _count_mirrored_cast_photos_for_source(db, pid, "tmdb") if source_total is not None else None
                     )
                     if (
                         source_total is not None
@@ -2090,8 +2331,7 @@ def refresh_show_photos_stream(
                         yield progress(
                             stage="sync_tmdb",
                             message=(
-                                "Skipping TMDb cast photos "
-                                f"({pid}): already mirrored {mirrored_count}/{source_total}."
+                                f"Skipping TMDb cast photos ({pid}): already mirrored {mirrored_count}/{source_total}."
                             ),
                             stage_current=stage_done,
                             stage_total=fetch_units,

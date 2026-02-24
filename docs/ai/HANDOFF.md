@@ -2,6 +2,151 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-24) — IMDb mediaindex tags normalized + show season/episode context enrichment
+
+- February 24, 2026: Implemented backend normalization for IMDb mediaindex rows so people/type/title tags are consistently persisted and episode context is inferred when IMDb title IDs match local episodes.
+  - Files:
+    - `trr_backend/ingestion/imdb_show_mediaindex.py`
+    - `api/routers/admin_show_sync.py`
+    - `tests/ingestion/test_imdb_show_mediaindex_rows.py` (new)
+    - `tests/api/routers/test_admin_show_sync_imdb_mediaindex_context.py` (new)
+  - Changes:
+    - `fetch_imdb_show_mediaindex_rows(...)` now:
+      - flattens mediaviewer tag payload into metadata keys:
+        - `people_names`, `people_imdb_ids`, `title_names`, `title_imdb_ids`, `imdb_image_type`
+      - normalizes kind by IMDb type:
+        - `Still Frame`/`still` -> `episode_still`
+        - `Poster` -> `poster`
+        - `Publicity` -> `promo`
+    - Added `_enrich_imdb_mediaindex_rows_with_episode_context(...)` in `admin_show_sync`:
+      - resolves title IMDb IDs against `core.episodes.imdb_episode_id` for the current show,
+      - tags metadata with `show_id`, `show_name`, `show_imdb_id`, and when matched:
+        - `episode_id`, `episode_imdb_id`, `episode_title`, `episode_number`, `season_number`, `episode_air_date`
+      - forces `kind = episode_still` when an episode match is found.
+    - `POST /api/v1/admin/shows/{show_id}/refresh-photos/stream` now runs this enrichment before upserting IMDb mediaindex rows.
+  - Validation:
+    - `pytest tests/ingestion/test_imdb_show_mediaindex_rows.py tests/api/routers/test_admin_show_sync_imdb_mediaindex_context.py -q` (`3 passed`)
+    - `pytest tests/api/routers/test_admin_show_sync.py -q` (`20 passed`)
+
+## Latest Update (2026-02-24) — Linked Supabase migrations applied through 0135 for networks logo assets
+
+- February 24, 2026: Applied pending migrations to the linked Supabase database to resolve missing admin logo-assets relation errors seen by TRR-APP detail pages.
+  - Runtime actions:
+    - Verified linked drift via `supabase migration list --linked` (remote lagging at `0123`).
+    - Applied pending migrations via direct DB URL:
+      - `set -a && source .env && set +a && supabase db push --db-url "$SUPABASE_DB_URL"`
+    - This applied `0124`–`0135` including:
+      - `0127_add_network_provider_link_fields.sql`
+      - `0128_add_network_provider_monochrome_logo_fields.sql`
+      - `0131_network_streaming_completion_and_overrides.sql`
+      - `0135_network_streaming_logo_assets.sql`
+    - Verified relation exists:
+      - `select to_regclass('admin.network_streaming_logo_assets');` -> non-null.
+    - Verified sync schema preflight reports no missing required columns.
+  - Notes:
+    - No backend source code changes were required in this subtask; this was schema alignment in the target Supabase environment.
+
+## Latest Update (2026-02-24) — Resize now rebuilds base + crop variants with fallback
+
+- February 24, 2026: Stabilized admin resize behavior to prevent stretched previews by always generating crop variants for resize operations.
+  - Files:
+    - `api/routers/admin_asset_batch_jobs.py`
+    - `api/routers/admin_person_images.py`
+    - `tests/api/routers/test_admin_asset_batch_jobs.py`
+    - `tests/api/routers/test_admin_person_images.py`
+  - Changes:
+    - Batch jobs `resize` now runs two variant passes per target:
+      - base variants (`crop=None`)
+      - crop variants with resolved crop payload.
+    - Added crop payload resolution for batch resize:
+      - prefer existing manual/auto crop metadata/context.
+      - when missing, attempt auto-count detection refresh.
+      - when still missing/unavailable, apply center fallback crop payload:
+        - `x=50`, `y=32`, `zoom=1`, `mode=auto`, `strategy=resize_center_fallback_v1`.
+    - Added additive progress detail for resize success:
+      - `crop_source` in progress payload (`manual`, `auto`, `auto_detect:*`, or `fallback`).
+    - Person gallery resize stage now always attempts crop generation for all resize candidates:
+      - uses existing crop when present,
+      - attempts auto-count refresh when absent,
+      - falls back to center payload when detection is unavailable.
+  - Validation:
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_asset_batch_jobs.py -q` (`6 passed`)
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py -q` (`20 passed`)
+
+## Latest Update (2026-02-24) — Social cloud-DB failover hardening for pooler DNS/SSL faults
+
+- February 24, 2026: Implemented cloud-first DB candidate resolution + pooled reconnect fallback to reduce social endpoint timeouts when Supabase pooler DNS/transport faults occur.
+  - Files:
+    - `trr_backend/db/connection.py`
+    - `trr_backend/db/pg.py`
+    - `tests/db/test_connection_resolution.py` (new)
+    - `tests/db/test_pg_pool.py`
+  - Root cause:
+    - Backend pool initialization used a single DSN and failed hard on transient pooler faults (`ENOTFOUND`, host translation failures, SSL EOF), amplifying social endpoint timeouts.
+  - Changes:
+    - Added `resolve_database_url_candidates(...)` with cloud-first order:
+      - `SUPABASE_DB_URL` -> `TRR_DB_FALLBACK_URL` -> auto-derived Supabase direct host fallback (`db.<project_ref>.supabase.co:5432`) -> `DATABASE_URL` -> `TRR_DB_URL` -> local Supabase fallback.
+    - Kept `resolve_database_url(...)` contract unchanged (returns first candidate).
+    - Updated `pg.py` pool creation to try candidates in order on transient transport init failures.
+    - Added shared pool reset + one-time transient retry for helper query execution paths (`fetch_all`, `fetch_one`, `execute_returning`, execute-values helpers).
+    - Added active-pool DSN diagnostics helper (`current_pool_dsn()`).
+  - Validation:
+    - `ruff check trr_backend/db/connection.py trr_backend/db/pg.py tests/db/test_connection_resolution.py tests/db/test_pg_pool.py` (pass)
+    - `pytest tests/db/test_connection_resolution.py tests/db/test_pg_pool.py` (`7 passed`)
+    - `pytest tests/api/routers/test_socials_season_analytics.py -k "targets or analytics or ingest_runs"` (`22 passed`)
+
+## Latest Update (2026-02-24)
+
+- February 24, 2026: Hybrid-cloud no-Docker screenalytics migration coordination (integration contract only; no backend code changes in this session).
+  - Contract reminder:
+    - `SCREENALYTICS_API_URL` in backend runtime can now target either:
+      - local no-Docker Screenalytics (`http://127.0.0.1:8001`) when launched with `SCREENALYTICS_SKIP_DOCKER=1`, or
+      - hosted Screenalytics API URL (Cloud Run/managed runtime).
+  - Scope:
+    - This backend repo was not functionally modified for this migration step.
+    - Change was captured here for cross-repo handoff traceability.
+
+## Latest Update (2026-02-24)
+
+- February 24, 2026: Added local-only scrape download utility for image-import workflows and validated with script-level tests.
+  - Files:
+    - `scripts/import/download_scraped_images_local.py` (new)
+    - `scripts/download_scraped_images_local.py` (new wrapper)
+    - `tests/scripts/test_download_scraped_images_local.py` (new)
+    - `scripts/README.md`
+  - Changes:
+    - Added CLI utility to scrape image candidates from any URL and download image bytes directly to a local folder, without creating `media_assets`/`media_links` rows.
+    - Default output directory is `~/Downloads/Bachelorette`, with options for `--min-width`, `--limit`, `--overwrite`, and custom manifest filename.
+    - Added per-run `manifest.json` output containing source metadata, download results, and errors.
+    - Added root-level wrapper script to match existing script alias pattern in this repo.
+  - Validation:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/scripts/test_download_scraped_images_local.py` (pass)
+
+## Latest Update (2026-02-23)
+
+- February 23, 2026: Implemented deterministic cast-only Bravo probing for canonical `/people/*` URLs, including cast-only parser mode and additive preview counters.
+  - Files:
+    - `api/routers/admin_show_bravo.py`
+    - `trr_backend/scraping/bravo_parser.py`
+    - `tests/api/routers/test_admin_show_bravo.py`
+    - `tests/scraping/test_bravo_parser.py`
+  - Changes:
+    - Added additive request field on preview:
+      - `cast_only: bool = False` in `BravoPreviewRequest`.
+    - Cast-only preview/commit now probes all canonical cast candidates (plus explicit candidates) and bypasses prior link-state suppression (`has_non_rejected` / existing N/A markers).
+    - Added parser flag `candidate_people_only` to `parse_bravo_show_bundle(...)`:
+      - when true, probe only `person_url_candidates` and skip merging show-page discovered people URLs.
+      - default remains false for non-cast-only behavior compatibility.
+    - Added additive preview counters (derived from `person_candidate_results`):
+      - `bravo_candidates_tested`
+      - `bravo_candidates_valid`
+      - `bravo_candidates_missing`
+      - `bravo_candidates_errors`
+    - Commit cast-only path still preserves existing missing-profile N/A marker persistence behavior.
+  - Validation:
+    - `ruff check api/routers/admin_show_bravo.py trr_backend/scraping/bravo_parser.py tests/api/routers/test_admin_show_bravo.py tests/scraping/test_bravo_parser.py` (pass)
+    - `pytest -q tests/api/routers/test_admin_show_bravo.py tests/scraping/test_bravo_parser.py` (`29 passed`)
+
 ## Latest Update (2026-02-19)
 
 - February 19, 2026: Implemented Bravo cast-only URL validation with commit-time N/A persistence for missing Bravo person pages.
@@ -2211,3 +2356,375 @@ Continuation (same session, 2026-02-19) — Sync by Fandom backend foundation (p
 - Validation:
   - `ruff check api/routers/admin_fandom_sync.py trr_backend/integrations/fandom_discovery.py trr_backend/integrations/openai_fandom_cleanup.py trr_backend/ingestion/fandom_person_scraper.py trr_backend/ingestion/fandom_season_scraper.py trr_backend/repositories/season_fandom.py tests/api/routers/test_admin_fandom_sync.py tests/integrations/fandom/test_fandom_discovery.py tests/ingestion/test_fandom_person_scraper.py` (pass)
   - `pytest -q tests/integrations/fandom/test_fandom_discovery.py tests/ingestion/test_fandom_person_scraper.py tests/api/routers/test_admin_fandom_sync.py` (`8 passed`)
+
+Continuation (same session, 2026-02-20) — cast refresh split backend foundations (IMDb preflight + ingest-only skips + reprocess resize):
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+- Changes:
+  - Added cast refresh preflight for `/api/v1/admin/shows/{show_id}/refresh` and `/refresh/stream`: when `cast_credits` is requested and show lacks IMDb ID (`imdb_id` or `external_ids.imdb/imdb_id`), endpoint now returns `409` and does not run cast scripts.
+  - Extended `RefreshImagesRequest` with additive optional flags: `skip_auto_count`, `skip_word_detection`, `skip_centering`, `skip_resize`.
+  - Applied those skip flags to both person refresh endpoints (`refresh-images` and `refresh-images/stream`) while keeping fetch/upsert/mirror/prune/profile sync intact.
+  - Updated `reprocess-images/stream` to include resize stage (`_resize_person_gallery_images`) after centering and report resize counters + `live_counts.resized`.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_person_images.py` (`43 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_sync.py api/routers/admin_person_images.py tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_person_images.py` (pass)
+
+Continuation (same session, 2026-02-23) — social landing perf hardening (`include_jobs=false`) + targets context short-circuit:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Root cause/focus:
+  - Season landing analytics path always computed ingest jobs and always loaded full season context in `get_targets`, adding avoidable backend latency for `/analytics` and `/targets` calls.
+- Changes:
+  - Added additive `include_jobs: bool = False` arg to `get_analytics(...)`.
+  - Preserved response shape by always returning `"jobs"` key; when `include_jobs=False`, it now returns `[]` and skips `list_jobs(...)`.
+  - Updated season analytics endpoint to call `get_analytics(..., include_jobs=False)`.
+  - Updated `get_targets(...)` to query `social.season_targets` first and avoid `get_season_context(...)` when explicit targets exist.
+  - Added lightweight season identity lookup (`season/show metadata only`) for explicit-target responses.
+  - Added regressions for:
+    - `get_analytics(include_jobs=False)` skips job listing and preserves `jobs=[]`.
+    - `get_targets` does not call `get_season_context` when rows already exist.
+- Validation:
+  - `ruff check trr_backend/repositories/social_season_analytics.py api/routers/socials.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest tests/repositories/test_social_season_analytics.py -k "include_jobs_false or get_targets_uses_existing_rows"` (`2 passed`)
+  - `pytest tests/repositories/test_social_season_analytics.py -k "analytics or targets"` (1 failure unrelated to this change set):
+    - failing test: `test_ingest_instagram_posts_stage_skips_up_to_date_posts_in_incremental_mode`
+    - observed failure: upsert/comments fetch executed unexpectedly in `_ingest_instagram` incremental path (`AssertionError: fetch_comments should not run for up-to-date incremental posts`).
+
+Continuation (same session, 2026-02-23) — cast-role-members timeout hardening + query path optimization:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0134_optimize_cast_role_members.sql` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_roles.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_roles.py`
+- Root cause/focus:
+  - `cast-role-members` path could exceed proxy timeout under load due expensive join/aggregation shape and row-wise role accumulation.
+- Changes:
+  - Added migration `0134_optimize_cast_role_members.sql`:
+    - Added idempotent index: `core.credits (show_id, person_id)`.
+    - Added partial index for cast-photo first-image lookups: `core.cast_photos (person_id, gallery_index) WHERE gallery_index IS NOT NULL`.
+    - Replaced `core.v_show_cast_roles_enriched` with pre-aggregated CTE view (`base_cast`, `episode_stats`, `role_stats`) to reduce multiplicative joins before grouping.
+    - Re-granted view select to `authenticated` and `service_role`.
+  - Updated `/api/v1/admin/shows/{show_id}/cast-role-members` path:
+    - Aggregates role names and assignment seasons in SQL per person (instead of row-wise Python accumulation).
+    - Keeps response shape/filter semantics unchanged.
+    - Added env-gated performance logs (`TRR_CAST_ROLE_MEMBERS_PERF_LOGS`) with segmented query timings + total endpoint duration.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_roles.py tests/api/routers/test_admin_show_roles.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_roles.py` (`7 passed`)
+
+Continuation (same session, 2026-02-23) — social landing timeout stabilization (DB pool + social query-path reductions):
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/db/pg.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/db/test_pg_pool.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Root cause/focus:
+  - Social landing paths were sensitive to DB/connectivity degradation because each query opened a new Postgres connection and analytics/targets paths performed avoidable extra work/lookups.
+- Changes:
+  - Replaced per-query connection lifecycle in `pg.py` with process-level `ThreadedConnectionPool`.
+    - Added env knobs: `TRR_DB_POOL_MINCONN`, `TRR_DB_POOL_MAXCONN`.
+    - Added safe checkout/return, commit on success, rollback on exception.
+    - Added `close_pool()` helper for cleanup/tests.
+  - `get_targets(...)` now uses joined season metadata in the same query path and avoids full `get_season_context(...)` when explicit target rows exist.
+  - `_target_accounts_by_platform(...)` now reads `social.season_targets` directly and falls back to defaults only when rows are absent; optional `context` reuse added to avoid repeated lookups.
+  - `get_analytics(...)` fast path remains `include_jobs=False` with preserved response shape (`jobs: []`).
+  - Added structured timing logs (`duration_ms`) for `/targets`, `/runs`, `/analytics` router handlers.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/db/pg.py trr_backend/repositories/social_season_analytics.py api/routers/socials.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/db/test_pg_pool.py` (`2 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py -k "targets or analytics or ingest_runs"` (`22 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "targets or analytics or runs"` (`52 passed, 1 failed`)
+    - Existing failing test not introduced in this change set: `test_ingest_instagram_posts_stage_skips_up_to_date_posts_in_incremental_mode` (Instagram incremental refresh behavior assertion).
+- Rollback notes:
+  - To rollback pooling only, revert `/trr_backend/db/pg.py`; repository/router logic remains backward compatible with previous DB helpers.
+  - To rollback social query-path changes, revert `/trr_backend/repositories/social_season_analytics.py` and `/api/routers/socials.py` together.
+
+Continuation (same session, 2026-02-24) — Bravo cast-only auto-probe streaming preview with per-URL progress:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/scraping/bravo_parser.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scraping/test_bravo_parser.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+- Root cause/focus:
+  - Cast-only Bravo preview was blocking on one payload, so users saw static zero counters with no candidate-level visibility while probes were running.
+- Changes:
+  - Added additive parser probe iterator behavior to expose deterministic per-candidate probe metadata (`candidate_url`, `status`, optional `person`, optional `error`) via `probe_bravo_person_url_candidates(...)`.
+  - Kept `parse_bravo_show_bundle(...)` behavior backward-compatible while reusing the iterator for single-source probe logic.
+  - Added new additive SSE endpoint:
+    - `POST /api/v1/admin/shows/{show_id}/import-bravo/preview/stream`
+    - emits `start` (candidate list + total), `progress` (per URL status + live counters), `complete` (preview-compatible aggregate payload), and fail-safe `error` events.
+  - Reused existing cast-only candidate construction and suppression bypass behavior (`cast_only=true` probes all canonical cast `/people/*` URLs).
+  - Added shared candidate summary helper for tested/valid/missing/error counters.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check trr_backend/scraping/bravo_parser.py api/routers/admin_show_bravo.py tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (`34 passed`)
+
+Continuation (same session, 2026-02-24) — weekly analytics comment coverage fields for Bravo post count table:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Root cause/focus:
+  - Weekly table rows exposed saved comment totals only, with no denominator for "how complete is comments backfill" by week.
+- Changes:
+  - Added `reported_comments` projection to analytics row queries for post rows:
+    - Instagram/TikTok/YouTube use post `comments_count`.
+    - Twitter uses post `replies_count`.
+    - Comment rows emit `reported_comments=0`.
+  - Extended weekly aggregation payload to include additive coverage fields:
+    - `weekly_platform_posts[].reported_comments` (per-platform map)
+    - `weekly_platform_posts[].total_reported_comments`
+    - `weekly_platform_posts[].comments_saved_pct` (saved-vs-reported %, nullable when denominator missing)
+  - Preserved existing response keys/shapes (additive only, no breaking changes).
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "get_analytics_includes_weekly_platform_engagement_and_has_data or get_analytics_include_jobs_false_keeps_jobs_key_and_skips_listing or test_get_analytics_weekly_daily_activity_uses_dynamic_day_count"` (`3 passed`)
+  - Note: full-file run still contains an existing unrelated failure in this repo baseline:
+    - `test_ingest_instagram_posts_stage_skips_up_to_date_posts_in_incremental_mode`
+
+Continuation (same session, 2026-02-24) — Bravo cast-only performance hardening (lightweight probes + concurrent stream + commit preview reuse):
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/scraping/bravo_parser.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scraping/test_bravo_parser.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+- Root cause/focus:
+  - Cast-only probes still parsed/hydrated person-page related videos/news (many extra fetches), and cast-only commit re-probed the full candidate set after preview.
+- Changes:
+  - Added additive lightweight parse controls in parser:
+    - `parse_person_page(..., include_related_content: bool = True, hydrate_related_dates: bool = True)`
+    - cast-only lightweight mode returns essential profile fields with `videos=[]` and `news=[]`.
+  - Extended probe/bundle parsing APIs additively:
+    - `probe_bravo_person_url_candidates(..., include_related_content, hydrate_related_dates)`
+    - `parse_bravo_show_bundle(..., include_person_related_content, hydrate_person_related_dates)`
+  - Cast-only preview/commit now call lightweight person parsing (`False/False`) so person probes avoid related-content hydration.
+  - Upgraded `POST /api/v1/admin/shows/{show_id}/import-bravo/preview/stream` cast-only people probe path:
+    - bounded worker pool (max 3),
+    - emits `progress` with `status: in_progress` when a candidate starts,
+    - terminal `progress` includes additive `candidate_index` and `elapsed_ms`,
+    - logs slow-candidate warnings and stream-level avg/p95 candidate timings.
+  - Added additive preview metadata to preview payloads (`/preview` + stream `complete`):
+    - `show_url`, `cast_only`, `season_filter`.
+  - Added additive commit reuse contract:
+    - `BravoCommitRequest.preview_result?: dict`
+    - cast-only commit validates preview freshness (show URL, candidate set, season filter) and reuses preview bundle instead of re-probing.
+    - stale/mismatched preview returns `409` (`Preview stale. Re-run preview.`).
+  - Existing missing-profile handling retained:
+    - NA marker persistence path still runs from candidate `missing` statuses.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_bravo.py trr_backend/scraping/bravo_parser.py tests/api/routers/test_admin_show_bravo.py tests/scraping/test_bravo_parser.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/scraping/test_bravo_parser.py tests/api/routers/test_admin_show_bravo.py` (`38 passed`)
+
+Continuation (same session, 2026-02-24) — Bravo cast-only commit now sets person profile media + thumbnail context:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+- Root cause/focus:
+  - Cast-only commit persisted person text/profile metadata and imported gallery assets, but did not explicitly promote imported Bravo hero media to primary person profile media links.
+- Changes:
+  - Extended `_import_bravo_person_image(...)` return payload additively with:
+    - `asset_ids`
+    - `hosted_urls`
+    - `primary_hosted_url`
+  - Added `_promote_bravo_profile_media_link(...)` to:
+    - upsert/normalize person `gallery` link context for Bravo profile assets,
+    - seed `context.thumbnail_crop` default (`x=50, y=32, zoom=1, mode=auto`) when absent,
+    - upsert `profile` link and set it as primary via `core.set_primary_media_link` RPC.
+  - Commit path now:
+    - promotes imported Bravo hero assets to profile links,
+    - writes hosted mirrored URL back into `people.profile_image_url.bravo` so profile image uses hosted media.
+  - Added regression test asserting hosted profile promotion call path and hosted URL persistence behavior during commit.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_bravo.py tests/api/routers/test_admin_show_bravo.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_bravo.py -q` (`26 passed`)
+
+Continuation (same session, 2026-02-24) — Bravo + Fandom cast sync integration + show-level fandom discovery hardening:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+- Changes:
+  - Added show-level fandom discovery in `_discover_show_links(...)`:
+    - prefers existing persisted non-rejected show fandom/wikia links,
+    - falls back to canonical `https://real-housewives.fandom.com/wiki/{Show_Name}`,
+    - writes as show knowledge links so Settings -> Show Pages can display persisted fandom rows.
+  - Extended Bravo preview/stream/commit flows with additive Fandom support:
+    - fandom domain resolution from show-assigned fandom/wikia links with fallback domain,
+    - per-cast canonical fandom candidate generation,
+    - preview + stream payloads include fandom results/counters/domains,
+    - stream progress events include source-aware (`bravo`/`fandom`) progress semantics.
+  - Cast-only preview reuse validation remains strict for freshness but is backward-compatible:
+    - if old preview payload lacks fandom candidate fields, reuse no longer hard-fails solely on missing fandom set.
+  - Commit flow includes additive fandom outcome counters in response and persisted fandom side effects already wired in route.
+  - Added/updated regression coverage for:
+    - show link fandom discovery fallback/prefer-existing behavior,
+    - source-aware stream progress/counters,
+    - cast-only commit preview reuse + fandom count reporting.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_bravo.py api/routers/admin_show_links.py tests/api/routers/test_admin_show_bravo.py tests/api/routers/test_admin_show_links.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py` (`54 passed`)
+
+Continuation (same session, 2026-02-24) — Networks/Streaming all-logo gallery sync + API metrics expansion:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0135_network_streaming_logo_assets.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/sync/sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/README.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+- Changes:
+  - Added persistent gallery table migration: `admin.network_streaming_logo_assets` (mirrored/skipped/failed assets with source provenance and hosted metadata).
+  - Extended `sync_networks_streaming_links.py` to mirror all capped candidate logos by source, dedupe by URL + SHA, upsert each asset row, and mark canonical primary asset.
+  - Preserved canonical behavior: primary/base logo still updates `core.networks` / `core.watch_providers`; black/white variant generation remains primary-only.
+  - Added sync output metrics: `logo_assets_discovered`, `logo_assets_mirrored`, `logo_assets_skipped`, `logo_assets_failed`.
+  - Expanded `POST /api/v1/admin/shows/sync-networks-streaming` response with the new `logo_assets_*` counters and schema preflight requirements for the new table.
+  - Added/updated tests for source caps/order, candidate dedupe behavior, and endpoint metric aggregation.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check scripts/sync/sync_networks_streaming_links.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py api/routers/admin_show_sync.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (`35 passed`)
+
+Continuation (same session, 2026-02-19) — Instagram sync reliability hardening (transaction safety, lifecycle consistency, scraper failure semantics):
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/permalink_metadata.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_instagram_permalink_metadata.py`
+- Changes:
+  - Reworked Instagram ingest transaction behavior to use per-post/per-anchor savepoints instead of full-connection rollbacks, preventing prior successful writes from being reverted by later per-post failures.
+  - Corrected persistence accounting by applying comment counters only after savepoint release; added additive retrieval metadata:
+    - `rolled_back_posts`
+    - `rolled_back_comments`
+    - `comment_fetch_failures_by_reason`
+    - `comments_mark_missing_skipped`
+  - Added lifecycle consistency fixes:
+    - posts-stage Instagram comment sync now tracks observed IDs and marks missing comments only when fetch is complete.
+    - comments-stage logical API failures now skip missing-mark operations and report skipped counts.
+    - manual `refresh_post_comments(... platform='instagram')` now applies completeness checks, optional missing-mark updates, and returns additive fields:
+      - `fetch_failed`
+      - `is_complete`
+      - `comments_marked_missing`
+      - `incomplete_reason`
+      - `comment_fail_reasons`
+  - Prevented lifecycle provenance clearing on manual refresh by not writing `last_seen_run_id` when `run_id is None`.
+  - Hardened account matching in `_load_existing_posts(...)` with normalized account expressions (including fallback to username/channel title), reducing incremental sync drift.
+  - Updated depth-default resolution:
+    - explicit caller values are respected.
+    - env-backed defaults apply when values are unset (`None`):
+      - `SOCIAL_DEFAULT_MAX_COMMENTS_PER_POST`
+      - `SOCIAL_DEFAULT_MAX_REPLIES_PER_POST`
+  - Hardened Instagram scraper error semantics:
+    - `comments_auth_failed` resets per `fetch_comments` call.
+    - comments/replies API payloads with `status != 'ok'` now set `last_comment_fetch_reason='api_status_fail'` and mark auth failure for login/challenge/checkpoint conditions.
+    - request-error logging path now safely handles missing response objects.
+  - Hardened permalink metadata extraction:
+    - route-aware probing now tries canonical route first (`p|reel|tv`) with fallback probing order.
+    - `data-sjs` parsing supports wrapped payload patterns (e.g. function-wrapped JSON) in addition to raw JSON bodies.
+  - Hardened media mirroring:
+    - dedupes thumbnail/media source URLs to avoid duplicate downloads/uploads.
+    - streams downloads with max-size guard via `SOCIAL_MEDIA_MIRROR_MAX_BYTES` (default `50MB`) and `asset_too_large` failure reason.
+- Validation:
+  - Targeted lint:
+    - `ruff check trr_backend/repositories/social_season_analytics.py trr_backend/socials/instagram/scraper.py trr_backend/socials/instagram/permalink_metadata.py tests/repositories/test_social_season_analytics.py tests/socials/test_comment_scraper_fixes.py tests/socials/test_instagram_permalink_metadata.py` (pass)
+  - Targeted tests:
+    - `pytest -q tests/socials/test_comment_scraper_fixes.py tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py -k "instagram or refresh_post_comments"` (`31 passed`)
+  - Full backend test suite:
+    - `pytest -q` (`734 passed`, `18 skipped`)
+  - Full-repo lint/format status (pre-existing workspace drift):
+    - `ruff check .` fails on unrelated existing files outside this task scope.
+    - `ruff format --check .` reports many pre-existing files needing formatting.
+
+Continuation (same session, 2026-02-24) — Person source URL auto-approval hardening (no pending person source links):
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/shows/backfill_bravo_person_source_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+- Changes:
+  - Enforced person-source no-pending behavior in discovery/sync flows for `imdb`, `tmdb`, `wikipedia`, `wikidata`, `fandom`, `wikia`, `bravo_profile`.
+  - Added challenge-aware IMDb/TMDb validation fallback for anti-bot/challenge pages so canonical ID-backed URLs can still validate as approved when page routing is canonical.
+  - Expanded cleanup scan behavior:
+    - pending person-source rows now either promote to `approved` when valid or are removed when invalid/unverifiable.
+    - existing non-pending rows continue strict owner/topic validation; fetch-error rows are preserved.
+  - Added pending promotion path in cleanup with duplicate-safe handling:
+    - if promotion collides with `entity_links_unique_active`, stale pending row is deleted.
+  - Updated Bravo commit persistence (`_persist_pending_links_from_bravo_sync`) to never force person-source links to pending and to skip non-approved person-source rows.
+  - Updated backfill script:
+    - target scope now auto-selects shows with IMDb-backed cast IDs (or accepts explicit `--show-id`),
+    - enforces no-pending person-source upserts,
+    - adds `cleanup_promoted` reporting,
+    - skips known `entity_links_unique_active` duplicate upsert collisions safely.
+  - Added/updated tests for:
+    - IMDb challenge-page acceptance for canonical ID-backed person URLs,
+    - cleanup promotion of pending valid rows,
+    - cleanup deletion of pending rows on fetch error,
+    - Bravo sync persistence skipping non-approved person-source discovered rows.
+- Validation:
+  - `ruff check api/routers/admin_show_links.py api/routers/admin_show_bravo.py scripts/shows/backfill_bravo_person_source_links.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py` (pass)
+  - `python -m py_compile api/routers/admin_show_links.py api/routers/admin_show_bravo.py scripts/shows/backfill_bravo_person_source_links.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py` (`54 passed`)
+- Backfill execution:
+  - Dry-run:
+    - `PYTHONPATH=/Users/thomashulihan/Projects/TRR/TRR-Backend python -u scripts/shows/backfill_bravo_person_source_links.py`
+    - totals: `cleanup_scanned=158`, `cleanup_invalid=0`, `cleanup_promoted=15`, `cleanup_deleted=0`, `cleanup_fetch_errors=32`, `discovered_upserted=1294`, `failed_shows=0`
+  - Apply:
+    - `PYTHONPATH=/Users/thomashulihan/Projects/TRR/TRR-Backend python -u scripts/shows/backfill_bravo_person_source_links.py --apply`
+    - first run completed 5/6 shows and surfaced one duplicate-collision failure; reran failed show after duplicate-safe patch:
+      - `PYTHONPATH=/Users/thomashulihan/Projects/TRR/TRR-Backend python -u scripts/shows/backfill_bravo_person_source_links.py --apply --show-id 7782652f-783a-488b-8860-41b97de32e75`
+      - totals: `cleanup_scanned=89`, `cleanup_invalid=0`, `cleanup_promoted=0`, `cleanup_deleted=0`, `cleanup_fetch_errors=27`, `discovered_upserted=161`, `failed_shows=0`
+  - Post-run verification:
+    - impacted-show query reports `show_count=6`, `pending_person_source=0`, `approved_person_source=987`, `total_person_source=987`
+    - Andy Cohen IMDb row present and approved: `https://www.imdb.com/name/nm0169212/`
+
+Continuation (same session, 2026-02-24) — Social analytics additive contract + run summary + diagnostics hardening:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+- Changes:
+  - Extended analytics output (additive):
+    - `summary.data_quality` (coverage/freshness timestamps + per-platform comment coverage)
+    - `weekly_flags` (`zero_activity`, `spike`, `drop`, `comment_gap`)
+    - `schedule_profile` (timezone + day-level posting profile)
+    - `benchmark` (current vs previous/trailing deltas + consistency scores)
+  - Added analytics include slicing in route:
+    - `GET /api/v1/admin/socials/seasons/{season_id}/analytics?include=rows,flags,schedule,benchmark`
+  - Added ingest run summary endpoint:
+    - `GET /api/v1/admin/socials/seasons/{season_id}/ingest/runs/summary`
+  - Added normalized `job_error_code` surface in job listing and run-summary aggregation.
+  - Extended week-detail output with additive totals + diagnostics:
+    - `expected_comments_total`, `saved_comments_total`, `comments_saved_pct`
+    - `diagnostics.run_id`, `diagnostics.generated_at`, `diagnostics.source_scope`
+  - Export enhancements:
+    - CSV/PDF include additive data-quality/flags/benchmark sections.
+- Tests:
+  - Added/expanded backend tests for:
+    - analytics additive fields,
+    - include-slice forwarding,
+    - ingest run summary endpoint,
+    - week-detail diagnostics/totals additive fields.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (`86 passed`)
+
+Continuation (same session, 2026-02-24) — Backend lint/format cleanup pass:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/restore_person_gallery_base_previews.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - plus broad repo formatting normalization from `ruff format .` (47 files reformatted in this pass).
+- Changes:
+  - Ran repo-wide lint autofix and formatting cleanup.
+  - Manually fixed remaining `E501` long SQL-snippet strings in `restore_person_gallery_base_previews.py` after autofix/format.
+  - Ensured backend-wide Ruff lint and format checks are fully green.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check .` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check .` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q` (`741 passed`, `18 skipped`)

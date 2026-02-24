@@ -69,6 +69,22 @@ class RefreshImagesRequest(BaseModel):
         default=False,
         description="Force re-mirror even if already hosted",
     )
+    skip_auto_count: bool = Field(
+        default=False,
+        description="Skip auto people counting stage",
+    )
+    skip_word_detection: bool = Field(
+        default=False,
+        description="Skip word/text overlay detection stage",
+    )
+    skip_centering: bool = Field(
+        default=False,
+        description="Skip face centering/cropping stage",
+    )
+    skip_resize: bool = Field(
+        default=False,
+        description="Skip resize/variant generation stage",
+    )
     show_id: UUID | None = Field(
         default=None,
         description="Optional show context to tag all fetched photos with show_id/show_name for filtering.",
@@ -155,14 +171,7 @@ def _get_person_details(db: SupabaseAdminClient, person_id: str) -> dict | None:
 def _get_show_name(db: SupabaseAdminClient, show_id: UUID | None) -> str | None:
     if show_id is None:
         return None
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("name")
-        .eq("id", str(show_id))
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("name").eq("id", str(show_id)).limit(1).execute()
     if hasattr(response, "error") and response.error:
         return None
     if not response.data:
@@ -712,9 +721,7 @@ def _mirror_person_media_assets(
                             if patch.get("hosted_content_type") is not None
                             else None
                         ),
-                        hosted_etag=(
-                            str(patch.get("hosted_etag")) if patch.get("hosted_etag") is not None else None
-                        ),
+                        hosted_etag=(str(patch.get("hosted_etag")) if patch.get("hosted_etag") is not None else None),
                         width=int(patch.get("width")) if patch.get("width") is not None else None,
                         height=int(patch.get("height")) if patch.get("height") is not None else None,
                         completed_at=completed_at,
@@ -993,6 +1000,7 @@ def _resize_person_gallery_images(
         )
 
     try:
+        from api.routers.admin_image_counts import auto_count_cast_photo, auto_count_media_asset
         from trr_backend.media.image_variants import (
             generate_cast_photo_variants,
             generate_media_asset_variants,
@@ -1011,15 +1019,124 @@ def _resize_person_gallery_images(
         )
         media_rows = _fetch_person_media_link_rows(db, person_id)
 
+        def _normalize_crop_payload(value: Any) -> dict[str, Any] | None:
+            if not isinstance(value, dict):
+                return None
+            try:
+                x = float(value.get("x"))
+                y = float(value.get("y"))
+                zoom = float(value.get("zoom"))
+            except (TypeError, ValueError):
+                return None
+            mode_raw = str(value.get("mode") or "auto").strip().lower()
+            mode = "manual" if mode_raw == "manual" else "auto"
+            payload: dict[str, Any] = {
+                "x": max(0.0, min(100.0, x)),
+                "y": max(0.0, min(100.0, y)),
+                "zoom": max(1.0, min(4.0, zoom)),
+                "mode": mode,
+            }
+            strategy = value.get("strategy")
+            if isinstance(strategy, str) and strategy.strip():
+                payload["strategy"] = strategy.strip()
+            return payload
+
+        def _fallback_crop_payload() -> dict[str, Any]:
+            return {
+                "x": 50.0,
+                "y": 32.0,
+                "zoom": 1.0,
+                "mode": "auto",
+                "strategy": "resize_center_fallback_v1",
+            }
+
+        def _select_best_crop(candidates: list[Any]) -> dict[str, Any] | None:
+            manual: dict[str, Any] | None = None
+            auto: dict[str, Any] | None = None
+            for candidate in candidates:
+                normalized = _normalize_crop_payload(candidate)
+                if not normalized:
+                    continue
+                if normalized.get("mode") == "manual":
+                    manual = normalized
+                    break
+                if auto is None:
+                    auto = normalized
+            return manual or auto
+
+        def _load_crop_from_db(origin: str, target_id: str) -> dict[str, Any] | None:
+            if origin == "cast_photos":
+                cast_resp = (
+                    db.schema("core").table("cast_photos").select("id,metadata").eq("id", target_id).limit(1).execute()
+                )
+                if hasattr(cast_resp, "error") and cast_resp.error:
+                    return None
+                cast_rows = cast_resp.data or []
+                if not cast_rows:
+                    return None
+                metadata = cast_rows[0].get("metadata") if isinstance(cast_rows[0].get("metadata"), dict) else {}
+                return _select_best_crop([metadata.get("thumbnail_crop") if isinstance(metadata, dict) else None])
+
+            link_resp = (
+                db.schema("core")
+                .table("media_links")
+                .select("id,context")
+                .eq("media_asset_id", target_id)
+                .limit(250)
+                .execute()
+            )
+            if hasattr(link_resp, "error") and link_resp.error:
+                return None
+            link_crops = [
+                row.get("context", {}).get("thumbnail_crop")
+                for row in (link_resp.data or [])
+                if isinstance(row, dict) and isinstance(row.get("context"), dict)
+            ]
+            selected = _select_best_crop(link_crops)
+            if selected is not None:
+                return selected
+            asset_resp = (
+                db.schema("core").table("media_assets").select("id,metadata").eq("id", target_id).limit(1).execute()
+            )
+            if hasattr(asset_resp, "error") and asset_resp.error:
+                return None
+            asset_rows = asset_resp.data or []
+            if not asset_rows:
+                return None
+            metadata = asset_rows[0].get("metadata") if isinstance(asset_rows[0].get("metadata"), dict) else {}
+            return _select_best_crop([metadata.get("thumbnail_crop") if isinstance(metadata, dict) else None])
+
+        def _resolve_crop_for_job(origin: str, target_id: str, existing: Any) -> dict[str, Any]:
+            existing_crop = _normalize_crop_payload(existing)
+            if existing_crop is not None:
+                return existing_crop
+            try:
+                target_uuid = UUID(str(target_id))
+                if origin == "cast_photos":
+                    auto_count_cast_photo(target_uuid, force=True, db=db, _=None)
+                else:
+                    auto_count_media_asset(target_uuid, force=True, db=db, _=None)
+            except Exception:
+                pass
+            detected_crop = _load_crop_from_db(origin, target_id)
+            if detected_crop is not None:
+                return detected_crop
+            return _fallback_crop_payload()
+
         base_jobs: list[dict[str, Any]] = []
+        cast_crops_by_photo: dict[str, dict[str, Any] | None] = {}
         for row in cast_rows:
             photo_id = str(row.get("id") or "")
             if not photo_id:
                 continue
             base_jobs.append({"origin": "cast_photos", "id": photo_id, "crop": None})
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            cast_crops_by_photo[photo_id] = _normalize_crop_payload(
+                metadata.get("thumbnail_crop") if isinstance(metadata, dict) else None
+            )
 
         seen_media_assets: set[str] = set()
-        media_crops_by_asset: dict[str, dict[str, Any]] = {}
+        media_crops_by_asset: dict[str, dict[str, Any] | None] = {}
         for row in media_rows:
             asset_id = str(row.get("media_asset_id") or "")
             if not asset_id:
@@ -1033,27 +1150,39 @@ def _resize_person_gallery_images(
             crop = context.get("thumbnail_crop")
             if not isinstance(crop, dict):
                 crop = metadata.get("thumbnail_crop") if isinstance(metadata.get("thumbnail_crop"), dict) else None
-            if isinstance(crop, dict):
+            normalized_crop = _normalize_crop_payload(crop)
+            if normalized_crop:
                 previous = media_crops_by_asset.get(asset_id)
                 if not previous:
-                    media_crops_by_asset[asset_id] = crop
+                    media_crops_by_asset[asset_id] = normalized_crop
                 else:
                     prev_mode = str(previous.get("mode") or "").lower()
-                    next_mode = str(crop.get("mode") or "").lower()
+                    next_mode = str(normalized_crop.get("mode") or "").lower()
                     if prev_mode != "manual" and next_mode == "manual":
-                        media_crops_by_asset[asset_id] = crop
+                        media_crops_by_asset[asset_id] = normalized_crop
 
         crop_jobs: list[dict[str, Any]] = []
-        for row in cast_rows:
-            photo_id = str(row.get("id") or "")
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-            crop = metadata.get("thumbnail_crop") if isinstance(metadata.get("thumbnail_crop"), dict) else None
-            if not photo_id or not isinstance(crop, dict):
+        for job in base_jobs:
+            origin = str(job.get("origin") or "")
+            target_id = str(job.get("id") or "")
+            if not target_id:
                 continue
-            crop_jobs.append({"origin": "cast_photos", "id": photo_id, "crop": crop})
-
-        for asset_id, crop in media_crops_by_asset.items():
-            crop_jobs.append({"origin": "media_assets", "id": asset_id, "crop": crop})
+            if origin == "cast_photos":
+                crop_jobs.append(
+                    {
+                        "origin": origin,
+                        "id": target_id,
+                        "crop": cast_crops_by_photo.get(target_id),
+                    }
+                )
+            else:
+                crop_jobs.append(
+                    {
+                        "origin": origin,
+                        "id": target_id,
+                        "crop": media_crops_by_asset.get(target_id),
+                    }
+                )
 
         total_ops = len(base_jobs) + len(crop_jobs)
         processed_ops = 0
@@ -1080,10 +1209,12 @@ def _resize_person_gallery_images(
 
         for job in crop_jobs:
             resize_crop_attempted += 1
-            crop_payload = job.get("crop") if isinstance(job.get("crop"), dict) else None
+            crop_payload = _resolve_crop_for_job(
+                str(job.get("origin") or ""),
+                str(job.get("id") or ""),
+                job.get("crop"),
+            )
             try:
-                if crop_payload is None:
-                    raise RuntimeError("No thumbnail_crop payload available")
                 if job["origin"] == "cast_photos":
                     generate_cast_photo_variants(
                         db,
@@ -1303,10 +1434,7 @@ def _names_match(expected: str | None, candidate: str | None) -> bool:
     if (
         len(expected_first) >= 3
         and len(candidate_first) >= 3
-        and (
-            expected_first.startswith(candidate_first)
-            or candidate_first.startswith(expected_first)
-        )
+        and (expected_first.startswith(candidate_first) or candidate_first.startswith(expected_first))
     ):
         return True
     return False
@@ -1671,77 +1799,98 @@ def refresh_person_images(
     photos_failed = cast_photos_failed + media_assets_failed
 
     # 4.5 Auto-count people for newly upserted TMDb/Fandom photos (only when no manual tags)
-    auto_counts_attempted_cast, auto_counts_succeeded_cast, auto_counts_failed_cast = _auto_count_cast_photos(
-        db,
-        person_id_str,
-        sources,
-        photo_ids=None,
-    )
-    auto_counts_attempted_media, auto_counts_succeeded_media, auto_counts_failed_media = _auto_count_media_links(
-        db,
-        person_id_str,
-        force_recount=False,
-    )
-    auto_counts_attempted = auto_counts_attempted_cast + auto_counts_attempted_media
-    auto_counts_succeeded = auto_counts_succeeded_cast + auto_counts_succeeded_media
-    auto_counts_failed = auto_counts_failed_cast + auto_counts_failed_media
+    auto_counts_attempted = 0
+    auto_counts_succeeded = 0
+    auto_counts_failed = 0
+    if not request.skip_auto_count:
+        auto_counts_attempted_cast, auto_counts_succeeded_cast, auto_counts_failed_cast = _auto_count_cast_photos(
+            db,
+            person_id_str,
+            sources,
+            photo_ids=None,
+        )
+        auto_counts_attempted_media, auto_counts_succeeded_media, auto_counts_failed_media = _auto_count_media_links(
+            db,
+            person_id_str,
+            force_recount=False,
+        )
+        auto_counts_attempted = auto_counts_attempted_cast + auto_counts_attempted_media
+        auto_counts_succeeded = auto_counts_succeeded_cast + auto_counts_succeeded_media
+        auto_counts_failed = auto_counts_failed_cast + auto_counts_failed_media
 
     # 4.6 Word ID / text overlay detection (best-effort)
+    text_overlay_attempted = 0
+    text_overlay_succeeded = 0
+    text_overlay_unknown = 0
+    text_overlay_failed = 0
     text_overlay_reason_counts: dict[str, int] = {}
-    (
-        text_overlay_attempted_cast,
-        text_overlay_succeeded_cast,
-        text_overlay_unknown_cast,
-        text_overlay_failed_cast,
-    ) = _detect_text_overlay_cast_photos(
-        db,
-        person_id_str,
-        sources,
-        photo_ids=None,
-        reason_counts=text_overlay_reason_counts,
-    )
-    (
-        text_overlay_attempted_media,
-        text_overlay_succeeded_media,
-        text_overlay_unknown_media,
-        text_overlay_failed_media,
-    ) = _detect_text_overlay_media_links(
-        db,
-        person_id_str,
-        reason_counts=text_overlay_reason_counts,
-    )
-    text_overlay_attempted = text_overlay_attempted_cast + text_overlay_attempted_media
-    text_overlay_succeeded = text_overlay_succeeded_cast + text_overlay_succeeded_media
-    text_overlay_unknown = text_overlay_unknown_cast + text_overlay_unknown_media
-    text_overlay_failed = text_overlay_failed_cast + text_overlay_failed_media
+    if not request.skip_word_detection:
+        (
+            text_overlay_attempted_cast,
+            text_overlay_succeeded_cast,
+            text_overlay_unknown_cast,
+            text_overlay_failed_cast,
+        ) = _detect_text_overlay_cast_photos(
+            db,
+            person_id_str,
+            sources,
+            photo_ids=None,
+            reason_counts=text_overlay_reason_counts,
+        )
+        (
+            text_overlay_attempted_media,
+            text_overlay_succeeded_media,
+            text_overlay_unknown_media,
+            text_overlay_failed_media,
+        ) = _detect_text_overlay_media_links(
+            db,
+            person_id_str,
+            reason_counts=text_overlay_reason_counts,
+        )
+        text_overlay_attempted = text_overlay_attempted_cast + text_overlay_attempted_media
+        text_overlay_succeeded = text_overlay_succeeded_cast + text_overlay_succeeded_media
+        text_overlay_unknown = text_overlay_unknown_cast + text_overlay_unknown_media
+        text_overlay_failed = text_overlay_failed_cast + text_overlay_failed_media
     text_overlay_failure_reasons = {
         reason: int(text_overlay_reason_counts.get(reason, 0)) for reason in TEXT_OVERLAY_FAILURE_REASONS
     }
 
     # 4.7 Center/crop thumbnails for non-manual rows (best-effort)
-    centering_attempted, centering_succeeded, centering_failed, centering_skipped_manual = (
-        _recenter_person_gallery_images(
+    centering_attempted = 0
+    centering_succeeded = 0
+    centering_failed = 0
+    centering_skipped_manual = 0
+    if not request.skip_centering:
+        centering_attempted, centering_succeeded, centering_failed, centering_skipped_manual = (
+            _recenter_person_gallery_images(
+                db,
+                person_id_str,
+                sources,
+                photo_ids=None,
+                force=False,
+            )
+        )
+
+    resize_attempted = 0
+    resize_succeeded = 0
+    resize_failed = 0
+    resize_crop_attempted = 0
+    resize_crop_succeeded = 0
+    resize_crop_failed = 0
+    if not request.skip_resize:
+        (
+            resize_attempted,
+            resize_succeeded,
+            resize_failed,
+            resize_crop_attempted,
+            resize_crop_succeeded,
+            resize_crop_failed,
+        ) = _resize_person_gallery_images(
             db,
             person_id_str,
             sources,
-            photo_ids=None,
             force=False,
         )
-    )
-
-    (
-        resize_attempted,
-        resize_succeeded,
-        resize_failed,
-        resize_crop_attempted,
-        resize_crop_succeeded,
-        resize_crop_failed,
-    ) = _resize_person_gallery_images(
-        db,
-        person_id_str,
-        sources,
-        force=False,
-    )
 
     # 5. Prune orphaned S3 objects
     photos_pruned = 0
@@ -2157,8 +2306,7 @@ async def refresh_person_images_stream(
                     {
                         "stage": "mirroring",
                         "message": (
-                            "Mirrored media assets "
-                            f"({media_assets_mirrored} hosted, {media_assets_failed} failed)."
+                            f"Mirrored media assets ({media_assets_mirrored} hosted, {media_assets_failed} failed)."
                         ),
                         "current": 2,
                         "total": 2,
@@ -2197,158 +2345,168 @@ async def refresh_person_images_stream(
         auto_counts_attempted = 0
         auto_counts_succeeded = 0
         auto_counts_failed = 0
-        try:
-            from trr_backend.clients.screenalytics import (
-                ScreenalyticsClientError,
-                count_people,
-                is_screenalytics_configured,
+        if request.skip_auto_count:
+            yield progress(
+                {
+                    "stage": "auto_count",
+                    "message": "Skipping auto-count (request).",
+                    "current": 0,
+                    "total": 0,
+                }
             )
-            from trr_backend.repositories.cast_photo_tags import (
-                get_tags_by_photo_ids,
-                has_manual_tags,
-                upsert_cast_photo_tags,
-            )
-            from trr_backend.repositories.media_links import (
-                has_manual_people_tags,
-                has_people_count,
-            )
-
-            if is_screenalytics_configured():
-                candidate_sources = [s for s in sources if s in ALL_SOURCES]
-                cast_rows = (
-                    db.schema("core")
-                    .table("cast_photos")
-                    .select(
-                        "id, hosted_url, hosted_content_type, url, image_url, thumb_url, "
-                        "source_page_url, people_names, source, metadata"
-                    )
-                    .eq("person_id", person_id_str)
-                    .in_("source", candidate_sources)
-                    .execute()
-                    .data
-                    or []
+        else:
+            try:
+                from trr_backend.clients.screenalytics import (
+                    ScreenalyticsClientError,
+                    count_people,
+                    is_screenalytics_configured,
                 )
-                tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in cast_rows if row.get("id")])
-                media_rows = _fetch_person_media_link_rows(db, person_id_str)
-
-                to_process: list[dict[str, Any]] = []
-                for row in cast_rows:
-                    tag_row = tag_rows.get(str(row["id"]))
-                    if has_manual_tags(tag_row):
-                        continue
-                    if tag_row and tag_row.get("people_count") is not None:
-                        continue
-                    urls = _pick_autocount_urls(row)
-                    if not urls:
-                        continue
-                    to_process.append(
-                        {
-                            "origin": "cast_photos",
-                            "id": str(row["id"]),
-                            "urls": urls,
-                            "tag_row": tag_row,
-                            "row": row,
-                        }
-                    )
-
-                for row in media_rows:
-                    context = row.get("context") if isinstance(row.get("context"), dict) else {}
-                    if has_manual_people_tags(context):
-                        continue
-                    if has_people_count(context):
-                        continue
-                    urls = _build_media_link_autocount_urls(row)
-                    if not urls:
-                        continue
-                    to_process.append(
-                        {
-                            "origin": "media_links",
-                            "id": str(row["id"]),
-                            "urls": urls,
-                            "context": dict(context or {}),
-                        }
-                    )
-
-                total_to_count = len(to_process)
-                yield progress(
-                    {
-                        "stage": "auto_count",
-                        "message": "Auto-counting people in images...",
-                        "current": 0,
-                        "total": total_to_count,
-                    }
+                from trr_backend.repositories.cast_photo_tags import (
+                    get_tags_by_photo_ids,
+                    has_manual_tags,
+                    upsert_cast_photo_tags,
                 )
-                for idx, entry in enumerate(to_process, start=1):
-                    auto_counts_attempted += 1
-                    result = None
-                    last_error: ScreenalyticsClientError | None = None
-                    for url in entry["urls"]:
-                        try:
-                            result = count_people(url)
-                            break
-                        except ScreenalyticsClientError as exc:
-                            last_error = exc
-                    try:
-                        if result is None:
-                            raise last_error or ScreenalyticsClientError("Unable to auto-count image")
-                        if entry["origin"] == "cast_photos":
-                            tag_row = entry.get("tag_row")
-                            upsert_cast_photo_tags(
-                                db,
-                                cast_photo_id=entry["id"],
-                                people_names=tag_row.get("people_names") if tag_row else None,
-                                people_ids=tag_row.get("people_ids") if tag_row else None,
-                                people_count=result.people_count,
-                                people_count_source="auto",
-                                detector=result.detector,
-                                updated_by_firebase_uid="system:auto",
-                            )
-                            crop_payload = _apply_auto_crop_payload(result)
-                            if crop_payload is not None:
-                                metadata = dict(entry["row"].get("metadata") or {})
-                                if not _is_manual_thumbnail_crop(metadata.get("thumbnail_crop")):
-                                    metadata["thumbnail_crop"] = crop_payload
-                                    db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
-                                        "id", entry["id"]
-                                    ).execute()
-                        else:
-                            context = dict(entry.get("context") or {})
-                            context["people_count"] = result.people_count
-                            context["people_count_source"] = "auto"
-                            context["people_count_detector"] = result.detector
-                            crop_payload = _apply_auto_crop_payload(result)
-                            if crop_payload is not None and not _is_manual_thumbnail_crop(
-                                context.get("thumbnail_crop")
-                            ):
-                                context["thumbnail_crop"] = crop_payload
-                            db.schema("core").table("media_links").update(
-                                {"context": context, "updated_at": datetime.now(UTC).isoformat()}
-                            ).eq("id", entry["id"]).execute()
-                        auto_counts_succeeded += 1
-                    except Exception as exc:  # noqa: BLE001
-                        auto_counts_failed += 1
-                        errors.append(f"Auto-count {entry['id']}: {exc}")
+                from trr_backend.repositories.media_links import (
+                    has_manual_people_tags,
+                    has_people_count,
+                )
 
-                    if idx <= 20 or idx % 5 == 0 or idx == total_to_count:
-                        yield progress(
+                if is_screenalytics_configured():
+                    candidate_sources = [s for s in sources if s in ALL_SOURCES]
+                    cast_rows = (
+                        db.schema("core")
+                        .table("cast_photos")
+                        .select(
+                            "id, hosted_url, hosted_content_type, url, image_url, thumb_url, "
+                            "source_page_url, people_names, source, metadata"
+                        )
+                        .eq("person_id", person_id_str)
+                        .in_("source", candidate_sources)
+                        .execute()
+                        .data
+                        or []
+                    )
+                    tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in cast_rows if row.get("id")])
+                    media_rows = _fetch_person_media_link_rows(db, person_id_str)
+
+                    to_process: list[dict[str, Any]] = []
+                    for row in cast_rows:
+                        tag_row = tag_rows.get(str(row["id"]))
+                        if has_manual_tags(tag_row):
+                            continue
+                        if tag_row and tag_row.get("people_count") is not None:
+                            continue
+                        urls = _pick_autocount_urls(row)
+                        if not urls:
+                            continue
+                        to_process.append(
                             {
-                                "stage": "auto_count",
-                                "message": "Auto-counting people in images...",
-                                "current": idx,
-                                "total": total_to_count,
+                                "origin": "cast_photos",
+                                "id": str(row["id"]),
+                                "urls": urls,
+                                "tag_row": tag_row,
+                                "row": row,
                             }
                         )
-            else:
-                yield progress(
-                    {
-                        "stage": "auto_count",
-                        "message": "Skipping auto-count (not configured).",
-                        "current": 0,
-                        "total": 0,
-                    }
-                )
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"Auto-count: {exc}")
+
+                    for row in media_rows:
+                        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+                        if has_manual_people_tags(context):
+                            continue
+                        if has_people_count(context):
+                            continue
+                        urls = _build_media_link_autocount_urls(row)
+                        if not urls:
+                            continue
+                        to_process.append(
+                            {
+                                "origin": "media_links",
+                                "id": str(row["id"]),
+                                "urls": urls,
+                                "context": dict(context or {}),
+                            }
+                        )
+
+                    total_to_count = len(to_process)
+                    yield progress(
+                        {
+                            "stage": "auto_count",
+                            "message": "Auto-counting people in images...",
+                            "current": 0,
+                            "total": total_to_count,
+                        }
+                    )
+                    for idx, entry in enumerate(to_process, start=1):
+                        auto_counts_attempted += 1
+                        result = None
+                        last_error: ScreenalyticsClientError | None = None
+                        for url in entry["urls"]:
+                            try:
+                                result = count_people(url)
+                                break
+                            except ScreenalyticsClientError as exc:
+                                last_error = exc
+                        try:
+                            if result is None:
+                                raise last_error or ScreenalyticsClientError("Unable to auto-count image")
+                            if entry["origin"] == "cast_photos":
+                                tag_row = entry.get("tag_row")
+                                upsert_cast_photo_tags(
+                                    db,
+                                    cast_photo_id=entry["id"],
+                                    people_names=tag_row.get("people_names") if tag_row else None,
+                                    people_ids=tag_row.get("people_ids") if tag_row else None,
+                                    people_count=result.people_count,
+                                    people_count_source="auto",
+                                    detector=result.detector,
+                                    updated_by_firebase_uid="system:auto",
+                                )
+                                crop_payload = _apply_auto_crop_payload(result)
+                                if crop_payload is not None:
+                                    metadata = dict(entry["row"].get("metadata") or {})
+                                    if not _is_manual_thumbnail_crop(metadata.get("thumbnail_crop")):
+                                        metadata["thumbnail_crop"] = crop_payload
+                                        db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
+                                            "id", entry["id"]
+                                        ).execute()
+                            else:
+                                context = dict(entry.get("context") or {})
+                                context["people_count"] = result.people_count
+                                context["people_count_source"] = "auto"
+                                context["people_count_detector"] = result.detector
+                                crop_payload = _apply_auto_crop_payload(result)
+                                if crop_payload is not None and not _is_manual_thumbnail_crop(
+                                    context.get("thumbnail_crop")
+                                ):
+                                    context["thumbnail_crop"] = crop_payload
+                                db.schema("core").table("media_links").update(
+                                    {"context": context, "updated_at": datetime.now(UTC).isoformat()}
+                                ).eq("id", entry["id"]).execute()
+                            auto_counts_succeeded += 1
+                        except Exception as exc:  # noqa: BLE001
+                            auto_counts_failed += 1
+                            errors.append(f"Auto-count {entry['id']}: {exc}")
+
+                        if idx <= 20 or idx % 5 == 0 or idx == total_to_count:
+                            yield progress(
+                                {
+                                    "stage": "auto_count",
+                                    "message": "Auto-counting people in images...",
+                                    "current": idx,
+                                    "total": total_to_count,
+                                }
+                            )
+                else:
+                    yield progress(
+                        {
+                            "stage": "auto_count",
+                            "message": "Skipping auto-count (not configured).",
+                            "current": 0,
+                            "total": 0,
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Auto-count: {exc}")
 
         # 5.6 Word ID / text overlay detection (best-effort)
         text_overlay_attempted = 0
@@ -2358,249 +2516,270 @@ async def refresh_person_images_stream(
         text_overlay_configured = False
         text_overlay_candidates = 0
         text_overlay_skipped_reason: str | None = None
-        try:
-            from trr_backend.vision.text_overlay import (
-                TextOverlayDetectionError,
-                classify_text_overlay_failure_reason,
-                detect_and_update_cast_photo_text_overlay,
-                detect_and_update_media_asset_text_overlay,
-                is_text_overlay_detection_configured,
+        if request.skip_word_detection:
+            text_overlay_skipped_reason = "request_skip"
+            yield progress(
+                {
+                    "stage": "word_id",
+                    "message": "Skipping word detection (request).",
+                    "current": 0,
+                    "total": 0,
+                }
             )
-
-            text_overlay_configured = is_text_overlay_detection_configured()
-            if text_overlay_configured:
-                cast_rows = (
-                    db.schema("core")
-                    .table("cast_photos")
-                    .select("id, metadata, source")
-                    .eq("person_id", person_id_str)
-                    .in_("source", [s for s in sources if s in ALL_SOURCES])
-                    .execute()
-                    .data
-                    or []
+        else:
+            try:
+                from trr_backend.vision.text_overlay import (
+                    TextOverlayDetectionError,
+                    classify_text_overlay_failure_reason,
+                    detect_and_update_cast_photo_text_overlay,
+                    detect_and_update_media_asset_text_overlay,
+                    is_text_overlay_detection_configured,
                 )
-                media_rows = _fetch_person_media_link_rows(db, person_id_str)
 
-                to_process: list[dict[str, str]] = []
-                for row in cast_rows:
-                    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-                    if "has_text_overlay" in (meta or {}):
-                        continue
-                    rid = row.get("id")
-                    if rid:
-                        to_process.append({"origin": "cast_photos", "id": str(rid)})
+                text_overlay_configured = is_text_overlay_detection_configured()
+                if text_overlay_configured:
+                    cast_rows = (
+                        db.schema("core")
+                        .table("cast_photos")
+                        .select("id, metadata, source")
+                        .eq("person_id", person_id_str)
+                        .in_("source", [s for s in sources if s in ALL_SOURCES])
+                        .execute()
+                        .data
+                        or []
+                    )
+                    media_rows = _fetch_person_media_link_rows(db, person_id_str)
 
-                seen_media_assets: set[str] = set()
-                for row in media_rows:
-                    asset_id = str(row.get("media_asset_id") or "")
-                    if not asset_id or asset_id in seen_media_assets:
-                        continue
-                    seen_media_assets.add(asset_id)
-                    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-                    if "has_text_overlay" in metadata:
-                        continue
-                    to_process.append({"origin": "media_links", "id": asset_id})
+                    to_process: list[dict[str, str]] = []
+                    for row in cast_rows:
+                        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                        if "has_text_overlay" in (meta or {}):
+                            continue
+                        rid = row.get("id")
+                        if rid:
+                            to_process.append({"origin": "cast_photos", "id": str(rid)})
 
-                total_text = len(to_process)
-                text_overlay_candidates = total_text
-                if total_text == 0:
-                    text_overlay_skipped_reason = "no_pending_images"
+                    seen_media_assets: set[str] = set()
+                    for row in media_rows:
+                        asset_id = str(row.get("media_asset_id") or "")
+                        if not asset_id or asset_id in seen_media_assets:
+                            continue
+                        seen_media_assets.add(asset_id)
+                        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                        if "has_text_overlay" in metadata:
+                            continue
+                        to_process.append({"origin": "media_links", "id": asset_id})
+
+                    total_text = len(to_process)
+                    text_overlay_candidates = total_text
+                    if total_text == 0:
+                        text_overlay_skipped_reason = "no_pending_images"
+                        yield progress(
+                            {
+                                "stage": "word_id",
+                                "message": "Text overlay already up to date (no pending images).",
+                                "current": 0,
+                                "total": 0,
+                            }
+                        )
+                    else:
+                        yield progress(
+                            {
+                                "stage": "word_id",
+                                "message": "Detecting words/text overlays...",
+                                "current": 0,
+                                "total": total_text,
+                            }
+                        )
+                        for idx, item in enumerate(to_process, start=1):
+                            text_overlay_attempted += 1
+                            try:
+                                if item["origin"] == "cast_photos":
+                                    result = detect_and_update_cast_photo_text_overlay(db, item["id"], force=False)
+                                else:
+                                    result = detect_and_update_media_asset_text_overlay(db, item["id"], force=False)
+                                if result.status == "unknown":
+                                    text_overlay_unknown += 1
+                                    reason = result.reason_code or "gemini_request_failed"
+                                    text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
+                                else:
+                                    text_overlay_succeeded += 1
+                            except TextOverlayDetectionError as exc:
+                                text_overlay_failed += 1
+                                reason = classify_text_overlay_failure_reason(exc)
+                                text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
+                                errors.append(f"Word ID {item['id']}: {exc}")
+                            except Exception as exc:  # noqa: BLE001
+                                text_overlay_failed += 1
+                                text_overlay_reason_counts["gemini_request_failed"] = (
+                                    text_overlay_reason_counts.get("gemini_request_failed", 0) + 1
+                                )
+                                errors.append(f"Word ID {item['id']}: {exc}")
+
+                            if idx <= 20 or idx % 5 == 0 or idx == total_text:
+                                yield progress(
+                                    {
+                                        "stage": "word_id",
+                                        "message": "Detecting words/text overlays...",
+                                        "current": idx,
+                                        "total": total_text,
+                                    }
+                                )
+                else:
+                    text_overlay_skipped_reason = "not_configured"
                     yield progress(
                         {
                             "stage": "word_id",
-                            "message": "Text overlay already up to date (no pending images).",
+                            "message": "Skipping word detection (not configured).",
                             "current": 0,
                             "total": 0,
                         }
                     )
-                else:
-                    yield progress(
-                        {
-                            "stage": "word_id",
-                            "message": "Detecting words/text overlays...",
-                            "current": 0,
-                            "total": total_text,
-                        }
-                    )
-                    for idx, item in enumerate(to_process, start=1):
-                        text_overlay_attempted += 1
-                        try:
-                            if item["origin"] == "cast_photos":
-                                result = detect_and_update_cast_photo_text_overlay(db, item["id"], force=False)
-                            else:
-                                result = detect_and_update_media_asset_text_overlay(db, item["id"], force=False)
-                            if result.status == "unknown":
-                                text_overlay_unknown += 1
-                                reason = result.reason_code or "gemini_request_failed"
-                                text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
-                            else:
-                                text_overlay_succeeded += 1
-                        except TextOverlayDetectionError as exc:
-                            text_overlay_failed += 1
-                            reason = classify_text_overlay_failure_reason(exc)
-                            text_overlay_reason_counts[reason] = text_overlay_reason_counts.get(reason, 0) + 1
-                            errors.append(f"Word ID {item['id']}: {exc}")
-                        except Exception as exc:  # noqa: BLE001
-                            text_overlay_failed += 1
-                            text_overlay_reason_counts["gemini_request_failed"] = (
-                                text_overlay_reason_counts.get("gemini_request_failed", 0) + 1
-                            )
-                            errors.append(f"Word ID {item['id']}: {exc}")
-
-                        if idx <= 20 or idx % 5 == 0 or idx == total_text:
-                            yield progress(
-                                {
-                                    "stage": "word_id",
-                                    "message": "Detecting words/text overlays...",
-                                    "current": idx,
-                                    "total": total_text,
-                                }
-                            )
-            else:
-                text_overlay_skipped_reason = "not_configured"
-                yield progress(
-                    {
-                        "stage": "word_id",
-                        "message": "Skipping word detection (not configured).",
-                        "current": 0,
-                        "total": 0,
-                    }
-                )
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"Word ID: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Word ID: {exc}")
 
         # 5.7 Centering/cropping stage (best-effort, non-manual only)
         centering_attempted = 0
         centering_succeeded = 0
         centering_failed = 0
         centering_skipped_manual = 0
-        try:
-            from trr_backend.clients.screenalytics import (
-                ScreenalyticsClientError,
-                count_people,
-                is_screenalytics_configured,
+        if request.skip_centering:
+            yield progress(
+                {
+                    "stage": "centering_cropping",
+                    "message": "Skipping centering/cropping (request).",
+                    "current": 0,
+                    "total": 0,
+                }
             )
-
-            if is_screenalytics_configured():
-                candidate_sources = [s for s in sources if s in ALL_SOURCES]
-                cast_rows = (
-                    db.schema("core")
-                    .table("cast_photos")
-                    .select("id, hosted_url, url, image_url, thumb_url, source_page_url, source, metadata")
-                    .eq("person_id", person_id_str)
-                    .in_("source", candidate_sources)
-                    .execute()
-                    .data
-                    or []
+        else:
+            try:
+                from trr_backend.clients.screenalytics import (
+                    ScreenalyticsClientError,
+                    count_people,
+                    is_screenalytics_configured,
                 )
-                media_rows = _fetch_person_media_link_rows(db, person_id_str)
 
-                to_process_crop: list[dict[str, Any]] = []
-                for row in cast_rows:
-                    metadata = dict(row.get("metadata") or {})
-                    existing_crop = metadata.get("thumbnail_crop")
-                    if _is_manual_thumbnail_crop(existing_crop):
-                        centering_skipped_manual += 1
-                        continue
-                    if not _should_recenter_auto_crop(existing_crop, force=False):
-                        continue
-                    urls = _pick_autocount_urls(row)
-                    if not urls:
-                        continue
-                    to_process_crop.append(
-                        {
-                            "origin": "cast_photos",
-                            "id": str(row["id"]),
-                            "urls": urls,
-                            "metadata": metadata,
-                        }
+                if is_screenalytics_configured():
+                    candidate_sources = [s for s in sources if s in ALL_SOURCES]
+                    cast_rows = (
+                        db.schema("core")
+                        .table("cast_photos")
+                        .select("id, hosted_url, url, image_url, thumb_url, source_page_url, source, metadata")
+                        .eq("person_id", person_id_str)
+                        .in_("source", candidate_sources)
+                        .execute()
+                        .data
+                        or []
                     )
+                    media_rows = _fetch_person_media_link_rows(db, person_id_str)
 
-                for row in media_rows:
-                    context = dict(row.get("context") or {})
-                    existing_crop = context.get("thumbnail_crop")
-                    if _is_manual_thumbnail_crop(existing_crop):
-                        centering_skipped_manual += 1
-                        continue
-                    if not _should_recenter_auto_crop(existing_crop, force=False):
-                        continue
-                    urls = _build_media_link_autocount_urls(row)
-                    if not urls:
-                        continue
-                    to_process_crop.append(
-                        {
-                            "origin": "media_links",
-                            "id": str(row["id"]),
-                            "urls": urls,
-                            "context": context,
-                        }
-                    )
-
-                total_crop = len(to_process_crop)
-                yield progress(
-                    {
-                        "stage": "centering_cropping",
-                        "message": "Centering/cropping thumbnails...",
-                        "current": 0,
-                        "total": total_crop,
-                    }
-                )
-                for idx, entry in enumerate(to_process_crop, start=1):
-                    centering_attempted += 1
-                    result = None
-                    last_error: ScreenalyticsClientError | None = None
-                    for url in entry["urls"]:
-                        try:
-                            result = count_people(url)
-                            break
-                        except ScreenalyticsClientError as exc:
-                            last_error = exc
-                    try:
-                        if result is None:
-                            raise last_error or ScreenalyticsClientError("Unable to center/crop image")
-                        crop_payload = _apply_auto_crop_payload(result)
-                        if crop_payload is None:
-                            raise ScreenalyticsClientError("No detections available for centering/cropping")
-                        if entry["origin"] == "cast_photos":
-                            metadata = dict(entry["metadata"] or {})
-                            metadata["thumbnail_crop"] = crop_payload
-                            db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
-                                "id", entry["id"]
-                            ).execute()
-                        else:
-                            context = dict(entry["context"] or {})
-                            context["thumbnail_crop"] = crop_payload
-                            db.schema("core").table("media_links").update(
-                                {
-                                    "context": context,
-                                    "updated_at": datetime.now(UTC).isoformat(),
-                                }
-                            ).eq("id", entry["id"]).execute()
-                        centering_succeeded += 1
-                    except Exception as exc:  # noqa: BLE001
-                        centering_failed += 1
-                        errors.append(f"Centering {entry['id']}: {exc}")
-
-                    if idx <= 20 or idx % 5 == 0 or idx == total_crop:
-                        yield progress(
+                    to_process_crop: list[dict[str, Any]] = []
+                    for row in cast_rows:
+                        metadata = dict(row.get("metadata") or {})
+                        existing_crop = metadata.get("thumbnail_crop")
+                        if _is_manual_thumbnail_crop(existing_crop):
+                            centering_skipped_manual += 1
+                            continue
+                        if not _should_recenter_auto_crop(existing_crop, force=False):
+                            continue
+                        urls = _pick_autocount_urls(row)
+                        if not urls:
+                            continue
+                        to_process_crop.append(
                             {
-                                "stage": "centering_cropping",
-                                "message": "Centering/cropping thumbnails...",
-                                "current": idx,
-                                "total": total_crop,
+                                "origin": "cast_photos",
+                                "id": str(row["id"]),
+                                "urls": urls,
+                                "metadata": metadata,
                             }
                         )
-            else:
-                yield progress(
-                    {
-                        "stage": "centering_cropping",
-                        "message": "Skipping centering/cropping (not configured).",
-                        "current": 0,
-                        "total": 0,
-                    }
-                )
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"Centering/Cropping: {exc}")
+
+                    for row in media_rows:
+                        context = dict(row.get("context") or {})
+                        existing_crop = context.get("thumbnail_crop")
+                        if _is_manual_thumbnail_crop(existing_crop):
+                            centering_skipped_manual += 1
+                            continue
+                        if not _should_recenter_auto_crop(existing_crop, force=False):
+                            continue
+                        urls = _build_media_link_autocount_urls(row)
+                        if not urls:
+                            continue
+                        to_process_crop.append(
+                            {
+                                "origin": "media_links",
+                                "id": str(row["id"]),
+                                "urls": urls,
+                                "context": context,
+                            }
+                        )
+
+                    total_crop = len(to_process_crop)
+                    yield progress(
+                        {
+                            "stage": "centering_cropping",
+                            "message": "Centering/cropping thumbnails...",
+                            "current": 0,
+                            "total": total_crop,
+                        }
+                    )
+                    for idx, entry in enumerate(to_process_crop, start=1):
+                        centering_attempted += 1
+                        result = None
+                        last_error: ScreenalyticsClientError | None = None
+                        for url in entry["urls"]:
+                            try:
+                                result = count_people(url)
+                                break
+                            except ScreenalyticsClientError as exc:
+                                last_error = exc
+                        try:
+                            if result is None:
+                                raise last_error or ScreenalyticsClientError("Unable to center/crop image")
+                            crop_payload = _apply_auto_crop_payload(result)
+                            if crop_payload is None:
+                                raise ScreenalyticsClientError("No detections available for centering/cropping")
+                            if entry["origin"] == "cast_photos":
+                                metadata = dict(entry["metadata"] or {})
+                                metadata["thumbnail_crop"] = crop_payload
+                                db.schema("core").table("cast_photos").update({"metadata": metadata}).eq(
+                                    "id", entry["id"]
+                                ).execute()
+                            else:
+                                context = dict(entry["context"] or {})
+                                context["thumbnail_crop"] = crop_payload
+                                db.schema("core").table("media_links").update(
+                                    {
+                                        "context": context,
+                                        "updated_at": datetime.now(UTC).isoformat(),
+                                    }
+                                ).eq("id", entry["id"]).execute()
+                            centering_succeeded += 1
+                        except Exception as exc:  # noqa: BLE001
+                            centering_failed += 1
+                            errors.append(f"Centering {entry['id']}: {exc}")
+
+                        if idx <= 20 or idx % 5 == 0 or idx == total_crop:
+                            yield progress(
+                                {
+                                    "stage": "centering_cropping",
+                                    "message": "Centering/cropping thumbnails...",
+                                    "current": idx,
+                                    "total": total_crop,
+                                }
+                            )
+                else:
+                    yield progress(
+                        {
+                            "stage": "centering_cropping",
+                            "message": "Skipping centering/cropping (not configured).",
+                            "current": 0,
+                            "total": 0,
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Centering/Cropping: {exc}")
 
         # 5.8 Resize/variant generation stage (best-effort for cast + media)
         resize_attempted = 0
@@ -2609,42 +2788,52 @@ async def refresh_person_images_stream(
         resize_crop_attempted = 0
         resize_crop_succeeded = 0
         resize_crop_failed = 0
-        try:
+        if request.skip_resize:
             yield progress(
                 {
                     "stage": "resizing",
-                    "message": "Generating resized variants...",
+                    "message": "Skipping resize/variant generation (request).",
                     "current": 0,
-                    "total": 1,
+                    "total": 0,
                 }
             )
-            (
-                resize_attempted,
-                resize_succeeded,
-                resize_failed,
-                resize_crop_attempted,
-                resize_crop_succeeded,
-                resize_crop_failed,
-            ) = _resize_person_gallery_images(
-                db,
-                person_id_str,
-                sources,
-                force=False,
-            )
-            yield progress(
-                {
-                    "stage": "resizing",
-                    "message": (
-                        "Variant generation complete "
-                        f"({resize_succeeded}/{resize_attempted} base, "
-                        f"{resize_crop_succeeded}/{resize_crop_attempted} crop)."
-                    ),
-                    "current": 1,
-                    "total": 1,
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"Resizing: {exc}")
+        else:
+            try:
+                yield progress(
+                    {
+                        "stage": "resizing",
+                        "message": "Generating resized variants...",
+                        "current": 0,
+                        "total": 1,
+                    }
+                )
+                (
+                    resize_attempted,
+                    resize_succeeded,
+                    resize_failed,
+                    resize_crop_attempted,
+                    resize_crop_succeeded,
+                    resize_crop_failed,
+                ) = _resize_person_gallery_images(
+                    db,
+                    person_id_str,
+                    sources,
+                    force=False,
+                )
+                yield progress(
+                    {
+                        "stage": "resizing",
+                        "message": (
+                            "Variant generation complete "
+                            f"({resize_succeeded}/{resize_attempted} base, "
+                            f"{resize_crop_succeeded}/{resize_crop_attempted} crop)."
+                        ),
+                        "current": 1,
+                        "total": 1,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Resizing: {exc}")
 
         # 6. Complete
         complete_data = {
@@ -2707,7 +2896,7 @@ async def reprocess_person_images_stream(
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> StreamingResponse:
-    """Re-run counting, text-ID, and face-crop on existing photos (no sync/mirror)."""
+    """Re-run counting, text-ID, centering, and resize on existing photos (no sync/mirror)."""
     person_id_str = str(person_id)
     run_id = f"reprocess-{person_id_str}-{int(datetime.now(UTC).timestamp())}"
 
@@ -2717,6 +2906,7 @@ async def reprocess_person_images_stream(
         auto_counts_succeeded = 0
         text_overlay_succeeded = 0
         c_succeeded = 0
+        resize_succeeded = 0
 
         def build_live_counts() -> dict[str, int]:
             return {
@@ -2725,7 +2915,7 @@ async def reprocess_person_images_stream(
                 "counted": int(auto_counts_succeeded),
                 "cropped": int(c_succeeded),
                 "id_text": int(text_overlay_succeeded),
-                "resized": 0,
+                "resized": int(resize_succeeded),
             }
 
         def progress(payload: dict[str, Any]) -> str:
@@ -2928,6 +3118,41 @@ async def reprocess_person_images_stream(
             }
         )
 
+        # ---------- Resize / variants ----------
+        yield progress(
+            {
+                "stage": "resizing",
+                "message": "Generating resized variants...",
+                "current": 0,
+                "total": 1,
+            }
+        )
+        (
+            resize_attempted,
+            resize_succeeded,
+            resize_failed,
+            resize_crop_attempted,
+            resize_crop_succeeded,
+            resize_crop_failed,
+        ) = _resize_person_gallery_images(
+            db,
+            person_id_str,
+            sources,
+            force=True,
+        )
+        yield progress(
+            {
+                "stage": "resizing",
+                "message": (
+                    "Variant generation complete "
+                    f"({resize_succeeded}/{resize_attempted} base, "
+                    f"{resize_crop_succeeded}/{resize_crop_attempted} crop)."
+                ),
+                "current": 1,
+                "total": 1,
+            }
+        )
+
         # ---------- Complete ----------
         complete_data = {
             "person_id": person_id_str,
@@ -2947,6 +3172,12 @@ async def reprocess_person_images_stream(
             "centering_succeeded": c_succeeded,
             "centering_failed": c_failed,
             "centering_skipped_manual": c_skipped,
+            "resize_attempted": resize_attempted,
+            "resize_succeeded": resize_succeeded,
+            "resize_failed": resize_failed,
+            "resize_crop_attempted": resize_crop_attempted,
+            "resize_crop_succeeded": resize_crop_succeeded,
+            "resize_crop_failed": resize_crop_failed,
             "live_counts": build_live_counts(),
             "errors": errors,
         }

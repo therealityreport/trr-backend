@@ -313,14 +313,7 @@ def _candidate_to_json(candidate: FandomCandidatePage) -> dict[str, Any]:
 
 
 def _resolve_person_name(db: SupabaseAdminClient, person_id: str) -> str:
-    response = (
-        db.schema("core")
-        .table("people")
-        .select("id,full_name")
-        .eq("id", person_id)
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("people").select("id,full_name").eq("id", person_id).limit(1).execute()
     rows = get_list_result(response, "loading person for fandom sync")
     if not rows:
         raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
@@ -547,7 +540,7 @@ def preview_season_fandom_sync(
 ):
     season_context = _resolve_season_context(db, show_id=str(show_id), season_number=season_number)
     query_name = season_context["season_title"] or (
-        f'{season_context["show_name"]} season {season_context["season_number"]}'
+        f"{season_context['show_name']} season {season_context['season_number']}"
     )
     candidate_pages, selected_pages, parsed_rows, warnings = _collect_season_preview(
         query_name=query_name,
@@ -579,7 +572,7 @@ def commit_season_fandom_sync(
 ):
     season_context = _resolve_season_context(db, show_id=str(show_id), season_number=season_number)
     query_name = season_context["season_title"] or (
-        f'{season_context["show_name"]} season {season_context["season_number"]}'
+        f"{season_context['show_name']} season {season_context['season_number']}"
     )
     preview_request = FandomSyncRequest(
         manual_page_urls=payload.selected_page_urls or payload.manual_page_urls,

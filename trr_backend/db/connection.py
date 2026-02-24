@@ -8,9 +8,11 @@ with support for local Supabase development and remote production environments.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from functools import lru_cache
+from urllib.parse import quote, urlsplit, urlunsplit
 
 
 class DatabaseConnectionError(RuntimeError):
@@ -56,6 +58,69 @@ def _get_local_supabase_db_url() -> str | None:
 
 
 @lru_cache(maxsize=1)
+def resolve_database_url_candidates(*, allow_local_fallback: bool = True) -> tuple[str, ...]:
+    """
+    Resolve candidate database URLs in priority order.
+
+    Priority order:
+    1. SUPABASE_DB_URL
+    2. TRR_DB_FALLBACK_URL (optional operator-provided fallback)
+    3. Auto-derived Supabase direct host fallback when SUPABASE_DB_URL is a pooler URL
+    4. DATABASE_URL
+    5. TRR_DB_URL
+    6. (Local only) `supabase status --output env` DB_URL
+    """
+
+    def _append_candidate(
+        ordered: list[str],
+        seen: set[str],
+        value: str | None,
+    ) -> None:
+        url = (value or "").strip()
+        if not url or url in seen:
+            return
+        ordered.append(url)
+        seen.add(url)
+
+    def _derive_supabase_direct_url(pooler_url: str) -> str | None:
+        parsed = urlsplit(pooler_url)
+        host = (parsed.hostname or "").strip().lower()
+        if not host.endswith("pooler.supabase.com"):
+            return None
+
+        username = parsed.username or ""
+        project_ref_match = re.match(r"^postgres\.([a-zA-Z0-9]+)$", username)
+        if not project_ref_match:
+            return None
+        project_ref = project_ref_match.group(1)
+
+        direct_host = f"db.{project_ref}.supabase.co"
+        userinfo = quote(username, safe="")
+        if parsed.password is not None:
+            userinfo = f"{userinfo}:{quote(parsed.password, safe='')}"
+        netloc = f"{direct_host}:5432"
+        if userinfo:
+            netloc = f"{userinfo}@{netloc}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    primary_url = (os.getenv("SUPABASE_DB_URL") or "").strip()
+    _append_candidate(candidates, seen, primary_url)
+    _append_candidate(candidates, seen, os.getenv("TRR_DB_FALLBACK_URL"))
+    if primary_url:
+        _append_candidate(candidates, seen, _derive_supabase_direct_url(primary_url))
+    _append_candidate(candidates, seen, os.getenv("DATABASE_URL"))
+    _append_candidate(candidates, seen, os.getenv("TRR_DB_URL"))
+
+    if allow_local_fallback:
+        _append_candidate(candidates, seen, _get_local_supabase_db_url())
+
+    return tuple(candidates)
+
+
+@lru_cache(maxsize=1)
 def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
     """
     Resolve the database URL using a prioritized lookup.
@@ -76,37 +141,22 @@ def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
     Raises:
         DatabaseConnectionError: If no valid database URL can be resolved.
     """
-    # Priority 1: Explicit Supabase DB URL
-    url = (os.getenv("SUPABASE_DB_URL") or "").strip()
-    if url:
-        return url
-
-    # Priority 2: Standard DATABASE_URL
-    url = (os.getenv("DATABASE_URL") or "").strip()
-    if url:
-        return url
-
-    # Priority 3: Legacy TRR_DB_URL
-    url = (os.getenv("TRR_DB_URL") or "").strip()
-    if url:
-        return url
-
-    # Priority 4: Local Supabase fallback
-    if allow_local_fallback:
-        url = _get_local_supabase_db_url()
-        if url:
-            return url
+    candidates = resolve_database_url_candidates(allow_local_fallback=allow_local_fallback)
+    if candidates:
+        return candidates[0]
 
     raise DatabaseConnectionError(
         "No database URL configured.\n\n"
         "For remote/production:\n"
         "  Set SUPABASE_DB_URL to your Supabase direct connection string.\n"
+        "  Optionally set TRR_DB_FALLBACK_URL for automatic failover.\n"
         "  Example: postgresql://postgres.<project>:<password>@<host>:5432/postgres\n\n"
         "For local development:\n"
         "  Start local Supabase: supabase start\n"
         "  Or set DATABASE_URL to your local Postgres connection string.\n\n"
         "Available environment variables (checked in order):\n"
         "  - SUPABASE_DB_URL (recommended for production)\n"
+        "  - TRR_DB_FALLBACK_URL (optional)\n"
         "  - DATABASE_URL\n"
         "  - TRR_DB_URL\n"
     )
@@ -145,6 +195,8 @@ def print_connection_info(database_url: str | None = None) -> None:
     source = "unknown"
     if os.getenv("SUPABASE_DB_URL"):
         source = "SUPABASE_DB_URL"
+    elif os.getenv("TRR_DB_FALLBACK_URL"):
+        source = "TRR_DB_FALLBACK_URL"
     elif os.getenv("DATABASE_URL"):
         source = "DATABASE_URL"
     elif os.getenv("TRR_DB_URL"):

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import importlib
 
-_mod = importlib.import_module("scripts.media.backfill_media_asset_variants")
+_mod = importlib.import_module("scripts.import.download_scraped_images_local")
 for _k, _v in _mod.__dict__.items():
-    if _k.startswith("__"):
+    if _k.startswith("__"):  # skip dunder
         continue
     globals()[_k] = _v
 

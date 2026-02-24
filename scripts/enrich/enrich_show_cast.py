@@ -372,10 +372,7 @@ def _names_match(expected: str | None, candidate: str | None) -> bool:
     if (
         len(expected_first) >= 3
         and len(candidate_first) >= 3
-        and (
-            expected_first.startswith(candidate_first)
-            or candidate_first.startswith(expected_first)
-        )
+        and (expected_first.startswith(candidate_first) or candidate_first.startswith(expected_first))
     ):
         return True
     return False

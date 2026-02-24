@@ -289,14 +289,14 @@ def _build_search_query(show_name: str, show_aliases: Sequence[str] | None) -> s
     terms: list[str] = []
     primary = (show_name or "").strip()
     if primary:
-        terms.append(f"\"{primary}\"")
+        terms.append(f'"{primary}"')
     for alias in show_aliases or []:
         cleaned = str(alias or "").strip()
         if not cleaned:
             continue
         if cleaned.lower() == primary.lower():
             continue
-        terms.append(f"\"{cleaned}\"")
+        terms.append(f'"{cleaned}"')
     if not terms:
         return "real housewives"
     if len(terms) == 1:

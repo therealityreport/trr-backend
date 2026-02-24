@@ -426,9 +426,7 @@ def _normalize_google_news_items(
         text_for_inference = f"{headline or ''} {summary or ''}".strip()
         raw_person_tags = raw.get("person_tags")
         person_tags = (
-            raw_person_tags
-            if isinstance(raw_person_tags, list)
-            else _infer_person_tags(text_for_inference, cast_index)
+            raw_person_tags if isinstance(raw_person_tags, list) else _infer_person_tags(text_for_inference, cast_index)
         )
         raw_topic_tags = raw.get("topic_tags")
         topic_tags = (
@@ -660,9 +658,7 @@ def _sync_google_news_featured_images(
         source_item = items[references[0][0]]
         source_article_url = references[0][1]
         headline = str(source_item.get("headline") or "").strip()
-        caption = (
-            f"{_GOOGLE_NEWS_IMAGE_CAPTION}: {headline[:120]}" if headline else _GOOGLE_NEWS_IMAGE_CAPTION
-        )
+        caption = f"{_GOOGLE_NEWS_IMAGE_CAPTION}: {headline[:120]}" if headline else _GOOGLE_NEWS_IMAGE_CAPTION
         try:
             import_request = ImportRequest(
                 entity_type="show",
@@ -741,11 +737,7 @@ def sync_google_news(
         )
 
     existing = _fetch_show_snapshot(db, show_id=show_id_str, source_id=_GOOGLE_SOURCE_ID)
-    if (
-        not payload.force
-        and _is_snapshot_fresh(existing)
-        and not _snapshot_needs_google_image_backfill(existing)
-    ):
+    if not payload.force and _is_snapshot_fresh(existing) and not _snapshot_needs_google_image_backfill(existing):
         existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
         normalized = existing_payload.get("normalized") if isinstance(existing_payload, dict) else {}
         existing_news = normalized.get("news") if isinstance(normalized, dict) else []
@@ -807,9 +799,7 @@ def sync_google_news(
             "resolved_feed_url": parse_result.get("resolved_feed_url"),
             "fallback_used": bool(parse_result.get("fallback_used")),
             "attempted_feeds": (
-                parse_result.get("attempted_feeds")
-                if isinstance(parse_result.get("attempted_feeds"), list)
-                else []
+                parse_result.get("attempted_feeds") if isinstance(parse_result.get("attempted_feeds"), list) else []
             ),
             "errors": parse_result.get("errors") if isinstance(parse_result.get("errors"), list) else [],
             "featured_images_added": int(parse_result.get("featured_images_added") or 0),
