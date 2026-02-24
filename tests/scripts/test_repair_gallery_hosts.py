@@ -103,7 +103,11 @@ def test_repair_gallery_hosts_dry_run_classification(
 
     monkeypatch.setattr(mod, "_probe_url_reachability", fake_probe)
     monkeypatch.setattr(mod, "_repair_candidate", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
-    monkeypatch.setattr(mod, "_mark_candidate_broken", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(
+        mod,
+        "_mark_candidate_broken",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()),
+    )
 
     report = mod.repair_gallery_hosts(
         object(),
@@ -348,6 +352,116 @@ def test_repair_gallery_hosts_transient_indeterminate_becomes_error(
     assert report["summary"]["error"] == 1
     assert report["summary"]["broken_unreachable"] == 0
     assert report["error_ids"] == ["asset-transient"]
+    assert marked_broken == []
+
+
+def test_probe_url_reachability_retries_transient_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def fake_check_url_reachability(
+        *,
+        url: str | None,
+        source: str,
+        timeout: float,
+        source_page_url: str | None = None,
+    ) -> tuple[bool, str]:
+        del source, timeout, source_page_url
+        assert url == "https://example.com/image.jpg"
+        calls["count"] += 1
+        if calls["count"] < 3:
+            return False, "http_503"
+        return True, "http_200"
+
+    monkeypatch.setattr(mod, "_check_url_reachability", fake_check_url_reachability)
+
+    result = mod._probe_url_reachability(
+        url="https://example.com/image.jpg",
+        source="imdb",
+        timeout=1.0,
+        source_page_url=None,
+        retry_attempts=3,
+        retry_backoff_ms=0,
+    )
+
+    assert calls["count"] == 3
+    assert result.ok is True
+    assert result.reason == "http_200"
+    assert result.attempts == 3
+    assert result.transient_failure is False
+
+
+def test_repair_gallery_hosts_confirmation_pass_prevents_broken_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        kind="media_link_asset",
+        row_id="asset-confirm",
+        hosted_url="https://cdn.example.com/confirm.jpg",
+        source_url="https://source.example.com/confirm.jpg",
+    )
+    monkeypatch.setattr(mod, "_collect_candidates", lambda *_args, **_kwargs: [candidate])
+    source_probe_calls = {"count": 0}
+
+    def fake_probe(
+        *,
+        url: str | None,
+        source: str,
+        timeout: float,
+        source_page_url: str | None,
+        retry_attempts: int,
+        retry_backoff_ms: int,
+    ) -> mod.ReachabilityProbeResult:
+        del source, timeout, source_page_url, retry_attempts, retry_backoff_ms
+        if url and "cdn.example.com" in url:
+            return mod.ReachabilityProbeResult(
+                ok=False,
+                reason="http_403",
+                attempts=1,
+                transient_failure=False,
+            )
+        source_probe_calls["count"] += 1
+        if source_probe_calls["count"] == 1:
+            return mod.ReachabilityProbeResult(
+                ok=False,
+                reason="http_404",
+                attempts=1,
+                transient_failure=False,
+            )
+        return mod.ReachabilityProbeResult(
+            ok=True,
+            reason="http_200",
+            attempts=1,
+            transient_failure=False,
+        )
+
+    marked_broken: list[str] = []
+    monkeypatch.setattr(mod, "_probe_url_reachability", fake_probe)
+    monkeypatch.setattr(mod, "_repair_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "_mark_candidate_broken",
+        lambda _db, broken_candidate, reason: marked_broken.append(f"{broken_candidate.row_id}:{reason}"),
+    )
+
+    report = mod.repair_gallery_hosts(
+        object(),
+        allowed_sources={"imdb"},
+        person_ids=[],
+        show_ids=[],
+        limit=None,
+        apply_updates=False,
+        timeout=1.0,
+        retry_attempts=2,
+        retry_backoff_ms=500,
+        confirm_unreachable_pass=True,
+        verbose=False,
+    )
+
+    assert report["summary"]["repaired"] == 1
+    assert report["summary"]["broken_unreachable"] == 0
+    assert report["repaired_ids"] == ["asset-confirm"]
     assert marked_broken == []
 
 
