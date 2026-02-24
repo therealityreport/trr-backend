@@ -3347,3 +3347,64 @@ Continuation (same session, 2026-02-24) — Networks/Streaming sync hardening ro
   - Cloud Run deploy remains blocked in this environment due non-interactive `gcloud` reauthentication:
     - `Reauthentication failed. cannot prompt during non-interactive execution.`
   - Backend deployment still requires interactive `gcloud auth login` (or service-account auth) before `gcloud run deploy`.
+
+Continuation (same session, 2026-02-24) — Networks/Streaming operational follow-up (global metrics + unresolved sweep).
+- Scope:
+  - Captured current global logo/completion metrics post-rollout.
+  - Attempted unresolved-only external refresh pass to reduce remaining manual-required rows.
+- Current snapshot:
+  - `admin.network_streaming_logo_assets`:
+    - total rows: `849`
+    - by type: `network=341`, `streaming=254`, `production=254`
+    - by mirror status: `mirrored=836`, `skipped=13`
+    - distinct entities with gallery rows: `61`
+  - `admin.network_streaming_completion`:
+    - total rows: `233`
+    - by status: `resolved=225`, `manual_required=8` (pre-refresh snapshot)
+  - After unresolved-only refresh attempts and snapshot recompute:
+    - unresolved rows currently: `14`
+    - all unresolved rows are `production` and `resolution_reason='incomplete_metadata'`:
+      - 10 by 10 Entertainment
+      - 3 Ball Productions
+      - A. Smith & Co. Productions
+      - Advanced Medical Productions
+      - Alfred Street Industries
+      - All3Media America
+      - Bayonne Entertainment
+      - Bazal
+      - BBC Worldwide Productions
+      - BET Productions
+      - Big Head Productions
+      - BiggerStage
+      - Bodega Pictures
+      - Brass Ring Productions
+- Notes:
+  - Unresolved-only refresh run (`network-streaming-20260224T173031Z`) processed `10` entities before manual interruption during external Logopedia lookup; run status reconciled to `failed` with explicit operator-stop error.
+
+Continuation (same session, 2026-02-24) — Bravo video thumbnail one-time backfill execution + scheduled backfill script.
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/backfill/backfill_bravo_video_thumbnails.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/backfill_bravo_video_thumbnails.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/README.md`
+- Changes:
+  - Added a reusable backfill runner for Bravo video thumbnail mirroring:
+    - discovers shows with `core.show_source_latest` Bravo snapshots,
+    - supports `--show-id`, `--limit`, `--force`, `--dry-run`, `--json-summary`,
+    - syncs pending thumbnails via existing `_sync_bravo_video_thumbnails` pipeline,
+    - updates snapshot `normalized.video_thumbnail_sync` metadata and writes updated snapshot.
+  - Added top-level wrapper script for compatibility:
+    - `scripts/backfill_bravo_video_thumbnails.py`.
+  - Added README usage documentation for Bravo video thumbnail backfill.
+- Operational run results:
+  - Attempted multi-show forced backfill via app proxy; most candidate shows had no persisted Bravo snapshots in this environment (`404 No persisted Bravo snapshot`).
+  - Executed direct forced RHOSLC sync:
+    - `show_id=7782652f-783a-488b-8860-41b97de32e75`
+    - response: `attempted=70`, `synced=70`, `failed=0`, `missing_source=0`, `pending_remaining=0`.
+  - Post-sync API verification (`/api/admin/trr-api/shows/{id}/bravo/videos`):
+    - `count=58`, `hosted_count=58`, statuses all `synced`.
+  - New script apply verification for RHOSLC:
+    - `status=skipped_no_pending`, `pending_before=0`, `pending_after=0`.
+- Validation:
+  - `ruff check scripts/backfill/backfill_bravo_video_thumbnails.py scripts/backfill_bravo_video_thumbnails.py` (pass)
+  - `PYTHONPATH=. .venv/bin/python scripts/backfill/backfill_bravo_video_thumbnails.py --show-id 7782652f-783a-488b-8860-41b97de32e75 --dry-run --json-summary -` (pass)
+  - `PYTHONPATH=. .venv/bin/python scripts/backfill/backfill_bravo_video_thumbnails.py --show-id 7782652f-783a-488b-8860-41b97de32e75 --json-summary -` (pass)

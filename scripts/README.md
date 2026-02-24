@@ -178,6 +178,17 @@ See `scripts/media/README.md`:
 - `scripts/media/mirror_media_assets_to_s3.py`
 - `scripts/media/rebuild_hosted_urls.py`
 
+Bravo video thumbnail backfill:
+
+```bash
+PYTHONPATH=. python scripts/backfill/backfill_bravo_video_thumbnails.py
+```
+
+Useful options:
+- `--show-id <uuid>` to target one show
+- `--force` to remirror all Bravo video thumbnails
+- `--dry-run` to inspect pending work without writing
+
 ## Artifacts Location
 
 Runtime artifacts should live **outside** the repo root in a dedicated directory, for example:
