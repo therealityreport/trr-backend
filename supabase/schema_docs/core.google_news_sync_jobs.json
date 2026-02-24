@@ -1,0 +1,165 @@
+{
+  "schema": "core",
+  "table": "google_news_sync_jobs",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'google_news'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "requested_async",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "false",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "force",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "false",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "requested_by",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "result",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "error",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "started_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "finished_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "google_news_sync_jobs_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "google_news_sync_jobs_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX google_news_sync_jobs_pkey ON core.google_news_sync_jobs USING btree (id)"
+    },
+    {
+      "name": "idx_google_news_sync_jobs_show_created",
+      "columns": [
+        "show_id",
+        "created_at DESC"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_google_news_sync_jobs_show_created ON core.google_news_sync_jobs USING btree (show_id, created_at DESC)"
+    },
+    {
+      "name": "idx_google_news_sync_jobs_status",
+      "columns": [
+        "status",
+        "updated_at DESC"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_google_news_sync_jobs_status ON core.google_news_sync_jobs USING btree (status, updated_at DESC)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "source_id": "example",
+    "status": "example",
+    "requested_async": false,
+    "force": false,
+    "requested_by": "example",
+    "result": {},
+    "error": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "started_at": "1970-01-01T00:00:00Z",
+    "finished_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

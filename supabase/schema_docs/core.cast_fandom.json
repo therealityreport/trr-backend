@@ -233,6 +233,70 @@
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "dynamic_sections",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "bio_card",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "casting_summary",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "citations",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "conflicts",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_variants",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "ai_model",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "ai_generated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -316,6 +380,14 @@
     "reunion_seating": {},
     "trivia": {},
     "infobox_raw": {},
-    "raw_html_sha256": "example"
+    "raw_html_sha256": "example",
+    "dynamic_sections": {},
+    "bio_card": {},
+    "casting_summary": "example",
+    "citations": {},
+    "conflicts": {},
+    "source_variants": {},
+    "ai_model": "example",
+    "ai_generated_at": "1970-01-01T00:00:00Z"
   }
 }

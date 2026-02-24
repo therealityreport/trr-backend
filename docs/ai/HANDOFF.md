@@ -2836,3 +2836,47 @@ Continuation (same session, 2026-02-24) — Week-view progress timeout hardening
     - `TRR_DB_POOL_MINCONN=2`
     - `TRR_DB_POOL_MAXCONN=24`
   - Local test dependency added during validation: `python-multipart` in backend venv (required for FastAPI form parsing in API test import path).
+
+Continuation (same session, 2026-02-24) — Networks/Streaming logo discovery cache + Bravo variant backfill:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/sync/sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/brandfetch.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/README.md`
+- Changes:
+  - Implemented cache-first external discovery for `sync_networks_streaming_links`:
+    - Reuses persisted `admin.network_streaming_logo_assets.source_url` candidates.
+    - Skips Brandfetch/Logopedia/IMDb discovery on reruns when source URLs are already cached (unless `--force`).
+  - Added per-asset cached mirror short-circuit:
+    - If a candidate URL is already mirrored in `admin.network_streaming_logo_assets`, skip re-download/re-mirror and reuse hosted metadata.
+  - Added catalog SVG raster fallback expansion:
+    - For Logopedia `static.wikia.nocookie.net ... .svg/revision/latest` URLs, auto-generates `.../scale-to-width-down/1024` variants to improve mirror success without re-querying discovery APIs.
+  - Updated Brandfetch candidate ranking to prefer PNG/WebP before SVG to reduce decode failures in environments without SVG rasterization libs.
+  - Updated sync/router tests for 4-step sync orchestration (`show_logos` step), new cache behavior, and cached remirror skip behavior.
+  - Updated script docs with explicit cache behavior and `--force` credit note.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/integrations/brandfetch.py scripts/sync/sync_networks_streaming_links.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py::TestSyncNetworksStreaming -q` (pass)
+  - Bravo targeted runs (`entity_type=network`, `entity_key=bravo`):
+    - First backfill run after cache logic: `asset_rows=22`, `mirrored_assets=7`
+    - After SVG raster fallback expansion run: `asset_rows=28`, `mirrored_assets=13`
+    - Re-run cache verification: `brandfetch_calls=0`, `logopedia_calls=0`
+
+Continuation (same session, 2026-02-24) — news feature hardening: async Google sync jobs, dedupe/pagination, canonical URLs, and mirror retry cooldowns.
+- Files:
+  - `api/routers/admin_show_news.py`
+  - `tests/api/routers/test_admin_show_news.py`
+  - `tests/scraping/test_google_news_parser.py`
+- Changes:
+  - Expanded `POST /api/v1/admin/shows/{show_id}/google-news/sync` request contract with additive `async` mode; async requests now return `{ queued, job_id }` and run via background task.
+  - Added additive job-status endpoint: `GET /api/v1/admin/shows/{show_id}/google-news/sync/{job_id}`.
+  - Hardened stale guard + mirror backfill with retry cooldown and attempt caps (`mirror_status`, `mirror_attempt_count`, `last_mirror_*`, `mirror_retry_after`).
+  - Added canonical article URL support and normalization in unified payload (`canonical_article_url`) and used it for dedupe.
+  - Added additive `/news` query support: `source_contains`, `since`, `until`, `limit`, `cursor`; response now includes `total_count`, `next_cursor`, and additive `quality_score` per item.
+  - Strengthened source parsing: invalid `sources` tokens now return `422` (absent/blank still defaults).
+  - Reduced featured-image probe budget and surfaced additional sync diagnostics in snapshot source metadata.
+  - Added read-path optimization to skip cast-index fetch when Google snapshot items already include `person_tags` and person filtering is not requested.
+- Validation:
+  - `ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
+  - `pytest -q tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (`16 passed`)

@@ -33,5 +33,13 @@ erDiagram
         JSONB trivia
         JSONB infobox_raw
         TEXT raw_html_sha256
+        JSONB dynamic_sections
+        JSONB bio_card
+        TEXT casting_summary
+        JSONB citations
+        JSONB conflicts
+        JSONB source_variants
+        TEXT ai_model
+        TIMESTAMP_WITH_TIME_ZONE ai_generated_at
     }
 ```

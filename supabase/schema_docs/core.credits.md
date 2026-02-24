@@ -35,6 +35,7 @@ id
 - credits_show_id_category_idx (non-unique): show_id, credit_category
 - credits_show_id_idx (non-unique): show_id
 - credits_show_person_category_idx (non-unique): show_id, person_id, credit_category
+- credits_show_person_idx (non-unique): show_id, person_id
 - credits_source_type_idx (non-unique): source_type
 - credits_unique_idx (unique): show_id, person_id, credit_category, COALESCE(role, ''::text), source_type
 

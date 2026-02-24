@@ -1356,6 +1356,40 @@ def _merge_source_urls(by_source: dict[str, list[str]], source: str, urls: list[
         bucket.append(text)
 
 
+def _logopedia_svg_raster_variant(url: str) -> str | None:
+    text = _normalize_text(url)
+    lower = text.lower()
+    if "static.wikia.nocookie.net" not in lower:
+        return None
+    if ".svg/revision/latest" not in lower:
+        return None
+    if "/scale-to-width-down/" in lower:
+        return None
+    if "?" in text:
+        base, query = text.split("?", 1)
+        return f"{base}/scale-to-width-down/1024?{query}"
+    return f"{text}/scale-to-width-down/1024"
+
+
+def _expand_candidate_urls(source: str, urls: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    source_name = _normalize_text(source).lower()
+    for value in urls:
+        text = _normalize_text(value)
+        if not text:
+            continue
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+        if source_name == "catalog":
+            raster = _logopedia_svg_raster_variant(text)
+            if raster and raster not in seen:
+                seen.add(raster)
+                out.append(raster)
+    return out
+
+
 def _tmdb_name_match(name_key: str, candidate: str) -> bool:
     candidate_key = _name_key(candidate)
     if not candidate_key:
@@ -1850,7 +1884,7 @@ def _capped_candidates(
         limit = LOGO_SOURCE_CAPS.get(source, 8)
         seen: set[str] = set()
         bucket: list[str] = []
-        for value in urls:
+        for value in _expand_candidate_urls(source, urls):
             text = _normalize_text(value)
             if not text or text in seen:
                 continue

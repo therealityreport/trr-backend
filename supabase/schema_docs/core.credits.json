@@ -144,6 +144,15 @@
       "definition": "CREATE INDEX credits_show_person_category_idx ON core.credits USING btree (show_id, person_id, credit_category)"
     },
     {
+      "name": "credits_show_person_idx",
+      "columns": [
+        "show_id",
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX credits_show_person_idx ON core.credits USING btree (show_id, person_id)"
+    },
+    {
       "name": "credits_source_type_idx",
       "columns": [
         "source_type"

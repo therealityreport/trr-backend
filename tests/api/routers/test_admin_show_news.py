@@ -424,3 +424,196 @@ def test_google_news_featured_image_sync_imports_to_media_pipeline() -> None:
     assert items[0]["hosted_image_url"] == hosted_url
     assert items[0]["image_url"] == hosted_url
     assert items[0]["featured_image_synced"] is True
+
+
+def test_unified_news_rejects_invalid_sources_filter(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_news._show_exists", return_value=True):
+            response = client.get(
+                f"/api/v1/admin/shows/{show_id}/news?sources=bravo,invalid_source",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 422
+    assert "Invalid sources filter" in str(response.json().get("detail"))
+
+
+def test_unified_news_dedupes_and_paginates(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+
+    def _snapshot_side_effect(*_args, **kwargs):
+        source_id = kwargs.get("source_id")
+        if source_id == "bravo":
+            return {
+                "source_id": "bravo",
+                "fetched_at": "2026-02-14T10:00:00Z",
+                "payload_sha256": "bravo-sha",
+                "payload": {"normalized": {}},
+            }
+        if source_id == "google_news":
+            return {
+                "source_id": "google_news",
+                "fetched_at": "2026-02-15T10:00:00Z",
+                "payload_sha256": "google-sha",
+                "payload": {
+                    "normalized": {
+                        "news": [
+                            {
+                                "headline": "Duplicate story",
+                                "article_url": "https://news.google.com/read/abc",
+                                "canonical_article_url": "https://www.bravotv.com/story-dup?utm_source=google",
+                                "published_at": "2026-02-14T11:00:00Z",
+                                "publisher_name": "People",
+                                "publisher_domain": "people.com",
+                                "person_tags": [],
+                                "topic_tags": ["drama"],
+                                "season_matches": [],
+                                "feed_rank": 0,
+                            },
+                            {
+                                "headline": "Unique google story",
+                                "article_url": "https://example.com/google-unique",
+                                "published_at": "2026-02-13T11:00:00Z",
+                                "publisher_name": "People",
+                                "publisher_domain": "people.com",
+                                "person_tags": [],
+                                "topic_tags": ["drama"],
+                                "season_matches": [],
+                                "feed_rank": 1,
+                            },
+                        ]
+                    }
+                },
+            }
+        return None
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_news._show_exists", return_value=True):
+            with patch("api.routers.admin_show_news._fetch_show_snapshot", side_effect=_snapshot_side_effect):
+                with patch(
+                    "api.routers.admin_show_bravo._extract_news_from_snapshot",
+                    return_value=[
+                        {
+                            "headline": "Duplicate story",
+                            "article_url": "https://www.bravotv.com/story-dup?utm_source=trr",
+                            "published_at": "2026-02-16T10:00:00Z",
+                            "person_tags": [],
+                        }
+                    ],
+                ):
+                    with patch("api.routers.admin_show_news._load_season_windows", return_value={}):
+                        page_one = client.get(
+                            f"/api/v1/admin/shows/{show_id}/news?sort=latest&limit=1",
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                        assert page_one.status_code == 200
+                        first_payload = page_one.json()
+                        assert first_payload["count"] == 1
+                        assert first_payload["total_count"] == 2
+                        assert isinstance(first_payload["next_cursor"], str)
+
+                        page_two = client.get(
+                            f"/api/v1/admin/shows/{show_id}/news?sort=latest&limit=1&cursor={first_payload['next_cursor']}",
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                        assert page_two.status_code == 200
+                        second_payload = page_two.json()
+                        assert second_payload["count"] == 1
+                        assert second_payload["next_cursor"] is None
+
+
+def test_unified_news_skips_cast_lookup_when_tags_already_present(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+
+    def _snapshot_side_effect(*_args, **kwargs):
+        source_id = kwargs.get("source_id")
+        if source_id == "google_news":
+            return {
+                "source_id": "google_news",
+                "fetched_at": "2026-02-15T10:00:00Z",
+                "payload_sha256": "google-sha",
+                "payload": {
+                    "normalized": {
+                        "news": [
+                            {
+                                "headline": "Tagged item",
+                                "article_url": "https://example.com/google-tagged",
+                                "published_at": "2026-02-15T11:30:00Z",
+                                "publisher_name": "People",
+                                "publisher_domain": "people.com",
+                                "person_tags": [{"person_id": str(uuid4()), "person_name": "Jane Doe"}],
+                                "topic_tags": ["reunion"],
+                                "season_matches": [],
+                                "feed_rank": 0,
+                            }
+                        ]
+                    }
+                },
+            }
+        return None
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_news._show_exists", return_value=True):
+            with patch("api.routers.admin_show_news._fetch_show_snapshot", side_effect=_snapshot_side_effect):
+                with patch("api.routers.admin_show_news._load_season_windows", return_value={}):
+                    with patch("api.routers.admin_show_news._build_show_cast_index") as cast_index_mock:
+                        response = client.get(
+                            f"/api/v1/admin/shows/{show_id}/news?sources=google_news",
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+    assert response.status_code == 200
+    assert cast_index_mock.called is False
+
+
+def test_google_news_sync_async_returns_job_id(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_news._show_exists", return_value=True):
+            with patch(
+                "api.routers.admin_show_news._resolve_google_news_link",
+                return_value={
+                    "url": "https://news.google.com/topics/topic-1?ceid=US:en&oc=3",
+                    "status": "approved",
+                },
+            ):
+                with patch("api.routers.admin_show_news._create_google_news_sync_job", return_value=str(uuid4())):
+                    with patch("api.routers.admin_show_news._run_google_news_sync_job"):
+                        response = client.post(
+                            f"/api/v1/admin/shows/{show_id}/google-news/sync",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={"async": True},
+                        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queued"] is True
+    assert isinstance(payload["job_id"], str)
+    assert payload["status"] == "queued"

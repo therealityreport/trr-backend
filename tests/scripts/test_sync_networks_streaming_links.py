@@ -107,6 +107,13 @@ def test_capped_candidates_applies_source_caps() -> None:
     assert len(out["official"]) == 8
 
 
+def test_expand_candidate_urls_adds_logopedia_svg_raster_variant() -> None:
+    svg_url = "https://static.wikia.nocookie.net/logopedia/images/2/22/Bravo_2024.svg/revision/latest?cb=20240508041547"
+    out = mod._expand_candidate_urls("catalog", [svg_url])
+    assert svg_url in out
+    assert any("/scale-to-width-down/1024" in value for value in out)
+
+
 def test_ordered_candidate_sources_includes_priority_then_remaining() -> None:
     out = mod._ordered_candidate_sources(
         {"catalog": ["a"], "imdb": ["b"], "tmdb": ["c"]},

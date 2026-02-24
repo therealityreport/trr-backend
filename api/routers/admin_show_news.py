@@ -814,7 +814,12 @@ def _decode_news_cursor(cursor: str | None) -> int:
     return max(0, offset)
 
 
-def _paginate_news(items: list[dict[str, Any]], *, limit: int | None, cursor: str | None) -> tuple[list[dict[str, Any]], str | None]:
+def _paginate_news(
+    items: list[dict[str, Any]],
+    *,
+    limit: int | None,
+    cursor: str | None,
+) -> tuple[list[dict[str, Any]], str | None]:
     if limit is None:
         return items, None
     offset = _decode_news_cursor(cursor)
@@ -1212,7 +1217,10 @@ def _run_google_news_sync_impl(
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     logger.info(
-        "google_news_sync_complete show_id=%s count=%s fallback_used=%s elapsed_ms=%s featured_images_probed=%s mirrored=%s",
+        (
+            "google_news_sync_complete show_id=%s count=%s fallback_used=%s "
+            "elapsed_ms=%s featured_images_probed=%s mirrored=%s"
+        ),
         show_id_str,
         len(normalized_items),
         bool(parse_result.get("fallback_used")),

@@ -72,6 +72,9 @@ PYTHONPATH=. python scripts/sync/sync_show_logos.py --all --verbose
   - `admin.network_streaming_completion_attempts`
 - Mirrors and persists all discovered logo candidates (deterministic per-source caps + URL/SHA dedupe) in:
   - `admin.network_streaming_logo_assets`
+- External discovery is cache-first:
+  - Normal runs reuse persisted `source_url` candidates from `admin.network_streaming_logo_assets` and do not re-query Brandfetch/Logopedia/IMDb for entities that already have cached source URLs.
+  - Use `--force` only when you intentionally want to refresh external discovery (this will consume external API credits again).
 - Keeps canonical logo serving fields on `core.networks` / `core.watch_providers` unchanged for primary color + black/white variants:
   - `hosted_logo_*`
   - `hosted_logo_black_*`

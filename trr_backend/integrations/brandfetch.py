@@ -70,14 +70,15 @@ def _format_rank(fmt: Mapping[str, Any]) -> tuple[int, int]:
     src = _normalize_text(fmt.get("src") or fmt.get("url") or "").lower()
     width = int(fmt.get("width") or 0) if isinstance(fmt.get("width"), int) else 0
 
-    # Prefer vector first, then PNG transparency-friendly assets.
+    # Prefer raster assets first because downstream mirroring normalizes to PNG and
+    # some environments cannot rasterize SVG dependencies at runtime.
     score = 100
-    if fmt_name == "svg" or ".svg" in src:
+    if fmt_name == "png" or ".png" in src:
         score = 0
-    elif fmt_name == "png" or ".png" in src:
-        score = 10
     elif fmt_name == "webp" or ".webp" in src:
-        score = 20
+        score = 5
+    elif fmt_name == "svg" or ".svg" in src:
+        score = 15
     elif fmt_name in {"jpeg", "jpg"} or ".jpg" in src or ".jpeg" in src:
         score = 30
 
