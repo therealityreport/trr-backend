@@ -340,8 +340,11 @@ def test_list_cast_with_roles_scopes_total_episodes_to_selected_seasons() -> Non
         }
     ]
     role_rows = [
-        {"person_id": "person-heather", "season_number": 1, "role_name": "Housewife"},
-        {"person_id": "person-heather", "season_number": 4, "role_name": "Housewife"},
+        {
+            "person_id": "person-heather",
+            "role_names": ["Housewife"],
+            "assignment_seasons": [1, 4],
+        }
     ]
     scoped_episode_rows = [{"person_id": "person-heather", "total_episodes": 12}]
 
@@ -385,9 +388,11 @@ def test_list_cast_with_roles_derives_latest_season_from_role_assignments() -> N
         }
     ]
     role_rows = [
-        {"person_id": "person-mary", "season_number": 1, "role_name": "Housewife"},
-        {"person_id": "person-mary", "season_number": 3, "role_name": "Friend"},
-        {"person_id": "person-mary", "season_number": 0, "role_name": "Guest"},
+        {
+            "person_id": "person-mary",
+            "role_names": ["Housewife", "Friend", "Guest"],
+            "assignment_seasons": [0, 1, 3],
+        }
     ]
 
     with patch("api.routers.admin_show_roles._show_exists", return_value=True):
@@ -410,3 +415,49 @@ def test_list_cast_with_roles_derives_latest_season_from_role_assignments() -> N
     assert payload[0]["seasons_appeared"] == 2
     assert payload[0]["season_numbers"] == [1, 3]
     assert sorted(payload[0]["roles"]) == ["Friend", "Guest", "Housewife"]
+
+
+def test_list_cast_with_roles_emits_perf_logs_when_enabled() -> None:
+    show_id = str(uuid4())
+
+    rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-lisa",
+            "person_name": "Lisa Barlow",
+            "total_episodes": 45,
+            "archive_episodes": 1,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/lisa.jpg",
+        }
+    ]
+    role_rows = [
+        {
+            "person_id": "person-lisa",
+            "role_names": ["Housewife"],
+            "assignment_seasons": [1, 2, 3, 4],
+        }
+    ]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch("api.routers.admin_show_roles.CAST_ROLE_MEMBERS_PERF_LOGS_ENABLED", True):
+            with patch("api.routers.admin_show_roles.pg.fetch_all", side_effect=[rows, role_rows]):
+                with patch("api.routers.admin_show_roles.logger.info") as logger_info:
+                    payload = list_cast_with_roles(
+                        UUID(show_id),
+                        {},
+                        sort_by="episodes",
+                        order="desc",
+                        seasons=None,
+                        roles=None,
+                        has_image=None,
+                        archive_mode="all",
+                    )
+
+    assert len(payload) == 1
+    assert payload[0]["person_id"] == "person-lisa"
+    assert logger_info.call_count == 1
+    assert "cast-role-members timings" in str(logger_info.call_args.args[0])

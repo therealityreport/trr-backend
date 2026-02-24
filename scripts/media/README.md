@@ -9,6 +9,8 @@ Scripts live in this directory:
 - `scripts/media/mirror_media_assets_to_s3.py`
 - `scripts/media/rebuild_hosted_urls.py`
 - `scripts/media/backfill_media_asset_variants.py`
+- `scripts/media/restore_person_gallery_base_previews.py` (person-scoped preview metadata rollback only)
+- `scripts/media/restore_changed_originals.py` (strict hash audit/repair for true hosted/source mismatches)
 
 Required environment variables
 ------------------------------
@@ -66,3 +68,22 @@ Generate `thumb/card/detail` variants (and optional crop variants) for existing 
 ```
 PYTHONPATH=. python scripts/media/backfill_media_asset_variants.py --batch-size 50 --with-crops
 ```
+
+Original Integrity Audit/Repair
+-------------------------------
+
+Dry-run IMDb mismatch audit across cast photos + person-gallery media assets:
+
+```
+PYTHONPATH=. python scripts/media/restore_changed_originals.py --source imdb --tables both --output-json /tmp/imdb-original-integrity-audit.json
+```
+
+Apply repair only to verified mismatches:
+
+```
+PYTHONPATH=. python scripts/media/restore_changed_originals.py --source imdb --tables both --apply --output-json /tmp/imdb-original-integrity-apply.json
+```
+
+Notes:
+- `restore_person_gallery_base_previews.py` is intentionally non-destructive and only resets preview crop metadata/context.
+- `restore_changed_originals.py` is the script for original hosted/source integrity verification and repair.

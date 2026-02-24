@@ -22,6 +22,25 @@
 | tmdb_fetched_at | timestamp with time zone | YES |  | NO | NEVER |
 | imdb_meta | jsonb | YES |  | NO | NEVER |
 | imdb_fetched_at | timestamp with time zone | YES |  | NO | NEVER |
+| wikidata_id | text | YES |  | NO | NEVER |
+| wikipedia_url | text | YES |  | NO | NEVER |
+| wikimedia_logo_file | text | YES |  | NO | NEVER |
+| link_enriched_at | timestamp with time zone | YES |  | NO | NEVER |
+| link_enrichment_source | text | YES |  | NO | NEVER |
+| hosted_logo_black_key | text | YES |  | NO | NEVER |
+| hosted_logo_black_url | text | YES |  | NO | NEVER |
+| hosted_logo_black_sha256 | text | YES |  | NO | NEVER |
+| hosted_logo_black_content_type | text | YES |  | NO | NEVER |
+| hosted_logo_black_bytes | bigint | YES |  | NO | NEVER |
+| hosted_logo_black_etag | text | YES |  | NO | NEVER |
+| hosted_logo_black_at | timestamp with time zone | YES |  | NO | NEVER |
+| hosted_logo_white_key | text | YES |  | NO | NEVER |
+| hosted_logo_white_url | text | YES |  | NO | NEVER |
+| hosted_logo_white_sha256 | text | YES |  | NO | NEVER |
+| hosted_logo_white_content_type | text | YES |  | NO | NEVER |
+| hosted_logo_white_bytes | bigint | YES |  | NO | NEVER |
+| hosted_logo_white_etag | text | YES |  | NO | NEVER |
+| hosted_logo_white_at | timestamp with time zone | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -65,6 +84,25 @@ true
   "tmdb_meta": {},
   "tmdb_fetched_at": "1970-01-01T00:00:00Z",
   "imdb_meta": {},
-  "imdb_fetched_at": "1970-01-01T00:00:00Z"
+  "imdb_fetched_at": "1970-01-01T00:00:00Z",
+  "wikidata_id": "example",
+  "wikipedia_url": "example",
+  "wikimedia_logo_file": "example",
+  "link_enriched_at": "1970-01-01T00:00:00Z",
+  "link_enrichment_source": "example",
+  "hosted_logo_black_key": "example",
+  "hosted_logo_black_url": "example",
+  "hosted_logo_black_sha256": "example",
+  "hosted_logo_black_content_type": "example",
+  "hosted_logo_black_bytes": 0,
+  "hosted_logo_black_etag": "example",
+  "hosted_logo_black_at": "1970-01-01T00:00:00Z",
+  "hosted_logo_white_key": "example",
+  "hosted_logo_white_url": "example",
+  "hosted_logo_white_sha256": "example",
+  "hosted_logo_white_content_type": "example",
+  "hosted_logo_white_bytes": 0,
+  "hosted_logo_white_etag": "example",
+  "hosted_logo_white_at": "1970-01-01T00:00:00Z"
 }
 ```

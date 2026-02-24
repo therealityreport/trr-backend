@@ -98,9 +98,7 @@ def test_extract_first_json_object_accepts_incomplete_object_with_has_text_overl
 
 
 def test_extract_first_json_object_parses_truncated_fields_with_confidence() -> None:
-    parsed = text_overlay._extract_first_json_object(
-        '{"has_text_overlay": "no", "confidence": 0.73'
-    )
+    parsed = text_overlay._extract_first_json_object('{"has_text_overlay": "no", "confidence": 0.73')
     assert parsed["has_text_overlay"] is False
     assert parsed["confidence"] == 0.73
 

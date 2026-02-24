@@ -779,10 +779,7 @@ class YouTubeScraper:
 
         # Supplement with yt-dlp search if channel browsing found few results
         if len(unique_videos) < 10 and config.keywords and shutil.which("yt-dlp"):
-            logger.info(
-                f"Channel browsing found only {len(unique_videos)} videos; "
-                "supplementing with yt-dlp search..."
-            )
+            logger.info(f"Channel browsing found only {len(unique_videos)} videos; supplementing with yt-dlp search...")
             search_videos = self._search_via_ytdlp(config)
             existing_ids = {v.video_id for v in unique_videos}
             added = 0
@@ -865,9 +862,7 @@ class YouTubeScraper:
             logger.info(f"yt-dlp searching YouTube: '{query}'")
 
             try:
-                proc = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=300
-                )
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             except subprocess.TimeoutExpired:
                 logger.warning(f"yt-dlp search timed out for '{query}'")
                 continue
@@ -897,11 +892,7 @@ class YouTubeScraper:
                         continue
 
                 seen_ids.add(vid_id)
-                dt_str = (
-                    datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
-                    if ts
-                    else ""
-                )
+                dt_str = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
 
                 video = YouTubeVideo(
                     video_id=vid_id,
@@ -924,9 +915,7 @@ class YouTubeScraper:
                     season_number=config.season_number,
                 )
                 all_videos.append(video)
-                logger.info(
-                    f"yt-dlp found: {vid_id} - {video.title[:50]}... ({dt_str})"
-                )
+                logger.info(f"yt-dlp found: {vid_id} - {video.title[:50]}... ({dt_str})")
 
         logger.info(f"yt-dlp search total: {len(all_videos)} videos from Bravo channel")
         return all_videos
@@ -1059,11 +1048,7 @@ class YouTubeScraper:
     def _build_comment_entity_index(self, data: dict) -> dict[str, dict]:
         """Build an index of commentId -> commentEntityPayload from framework updates."""
         index: dict[str, dict] = {}
-        mutations = (
-            data.get("frameworkUpdates", {})
-            .get("entityBatchUpdate", {})
-            .get("mutations", [])
-        )
+        mutations = data.get("frameworkUpdates", {}).get("entityBatchUpdate", {}).get("mutations", [])
         for mutation in mutations:
             payload = mutation.get("payload", {})
             entity = payload.get("commentEntityPayload", {})

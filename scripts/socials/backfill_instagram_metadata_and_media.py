@@ -19,6 +19,8 @@ class BackfillCounters:
     mirrored: int = 0
     partial: int = 0
     failed: int = 0
+    mirror_jobs_enqueued: int = 0
+    mirror_job_enqueue_failed: int = 0
 
 
 class _BackfillPost:
@@ -140,7 +142,18 @@ def _mirror_is_missing(row: dict[str, Any]) -> bool:
     source_media = social_repo._as_text_list(row.get("media_urls"))  # noqa: SLF001
     if not source_thumbnail and not source_media:
         return False
-    return not hosted_thumbnail or not hosted_media
+    if source_thumbnail and not hosted_thumbnail:
+        return True
+    if source_media and len(hosted_media) < len(source_media):
+        return True
+    mirror_status = str(row.get("media_mirror_status") or "").strip().lower()
+    if mirror_status in {"pending", "partial", "failed"}:
+        return True
+    source_count = len(source_media) + (1 if source_thumbnail else 0)
+    hosted_count = len(hosted_media) + (1 if hosted_thumbnail else 0)
+    if source_count > 0 and hosted_count >= source_count:
+        return False
+    return mirror_status != "mirrored"
 
 
 def main() -> int:
@@ -205,21 +218,31 @@ def main() -> int:
                     timezone="America/New_York",
                 )
                 week_index = week_window.week_index if week_window else None
-            hosted_thumbnail_url, hosted_media_urls, mirror_status, mirror_error = social_repo._mirror_instagram_media_to_s3(  # noqa: SLF001,E501
-                context,
-                post=post,
-                week_index=week_index,
-            )
-            post.hosted_thumbnail_url = hosted_thumbnail_url
-            post.hosted_media_urls = hosted_media_urls
-            post.media_mirror_status = mirror_status
-            post.media_mirror_error = mirror_error
-            if mirror_status == "mirrored":
+            post.media_mirror_status = "pending"
+            post.media_mirror_error = None
+            if args.dry_run:
+                counters.mirror_jobs_enqueued += 1
                 counters.mirrored += 1
-            elif mirror_status == "partial":
-                counters.partial += 1
-            elif mirror_status == "failed":
-                counters.failed += 1
+            else:
+                try:
+                    mirror_job_id = social_repo._enqueue_instagram_media_mirror_job(  # noqa: SLF001
+                        context,
+                        run_id=None,
+                        source_scope=args.source_scope,
+                        account=str(row.get("source_account") or row.get("username") or ""),
+                        post_row=row,
+                        week_index=week_index,
+                        parent_job_id="backfill-instagram-metadata-media",
+                        conn=None,
+                    )
+                    if mirror_job_id:
+                        counters.mirror_jobs_enqueued += 1
+                        counters.mirrored += 1
+                    else:
+                        counters.partial += 1
+                except Exception:
+                    counters.failed += 1
+                    counters.mirror_job_enqueue_failed += 1
 
         if args.dry_run:
             continue
@@ -239,6 +262,8 @@ def main() -> int:
                 "mirrored": counters.mirrored,
                 "partial": counters.partial,
                 "failed": counters.failed,
+                "mirror_jobs_enqueued": counters.mirror_jobs_enqueued,
+                "mirror_job_enqueue_failed": counters.mirror_job_enqueue_failed,
                 "dry_run": bool(args.dry_run),
             }
         )

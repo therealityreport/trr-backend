@@ -47,10 +47,10 @@ class StarAssetRequest(BaseModel):
 
 
 class StarAssetResponse(BaseModel):
-  origin: AssetOrigin
-  asset_id: str
-  starred: bool
-  starred_at: str | None = None
+    origin: AssetOrigin
+    asset_id: str
+    starred: bool
+    starred_at: str | None = None
 
 
 class UpdateAssetContentTypeRequest(BaseModel):
@@ -163,14 +163,7 @@ def _fetch_content_row(db: SupabaseAdminClient, *, origin: AssetOrigin, asset_id
     else:
         select_fields = "id, metadata"
 
-    response = (
-        db.schema("core")
-        .table(table)
-        .select(select_fields)
-        .eq("id", asset_id)
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table(table).select(select_fields).eq("id", asset_id).limit(1).execute()
     if hasattr(response, "error") and response.error:
         raise HTTPException(status_code=502, detail="Database error fetching asset")
     if not response.data:
@@ -321,11 +314,7 @@ def update_asset_content_type(
     # Keep media-link gallery contexts aligned for media_assets so UI filters update immediately.
     if payload.origin == "media_assets" and context_type_value:
         links_response = (
-            db.schema("core")
-            .table("media_links")
-            .select("id, context")
-            .eq("media_asset_id", asset_id_str)
-            .execute()
+            db.schema("core").table("media_links").select("id, context").eq("media_asset_id", asset_id_str).execute()
         )
         if not (hasattr(links_response, "error") and links_response.error):
             for link in links_response.data or []:
@@ -334,9 +323,9 @@ def update_asset_content_type(
                 context_out["fandom_section_tag"] = content_type
                 context_out["context_type"] = context_type_value
                 try:
-                    db.schema("core").table("media_links").update(
-                        {"context": context_out, "updated_at": now_iso}
-                    ).eq("id", link["id"]).execute()
+                    db.schema("core").table("media_links").update({"context": context_out, "updated_at": now_iso}).eq(
+                        "id", link["id"]
+                    ).execute()
                 except Exception:
                     continue
 

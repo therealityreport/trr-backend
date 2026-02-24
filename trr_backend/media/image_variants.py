@@ -321,13 +321,7 @@ def _update_asset_variant_metadata(db, asset_id: str, variants: list[VariantResu
         metadata["crop_detail_url"] = _best_url("crop_detail")
         metadata["active_crop_signature"] = crop_signature
 
-    (
-        db.schema("core")
-        .table("media_assets")
-        .update({"metadata": metadata})
-        .eq("id", asset_id)
-        .execute()
-    )
+    (db.schema("core").table("media_assets").update({"metadata": metadata}).eq("id", asset_id).execute())
 
 
 def _existing_cast_metadata_variants(
@@ -399,13 +393,7 @@ def _update_cast_photo_variant_metadata(
         metadata["crop_detail_url"] = _best_url("crop_detail")
         metadata["active_crop_signature"] = crop_signature
 
-    (
-        db.schema("core")
-        .table("cast_photos")
-        .update({"metadata": metadata})
-        .eq("id", photo_id)
-        .execute()
-    )
+    (db.schema("core").table("cast_photos").update({"metadata": metadata}).eq("id", photo_id).execute())
 
 
 def generate_media_asset_variants(
@@ -437,8 +425,7 @@ def generate_media_asset_variants(
         ]
     else:
         variant_specs = [
-            (variant_key, _focus_crop(image, crop_spec, out_w, out_h))
-            for variant_key, out_w, out_h in _CROP_VARIANTS
+            (variant_key, _focus_crop(image, crop_spec, out_w, out_h)) for variant_key, out_w, out_h in _CROP_VARIANTS
         ]
 
     for variant_key, variant_image in variant_specs:
@@ -528,8 +515,7 @@ def generate_cast_photo_variants(
         ]
     else:
         variant_specs = [
-            (variant_key, _focus_crop(image, crop_spec, out_w, out_h))
-            for variant_key, out_w, out_h in _CROP_VARIANTS
+            (variant_key, _focus_crop(image, crop_spec, out_w, out_h)) for variant_key, out_w, out_h in _CROP_VARIANTS
         ]
 
     for variant_key, variant_image in variant_specs:

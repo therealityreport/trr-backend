@@ -42,6 +42,95 @@ def test_fetch_permalink_media_item_parses_data_sjs_payload(monkeypatch: pytest.
     assert found["product_type"] == "clips"
 
 
+def test_fetch_permalink_media_item_supports_wrapped_data_sjs_payload() -> None:
+    media_item = {"id": "media-wrapped", "taken_at": 1739481600}
+    payload = {
+        "__bbox": {
+            "result": {
+                "data": {
+                    "xdt_api__v1__media__shortcode__web_info": {
+                        "items": [media_item],
+                    }
+                }
+            }
+        }
+    }
+    wrapped = f"window.__additionalDataLoaded('/p/DUHvBbEDhfw/', {json.dumps(payload)});"
+    html = f'<html><body><script type="application/json" data-sjs>{wrapped}</script></body></html>'
+
+    class _FakeResponse:
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+    found = fetch_permalink_media_item("DUHvBbEDhfw", session=_FakeSession())  # type: ignore[arg-type]
+    assert found is not None
+    assert found["id"] == "media-wrapped"
+
+
+def test_fetch_permalink_media_item_uses_route_order_with_fallback() -> None:
+    media_item = {"id": "media-route", "taken_at": 1739481600}
+    payload = {
+        "__bbox": {
+            "result": {
+                "data": {
+                    "xdt_api__v1__media__shortcode__web_info": {
+                        "items": [media_item],
+                    }
+                }
+            }
+        }
+    }
+    html = f'<html><body><script type="application/json" data-sjs>{json.dumps(payload)}</script></body></html>'
+    requested_urls: list[str] = []
+
+    class _FakeResponse:
+        def __init__(self, *, status_code: int, text: str = ""):
+            self.status_code = status_code
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                import requests
+
+                raise requests.HTTPError(f"{self.status_code} error")
+
+    class _FakeSession:
+        def get(self, url: str, *_args, **_kwargs):
+            requested_urls.append(url)
+            if "/reel/" in url:
+                return _FakeResponse(status_code=404)
+            if "/p/" in url:
+                return _FakeResponse(status_code=200, text=html)
+            return _FakeResponse(status_code=404)
+
+    found = fetch_permalink_media_item(
+        "https://www.instagram.com/reel/DUHvBbEDhfw/",
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert found is not None
+    assert found["id"] == "media-route"
+    assert requested_urls[0].endswith("/reel/DUHvBbEDhfw/")
+    assert requested_urls[1].endswith("/p/DUHvBbEDhfw/")
+
+
+def test_fetch_permalink_media_item_rejects_malformed_shortcode_or_url() -> None:
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("network should not be called for malformed shortcode input")
+
+    found = fetch_permalink_media_item(
+        "https://www.instagram.com/reel/not-a-valid-shortcode!!!/",
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert found is None
+
+
 def test_parse_permalink_metadata_extracts_fields_from_media_item() -> None:
     efg = quote(json.dumps({"video_info": {"duration_s": 17.4}}))
     metadata = parse_permalink_metadata(

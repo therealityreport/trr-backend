@@ -621,8 +621,7 @@ def _detect_text_overlay_with_gemini(image_bytes: bytes, *, content_type: str | 
                 detector="gemini",
                 model=model_name,
                 error=(
-                    "Failed to parse Gemini response as JSON after retry: "
-                    f"initial={parse_exc}; retry={retry_parse_exc}"
+                    f"Failed to parse Gemini response as JSON after retry: initial={parse_exc}; retry={retry_parse_exc}"
                 ),
                 finish_reason=finish_reason,
                 reason_code=TEXT_OVERLAY_REASON_GEMINI_JSON_PARSE_FAILED,
@@ -679,23 +678,11 @@ def _extract_existing_fields(metadata: dict[str, Any]) -> TextOverlayResult | No
     model = metadata.get("text_overlay_model")
     model_str = model.strip() if isinstance(model, str) and model.strip() else None
     model_source = metadata.get("text_overlay_model_source")
-    model_source_str = (
-        model_source.strip()
-        if isinstance(model_source, str) and model_source.strip()
-        else None
-    )
+    model_source_str = model_source.strip() if isinstance(model_source, str) and model_source.strip() else None
     model_route = metadata.get("text_overlay_model_route")
-    model_route_str = (
-        model_route.strip()
-        if isinstance(model_route, str) and model_route.strip()
-        else None
-    )
+    model_route_str = model_route.strip() if isinstance(model_route, str) and model_route.strip() else None
     fallback_path = metadata.get("text_overlay_model_fallback_path")
-    fallback_path_str = (
-        fallback_path.strip()
-        if isinstance(fallback_path, str) and fallback_path.strip()
-        else None
-    )
+    fallback_path_str = fallback_path.strip() if isinstance(fallback_path, str) and fallback_path.strip() else None
     prompt_version = metadata.get("text_overlay_prompt_version")
     prompt_version_str = (
         prompt_version.strip()
@@ -707,11 +694,7 @@ def _extract_existing_fields(metadata: dict[str, Any]) -> TextOverlayResult | No
     reason_code = metadata.get("text_overlay_error_code")
     reason_code_str = reason_code.strip() if isinstance(reason_code, str) and reason_code.strip() else None
     finish_reason = metadata.get("text_overlay_finish_reason")
-    finish_reason_str = (
-        finish_reason.strip()
-        if isinstance(finish_reason, str) and finish_reason.strip()
-        else None
-    )
+    finish_reason_str = finish_reason.strip() if isinstance(finish_reason, str) and finish_reason.strip() else None
     normalized_status: Literal["detected", "unknown"] = "unknown" if status == "unknown" else "detected"
 
     return TextOverlayResult(

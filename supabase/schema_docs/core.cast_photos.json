@@ -387,6 +387,15 @@
       "definition": "CREATE INDEX cast_photos_hosted_sha_idx ON core.cast_photos USING btree (hosted_sha256) WHERE (hosted_sha256 IS NOT NULL)"
     },
     {
+      "name": "cast_photos_person_gallery_idx",
+      "columns": [
+        "person_id",
+        "gallery_index) WHERE (gallery_index IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX cast_photos_person_gallery_idx ON core.cast_photos USING btree (person_id, gallery_index) WHERE (gallery_index IS NOT NULL)"
+    },
+    {
       "name": "cast_photos_person_source_idx",
       "columns": [
         "person_id",

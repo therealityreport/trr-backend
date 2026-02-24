@@ -227,9 +227,7 @@ class TikTokScraper:
         for env_key in ("TIKTOK_COOKIES_FILE", "SOCIAL_TIKTOK_COOKIES_FILE"):
             json_path = (os.getenv(env_key) or "").strip()
             if json_path:
-                netscape = Path(json_path).with_name(
-                    Path(json_path).stem + "_netscape.txt"
-                )
+                netscape = Path(json_path).with_name(Path(json_path).stem + "_netscape.txt")
                 if netscape.is_file():
                     return str(netscape)
 
@@ -362,7 +360,8 @@ class TikTokScraper:
             "--flat-playlist",
             "--print",
             "%(id)s\t%(upload_date)s\t%(view_count)s\t%(title)s",
-            "--playlist-end", str(max_videos),
+            "--playlist-end",
+            str(max_videos),
             url,
         ]
 
@@ -372,9 +371,7 @@ class TikTokScraper:
 
         logger.info(f"yt-dlp listing videos for @{username} (max {max_videos})...")
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120
-            )
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired:
             logger.warning("yt-dlp listing timed out")
             return []
@@ -414,9 +411,7 @@ class TikTokScraper:
 
         cmd = ["yt-dlp", "--dump-json", "--no-download", video_url]
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30
-            )
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if proc.returncode != 0:
                 logger.warning(f"yt-dlp metadata failed for {video_url}: {proc.stderr[:200]}")
                 return None
@@ -443,11 +438,7 @@ class TikTokScraper:
 
         return TikTokPost(
             video_id=video_id,
-            date_time=(
-                datetime.fromtimestamp(create_time).strftime("%Y-%m-%d %H:%M:%S")
-                if create_time
-                else ""
-            ),
+            date_time=(datetime.fromtimestamp(create_time).strftime("%Y-%m-%d %H:%M:%S") if create_time else ""),
             create_time=create_time,
             description=description,
             hashtags=self._extract_hashtags(description),
@@ -505,7 +496,8 @@ class TikTokScraper:
             "yt-dlp",
             "--flat-playlist",
             "--dump-json",
-            "--playlist-end", str(max_videos),
+            "--playlist-end",
+            str(max_videos),
         ]
 
         # Pass cookies if a Netscape-format file exists
@@ -519,7 +511,9 @@ class TikTokScraper:
         logger.info(f"yt-dlp bulk listing @{config.username} (up to {max_videos} videos)...")
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True,
+                cmd,
+                capture_output=True,
+                text=True,
                 timeout=max(120, max_videos // 3),
             )
         except subprocess.TimeoutExpired:
@@ -548,10 +542,7 @@ class TikTokScraper:
 
             post = self._parse_ytdlp_metadata(data, config)
             posts.append(post)
-            logger.info(
-                f"Found #{len(posts)}: {post.video_id} ({post.date_time}) "
-                f"- {post.views:,} views"
-            )
+            logger.info(f"Found #{len(posts)}: {post.video_id} ({post.date_time}) - {post.views:,} views")
 
             if max_posts_hint and len(posts) >= max_posts_hint:
                 break
@@ -728,10 +719,7 @@ class TikTokScraper:
             use_api = True
             logger.info(f"Found user: {user.get('nickname')} (@{config.username})")
         else:
-            logger.warning(
-                f"API returned no data for @{config.username}; "
-                "falling back to HTML scraping"
-            )
+            logger.warning(f"API returned no data for @{config.username}; falling back to HTML scraping")
 
         # Try HTML scraping fallback to get initial posts + secUid
         html_posts: list[dict] = []

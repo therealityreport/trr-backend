@@ -232,9 +232,7 @@ def _is_show_relevant_news_item(
         return True
 
     show_title_phrase = (
-        " ".join(re.split(r"[^a-z0-9]+", show_title.lower())).strip()
-        if isinstance(show_title, str)
-        else ""
+        " ".join(re.split(r"[^a-z0-9]+", show_title.lower())).strip() if isinstance(show_title, str) else ""
     )
     if show_title_phrase and len(show_title_phrase) >= 4 and show_title_phrase in searchable:
         return True
@@ -928,7 +926,12 @@ def parse_show_news(
     )
 
 
-def parse_person_page(person_url: str) -> dict[str, Any]:
+def parse_person_page(
+    person_url: str,
+    *,
+    include_related_content: bool = True,
+    hydrate_related_dates: bool = True,
+) -> dict[str, Any]:
     fetched = _fetch_html(person_url)
     soup = fetched.soup
 
@@ -959,8 +962,18 @@ def parse_person_page(person_url: str) -> dict[str, Any]:
     if hero_image:
         hero_image = _canonicalize_url(urljoin(fetched.url, hero_image))
 
-    videos = _hydrate_items_published_at(_collect_video_items(soup, fetched.url), url_key="clip_url")
-    news = _hydrate_items_published_at(_collect_news_items(soup, fetched.url), url_key="article_url")
+    if include_related_content:
+        raw_videos = _collect_video_items(soup, fetched.url)
+        raw_news = _collect_news_items(soup, fetched.url)
+        if hydrate_related_dates:
+            videos = _hydrate_items_published_at(raw_videos, url_key="clip_url")
+            news = _hydrate_items_published_at(raw_news, url_key="article_url")
+        else:
+            videos = raw_videos
+            news = raw_news
+    else:
+        videos = []
+        news = []
 
     return {
         "canonical_url": fetched.url,
@@ -984,6 +997,53 @@ def _candidate_result(url: str, *, status: str, error: str | None = None) -> dic
     return result
 
 
+def probe_bravo_person_url_candidates(
+    person_url_candidates: list[str] | None,
+    *,
+    max_people: int = 40,
+    include_related_content: bool = True,
+    hydrate_related_dates: bool = True,
+) -> Iterable[dict[str, Any]]:
+    """Probe canonical Bravo person URLs in deterministic order."""
+    for person_url in (person_url_candidates or [])[: max(0, max_people)]:
+        candidate_url = str(person_url).strip()
+        if not candidate_url:
+            continue
+        canonical_candidate_url = _canonicalize_url(candidate_url)
+        try:
+            if include_related_content and hydrate_related_dates:
+                person = parse_person_page(candidate_url)
+            else:
+                person = parse_person_page(
+                    candidate_url,
+                    include_related_content=include_related_content,
+                    hydrate_related_dates=hydrate_related_dates,
+                )
+            resolved_url = str(person.get("canonical_url") or candidate_url)
+            yield {
+                "candidate_url": canonical_candidate_url,
+                "url": _canonicalize_url(resolved_url),
+                "status": "ok",
+                "person": person,
+            }
+        except requests.RequestException as exc:
+            error_text = str(exc).strip()
+            lowered = error_text.lower()
+            if "not found" in lowered:
+                yield {
+                    "candidate_url": canonical_candidate_url,
+                    "url": canonical_candidate_url,
+                    "status": "missing",
+                }
+            else:
+                yield {
+                    "candidate_url": canonical_candidate_url,
+                    "url": canonical_candidate_url,
+                    "status": "error",
+                    "error": error_text or "request_failed",
+                }
+
+
 def parse_bravo_show_bundle(
     show_url: str,
     *,
@@ -992,12 +1052,19 @@ def parse_bravo_show_bundle(
     include_news: bool = True,
     person_url_candidates: list[str] | None = None,
     max_people: int = 40,
+    candidate_people_only: bool = False,
+    include_person_related_content: bool = True,
+    hydrate_person_related_dates: bool = True,
 ) -> dict[str, Any]:
     show = parse_show_page(show_url)
     discovered_person_urls = list(show.get("person_urls") or [])
-    candidate_person_urls = _merge_person_urls(
-        person_url_candidates or [],
-        discovered_person_urls,
+    candidate_person_urls = (
+        _merge_person_urls(person_url_candidates or [])
+        if candidate_people_only
+        else _merge_person_urls(
+            person_url_candidates or [],
+            discovered_person_urls,
+        )
     )
 
     videos = parse_show_videos(show["canonical_url"]) if include_videos else []
@@ -1014,32 +1081,29 @@ def parse_bravo_show_bundle(
     people: list[dict[str, Any]] = []
     person_candidate_results: list[dict[str, Any]] = []
     if include_people:
-        for person_url in candidate_person_urls[:max_people]:
-            try:
-                person = parse_person_page(person_url)
-                people.append(person)
-                person_candidate_results.append(
-                    _candidate_result(
-                        str(person.get("canonical_url") or person_url),
-                        status="ok",
-                    )
-                )
-            except requests.RequestException as exc:
-                error_text = str(exc).strip()
-                if "not found" in error_text.lower():
-                    person_candidate_results.append(_candidate_result(person_url, status="missing"))
-                else:
-                    person_candidate_results.append(
-                        _candidate_result(person_url, status="error", error=error_text or "request_failed")
-                    )
+        for probe in probe_bravo_person_url_candidates(
+            candidate_person_urls,
+            max_people=max_people,
+            include_related_content=include_person_related_content,
+            hydrate_related_dates=hydrate_person_related_dates,
+        ):
+            status = str(probe.get("status") or "").strip().lower()
+            url = str(probe.get("url") or "").strip()
+            if not url or status not in {"ok", "missing", "error"}:
                 continue
+            person = probe.get("person") if isinstance(probe.get("person"), dict) else None
+            if status == "ok" and person:
+                people.append(person)
+            person_candidate_results.append(
+                _candidate_result(
+                    url,
+                    status=status,
+                    error=str(probe.get("error") or "").strip() or None,
+                )
+            )
 
     resolved_person_urls = _merge_person_urls(
-        [
-            str(person.get("canonical_url") or "").strip()
-            for person in people
-            if isinstance(person, dict)
-        ]
+        [str(person.get("canonical_url") or "").strip() for person in people if isinstance(person, dict)]
     )
     if include_people:
         discovered_person_urls = resolved_person_urls

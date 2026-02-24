@@ -603,15 +603,9 @@ def main(argv: list[str] | None = None) -> int:
 
             if failed_cast_fetches > 0 and successful_cast_fetches == 0:
                 seasons_used_label = (
-                    ",".join(str(value) for value in sorted(seasons_used_for_show))
-                    if seasons_used_for_show
-                    else "none"
+                    ",".join(str(value) for value in sorted(seasons_used_for_show)) if seasons_used_for_show else "none"
                 )
-                season_sources_label = (
-                    ",".join(sorted(season_sources_used))
-                    if season_sources_used
-                    else "unknown"
-                )
+                season_sources_label = ",".join(sorted(season_sources_used)) if season_sources_used else "unknown"
                 print(
                     "OCCURRENCES diagnostics "
                     f"show_id={show_id} "
@@ -651,15 +645,9 @@ def main(argv: list[str] | None = None) -> int:
                     occurrences_inserted += len(inserted)
 
             seasons_used_label = (
-                ",".join(str(value) for value in sorted(seasons_used_for_show))
-                if seasons_used_for_show
-                else "none"
+                ",".join(str(value) for value in sorted(seasons_used_for_show)) if seasons_used_for_show else "none"
             )
-            season_sources_label = (
-                ",".join(sorted(season_sources_used))
-                if season_sources_used
-                else "unknown"
-            )
+            season_sources_label = ",".join(sorted(season_sources_used)) if season_sources_used else "unknown"
             print(
                 "OCCURRENCES diagnostics "
                 f"show_id={show_id} "

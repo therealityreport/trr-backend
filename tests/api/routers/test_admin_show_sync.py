@@ -122,7 +122,7 @@ class TestSyncNetworksStreaming:
     def test_runs_three_steps_and_aggregates_metrics(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         token = _make_admin_token("test-secret")
-        received = {"entities": None, "providers": None, "links": None}
+        received = {"entities": None, "providers": None, "links": None, "show_logos": None}
 
         def fake_entities(argv):
             received["entities"] = list(argv or [])
@@ -149,6 +149,10 @@ class TestSyncNetworksStreaming:
             print("logos_mirrored=4")
             print("variants_black_mirrored=3")
             print("variants_white_mirrored=2")
+            print("logo_assets_discovered=25")
+            print("logo_assets_mirrored=14")
+            print("logo_assets_skipped=8")
+            print("logo_assets_failed=3")
             print("completion_total=40")
             print("completion_resolved=39")
             print("completion_unresolved=1")
@@ -157,6 +161,15 @@ class TestSyncNetworksStreaming:
             print('unresolved_logo={"type":"network","id":"77","name":"Bravo","reason":"no_logo_claim"}')
             print('unresolved_logo={"type":"streaming","id":"531","name":"Peacock","reason":"download_failed"}')
             print("failures=2")
+            return 0
+
+        def fake_show_logos(argv):
+            received["show_logos"] = list(argv or [])
+            print("show_logos_discovered=16")
+            print("show_logos_imported=9")
+            print("show_logos_skipped=4")
+            print("show_logo_failures=3")
+            print("failures=0")
             return 0
 
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
@@ -169,11 +182,12 @@ class TestSyncNetworksStreaming:
                         "api.routers.admin_show_sync.sync_networks_streaming_links.main",
                         side_effect=fake_links,
                     ):
-                        response = client.post(
-                            "/api/v1/admin/shows/sync-networks-streaming",
-                            headers={"Authorization": f"Bearer {token}"},
-                            json={"skip_s3": True, "force": True, "limit": 50},
-                        )
+                        with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=fake_show_logos):
+                            response = client.post(
+                                "/api/v1/admin/shows/sync-networks-streaming",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"skip_s3": True, "force": True, "limit": 50},
+                            )
 
         assert response.status_code == 200
         payload = response.json()
@@ -183,6 +197,14 @@ class TestSyncNetworksStreaming:
         assert payload["logos_mirrored"] == 9
         assert payload["variants_black_mirrored"] == 3
         assert payload["variants_white_mirrored"] == 2
+        assert payload["logo_assets_discovered"] == 25
+        assert payload["logo_assets_mirrored"] == 14
+        assert payload["logo_assets_skipped"] == 8
+        assert payload["logo_assets_failed"] == 3
+        assert payload["show_logos_discovered"] == 16
+        assert payload["show_logos_imported"] == 9
+        assert payload["show_logos_skipped"] == 4
+        assert payload["show_logo_failures"] == 3
         assert payload["completion_total"] == 40
         assert payload["completion_resolved"] == 39
         assert payload["completion_unresolved"] == 1
@@ -199,6 +221,7 @@ class TestSyncNetworksStreaming:
         assert payload["steps"]["tmdb_show_entities"]["status"] == "success"
         assert payload["steps"]["tmdb_watch_providers"]["status"] == "success"
         assert payload["steps"]["network_streaming_links"]["status"] == "success"
+        assert payload["steps"]["show_logos"]["status"] == "success"
 
         assert "--all" in (received["entities"] or [])
         assert "--force" in (received["entities"] or [])
@@ -206,6 +229,7 @@ class TestSyncNetworksStreaming:
         assert "--limit" in (received["entities"] or [])
         assert "--skip-s3" in (received["providers"] or [])
         assert "--skip-s3" in (received["links"] or [])
+        assert "--skip-s3" in (received["show_logos"] or [])
 
     def test_truncates_unresolved_logo_list_to_cap(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
@@ -270,6 +294,21 @@ class TestSyncNetworksStreaming:
                 ),
                 unresolved_output,
             ),
+            (
+                SyncNetworksStreamingStepResult(
+                    status="success",
+                    duration_ms=1,
+                    exit_code=0,
+                    metrics={
+                        "show_logos_discovered": 0,
+                        "show_logos_imported": 0,
+                        "show_logos_skipped": 0,
+                        "show_logo_failures": 0,
+                        "failures": 0,
+                    },
+                ),
+                "",
+            ),
         ]
 
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
@@ -311,15 +350,24 @@ class TestSyncNetworksStreaming:
             print("failures=0")
             return 0
 
+        def ok_show_logos(argv):
+            print("show_logos_discovered=0")
+            print("show_logos_imported=0")
+            print("show_logos_skipped=0")
+            print("show_logo_failures=0")
+            print("failures=0")
+            return 0
+
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
             with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=bad_entities):
                 with patch("api.routers.admin_show_sync.sync_tmdb_watch_providers.main", side_effect=ok_providers):
                     with patch("api.routers.admin_show_sync.sync_networks_streaming_links.main", side_effect=ok_links):
-                        response = client.post(
-                            "/api/v1/admin/shows/sync-networks-streaming",
-                            headers={"Authorization": f"Bearer {token}"},
-                            json={},
-                        )
+                        with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=ok_show_logos):
+                            response = client.post(
+                                "/api/v1/admin/shows/sync-networks-streaming",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={},
+                            )
 
         assert response.status_code == 200
         payload = response.json()
@@ -385,9 +433,7 @@ class TestNetworksStreamingOverrides:
         override_id = str(uuid4())
 
         mock_db = MagicMock()
-        delete_query = (
-            mock_db.schema.return_value.table.return_value.delete.return_value.eq.return_value
-        )
+        delete_query = mock_db.schema.return_value.table.return_value.delete.return_value.eq.return_value
         delete_response = MagicMock()
         delete_response.error = None
         delete_response.data = []
@@ -425,6 +471,54 @@ class TestRefreshShow:
 
         assert response.status_code == 404
 
+    def test_returns_409_when_cast_refresh_missing_show_imdb_id(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+
+        show_id = str(uuid4())
+        mock_db = MagicMock()
+        show_resp = MagicMock()
+        show_resp.data = [{"id": show_id, "imdb_id": None, "external_ids": {}}]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync.sync_show_cast.main") as p_show_cast:
+                response = client.post(
+                    f"/api/v1/admin/shows/{show_id}/refresh",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"targets": ["cast_credits"]},
+                )
+
+        assert response.status_code == 409
+        assert "missing an IMDb ID" in response.json().get("detail", "")
+        p_show_cast.assert_not_called()
+
+    def test_refresh_stream_returns_409_when_cast_refresh_missing_show_imdb_id(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        token = _make_admin_token("test-secret")
+
+        show_id = str(uuid4())
+        mock_db = MagicMock()
+        show_resp = MagicMock()
+        show_resp.data = [{"id": show_id, "imdb_id": None, "external_ids": {}}]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync.sync_show_cast.main") as p_show_cast:
+                response = client.post(
+                    f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"targets": ["cast_credits"]},
+                )
+
+        assert response.status_code == 409
+        assert "missing an IMDb ID" in response.json().get("detail", "")
+        p_show_cast.assert_not_called()
+
     def test_calls_script_mains_for_targets(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         token = _make_admin_token("test-secret")
@@ -432,7 +526,7 @@ class TestRefreshShow:
         # Mock DB show exists
         mock_db = MagicMock()
         show_resp = MagicMock()
-        show_resp.data = [{"id": str(uuid4())}]
+        show_resp.data = [{"id": str(uuid4()), "imdb_id": "tt1234567", "external_ids": {}}]
         show_resp.error = None
         query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
         query.execute.return_value = show_resp

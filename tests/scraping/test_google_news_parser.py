@@ -28,8 +28,7 @@ def _mock_get_factory(pages: dict[str, str]):
 
 def test_topic_url_to_rss_candidates_builds_topics_rss_url() -> None:
     topic_url = (
-        "https://news.google.com/topics/"
-        "CAAqKAgKIiJDQkFTRXdvTkwyY3ZNVEZvYlhBeGVtUndNQklDWlc0b0FBUAE?ceid=US:en&oc=3"
+        "https://news.google.com/topics/CAAqKAgKIiJDQkFTRXdvTkwyY3ZNVEZvYlhBeGVtUndNQklDWlc0b0FBUAE?ceid=US:en&oc=3"
     )
 
     candidates = google_news_parser.topic_url_to_rss_candidates(topic_url)
@@ -102,7 +101,9 @@ def test_parse_rss_items_extracts_image_from_description_html() -> None:
 def test_fetch_google_news_falls_back_to_search_rss_when_topic_has_no_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    topic_url = "https://news.google.com/topics/CAAqKAgKIiJDQkFTRXdvTkwyY3ZNVEZvYlhBeGVtUndNQklDWlc0b0FBUAE?ceid=US:en&oc=3"
+    topic_url = (
+        "https://news.google.com/topics/CAAqKAgKIiJDQkFTRXdvTkwyY3ZNVEZvYlhBeGVtUndNQklDWlc0b0FBUAE?ceid=US:en&oc=3"
+    )
     candidates = google_news_parser.topic_url_to_rss_candidates(topic_url)
     fallback_url = google_news_parser.build_search_rss_url(
         "The Real Housewives of Salt Lake City",
@@ -147,7 +148,9 @@ def test_fetch_google_news_falls_back_to_search_rss_when_topic_has_no_items(
 def test_fetch_google_news_backfills_featured_image_from_article_meta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    topic_url = "https://news.google.com/topics/CAAqKAgKIiJDQkFTRXdvTkwyY3ZNVEZvYlhBeGVtUndNQklDWlc0b0FBUAE?ceid=US:en&oc=3"
+    topic_url = (
+        "https://news.google.com/topics/CAAqKAgKIiJDQkFTRXdvTkwyY3ZNVEZvYlhBeGVtUndNQklDWlc0b0FBUAE?ceid=US:en&oc=3"
+    )
     candidate = google_news_parser.topic_url_to_rss_candidates(topic_url)[0]
     article_url = "https://example.com/story-9"
 
@@ -190,3 +193,11 @@ def test_fetch_google_news_backfills_featured_image_from_article_meta(
     assert result["featured_images_added"] == 1
     assert result["featured_images_probed"] == 1
     assert result["items"][0]["image_url"] == "https://cdn.example.com/featured-9.jpg"
+
+
+def test_normalize_article_url_strips_tracking_params() -> None:
+    normalized = google_news_parser.normalize_article_url(
+        "https://www.people.com/story-1/?utm_source=google&oc=3&foo=bar"
+    )
+
+    assert normalized == "https://people.com/story-1?foo=bar"

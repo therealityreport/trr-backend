@@ -15,6 +15,75 @@ from trr_backend.integrations.imdb.mediaindex_images import (
 )
 
 
+def _normalize_imdb_type(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_kind_from_imdb_type(imdb_type: str | None, fallback_kind: str = "media") -> str:
+    normalized = (imdb_type or "").strip().lower()
+    if not normalized:
+        return fallback_kind
+    if "still" in normalized or "frame" in normalized:
+        return "episode_still"
+    if "poster" in normalized:
+        return "poster"
+    if "publicity" in normalized:
+        return "promo"
+    return fallback_kind
+
+
+def _flatten_tags_into_metadata(metadata: dict[str, Any], tags: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(metadata)
+    people = tags.get("people") if isinstance(tags.get("people"), list) else []
+    titles = tags.get("titles") if isinstance(tags.get("titles"), list) else []
+
+    people_names: list[str] = []
+    people_imdb_ids: list[str] = []
+    for item in people:
+        if not isinstance(item, dict):
+            continue
+        imdb_id = str(item.get("imdb_id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if imdb_id:
+            people_imdb_ids.append(imdb_id)
+        if name:
+            people_names.append(name)
+
+    title_names: list[str] = []
+    title_imdb_ids: list[str] = []
+    for item in titles:
+        if not isinstance(item, dict):
+            continue
+        imdb_id = str(item.get("imdb_id") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if imdb_id:
+            title_imdb_ids.append(imdb_id)
+        if title:
+            title_names.append(title)
+
+    if people_names:
+        merged["people_names"] = list(dict.fromkeys(people_names))
+    if people_imdb_ids:
+        merged["people_imdb_ids"] = list(dict.fromkeys(people_imdb_ids))
+    if title_names:
+        merged["title_names"] = list(dict.fromkeys(title_names))
+    if title_imdb_ids:
+        merged["title_imdb_ids"] = list(dict.fromkeys(title_imdb_ids))
+
+    image_type = _normalize_imdb_type(tags.get("image_type"))
+    if image_type:
+        merged["imdb_image_type"] = image_type
+
+    caption_plain = tags.get("caption_plain")
+    if isinstance(caption_plain, str) and caption_plain.strip():
+        merged.setdefault("imdb_caption_plain", caption_plain.strip())
+
+    return merged
+
+
 def fetch_imdb_show_mediaindex_rows(
     imdb_id: str,
     *,
@@ -73,6 +142,9 @@ def fetch_imdb_show_mediaindex_rows(
         metadata = dict(image.metadata or {})
         metadata.setdefault("viewer_url", image.viewer_url)
         metadata.setdefault("viewer_path", image.viewer_path)
+        imdb_type = _normalize_imdb_type(image.image_type)
+        if imdb_type:
+            metadata.setdefault("imdb_image_type", imdb_type)
         if include_tags:
             try:
                 tags = fetch_imdb_mediaviewer_tags(imdb_id, image.imdb_image_id, sleep_ms=sleep_ms)
@@ -80,13 +152,15 @@ def fetch_imdb_show_mediaindex_rows(
                 tags = {}
             if tags:
                 metadata.setdefault("tags", tags)
+                metadata = _flatten_tags_into_metadata(metadata, tags)
+                imdb_type = _normalize_imdb_type(tags.get("image_type")) or imdb_type
         rows.append(
             {
                 "show_id": show_id,
                 "source": "imdb",
                 "source_image_id": image.imdb_image_id,
-                "kind": "media",
-                "image_type": image.image_type,
+                "kind": _normalize_kind_from_imdb_type(imdb_type, "media"),
+                "image_type": imdb_type,
                 "caption": image.caption,
                 "position": image.position or idx,
                 "url": image.url,

@@ -33,9 +33,7 @@ def test_imdb_episode_fields_take_precedence_and_tmdb_fills_provider_fields(monk
     )
     monkeypatch.setattr(mod, "update_show", lambda *_args, **_kwargs: dict(show_row))
 
-    season_store: dict[int, dict] = {
-        1: {"id": "season-1", "season_number": 1, "external_ids": {"imdb": "tt0100001"}}
-    }
+    season_store: dict[int, dict] = {1: {"id": "season-1", "season_number": 1, "external_ids": {"imdb": "tt0100001"}}}
     episode_store: dict[int, dict] = {
         1: {
             "episode_number": 1,

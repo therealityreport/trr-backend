@@ -12,4 +12,3 @@ for _k, _v in _mod.__dict__.items():
 if __name__ == "__main__":
     if hasattr(_mod, "main"):
         raise SystemExit(_mod.main())
-

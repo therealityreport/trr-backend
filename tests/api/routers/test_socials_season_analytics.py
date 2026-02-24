@@ -223,8 +223,7 @@ def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: p
 
     with patch("trr_backend.repositories.social_season_analytics.list_jobs", return_value=[]) as mocked:
         response = client.get(
-            f"/api/v1/admin/socials/seasons/{season_id}/ingest/jobs"
-            f"?run_id={run_id}&status=running&platform=instagram",
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/jobs?run_id={run_id}&status=running&platform=instagram",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -239,6 +238,7 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")
     season_id = str(uuid4())
+    run_id = str(uuid4())
 
     runs_payload = [
         {
@@ -251,8 +251,7 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
 
     with patch("trr_backend.repositories.social_season_analytics.list_runs", return_value=runs_payload) as mocked:
         response = client.get(
-            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs"
-            "?status=completed&source_scope=bravo&limit=25",
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs?status=completed&source_scope=bravo&run_id={run_id}&limit=25",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -261,9 +260,11 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
     assert body["season_id"] == season_id
     assert body["filters"]["status"] == "completed"
     assert body["filters"]["source_scope"] == "bravo"
+    assert body["filters"]["run_id"] == run_id
     assert body["runs"] == runs_payload
     assert mocked.call_args.kwargs["status"] == "completed"
     assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["run_id"] == run_id
     assert mocked.call_args.kwargs["limit"] == 25
 
 
@@ -321,6 +322,59 @@ def test_get_week_detail_endpoint_returns_youtube_comment_totals(
     body = response.json()
     assert body["totals"]["total_comments"] == 420
     assert body["platforms"]["youtube"]["posts"][0]["comments_count"] == 420
+
+
+def test_get_week_detail_endpoint_includes_additive_diagnostics(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    payload = {
+        "season_id": season_id,
+        "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
+        "platforms": {
+            "youtube": {
+                "posts": [],
+                "totals": {
+                    "posts": 1,
+                    "total_comments": 420,
+                    "total_engagement": 1000,
+                    "expected_comments_total": 500,
+                    "saved_comments_total": 420,
+                    "comments_saved_pct": 84.0,
+                },
+            }
+        },
+        "totals": {
+            "posts": 1,
+            "total_comments": 420,
+            "total_engagement": 1000,
+            "expected_comments_total": 500,
+            "saved_comments_total": 420,
+            "comments_saved_pct": 84.0,
+        },
+        "diagnostics": {
+            "run_id": "run-abc",
+            "generated_at": "2026-02-24T00:00:00Z",
+            "source_scope": "bravo",
+        },
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["totals"]["expected_comments_total"] == 500
+    assert body["totals"]["saved_comments_total"] == 420
+    assert body["totals"]["comments_saved_pct"] == 84.0
+    assert body["diagnostics"]["run_id"] == "run-abc"
 
 
 def test_get_post_comments_endpoint_returns_youtube_effective_stats(
@@ -400,6 +454,39 @@ def test_refresh_post_comments_endpoint_returns_latest_post_detail(
     assert refresh_mock.call_args.kwargs["source_id"] == "72899887766"
     assert refresh_mock.call_args.kwargs["max_comments_per_post"] == 1000
     assert get_mock.call_args.kwargs["platform"] == "tiktok"
+
+
+def test_requeue_instagram_mirror_jobs_endpoint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "source_scope": "bravo",
+        "failed_only": True,
+        "scanned": 20,
+        "queued_jobs": 8,
+        "skipped": 10,
+        "failed": 2,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.requeue_instagram_media_mirror_jobs",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/instagram/mirror/requeue?source_scope=bravo&limit=500&failed_only=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["queued_jobs"] == 8
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["limit"] == 500
+    assert mocked.call_args.kwargs["failed_only"] is True
 
 
 def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -710,6 +797,66 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
     assert "weekly_platform_engagement" in response.json()
     assert "weekly_daily_activity" in response.json()
     assert mocked.call_args.kwargs["week"] == 0
+
+
+def test_get_analytics_include_slices_forwarded(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    expected = {
+        "window": {"week": None},
+        "summary": {},
+        "weekly": [],
+        "weekly_platform_posts": [],
+        "weekly_platform_engagement": [],
+        "weekly_daily_activity": [],
+        "platform_breakdown": [],
+        "themes": {"positive": [], "negative": []},
+        "leaderboards": {"bravo_content": [], "viewer_discussion": []},
+        "jobs": [],
+        "benchmark": {"week_index": 1},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics?include=rows,benchmark",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["benchmark"]["week_index"] == 1
+    assert mocked.call_args.kwargs["include_rows"] is True
+    assert mocked.call_args.kwargs["include_flags"] is False
+    assert mocked.call_args.kwargs["include_schedule"] is False
+    assert mocked.call_args.kwargs["include_benchmark"] is True
+
+
+def test_get_ingest_run_summary_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    summaries = [
+        {
+            "run_id": str(uuid4()),
+            "status": "completed",
+            "source_scope": "bravo",
+            "success_rate_pct": 100.0,
+        }
+    ]
+
+    with patch("trr_backend.repositories.social_season_analytics.list_run_summaries", return_value=summaries) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/summary?source_scope=bravo&limit=20",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["season_id"] == season_id
+    assert body["filters"]["source_scope"] == "bravo"
+    assert body["summaries"] == summaries
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["limit"] == 20
 
 
 def test_export_pdf(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

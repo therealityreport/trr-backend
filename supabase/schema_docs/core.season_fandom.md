@@ -28,7 +28,7 @@ id
 
 ## Unique Constraints
 
-- season_id, source
+(none)
 
 ## Foreign Keys
 
@@ -37,7 +37,35 @@ id
 
 ## Indexes
 
+- core_season_fandom_season_number_idx (non-unique): season_number
+- core_season_fandom_show_id_idx (non-unique): show_id
 - season_fandom_pkey (unique): id
 - season_fandom_season_source_key (unique): season_id, source
-- core_season_fandom_show_id_idx (non-unique): show_id
-- core_season_fandom_season_number_idx (non-unique): season_number
+
+## RLS Enabled
+
+false
+
+## Example Row
+
+```json
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "season_id": "00000000-0000-0000-0000-000000000000",
+  "show_id": "00000000-0000-0000-0000-000000000000",
+  "season_number": 0,
+  "source": "example",
+  "source_url": "example",
+  "page_title": "example",
+  "page_revision_id": 0,
+  "scraped_at": "1970-01-01T00:00:00Z",
+  "summary": "example",
+  "dynamic_sections": {},
+  "citations": {},
+  "conflicts": {},
+  "source_variants": {},
+  "ai_model": "example",
+  "ai_generated_at": "1970-01-01T00:00:00Z",
+  "raw_html_sha256": "example"
+}
+```

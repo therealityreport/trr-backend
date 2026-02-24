@@ -120,9 +120,7 @@ def _build_face_boxes(result: Any) -> list[dict[str, Any]]:
 
         confidence_raw = getattr(det, "confidence", None)
         confidence = (
-            round(max(0.0, min(1.0, float(confidence_raw))), 4)
-            if isinstance(confidence_raw, (int, float))
-            else None
+            round(max(0.0, min(1.0, float(confidence_raw))), 4) if isinstance(confidence_raw, (int, float)) else None
         )
 
         boxes.append(
@@ -264,9 +262,7 @@ def auto_count_cast_photo(
 
     if metadata_changed:
         try:
-            db.schema("core").table("cast_photos").update(
-                {"metadata": metadata}
-            ).eq("id", str(photo_id)).execute()
+            db.schema("core").table("cast_photos").update({"metadata": metadata}).eq("id", str(photo_id)).execute()
         except Exception:
             # Best effort: count should still succeed if metadata write fails.
             pass
@@ -365,9 +361,9 @@ def auto_count_media_asset(
                 }
                 latest_crop_payload = context["thumbnail_crop"]
             try:
-                db.schema("core").table("media_links").update(
-                    {"context": context, "updated_at": now}
-                ).eq("id", link["id"]).execute()
+                db.schema("core").table("media_links").update({"context": context, "updated_at": now}).eq(
+                    "id", link["id"]
+                ).execute()
             except Exception:
                 # Best effort: count should still succeed if crop write fails.
                 continue

@@ -230,6 +230,8 @@ python-dotenv==1.2.1
     # via
     #   -r requirements.in
     #   uvicorn
+python-multipart==0.0.22
+    # via -r requirements.in
 pyyaml==6.0.3
     # via uvicorn
 realtime==2.27.0

@@ -22,6 +22,10 @@ from trr_backend.integrations.brandfetch import (
     fetch_brandfetch_logo_candidates,
     normalize_domain,
 )
+from trr_backend.integrations.imdb.companycredits import (
+    ImdbCompanyCreditsError,
+    fetch_imdb_company_credits,
+)
 from trr_backend.integrations.imdb.graphql_operations import fetch_hero_watch_box
 from trr_backend.integrations.logopedia import (
     LogopediaNoFilesError,
@@ -48,6 +52,16 @@ WIKIDATA_ENTITY_URL = "https://www.wikidata.org/wiki/Special:EntityData/{item_id
 WIKIDATA_ITEM_RE = re.compile(r"^Q\d+$", re.IGNORECASE)
 LOGO_CLAIM_IDS = ("P154", "P2910")
 DEFAULT_SOURCE_PRIORITY = ["override", "tmdb", "wikimedia", "official", "catalog"]
+LOGO_SOURCE_CAPS: dict[str, int] = {
+    "override": 12,
+    "tmdb": 5,
+    "wikimedia": 5,
+    "official": 8,
+    "catalog": 12,
+    "imdb": 8,
+}
+ATTEMPT_TABLE_SOURCES = {"override", "tmdb", "wikimedia", "official", "catalog", "variant"}
+LOGO_ASSET_TABLE_SOURCES = {"override", "tmdb", "wikimedia", "official", "catalog", "imdb"}
 REQUEST_HEADERS = {
     "accept": "application/json",
     "user-agent": "TRR-Backend/1.0",
@@ -160,6 +174,7 @@ class SyncRunContext:
     tmdb_network_hints_by_id: dict[int, dict[str, Any]] = field(default_factory=dict)
     provider_imdb_ids_by_provider_id: dict[int, list[str]] = field(default_factory=dict)
     imdb_watch_box_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    production_imdb_hints_by_key: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -171,6 +186,10 @@ class SyncSummary:
     logos_mirrored: int = 0
     variants_black_mirrored: int = 0
     variants_white_mirrored: int = 0
+    logo_assets_discovered: int = 0
+    logo_assets_mirrored: int = 0
+    logo_assets_skipped: int = 0
+    logo_assets_failed: int = 0
     failures: int = 0
     unresolved_logos: list[UnresolvedLogo] = field(default_factory=list)
     completion_total: int = 0
@@ -183,7 +202,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sync_networks_streaming_links",
         description=(
-            "Enrich used core.networks/core.watch_providers rows with Wikidata + Wikipedia links, "
+            "Enrich used core.networks/core.watch_providers/core.production_companies rows with "
+            "Wikidata + Wikipedia links, "
             "mirror missing logo assets from multiple sources, and generate black/white transparent variants."
         ),
     )
@@ -604,12 +624,7 @@ def _load_provider_names_by_id(db) -> dict[int, str]:
 def _build_provider_primary_rows(db) -> dict[str, dict[str, Any]]:
     by_key: dict[str, dict[str, Any]] = {}
     provider_names_by_id = _load_provider_names_by_id(db)
-    query = (
-        db.schema("core")
-        .table("show_watch_providers")
-        .select("show_id,provider_id")
-        .order("show_id")
-    )
+    query = db.schema("core").table("show_watch_providers").select("show_id,provider_id").order("show_id")
     for row in _iter_rows_paged(query):
         show_id = _normalize_text(row.get("show_id"))
         provider_id = row.get("provider_id")
@@ -677,6 +692,99 @@ def _build_provider_inventory(db, *, added_show_ids: set[str]) -> dict[str, Inve
     return inventory
 
 
+def _load_production_names_by_id(db) -> dict[int, str]:
+    by_id: dict[int, str] = {}
+    query = db.schema("core").table("production_companies").select("id,name").order("id")
+    for row in _iter_rows_paged(query):
+        production_id = row.get("id")
+        name = _normalize_text(row.get("name"))
+        if isinstance(production_id, int) and name:
+            by_id[production_id] = name
+    return by_id
+
+
+def _extract_tmdb_meta_production_names(row: dict[str, Any]) -> list[str]:
+    meta = row.get("tmdb_meta")
+    if not isinstance(meta, dict):
+        return []
+    values = meta.get("production_companies")
+    if not isinstance(values, list):
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        name = _normalize_text(value.get("name"))
+        key = _name_key(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _build_production_inventory(db, *, added_show_ids: set[str]) -> dict[str, InventoryEntity]:
+    production_names_by_id = _load_production_names_by_id(db)
+    by_key: dict[str, dict[str, Any]] = {}
+
+    query = db.schema("core").table("shows").select("id,tmdb_production_company_ids,tmdb_meta").order("id")
+    for row in _iter_rows_paged(query):
+        show_id = _normalize_text(row.get("id"))
+        if not show_id:
+            continue
+        is_added = show_id in added_show_ids
+
+        keys_seen_for_show: set[str] = set()
+        for production_id in row.get("tmdb_production_company_ids") or []:
+            if not isinstance(production_id, int):
+                continue
+            display = _normalize_text(production_names_by_id.get(production_id))
+            key = _name_key(display)
+            if not key:
+                continue
+            keys_seen_for_show.add(key)
+            bucket = by_key.setdefault(
+                key,
+                {
+                    "display_name": display,
+                    "show_ids": set(),
+                    "added_show_ids": set(),
+                },
+            )
+            bucket["show_ids"].add(show_id)
+            if is_added:
+                bucket["added_show_ids"].add(show_id)
+
+        for display in _extract_tmdb_meta_production_names(row):
+            key = _name_key(display)
+            if not key or key in keys_seen_for_show:
+                continue
+            bucket = by_key.setdefault(
+                key,
+                {
+                    "display_name": display,
+                    "show_ids": set(),
+                    "added_show_ids": set(),
+                },
+            )
+            bucket["show_ids"].add(show_id)
+            if is_added:
+                bucket["added_show_ids"].add(show_id)
+
+    inventory: dict[str, InventoryEntity] = {}
+    for key, value in by_key.items():
+        inventory[key] = InventoryEntity(
+            entity_type="production",
+            entity_key=key,
+            display_name=str(value["display_name"]),
+            available_show_count=len(value["show_ids"]),
+            added_show_count=len(value["added_show_ids"]),
+        )
+    return inventory
+
+
 def _load_used_inventory(db) -> dict[tuple[str, str], InventoryEntity]:
     added_show_ids = _collect_added_show_ids(db)
     inventory: dict[tuple[str, str], InventoryEntity] = {}
@@ -688,6 +796,10 @@ def _load_used_inventory(db) -> dict[tuple[str, str], InventoryEntity]:
     providers = _build_provider_inventory(db, added_show_ids=added_show_ids)
     for key, entity in providers.items():
         inventory[("streaming", key)] = entity
+
+    productions = _build_production_inventory(db, added_show_ids=added_show_ids)
+    for key, entity in productions.items():
+        inventory[("production", key)] = entity
 
     return inventory
 
@@ -750,12 +862,7 @@ def _load_provider_imdb_ids_by_provider_id(db, *, max_ids_per_provider: int = 3)
             by_show_id[show_id] = imdb_id
 
     by_provider: dict[int, list[str]] = defaultdict(list)
-    query = (
-        db.schema("core")
-        .table("show_watch_providers")
-        .select("show_id,provider_id")
-        .order("provider_id")
-    )
+    query = db.schema("core").table("show_watch_providers").select("show_id,provider_id").order("provider_id")
     for row in _iter_rows_paged(query):
         provider_id = row.get("provider_id")
         show_id = _normalize_text(row.get("show_id"))
@@ -771,12 +878,133 @@ def _load_provider_imdb_ids_by_provider_id(db, *, max_ids_per_provider: int = 3)
     return dict(by_provider)
 
 
+def _is_imdb_production_category(value: str | None) -> bool:
+    label = _normalize_text(value).casefold()
+    if not label:
+        return True
+    return "production" in label
+
+
+def _load_production_imdb_hints_by_key(
+    db,
+    *,
+    max_requests: int = 200,
+) -> dict[str, dict[str, list[str]]]:
+    production_names_by_id = _load_production_names_by_id(db)
+    hints: dict[str, dict[str, set[str]]] = {}
+    fetched = 0
+
+    query = db.schema("core").table("shows").select("id,imdb_id,tmdb_production_company_ids,tmdb_meta").order("id")
+    for row in _iter_rows_paged(query):
+        if fetched >= max_requests:
+            break
+
+        imdb_id = _normalize_text(row.get("imdb_id"))
+        if not imdb_id.startswith("tt"):
+            continue
+
+        target_names_by_key: dict[str, set[str]] = {}
+        for production_id in row.get("tmdb_production_company_ids") or []:
+            if not isinstance(production_id, int):
+                continue
+            name = _normalize_text(production_names_by_id.get(production_id))
+            key = _name_key(name)
+            if not key:
+                continue
+            target_names_by_key.setdefault(key, set()).add(name)
+
+        for name in _extract_tmdb_meta_production_names(row):
+            key = _name_key(name)
+            if not key:
+                continue
+            target_names_by_key.setdefault(key, set()).add(name)
+
+        if not target_names_by_key:
+            continue
+
+        try:
+            imdb_result = fetch_imdb_company_credits(imdb_id)
+            fetched += 1
+        except ImdbCompanyCreditsError:
+            continue
+
+        companies = [
+            company
+            for company in imdb_result.companies
+            if _is_imdb_production_category(company.category)
+        ] or imdb_result.companies
+        if not companies:
+            continue
+
+        matched_any = False
+        for entity_key, names in target_names_by_key.items():
+            compare_keys = {_name_key(name) for name in names if _normalize_text(name)}
+            entity_hints = hints.setdefault(
+                entity_key,
+                {
+                    "aliases": set(),
+                    "company_urls": set(),
+                    "source_urls": set(),
+                },
+            )
+            matched_for_entity = False
+            for company in companies:
+                company_name = _normalize_text(company.name)
+                if not company_name:
+                    continue
+                if any(_tmdb_name_match(compare_key, company_name) for compare_key in compare_keys):
+                    matched_for_entity = True
+                    matched_any = True
+                    entity_hints["aliases"].add(company_name)
+                    if company.company_url:
+                        entity_hints["company_urls"].add(company.company_url)
+                    entity_hints["source_urls"].add(imdb_result.source_url)
+
+            if not matched_for_entity and len(compare_keys) == 1 and len(companies) == 1:
+                company = companies[0]
+                company_name = _normalize_text(company.name)
+                if company_name:
+                    matched_any = True
+                    entity_hints["aliases"].add(company_name)
+                    if company.company_url:
+                        entity_hints["company_urls"].add(company.company_url)
+                    entity_hints["source_urls"].add(imdb_result.source_url)
+
+        if not matched_any and len(target_names_by_key) == 1 and len(companies) == 1:
+            entity_key = next(iter(target_names_by_key.keys()))
+            company = companies[0]
+            company_name = _normalize_text(company.name)
+            if company_name:
+                entity_hints = hints.setdefault(
+                    entity_key,
+                    {
+                        "aliases": set(),
+                        "company_urls": set(),
+                        "source_urls": set(),
+                    },
+                )
+                entity_hints["aliases"].add(company_name)
+                if company.company_url:
+                    entity_hints["company_urls"].add(company.company_url)
+                entity_hints["source_urls"].add(imdb_result.source_url)
+
+    out: dict[str, dict[str, list[str]]] = {}
+    for entity_key, values in hints.items():
+        out[entity_key] = {
+            "aliases": sorted(values.get("aliases") or set()),
+            "company_urls": sorted(values.get("company_urls") or set()),
+            "source_urls": sorted(values.get("source_urls") or set()),
+        }
+    return out
+
+
 def _build_sync_context(db) -> SyncRunContext:
     return SyncRunContext(
         tmdb_api_key=resolve_api_key(),
         tmdb_bearer_token=resolve_bearer_token(),
         tmdb_network_ids_by_key=_collect_tmdb_network_ids_by_key(db),
         provider_imdb_ids_by_provider_id=_load_provider_imdb_ids_by_provider_id(db),
+        production_imdb_hints_by_key=_load_production_imdb_hints_by_key(db),
     )
 
 
@@ -831,7 +1059,7 @@ def _load_overrides(db) -> dict[tuple[str, str], OverrideConfig]:
     for row in _iter_rows_paged(query):
         entity_type = _normalize_text(row.get("entity_type"))
         entity_key = _name_key(row.get("entity_key"))
-        if entity_type not in {"network", "streaming"} or not entity_key:
+        if entity_type not in {"network", "streaming", "production"} or not entity_key:
             continue
         key = (entity_type, entity_key)
         if key in overrides:
@@ -899,6 +1127,159 @@ def _update_core_row(db, *, table: str, id_field: str, entity_id: Any, patch: di
     response = db.schema("core").table(table).update(patch).eq(id_field, entity_id).execute()
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error updating {table}: {response.error}")
+
+
+def _load_existing_logo_assets_sha(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+) -> set[str]:
+    out: set[str] = set()
+    query = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .select("hosted_logo_sha256,mirror_status")
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+    )
+    for row in _iter_rows_paged(query):
+        if _normalize_text(row.get("mirror_status")) != "mirrored":
+            continue
+        sha = _normalize_text(row.get("hosted_logo_sha256"))
+        if sha:
+            out.add(sha)
+    return out
+
+
+def _load_existing_logo_asset_source_urls(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = defaultdict(list)
+    query = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .select("source,source_url")
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+        .order("source_rank")
+    )
+    for row in _iter_rows_paged(query):
+        source = _normalize_text(row.get("source")).lower()
+        source_url = _normalize_text(row.get("source_url"))
+        if not source or not source_url:
+            continue
+        bucket = out.setdefault(source, [])
+        if source_url in bucket:
+            continue
+        bucket.append(source_url)
+    return dict(out)
+
+
+def _load_existing_logo_asset_index(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    query = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .select(
+            "source,source_url,mirror_status,hosted_logo_key,hosted_logo_url,hosted_logo_sha256,"
+            "hosted_logo_content_type,hosted_logo_bytes,hosted_logo_etag,base_logo_format"
+        )
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+    )
+    for row in _iter_rows_paged(query):
+        source = _normalize_text(row.get("source")).lower()
+        source_url = _normalize_text(row.get("source_url"))
+        if not source or not source_url:
+            continue
+        out[(source, source_url)] = row
+    return out
+
+
+def _logo_patch_from_asset_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hosted_logo_key": _normalize_text(row.get("hosted_logo_key")) or None,
+        "hosted_logo_url": _normalize_text(row.get("hosted_logo_url")) or None,
+        "hosted_logo_sha256": _normalize_text(row.get("hosted_logo_sha256")) or None,
+        "hosted_logo_content_type": _normalize_text(row.get("hosted_logo_content_type")) or None,
+        "hosted_logo_bytes": row.get("hosted_logo_bytes"),
+        "hosted_logo_etag": _normalize_text(row.get("hosted_logo_etag")) or None,
+    }
+
+
+def _source_has_logopedia_urls(urls: list[str]) -> bool:
+    for url in urls:
+        host = _normalize_text(urlparse(_normalize_text(url)).netloc).lower()
+        if host.endswith("logos.fandom.com") or host.endswith("fandom.com") or host.endswith("wikia.nocookie.net"):
+            return True
+    return False
+
+
+def _upsert_logo_asset(
+    db,
+    *,
+    row: dict[str, Any],
+) -> None:
+    payload = dict(row)
+    payload["updated_at"] = _now_iso()
+    payload.setdefault("created_at", payload["updated_at"])
+    response = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .upsert(payload, on_conflict="entity_type,entity_key,source,source_url")
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error upserting logo asset row: {response.error}")
+
+
+def _reset_logo_asset_primary_flags(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+) -> None:
+    response = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .update({"is_primary": False, "updated_at": _now_iso()})
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error resetting logo asset primary flags: {response.error}")
+
+
+def _mark_logo_asset_primary(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+    source: str,
+    source_url: str,
+) -> None:
+    response = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .update({"is_primary": True, "updated_at": _now_iso()})
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+        .eq("source", source)
+        .eq("source_url", source_url)
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error marking logo asset primary: {response.error}")
 
 
 def _upsert_completion(db, row: dict[str, Any]) -> dict[str, Any]:
@@ -973,6 +1354,40 @@ def _merge_source_urls(by_source: dict[str, list[str]], source: str, urls: list[
         if not text or text in bucket:
             continue
         bucket.append(text)
+
+
+def _logopedia_svg_raster_variant(url: str) -> str | None:
+    text = _normalize_text(url)
+    lower = text.lower()
+    if "static.wikia.nocookie.net" not in lower:
+        return None
+    if ".svg/revision/latest" not in lower:
+        return None
+    if "/scale-to-width-down/" in lower:
+        return None
+    if "?" in text:
+        base, query = text.split("?", 1)
+        return f"{base}/scale-to-width-down/1024?{query}"
+    return f"{text}/scale-to-width-down/1024"
+
+
+def _expand_candidate_urls(source: str, urls: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    source_name = _normalize_text(source).lower()
+    for value in urls:
+        text = _normalize_text(value)
+        if not text:
+            continue
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+        if source_name == "catalog":
+            raster = _logopedia_svg_raster_variant(text)
+            if raster and raster not in seen:
+                seen.add(raster)
+                out.append(raster)
+    return out
 
 
 def _tmdb_name_match(name_key: str, candidate: str) -> bool:
@@ -1148,10 +1563,16 @@ def _collect_external_logo_candidates(
     override: OverrideConfig | None,
     context: SyncRunContext | None,
     tmdb_hints: dict[str, Any],
+    allow_brandfetch_lookup: bool,
+    allow_logopedia_lookup: bool,
+    allow_imdb_lookup: bool,
 ) -> tuple[dict[str, list[str]], list[AttemptRecord], str | None]:
     by_source: dict[str, list[str]] = defaultdict(list)
     attempts: list[AttemptRecord] = []
     unresolved_reason: str | None = None
+    imdb_company_hints: dict[str, list[str]] = {"aliases": [], "company_urls": [], "source_urls": []}
+    if entity.entity_type == "production" and context is not None:
+        imdb_company_hints = context.production_imdb_hints_by_key.get(entity.entity_key, imdb_company_hints)
 
     # Brandfetch candidate domains
     domains: list[str] = []
@@ -1168,6 +1589,11 @@ def _collect_external_logo_candidates(
                 if domain:
                     domains.append(domain)
 
+    for url in imdb_company_hints.get("company_urls", []):
+        domain = normalize_domain(url)
+        if domain:
+            domains.append(domain)
+
     domains.extend(_heuristic_domains_for_name(display_name))
     domain_seen: set[str] = set()
     ordered_domains: list[str] = []
@@ -1177,106 +1603,163 @@ def _collect_external_logo_candidates(
         domain_seen.add(domain)
         ordered_domains.append(domain)
 
-    for domain in ordered_domains:
-        started = time.perf_counter()
+    if allow_brandfetch_lookup:
+        for domain in ordered_domains:
+            started = time.perf_counter()
+            try:
+                urls = fetch_brandfetch_logo_candidates(domain)
+                _merge_source_urls(by_source, "official", urls[:8])
+                attempts.append(
+                    AttemptRecord(
+                        source="official",
+                        attempt_url=f"https://{domain}",
+                        outcome="success",
+                        failure_reason=None,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        details={"provider": "brandfetch", "candidate_count": len(urls)},
+                    )
+                )
+                if urls:
+                    break
+            except BrandfetchAuthError:
+                reason = "brandfetch_auth_missing"
+                unresolved_reason = unresolved_reason or reason
+                attempts.append(
+                    AttemptRecord(
+                        source="official",
+                        attempt_url=f"https://{domain}",
+                        outcome="failed",
+                        failure_reason=reason,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        details={"provider": "brandfetch"},
+                    )
+                )
+                break
+            except BrandfetchNotFoundError:
+                reason = "brandfetch_not_found"
+                unresolved_reason = unresolved_reason or reason
+                attempts.append(
+                    AttemptRecord(
+                        source="official",
+                        attempt_url=f"https://{domain}",
+                        outcome="failed",
+                        failure_reason=reason,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        details={"provider": "brandfetch"},
+                    )
+                )
+            except BrandfetchRequestError as exc:
+                reason = _reason_from_exception(exc)
+                unresolved_reason = unresolved_reason or reason
+                attempts.append(
+                    AttemptRecord(
+                        source="official",
+                        attempt_url=f"https://{domain}",
+                        outcome="failed",
+                        failure_reason=reason,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        details={"provider": "brandfetch", "error": str(exc)},
+                    )
+                )
+    else:
+        attempts.append(
+            AttemptRecord(
+                source="official",
+                attempt_url=None,
+                outcome="skipped",
+                failure_reason="cached_discovery_reused",
+                duration_ms=0,
+                details={"provider": "brandfetch"},
+            )
+        )
+
+    aliases = [
+        *([alias for alias in (tmdb_hints or {}).get("aliases") or [] if isinstance(alias, str)]),
+        *([alias for alias in imdb_company_hints.get("aliases", []) if isinstance(alias, str)]),
+    ]
+    if allow_logopedia_lookup:
         try:
-            urls = fetch_brandfetch_logo_candidates(domain)
-            _merge_source_urls(by_source, "official", urls[:8])
+            logopedia_urls = fetch_logopedia_logo_candidates(display_name, aliases=aliases)
+            _merge_source_urls(by_source, "catalog", logopedia_urls[:12])
             attempts.append(
                 AttemptRecord(
-                    source="official",
-                    attempt_url=f"https://{domain}",
+                    source="catalog",
+                    attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
                     outcome="success",
                     failure_reason=None,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    details={"provider": "brandfetch", "candidate_count": len(urls)},
+                    duration_ms=0,
+                    details={"provider": "logopedia", "candidate_count": len(logopedia_urls)},
                 )
             )
-            if urls:
-                break
-        except BrandfetchAuthError:
-            reason = "brandfetch_auth_missing"
-            unresolved_reason = unresolved_reason or reason
+        except LogopediaNoFilesError:
+            unresolved_reason = unresolved_reason or "logopedia_no_files"
             attempts.append(
                 AttemptRecord(
-                    source="official",
-                    attempt_url=f"https://{domain}",
+                    source="catalog",
+                    attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
                     outcome="failed",
-                    failure_reason=reason,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    details={"provider": "brandfetch"},
+                    failure_reason="logopedia_no_files",
+                    duration_ms=0,
+                    details={"provider": "logopedia"},
                 )
             )
-            break
-        except BrandfetchNotFoundError:
-            reason = "brandfetch_not_found"
-            unresolved_reason = unresolved_reason or reason
-            attempts.append(
-                AttemptRecord(
-                    source="official",
-                    attempt_url=f"https://{domain}",
-                    outcome="failed",
-                    failure_reason=reason,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    details={"provider": "brandfetch"},
-                )
-            )
-        except BrandfetchRequestError as exc:
+        except LogopediaRequestError as exc:
             reason = _reason_from_exception(exc)
             unresolved_reason = unresolved_reason or reason
             attempts.append(
                 AttemptRecord(
-                    source="official",
-                    attempt_url=f"https://{domain}",
+                    source="catalog",
+                    attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
                     outcome="failed",
                     failure_reason=reason,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    details={"provider": "brandfetch", "error": str(exc)},
+                    duration_ms=0,
+                    details={"provider": "logopedia", "error": str(exc)},
                 )
             )
-
-    aliases = (tmdb_hints or {}).get("aliases") or []
-    try:
-        logopedia_urls = fetch_logopedia_logo_candidates(display_name, aliases=aliases)
-        _merge_source_urls(by_source, "catalog", logopedia_urls[:12])
+    else:
         attempts.append(
             AttemptRecord(
                 source="catalog",
                 attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
-                outcome="success",
-                failure_reason=None,
-                duration_ms=0,
-                details={"provider": "logopedia", "candidate_count": len(logopedia_urls)},
-            )
-        )
-    except LogopediaNoFilesError:
-        unresolved_reason = unresolved_reason or "logopedia_no_files"
-        attempts.append(
-            AttemptRecord(
-                source="catalog",
-                attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
-                outcome="failed",
-                failure_reason="logopedia_no_files",
+                outcome="skipped",
+                failure_reason="cached_discovery_reused",
                 duration_ms=0,
                 details={"provider": "logopedia"},
             )
         )
-    except LogopediaRequestError as exc:
-        reason = _reason_from_exception(exc)
-        unresolved_reason = unresolved_reason or reason
-        attempts.append(
-            AttemptRecord(
-                source="catalog",
-                attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
-                outcome="failed",
-                failure_reason=reason,
-                duration_ms=0,
-                details={"provider": "logopedia", "error": str(exc)},
+
+    if entity.entity_type == "production":
+        imdb_source_urls = [url for url in imdb_company_hints.get("source_urls", []) if _normalize_text(url)]
+        if imdb_source_urls or imdb_company_hints.get("aliases") or imdb_company_hints.get("company_urls"):
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url=imdb_source_urls[0] if imdb_source_urls else "https://www.imdb.com/",
+                    outcome="success",
+                    failure_reason=None,
+                    duration_ms=0,
+                    details={
+                        "provider": "imdb_companycredits",
+                        "source_url_count": len(imdb_source_urls),
+                        "alias_count": len(imdb_company_hints.get("aliases", [])),
+                        "company_url_count": len(imdb_company_hints.get("company_urls", [])),
+                    },
+                )
             )
-        )
+        else:
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url="https://www.imdb.com/",
+                    outcome="failed",
+                    failure_reason="imdb_companycredits_not_found",
+                    duration_ms=0,
+                    details={"provider": "imdb_companycredits"},
+                )
+            )
 
     # IMDb fallback for streaming providers.
-    if entity.entity_type == "streaming" and context is not None:
+    if entity.entity_type == "streaming" and context is not None and allow_imdb_lookup:
         provider_id = core_row.get("provider_id")
         imdb_ids = context.provider_imdb_ids_by_provider_id.get(provider_id, []) if isinstance(provider_id, int) else []
         imdb_candidates: list[str] = []
@@ -1298,7 +1781,7 @@ def _collect_external_logo_candidates(
                 break
 
         if imdb_candidates:
-            _merge_source_urls(by_source, "catalog", imdb_candidates)
+            _merge_source_urls(by_source, "imdb", imdb_candidates)
             attempts.append(
                 AttemptRecord(
                     source="catalog",
@@ -1321,6 +1804,17 @@ def _collect_external_logo_candidates(
                     details={"provider": "imdb_watch_box"},
                 )
             )
+    elif entity.entity_type == "streaming" and context is not None:
+        attempts.append(
+            AttemptRecord(
+                source="catalog",
+                attempt_url="https://www.imdb.com/",
+                outcome="skipped",
+                failure_reason="cached_discovery_reused",
+                duration_ms=0,
+                details={"provider": "imdb_watch_box"},
+            )
+        )
 
     return dict(by_source), attempts, unresolved_reason
 
@@ -1382,6 +1876,66 @@ def _build_logo_candidates(
     return dict(by_source)
 
 
+def _capped_candidates(
+    candidates: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    capped: dict[str, list[str]] = {}
+    for source, urls in (candidates or {}).items():
+        limit = LOGO_SOURCE_CAPS.get(source, 8)
+        seen: set[str] = set()
+        bucket: list[str] = []
+        for value in _expand_candidate_urls(source, urls):
+            text = _normalize_text(value)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            bucket.append(text)
+            if len(bucket) >= limit:
+                break
+        if bucket:
+            capped[source] = bucket
+    return capped
+
+
+def _attempt_source_name(source: str) -> str:
+    text = _normalize_text(source).lower()
+    if text in ATTEMPT_TABLE_SOURCES:
+        return text
+    if text == "imdb":
+        return "catalog"
+    return "catalog"
+
+
+def _logo_asset_source_name(source: str) -> str:
+    text = _normalize_text(source).lower()
+    if text in LOGO_ASSET_TABLE_SOURCES:
+        return text
+    if text == "variant":
+        return "catalog"
+    return "catalog"
+
+
+def _ordered_candidate_sources(
+    candidates: dict[str, list[str]],
+    source_priority: list[str],
+) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for source in source_priority:
+        text = _normalize_text(source).lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    for source in sorted(candidates.keys()):
+        text = _normalize_text(source).lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
 def _build_resolution_status(
     *,
     wikidata_id: str,
@@ -1432,17 +1986,24 @@ def _process_entity(
     summary.processed += 1
     attempts: list[AttemptRecord] = []
 
-    row_table = "networks" if entity.entity_type == "network" else "watch_providers"
-    id_field = "id" if entity.entity_type == "network" else "provider_id"
+    if entity.entity_type == "network":
+        row_table = "networks"
+        id_field = "id"
+        logo_kind = "networks"
+    elif entity.entity_type == "streaming":
+        row_table = "watch_providers"
+        id_field = "provider_id"
+        logo_kind = "watch-providers"
+    else:
+        row_table = "production_companies"
+        id_field = "id"
+        logo_kind = "production-companies"
     row_type = entity.entity_type
-    logo_kind = "networks" if entity.entity_type == "network" else "watch-providers"
 
     core_row = dict(core_row or {})
     entity_id_value = _normalize_text(core_row.get(id_field)) or ""
     display_name = (
-        override.display_name_override
-        if override and override.display_name_override
-        else entity.display_name
+        override.display_name_override if override and override.display_name_override else entity.display_name
     )
 
     patch: dict[str, Any] = {}
@@ -1499,43 +2060,117 @@ def _process_entity(
 
         merged_row = {**core_row, **patch}
         has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
+        existing_asset_source_urls: dict[str, list[str]] = {}
+        if not args.skip_s3 and core_row:
+            existing_asset_source_urls = _load_existing_logo_asset_source_urls(
+                db,
+                entity_type=entity.entity_type,
+                entity_key=entity.entity_key,
+            )
+
         external_candidates: dict[str, list[str]] = {}
+        for source_name, urls in existing_asset_source_urls.items():
+            if source_name in {"official", "catalog", "imdb"}:
+                _merge_source_urls(external_candidates, source_name, urls)
+
+        has_cached_official = bool(existing_asset_source_urls.get("official"))
+        has_cached_catalog = bool(existing_asset_source_urls.get("catalog"))
+        has_cached_logopedia = _source_has_logopedia_urls(existing_asset_source_urls.get("catalog", []))
+        has_cached_imdb = bool(existing_asset_source_urls.get("imdb"))
+
+        allow_brandfetch_lookup = bool(args.force or not has_cached_official)
+        allow_logopedia_lookup = bool(args.force or not has_cached_logopedia)
+        allow_imdb_lookup = bool(args.force or not has_cached_imdb)
+        should_collect_external = bool(
+            not args.skip_s3
+            and not args.dry_run
+            and (
+                allow_brandfetch_lookup
+                or allow_logopedia_lookup
+                or (entity.entity_type == "streaming" and allow_imdb_lookup)
+                or (entity.entity_type == "production" and (not has_cached_catalog or args.force))
+            )
+        )
+
         external_attempts: list[AttemptRecord] = []
         external_reason: str | None = None
-        if (args.force or not has_base_logo) and not args.skip_s3:
-            external_candidates, external_attempts, external_reason = _collect_external_logo_candidates(
+        if should_collect_external:
+            external_new_candidates, external_attempts, external_reason = _collect_external_logo_candidates(
                 entity=entity,
                 display_name=display_name,
                 core_row=merged_row,
                 override=override,
                 context=context,
                 tmdb_hints=tmdb_hints,
+                allow_brandfetch_lookup=allow_brandfetch_lookup,
+                allow_logopedia_lookup=allow_logopedia_lookup,
+                allow_imdb_lookup=allow_imdb_lookup,
             )
+            for source_name, urls in external_new_candidates.items():
+                _merge_source_urls(external_candidates, source_name, urls)
             attempts.extend(external_attempts)
+        elif not args.skip_s3:
+            attempts.append(
+                AttemptRecord(
+                    source="official",
+                    attempt_url=None,
+                    outcome="skipped",
+                    failure_reason="cached_discovery_reused",
+                    duration_ms=0,
+                    details={"provider": "brandfetch"},
+                )
+            )
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url=None,
+                    outcome="skipped",
+                    failure_reason="cached_discovery_reused",
+                    duration_ms=0,
+                    details={"provider": "logopedia"},
+                )
+            )
 
         source_priority = _source_priority(override)
-        candidates = _build_logo_candidates(
-            override=override,
-            core_row=merged_row,
-            wikimedia_logo_file=_normalize_text(merged_row.get("wikimedia_logo_file")) or wikimedia_logo_file,
-            extra_by_source=external_candidates,
-            extra_tmdb_logo_urls=[url for url in (tmdb_hints.get("tmdb_logo_urls") or []) if isinstance(url, str)],
+        candidates = _capped_candidates(
+            _build_logo_candidates(
+                override=override,
+                core_row=merged_row,
+                wikimedia_logo_file=_normalize_text(merged_row.get("wikimedia_logo_file")) or wikimedia_logo_file,
+                extra_by_source=external_candidates,
+                extra_tmdb_logo_urls=[url for url in (tmdb_hints.get("tmdb_logo_urls") or []) if isinstance(url, str)],
+            )
         )
 
         selected_logo_source = ""
         selected_logo_url = ""
+        selected_logo_patch: dict[str, Any] = {}
 
         if not core_row:
             unresolved_reason = "missing_dimension_row"
 
         if not args.skip_s3 and not args.dry_run and core_row:
-            for source_name in source_priority:
+            existing_sha = _load_existing_logo_assets_sha(
+                db,
+                entity_type=entity.entity_type,
+                entity_key=entity.entity_key,
+            )
+            existing_asset_index = _load_existing_logo_asset_index(
+                db,
+                entity_type=entity.entity_type,
+                entity_key=entity.entity_key,
+            )
+            seen_urls: set[str] = set()
+            successful_by_source: dict[str, tuple[str, dict[str, Any]]] = {}
+            mirrored_urls_this_run: set[tuple[str, str]] = set()
+
+            for source_name in _ordered_candidate_sources(candidates, source_priority):
                 urls = candidates.get(source_name, [])
                 if not urls:
                     if source_name in {"official", "catalog", "override", "tmdb", "wikimedia"}:
                         attempts.append(
                             AttemptRecord(
-                                source=source_name,
+                                source=_attempt_source_name(source_name),
                                 attempt_url=None,
                                 outcome="skipped",
                                 failure_reason="no_candidate_url",
@@ -1543,67 +2178,255 @@ def _process_entity(
                             )
                         )
                     continue
-                for candidate_url in urls:
-                    started = time.perf_counter()
-                    try:
-                        logo_patch = mirror_external_logo_row(
-                            {**merged_row, **patch},
-                            kind=logo_kind,
-                            id_field=id_field,
-                            source_url=candidate_url,
-                            force=bool(args.force),
-                            s3_client=s3_client,
-                            source=source_name,
-                        )
-                        duration_ms = int((time.perf_counter() - started) * 1000)
-                        if logo_patch:
-                            patch.update(logo_patch)
-                            summary.logos_mirrored += 1
-                            merged_row = {**merged_row, **logo_patch}
-                            has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
-                        else:
-                            has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
+                for source_rank, candidate_url in enumerate(urls, start=1):
+                    summary.logo_assets_discovered += 1
+
+                    mirror_status = "failed"
+                    failure_reason: str | None = None
+                    logo_patch: dict[str, Any] = {}
+
+                    if candidate_url in seen_urls:
+                        mirror_status = "skipped"
+                        failure_reason = "duplicate_url"
+                        summary.logo_assets_skipped += 1
                         attempts.append(
                             AttemptRecord(
-                                source=source_name,
+                                source=_attempt_source_name(source_name),
                                 attempt_url=candidate_url,
-                                outcome="success",
-                                failure_reason=None,
-                                duration_ms=duration_ms,
+                                outcome="skipped",
+                                failure_reason=failure_reason,
+                                duration_ms=0,
                             )
                         )
-                        selected_logo_source = source_name
-                        selected_logo_url = candidate_url
-                        break
+                        _upsert_logo_asset(
+                            db,
+                            row={
+                                "entity_type": entity.entity_type,
+                                "entity_key": entity.entity_key,
+                                "entity_id": entity_id_value or None,
+                                "display_name": display_name,
+                                "source": _logo_asset_source_name(source_name),
+                                "source_url": candidate_url,
+                                "source_rank": source_rank,
+                                "run_id": run_id,
+                                "base_logo_format": _detect_base_logo_format(
+                                    wikimedia_logo_file="",
+                                    logo_source_url=candidate_url,
+                                    hosted_logo_url="",
+                                ),
+                                "mirror_status": mirror_status,
+                                "failure_reason": failure_reason,
+                                "is_primary": False,
+                            },
+                        )
+                        continue
+
+                    seen_urls.add(candidate_url)
+                    source_key = _logo_asset_source_name(source_name)
+                    cached_asset_row = existing_asset_index.get((source_key, candidate_url))
+                    if cached_asset_row and not args.force:
+                        cached_status = _normalize_text(cached_asset_row.get("mirror_status"))
+                        cached_logo_patch = _logo_patch_from_asset_row(cached_asset_row)
+                        cached_hosted_url = _normalize_text(cached_logo_patch.get("hosted_logo_url"))
+                        if cached_status == "mirrored" and cached_hosted_url:
+                            summary.logo_assets_skipped += 1
+                            attempts.append(
+                                AttemptRecord(
+                                    source=_attempt_source_name(source_name),
+                                    attempt_url=candidate_url,
+                                    outcome="skipped",
+                                    failure_reason="already_mirrored",
+                                    duration_ms=0,
+                                )
+                            )
+                            cached_sha = _normalize_text(cached_logo_patch.get("hosted_logo_sha256"))
+                            if cached_sha:
+                                existing_sha.add(cached_sha)
+                            if source_name not in successful_by_source:
+                                successful_by_source[source_name] = (candidate_url, cached_logo_patch)
+                            _upsert_logo_asset(
+                                db,
+                                row={
+                                    "entity_type": entity.entity_type,
+                                    "entity_key": entity.entity_key,
+                                    "entity_id": entity_id_value or None,
+                                    "display_name": display_name,
+                                    "source": source_key,
+                                    "source_url": candidate_url,
+                                    "source_rank": source_rank,
+                                    "run_id": run_id,
+                                    "hosted_logo_key": _normalize_text(cached_logo_patch.get("hosted_logo_key"))
+                                    or None,
+                                    "hosted_logo_url": cached_hosted_url or None,
+                                    "hosted_logo_sha256": _normalize_text(cached_logo_patch.get("hosted_logo_sha256"))
+                                    or None,
+                                    "hosted_logo_content_type": (
+                                        _normalize_text(cached_logo_patch.get("hosted_logo_content_type")) or None
+                                    ),
+                                    "hosted_logo_bytes": cached_logo_patch.get("hosted_logo_bytes"),
+                                    "hosted_logo_etag": _normalize_text(cached_logo_patch.get("hosted_logo_etag"))
+                                    or None,
+                                    "base_logo_format": _normalize_text(cached_asset_row.get("base_logo_format"))
+                                    or _detect_base_logo_format(
+                                        wikimedia_logo_file="",
+                                        logo_source_url=candidate_url,
+                                        hosted_logo_url=cached_hosted_url,
+                                    ),
+                                    "pixel_width": None,
+                                    "pixel_height": None,
+                                    "mirror_status": "mirrored",
+                                    "failure_reason": None,
+                                    "is_primary": False,
+                                },
+                            )
+                            continue
+
+                    started = time.perf_counter()
+                    try:
+                        logo_patch = (
+                            mirror_external_logo_row(
+                                {
+                                    id_field: core_row.get(id_field),
+                                    "hosted_logo_url": None,
+                                    "hosted_logo_key": None,
+                                    "hosted_logo_sha256": None,
+                                },
+                                kind=logo_kind,
+                                id_field=id_field,
+                                source_url=candidate_url,
+                                force=False,
+                                s3_client=s3_client,
+                                source=_attempt_source_name(source_name),
+                            )
+                            or {}
+                        )
+                        duration_ms = int((time.perf_counter() - started) * 1000)
+                        hosted_sha = _normalize_text(logo_patch.get("hosted_logo_sha256"))
+                        if hosted_sha and hosted_sha in existing_sha:
+                            mirror_status = "skipped"
+                            failure_reason = "duplicate_sha"
+                            summary.logo_assets_skipped += 1
+                            attempts.append(
+                                AttemptRecord(
+                                    source=_attempt_source_name(source_name),
+                                    attempt_url=candidate_url,
+                                    outcome="skipped",
+                                    failure_reason=failure_reason,
+                                    duration_ms=duration_ms,
+                                )
+                            )
+                        elif logo_patch:
+                            mirror_status = "mirrored"
+                            summary.logo_assets_mirrored += 1
+                            mirrored_urls_this_run.add((_logo_asset_source_name(source_name), candidate_url))
+                            if hosted_sha:
+                                existing_sha.add(hosted_sha)
+                            attempts.append(
+                                AttemptRecord(
+                                    source=_attempt_source_name(source_name),
+                                    attempt_url=candidate_url,
+                                    outcome="success",
+                                    failure_reason=None,
+                                    duration_ms=duration_ms,
+                                )
+                            )
+                            if source_name not in successful_by_source:
+                                successful_by_source[source_name] = (candidate_url, logo_patch)
+                        else:
+                            mirror_status = "failed"
+                            failure_reason = "logo_decode_failed"
+                            summary.logo_assets_failed += 1
+                            attempts.append(
+                                AttemptRecord(
+                                    source=_attempt_source_name(source_name),
+                                    attempt_url=candidate_url,
+                                    outcome="failed",
+                                    failure_reason=failure_reason,
+                                    duration_ms=duration_ms,
+                                )
+                            )
                     except Exception as exc:  # noqa: BLE001
                         duration_ms = int((time.perf_counter() - started) * 1000)
+                        failure_reason = _reason_from_exception(exc)
+                        mirror_status = "failed"
+                        summary.logo_assets_failed += 1
+                        unresolved_reason = unresolved_reason or failure_reason
                         attempts.append(
                             AttemptRecord(
-                                source=source_name,
+                                source=_attempt_source_name(source_name),
                                 attempt_url=candidate_url,
                                 outcome="failed",
-                                failure_reason=_reason_from_exception(exc),
+                                failure_reason=failure_reason,
                                 duration_ms=duration_ms,
                                 details={"error": str(exc)},
                             )
                         )
-                        unresolved_reason = _reason_from_exception(exc)
-                        continue
-                if has_base_logo:
-                    break
+
+                    _upsert_logo_asset(
+                        db,
+                        row={
+                            "entity_type": entity.entity_type,
+                            "entity_key": entity.entity_key,
+                            "entity_id": entity_id_value or None,
+                            "display_name": display_name,
+                            "source": _logo_asset_source_name(source_name),
+                            "source_url": candidate_url,
+                            "source_rank": source_rank,
+                            "run_id": run_id,
+                            "hosted_logo_key": _normalize_text(logo_patch.get("hosted_logo_key")) or None,
+                            "hosted_logo_url": _normalize_text(logo_patch.get("hosted_logo_url")) or None,
+                            "hosted_logo_sha256": _normalize_text(logo_patch.get("hosted_logo_sha256")) or None,
+                            "hosted_logo_content_type": (
+                                _normalize_text(logo_patch.get("hosted_logo_content_type")) or None
+                            ),
+                            "hosted_logo_bytes": logo_patch.get("hosted_logo_bytes"),
+                            "hosted_logo_etag": _normalize_text(logo_patch.get("hosted_logo_etag")) or None,
+                            "base_logo_format": _detect_base_logo_format(
+                                wikimedia_logo_file="",
+                                logo_source_url=candidate_url,
+                                hosted_logo_url=_normalize_text(logo_patch.get("hosted_logo_url")),
+                            ),
+                            "pixel_width": None,
+                            "pixel_height": None,
+                            "mirror_status": mirror_status,
+                            "failure_reason": failure_reason,
+                            "is_primary": False,
+                        },
+                    )
+
+            for source_name in source_priority:
+                candidate = successful_by_source.get(source_name)
+                if not candidate:
+                    continue
+                selected_logo_source = source_name
+                selected_logo_url, selected_logo_patch = candidate
+                break
+
+            if selected_logo_patch:
+                patch.update(selected_logo_patch)
+                if (_logo_asset_source_name(selected_logo_source), selected_logo_url) in mirrored_urls_this_run:
+                    summary.logos_mirrored += 1
+                merged_row = {**merged_row, **selected_logo_patch}
+                has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
+                _reset_logo_asset_primary_flags(
+                    db,
+                    entity_type=entity.entity_type,
+                    entity_key=entity.entity_key,
+                )
+                _mark_logo_asset_primary(
+                    db,
+                    entity_type=entity.entity_type,
+                    entity_key=entity.entity_key,
+                    source=_logo_asset_source_name(selected_logo_source),
+                    source_url=selected_logo_url,
+                )
+            else:
+                has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
 
         if not has_base_logo:
             if not (_normalize_text(wikidata_id) or _normalize_text(existing_wikidata)):
                 unresolved_reason = unresolved_reason or "no_wikidata_match"
-            elif not any(
-                [
-                    candidates.get("wikimedia"),
-                    candidates.get("tmdb"),
-                    candidates.get("override"),
-                    candidates.get("official"),
-                    candidates.get("catalog"),
-                ]
-            ):
+            elif not any(candidates.values()):
                 unresolved_reason = unresolved_reason or external_reason or "no_logo_claim"
             else:
                 unresolved_reason = unresolved_reason or external_reason or "download_failed"
@@ -1625,7 +2448,7 @@ def _process_entity(
                         source_url=variant_source_url,
                         force=bool(args.force),
                         s3_client=s3_client,
-                        source=selected_logo_source or "wikimedia",
+                        source=_attempt_source_name(selected_logo_source or "wikimedia"),
                     )
                     duration_ms = int((time.perf_counter() - started) * 1000)
                     if isinstance(variant_result, MonochromeLogoMirrorResult):
@@ -1826,11 +2649,7 @@ def _refresh_completion_snapshot(
     summary.completion_total = len(inventory)
     summary.completion_resolved = resolved_count
     summary.completion_unresolved = len(unresolved)
-    summary.completion_percent = (
-        round((resolved_count / len(inventory)) * 100.0, 2)
-        if inventory
-        else 100.0
-    )
+    summary.completion_percent = round((resolved_count / len(inventory)) * 100.0, 2) if inventory else 100.0
     summary.unresolved_logos = unresolved
 
 
@@ -1877,6 +2696,12 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
         id_field="provider_id",
         name_field="provider_name",
     )
+    production_lookup = _load_dimension_lookup(
+        db,
+        table="production_companies",
+        id_field="id",
+        name_field="name",
+    )
     overrides = _load_overrides(db)
 
     unresolved_keys = _load_unresolved_keys(db, used_keys=set(inventory.keys())) if args.unresolved_only else set()
@@ -1889,11 +2714,12 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
 
     for entity in entities:
         pair = (entity.entity_type, entity.entity_key)
-        core_row = (
-            network_lookup.get(entity.entity_key)
-            if entity.entity_type == "network"
-            else provider_lookup.get(entity.entity_key)
-        )
+        if entity.entity_type == "network":
+            core_row = network_lookup.get(entity.entity_key)
+        elif entity.entity_type == "streaming":
+            core_row = provider_lookup.get(entity.entity_key)
+        else:
+            core_row = production_lookup.get(entity.entity_key)
         override = overrides.get(pair)
         _process_entity(
             db,
@@ -1932,6 +2758,10 @@ def main(argv: list[str] | None = None) -> int:
         "logos_mirrored",
         "variants_black_mirrored",
         "variants_white_mirrored",
+        "logo_assets_discovered",
+        "logo_assets_mirrored",
+        "logo_assets_skipped",
+        "logo_assets_failed",
         "completion_total",
         "completion_resolved",
         "completion_unresolved",

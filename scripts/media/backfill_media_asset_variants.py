@@ -118,10 +118,7 @@ def main(argv: list[str] | None = None) -> int:
                             crop_generated += 1
                 succeeded += 1
                 if args.verbose:
-                    print(
-                        f"[ok] {asset_id} base_variants={len(base)} "
-                        f"crop={'yes' if args.with_crops else 'no'}"
-                    )
+                    print(f"[ok] {asset_id} base_variants={len(base)} crop={'yes' if args.with_crops else 'no'}")
             except Exception as exc:  # pragma: no cover - operational script
                 failed += 1
                 print(f"[error] {asset_id}: {exc}", file=sys.stderr)
@@ -140,4 +137,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

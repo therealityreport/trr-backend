@@ -65,6 +65,7 @@ id
 
 - cast_photos_hosted_at_idx (non-unique): hosted_at) WHERE (hosted_at IS NOT NULL
 - cast_photos_hosted_sha_idx (non-unique): hosted_sha256) WHERE (hosted_sha256 IS NOT NULL
+- cast_photos_person_gallery_idx (non-unique): person_id, gallery_index) WHERE (gallery_index IS NOT NULL
 - cast_photos_person_source_idx (non-unique): person_id, source
 - cast_photos_person_source_image_url_canonical_key (unique): person_id, source, image_url_canonical
 - cast_photos_person_source_source_image_id_key (unique): person_id, source, source_image_id

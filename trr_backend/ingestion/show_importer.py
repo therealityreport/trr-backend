@@ -1930,8 +1930,7 @@ def upsert_candidates_into_supabase(
                                                 isinstance(tmdb_overview, str)
                                                 and tmdb_overview.strip()
                                                 and not (
-                                                    isinstance(existing_overview, str)
-                                                    and existing_overview.strip()
+                                                    isinstance(existing_overview, str) and existing_overview.strip()
                                                 )
                                             ):
                                                 overview_value = tmdb_overview.strip()

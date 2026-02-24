@@ -14,7 +14,7 @@ import os
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -343,7 +343,7 @@ class InstagramScraper:
         return InstagramPost(
             shortcode=shortcode,
             post_type=self._determine_post_type(node),
-            date_time=datetime.fromtimestamp(taken_at).strftime("%Y-%m-%d %H:%M:%S") if taken_at else "",
+            date_time=datetime.fromtimestamp(taken_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if taken_at else "",
             taken_at=taken_at,
             caption=self._extract_caption(node),
             profile_tags=self._extract_profile_tags(node),
@@ -494,10 +494,12 @@ class InstagramScraper:
             List of InstagramComment objects with nested replies
         """
         self.last_comment_fetch_reason = None
+        self.comments_auth_failed = False
         try:
             media_id = self._shortcode_to_media_id(shortcode)
         except (ValueError, IndexError):
             logger.error(f"Invalid shortcode '{shortcode}' — skipping comment fetch")
+            self.last_comment_fetch_reason = "invalid_shortcode"
             return []
         post_url = f"https://www.instagram.com/p/{shortcode}/"
         logger.info(f"Fetching comments for {shortcode} (media_id: {media_id})")
@@ -507,6 +509,7 @@ class InstagramScraper:
         comments_fetched = 0
 
         while True:
+            response: requests.Response | None = None
             self._rate_limit(delay)
             url = self.COMMENTS_URL.format(media_id=media_id)
             params = {"can_support_threading": "true", "permalink_enabled": "false"}
@@ -534,11 +537,25 @@ class InstagramScraper:
                 except ValueError:
                     self.last_comment_fetch_reason = "non_json_response"
                     logger.error(
-                        "Instagram comments endpoint returned a non-JSON payload for %s "
-                        "(status=%s content-type=%s)",
+                        "Instagram comments endpoint returned a non-JSON payload for %s (status=%s content-type=%s)",
                         shortcode,
                         response.status_code,
                         content_type or "unknown",
+                    )
+                    break
+                status_value = str(data.get("status") or "").strip().lower()
+                if status_value and status_value != "ok":
+                    self.last_comment_fetch_reason = "api_status_fail"
+                    message = str(data.get("message") or data.get("error_message") or "").strip().lower()
+                    if status_value in {"fail", "login_required", "checkpoint_required", "challenge_required"} or (
+                        "challenge" in message or "login" in message or "checkpoint" in message
+                    ):
+                        self.comments_auth_failed = True
+                    logger.error(
+                        "Instagram comments endpoint returned status=%s for %s (message=%s)",
+                        status_value,
+                        shortcode,
+                        str(data.get("message") or data.get("error_message") or ""),
                     )
                     break
             except requests.exceptions.RequestException as e:
@@ -546,7 +563,7 @@ class InstagramScraper:
                 logger.error(
                     "Failed to fetch comments for %s (status=%s): %s",
                     shortcode,
-                    getattr(response, "status_code", "?") if "response" in dir() else "?",
+                    getattr(response, "status_code", "?") if response is not None else "?",
                     e,
                 )
                 break
@@ -598,6 +615,7 @@ class InstagramScraper:
         cursor = None
 
         while True:
+            response: requests.Response | None = None
             self._rate_limit(delay)
             url = self.COMMENT_REPLIES_URL.format(media_id=media_id, comment_id=comment_id)
             params = {}
@@ -615,6 +633,7 @@ class InstagramScraper:
                         "Instagram returned HTML for replies on comment %s (session cookie likely expired)",
                         comment_id,
                     )
+                    self.comments_auth_failed = True
                     self.last_comment_fetch_reason = "html_challenge_or_auth_required"
                     break
                 try:
@@ -627,6 +646,21 @@ class InstagramScraper:
                         comment_id,
                         response.status_code,
                         content_type or "unknown",
+                    )
+                    break
+                status_value = str(data.get("status") or "").strip().lower()
+                if status_value and status_value != "ok":
+                    self.last_comment_fetch_reason = "api_status_fail"
+                    message = str(data.get("message") or data.get("error_message") or "").strip().lower()
+                    if status_value in {"fail", "login_required", "checkpoint_required", "challenge_required"} or (
+                        "challenge" in message or "login" in message or "checkpoint" in message
+                    ):
+                        self.comments_auth_failed = True
+                    logger.error(
+                        "Instagram replies endpoint returned status=%s for comment %s (message=%s)",
+                        status_value,
+                        comment_id,
+                        str(data.get("message") or data.get("error_message") or ""),
                     )
                     break
             except requests.exceptions.RequestException as e:
@@ -666,7 +700,7 @@ class InstagramScraper:
             username=user.get("username", ""),
             user_id=str(user.get("pk", "")),
             created_at=created_at,
-            date_time=datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S") if created_at else "",
+            date_time=datetime.fromtimestamp(created_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if created_at else "",
             likes=data.get("comment_like_count", 0),
             is_reply=is_reply,
             parent_comment_id=parent_id,
