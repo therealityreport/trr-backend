@@ -1086,21 +1086,29 @@ def _build_production_inventory(db, *, added_show_ids: set[str]) -> dict[str, In
     return inventory
 
 
-def _load_used_inventory(db) -> dict[tuple[str, str], InventoryEntity]:
+def _load_used_inventory(
+    db,
+    *,
+    include_types: set[str] | None = None,
+) -> dict[tuple[str, str], InventoryEntity]:
     added_show_ids = _collect_added_show_ids(db)
     inventory: dict[tuple[str, str], InventoryEntity] = {}
+    selected_types = include_types or {"network", "streaming", "production"}
 
-    networks = _build_network_inventory(db, added_show_ids=added_show_ids)
-    for key, entity in networks.items():
-        inventory[("network", key)] = entity
+    if "network" in selected_types:
+        networks = _build_network_inventory(db, added_show_ids=added_show_ids)
+        for key, entity in networks.items():
+            inventory[("network", key)] = entity
 
-    providers = _build_provider_inventory(db, added_show_ids=added_show_ids)
-    for key, entity in providers.items():
-        inventory[("streaming", key)] = entity
+    if "streaming" in selected_types:
+        providers = _build_provider_inventory(db, added_show_ids=added_show_ids)
+        for key, entity in providers.items():
+            inventory[("streaming", key)] = entity
 
-    productions = _build_production_inventory(db, added_show_ids=added_show_ids)
-    for key, entity in productions.items():
-        inventory[("production", key)] = entity
+    if "production" in selected_types:
+        productions = _build_production_inventory(db, added_show_ids=added_show_ids)
+        for key, entity in productions.items():
+            inventory[("production", key)] = entity
 
     return inventory
 
@@ -3179,19 +3187,37 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
     summary.run_status = "running"
     started_at_iso = _now_iso()
 
-    inventory = _load_used_inventory(db)
-    network_lookup = _load_dimension_lookup(db, table="networks", id_field="id", name_field="name")
-    provider_lookup = _load_dimension_lookup(
-        db,
-        table="watch_providers",
-        id_field="provider_id",
-        name_field="provider_name",
+    requested_entity_type = _normalize_text(getattr(args, "entity_type", None)).lower()
+    requested_inventory_types = (
+        {requested_entity_type}
+        if requested_entity_type in {"network", "streaming", "production"}
+        else None
     )
-    production_lookup = _load_dimension_lookup(
-        db,
-        table="production_companies",
-        id_field="id",
-        name_field="name",
+    inventory = _load_used_inventory(db, include_types=requested_inventory_types)
+    network_lookup = (
+        _load_dimension_lookup(db, table="networks", id_field="id", name_field="name")
+        if requested_inventory_types is None or "network" in requested_inventory_types
+        else {}
+    )
+    provider_lookup = (
+        _load_dimension_lookup(
+            db,
+            table="watch_providers",
+            id_field="provider_id",
+            name_field="provider_name",
+        )
+        if requested_inventory_types is None or "streaming" in requested_inventory_types
+        else {}
+    )
+    production_lookup = (
+        _load_dimension_lookup(
+            db,
+            table="production_companies",
+            id_field="id",
+            name_field="name",
+        )
+        if requested_inventory_types is None or "production" in requested_inventory_types
+        else {}
     )
     overrides = _load_overrides(db)
 

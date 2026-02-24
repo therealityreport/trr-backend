@@ -3749,3 +3749,30 @@ Continuation (same session, 2026-02-24) — NO_GO follow-up patch: unscoped jobs
 - Validation evidence:
   - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
   - `pytest tests/repositories/test_social_season_analytics.py -k "list_jobs_uses_candidate_cte_for_unscoped_queries or list_jobs_uses_direct_query_for_run_scoped_queries"` (pass)
+- Continuation (same session, 2026-02-24): IMDb/TMDb fetch-error carry-forward hardening.
+  - File updated:
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - Behavior change:
+    - Added `_load_preapproved_person_source_url(...)` and `_validated_or_carried_person_source_url(...)`.
+    - For person `imdb`/`tmdb` discovery only, when live validation outcome is `fetch_error`, discovery now reuses an existing approved link for the same `(person_id, kind, url_key)` (including legacy slash/no-slash `url_key` variants).
+    - Keeps strict owner-match policy for new approvals; carry-forward only reuses previously approved rows.
+  - Discovery wiring:
+    - `_discover_people_links(...)` now uses `_validated_or_carried_person_source_url(...)` for imdb/tmdb.
+  - Tests updated:
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+      - `test_discover_people_links_carries_forward_imdb_when_validation_fetch_errors`
+      - `test_load_preapproved_person_source_url_matches_by_url_key`
+      - `test_load_preapproved_person_source_url_ignores_non_person_sources`
+      - adjusted existing imdb/tmdb generation + failure tests for new helper path.
+  - Validation:
+    - `ruff check ...admin_show_links.py ...test_admin_show_links.py` (pass)
+    - `pytest -q ...test_admin_show_links.py ...test_admin_show_bravo.py ...test_backfill_bravo_person_source_links.py` (pass, `84 passed`)
+    - `python -m py_compile ...admin_show_links.py` (pass)
+  - Targeted data remediation executed:
+    - Used targeted retry/upsert for Andy Cohen on shows:
+      - `8eaa9603-8a3a-4b5e-9f06-4bbf7e76b489`
+      - `eebff6c6-1b28-46a1-9051-d73ff0398c42`
+    - Result: IMDb approved links inserted via carry-forward path.
+    - Post-check now shows Andy Cohen has approved IMDb on all 3 relevant show contexts.
+  - Policy check:
+    - pending person-source rows remain `0`.
