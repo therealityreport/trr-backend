@@ -122,7 +122,7 @@ class TestSyncNetworksStreaming:
     def test_runs_three_steps_and_aggregates_metrics(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         token = _make_admin_token("test-secret")
-        received = {"entities": None, "providers": None, "links": None}
+        received = {"entities": None, "providers": None, "links": None, "show_logos": None}
 
         def fake_entities(argv):
             received["entities"] = list(argv or [])
@@ -163,6 +163,15 @@ class TestSyncNetworksStreaming:
             print("failures=2")
             return 0
 
+        def fake_show_logos(argv):
+            received["show_logos"] = list(argv or [])
+            print("show_logos_discovered=16")
+            print("show_logos_imported=9")
+            print("show_logos_skipped=4")
+            print("show_logo_failures=3")
+            print("failures=0")
+            return 0
+
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
             with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=fake_entities):
                 with patch(
@@ -173,11 +182,12 @@ class TestSyncNetworksStreaming:
                         "api.routers.admin_show_sync.sync_networks_streaming_links.main",
                         side_effect=fake_links,
                     ):
-                        response = client.post(
-                            "/api/v1/admin/shows/sync-networks-streaming",
-                            headers={"Authorization": f"Bearer {token}"},
-                            json={"skip_s3": True, "force": True, "limit": 50},
-                        )
+                        with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=fake_show_logos):
+                            response = client.post(
+                                "/api/v1/admin/shows/sync-networks-streaming",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"skip_s3": True, "force": True, "limit": 50},
+                            )
 
         assert response.status_code == 200
         payload = response.json()
@@ -191,6 +201,10 @@ class TestSyncNetworksStreaming:
         assert payload["logo_assets_mirrored"] == 14
         assert payload["logo_assets_skipped"] == 8
         assert payload["logo_assets_failed"] == 3
+        assert payload["show_logos_discovered"] == 16
+        assert payload["show_logos_imported"] == 9
+        assert payload["show_logos_skipped"] == 4
+        assert payload["show_logo_failures"] == 3
         assert payload["completion_total"] == 40
         assert payload["completion_resolved"] == 39
         assert payload["completion_unresolved"] == 1
@@ -207,6 +221,7 @@ class TestSyncNetworksStreaming:
         assert payload["steps"]["tmdb_show_entities"]["status"] == "success"
         assert payload["steps"]["tmdb_watch_providers"]["status"] == "success"
         assert payload["steps"]["network_streaming_links"]["status"] == "success"
+        assert payload["steps"]["show_logos"]["status"] == "success"
 
         assert "--all" in (received["entities"] or [])
         assert "--force" in (received["entities"] or [])
@@ -214,6 +229,7 @@ class TestSyncNetworksStreaming:
         assert "--limit" in (received["entities"] or [])
         assert "--skip-s3" in (received["providers"] or [])
         assert "--skip-s3" in (received["links"] or [])
+        assert "--skip-s3" in (received["show_logos"] or [])
 
     def test_truncates_unresolved_logo_list_to_cap(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
@@ -334,15 +350,24 @@ class TestSyncNetworksStreaming:
             print("failures=0")
             return 0
 
+        def ok_show_logos(argv):
+            print("show_logos_discovered=0")
+            print("show_logos_imported=0")
+            print("show_logos_skipped=0")
+            print("show_logo_failures=0")
+            print("failures=0")
+            return 0
+
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
             with patch("api.routers.admin_show_sync.sync_tmdb_show_entities.main", side_effect=bad_entities):
                 with patch("api.routers.admin_show_sync.sync_tmdb_watch_providers.main", side_effect=ok_providers):
                     with patch("api.routers.admin_show_sync.sync_networks_streaming_links.main", side_effect=ok_links):
-                        response = client.post(
-                            "/api/v1/admin/shows/sync-networks-streaming",
-                            headers={"Authorization": f"Bearer {token}"},
-                            json={},
-                        )
+                        with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=ok_show_logos):
+                            response = client.post(
+                                "/api/v1/admin/shows/sync-networks-streaming",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={},
+                            )
 
         assert response.status_code == 200
         payload = response.json()

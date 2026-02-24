@@ -193,3 +193,11 @@ def test_fetch_google_news_backfills_featured_image_from_article_meta(
     assert result["featured_images_added"] == 1
     assert result["featured_images_probed"] == 1
     assert result["items"][0]["image_url"] == "https://cdn.example.com/featured-9.jpg"
+
+
+def test_normalize_article_url_strips_tracking_params() -> None:
+    normalized = google_news_parser.normalize_article_url(
+        "https://www.people.com/story-1/?utm_source=google&oc=3&foo=bar"
+    )
+
+    assert normalized == "https://people.com/story-1?foo=bar"

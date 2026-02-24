@@ -646,7 +646,7 @@ def _apply_news_filters(
     items: list[dict[str, Any]],
     person_id: str | None,
     source_filter: str | None,
-    source_contains: str | None,
+    source_contains: str | None = None,
     topic_filter: str | None,
     season_number: int | None,
 ) -> list[dict[str, Any]]:
@@ -1007,18 +1007,8 @@ def _sync_google_news_featured_images(
     }
 
 
-@router.post("/{show_id}/google-news/sync")
-def sync_google_news(
-    show_id: UUID,
-    payload: GoogleNewsSyncRequest,
-    db: SupabaseAdminClient = None,
-    admin_user: AdminUser = None,
-) -> dict[str, Any]:
-    show_id_str = str(show_id)
-    if not _show_exists(db, show_id_str):
-        raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
-
-    google_link = _resolve_google_news_link(show_id_str)
+def _resolve_google_news_topic_url(show_id: str) -> str:
+    google_link = _resolve_google_news_link(show_id)
     if not google_link:
         raise HTTPException(
             status_code=409,
@@ -1030,9 +1020,101 @@ def sync_google_news(
             status_code=409,
             detail="Google News URL is empty for this show. Update the show setting before syncing.",
         )
+    return topic_url
 
+
+def _create_google_news_sync_job(*, show_id: str, force: bool, requested_by: str | None) -> str:
+    rows = pg.execute_returning(
+        """
+        INSERT INTO core.google_news_sync_jobs (
+          show_id,
+          source_id,
+          status,
+          requested_async,
+          force,
+          requested_by,
+          created_at,
+          updated_at
+        )
+        VALUES (%s, %s, %s, TRUE, %s, %s, NOW(), NOW())
+        RETURNING id::text
+        """,
+        [show_id, _GOOGLE_SOURCE_ID, _GOOGLE_SYNC_JOB_STATUS_QUEUED, force, requested_by],
+    )
+    if not rows:
+        raise HTTPException(status_code=502, detail="Failed to create Google News sync job")
+    return str(rows[0]["id"])
+
+
+def _set_google_news_sync_job_running(*, job_id: str) -> None:
+    pg.execute_returning(
+        """
+        UPDATE core.google_news_sync_jobs
+        SET status = %s, started_at = NOW(), updated_at = NOW()
+        WHERE id = %s::uuid
+        """,
+        [_GOOGLE_SYNC_JOB_STATUS_RUNNING, job_id],
+    )
+
+
+def _set_google_news_sync_job_finished(
+    *,
+    job_id: str,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    pg.execute_returning(
+        """
+        UPDATE core.google_news_sync_jobs
+        SET status = %s,
+            result = %s::jsonb,
+            error = %s,
+            finished_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s::uuid
+        """,
+        [status, json.dumps(result or {}), error, job_id],
+    )
+
+
+def _get_google_news_sync_job(*, show_id: str, job_id: str) -> dict[str, Any] | None:
+    return pg.fetch_one(
+        """
+        SELECT
+          id::text AS id,
+          show_id::text AS show_id,
+          source_id,
+          status,
+          requested_async,
+          force,
+          requested_by,
+          result,
+          error,
+          created_at,
+          started_at,
+          finished_at,
+          updated_at
+        FROM core.google_news_sync_jobs
+        WHERE id = %s::uuid
+          AND show_id = %s::uuid
+        LIMIT 1
+        """,
+        [job_id, show_id],
+    )
+
+
+def _run_google_news_sync_impl(
+    *,
+    show_id_str: str,
+    force: bool,
+    db: SupabaseAdminClient,
+    admin_user: AdminUser,
+) -> dict[str, Any]:
+    started_at = time.monotonic()
+    topic_url = _resolve_google_news_topic_url(show_id_str)
     existing = _fetch_show_snapshot(db, show_id=show_id_str, source_id=_GOOGLE_SOURCE_ID)
-    if not payload.force and _is_snapshot_fresh(existing) and not _snapshot_needs_google_image_backfill(existing):
+    if not force and _is_snapshot_fresh(existing) and not _snapshot_needs_google_image_backfill(existing):
         existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
         normalized = existing_payload.get("normalized") if isinstance(existing_payload, dict) else {}
         existing_news = normalized.get("news") if isinstance(normalized, dict) else []
@@ -1051,6 +1133,7 @@ def sync_google_news(
         }
 
     _ensure_google_source(db)
+    topic_keywords = _load_topic_keyword_map()
     show_name, show_aliases = _show_name_and_aliases(show_id_str)
     cast_index = _build_show_cast_index(show_id_str)
     season_windows = _load_season_windows(show_id_str)
@@ -1060,6 +1143,8 @@ def sync_google_news(
             topic_url=topic_url,
             show_name=show_name,
             show_aliases=show_aliases,
+            max_featured_image_probes=_GOOGLE_FEATURED_IMAGE_MAX_PROBES,
+            max_canonical_url_probes=_GOOGLE_CANONICAL_URL_MAX_PROBES,
         )
     except Exception as exc:  # noqa: BLE001
         _upsert_show_snapshot(
@@ -1076,6 +1161,7 @@ def sync_google_news(
         items=parse_result.get("items") if isinstance(parse_result.get("items"), list) else [],
         cast_index=cast_index,
         season_windows=season_windows,
+        topic_keywords=topic_keywords,
     )
     image_sync = _sync_google_news_featured_images(
         db=db,
@@ -1104,6 +1190,13 @@ def sync_google_news(
                 if isinstance(parse_result.get("featured_image_errors"), list)
                 else []
             ),
+            "canonical_urls_resolved": int(parse_result.get("canonical_urls_resolved") or 0),
+            "canonical_urls_probed": int(parse_result.get("canonical_urls_probed") or 0),
+            "canonical_url_errors": (
+                parse_result.get("canonical_url_errors")
+                if isinstance(parse_result.get("canonical_url_errors"), list)
+                else []
+            ),
             "image_sync": image_sync,
         },
         "normalized": {
@@ -1117,6 +1210,17 @@ def sync_google_news(
         payload=snapshot_payload,
     )
 
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    logger.info(
+        "google_news_sync_complete show_id=%s count=%s fallback_used=%s elapsed_ms=%s featured_images_probed=%s mirrored=%s",
+        show_id_str,
+        len(normalized_items),
+        bool(parse_result.get("fallback_used")),
+        elapsed_ms,
+        int(parse_result.get("featured_images_probed") or 0),
+        int(image_sync.get("mirrored") or 0),
+    )
+
     return {
         "show_id": show_id_str,
         "synced": True,
@@ -1125,7 +1229,91 @@ def sync_google_news(
         "fallback_used": bool(parse_result.get("fallback_used")),
         "image_sync": image_sync,
         "snapshot": snapshot,
+        "sync_duration_ms": elapsed_ms,
     }
+
+
+def _run_google_news_sync_job(
+    *,
+    job_id: str,
+    show_id_str: str,
+    force: bool,
+    admin_user_payload: dict[str, Any] | None,
+) -> None:
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    db = create_supabase_admin_client()
+    _set_google_news_sync_job_running(job_id=job_id)
+    admin_user = admin_user_payload or {"id": "service_role:background", "role": "service_role"}
+    try:
+        result = _run_google_news_sync_impl(show_id_str=show_id_str, force=force, db=db, admin_user=admin_user)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Google News async sync job failed for %s", show_id_str)
+        _set_google_news_sync_job_finished(
+            job_id=job_id,
+            status=_GOOGLE_SYNC_JOB_STATUS_FAILED,
+            result={},
+            error=str(exc),
+        )
+        return
+    _set_google_news_sync_job_finished(
+        job_id=job_id,
+        status=_GOOGLE_SYNC_JOB_STATUS_COMPLETED,
+        result=result,
+        error=None,
+    )
+
+
+@router.post("/{show_id}/google-news/sync")
+def sync_google_news(
+    show_id: UUID,
+    payload: GoogleNewsSyncRequest,
+    background_tasks: BackgroundTasks,
+    db: SupabaseAdminClient = None,
+    admin_user: AdminUser = None,
+) -> dict[str, Any]:
+    show_id_str = str(show_id)
+    if not _show_exists(db, show_id_str):
+        raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+
+    # Preflight the show-level Google URL so async requests fail fast.
+    _resolve_google_news_topic_url(show_id_str)
+
+    if payload.async_mode:
+        requested_by = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "").strip() or None
+        job_id = _create_google_news_sync_job(show_id=show_id_str, force=payload.force, requested_by=requested_by)
+        background_tasks.add_task(
+            _run_google_news_sync_job,
+            job_id=job_id,
+            show_id_str=show_id_str,
+            force=payload.force,
+            admin_user_payload=dict(admin_user or {}),
+        )
+        return {
+            "show_id": show_id_str,
+            "synced": False,
+            "queued": True,
+            "job_id": job_id,
+            "status": _GOOGLE_SYNC_JOB_STATUS_QUEUED,
+        }
+
+    return _run_google_news_sync_impl(show_id_str=show_id_str, force=payload.force, db=db, admin_user=admin_user)
+
+
+@router.get("/{show_id}/google-news/sync/{job_id}")
+def get_google_news_sync_job_status(
+    show_id: UUID,
+    job_id: UUID,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    show_id_str = str(show_id)
+    if not _show_exists(db, show_id_str):
+        raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+    row = _get_google_news_sync_job(show_id=show_id_str, job_id=str(job_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Google News sync job not found")
+    return row
 
 
 @router.get("/{show_id}/news")
@@ -1134,17 +1322,25 @@ def get_show_news(
     sources: str = Query(default=f"{_BRAVO_SOURCE_ID},{_GOOGLE_SOURCE_ID}"),
     person_id: UUID | None = Query(default=None),
     source: str | None = Query(default=None),
+    source_contains: str | None = Query(default=None),
     topic: str | None = Query(default=None),
     season_number: int | None = Query(default=None, ge=1, le=200),
     sort: Literal["trending", "latest"] = Query(default="trending"),
+    limit: int | None = Query(default=None, ge=1, le=200),
+    cursor: str | None = Query(default=None),
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+    if since and until and since > until:
+        raise HTTPException(status_code=422, detail="since must be less than or equal to until")
 
     selected_sources = _parse_sources(sources)
+    topic_keywords = _load_topic_keyword_map()
     season_windows = _load_season_windows(show_id_str)
 
     merged: list[dict[str, Any]] = []
@@ -1155,7 +1351,13 @@ def get_show_news(
         if bravo_snapshot:
             bravo_payload = bravo_snapshot.get("payload") if isinstance(bravo_snapshot.get("payload"), dict) else {}
             bravo_news = admin_show_bravo._extract_news_from_snapshot(bravo_payload, db=db)
-            merged.extend(_normalize_bravo_news_items(items=bravo_news, season_windows=season_windows))
+            merged.extend(
+                _normalize_bravo_news_items(
+                    items=bravo_news,
+                    season_windows=season_windows,
+                    topic_keywords=topic_keywords,
+                )
+            )
             snapshot_meta[_BRAVO_SOURCE_ID] = {
                 "fetched_at": bravo_snapshot.get("fetched_at"),
                 "payload_sha256": bravo_snapshot.get("payload_sha256"),
@@ -1167,11 +1369,18 @@ def get_show_news(
             google_payload = google_snapshot.get("payload") if isinstance(google_snapshot.get("payload"), dict) else {}
             normalized = google_payload.get("normalized") if isinstance(google_payload, dict) else {}
             google_news = normalized.get("news") if isinstance(normalized, dict) else []
+            needs_cast_index = bool(person_id)
+            if not needs_cast_index and isinstance(google_news, list):
+                needs_cast_index = any(
+                    isinstance(item, dict) and not isinstance(item.get("person_tags"), list) for item in google_news
+                )
+            cast_index = _build_show_cast_index(show_id_str) if needs_cast_index else None
             merged.extend(
                 _normalize_google_news_items(
                     items=google_news if isinstance(google_news, list) else [],
-                    cast_index=_build_show_cast_index(show_id_str),
+                    cast_index=cast_index,
                     season_windows=season_windows,
+                    topic_keywords=topic_keywords,
                 )
             )
             snapshot_meta[_GOOGLE_SOURCE_ID] = {
@@ -1179,18 +1388,26 @@ def get_show_news(
                 "payload_sha256": google_snapshot.get("payload_sha256"),
             }
 
+    deduped = _dedupe_news_items(merged)
+    windowed = _apply_news_time_window(items=deduped, since=since, until=until)
     filtered = _apply_news_filters(
-        items=merged,
+        items=windowed,
         person_id=str(person_id) if person_id else None,
         source_filter=source,
+        source_contains=source_contains,
         topic_filter=topic,
         season_number=season_number,
     )
     sorted_items = _sort_news(filtered, mode=sort)
+    page_limit = _NEWS_DEFAULT_LIMIT if limit is None else limit
+    page_items, next_cursor = _paginate_news(sorted_items, limit=page_limit, cursor=cursor)
 
     return {
-        "news": sorted_items,
-        "count": len(sorted_items),
+        "news": page_items,
+        "count": len(page_items),
+        "total_count": len(sorted_items),
+        "next_cursor": next_cursor,
+        "limit": page_limit,
         "sort": sort,
         "sources": selected_sources,
         "snapshots": snapshot_meta,
