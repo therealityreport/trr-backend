@@ -18,6 +18,7 @@ import hashlib
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
+from threading import Thread
 from typing import Any, Literal
 from uuid import UUID
 
@@ -1322,7 +1323,6 @@ def sync_networks_streaming(
         tmdb_entities.metrics.get("failures", 0)
         + tmdb_watch_providers.metrics.get("failures", 0)
         + network_streaming_links.metrics.get("failures", 0)
-        + show_logos.metrics.get("failures", 0)
     )
     completion_gate_passed = completion_unresolved == 0
     if not completion_gate_passed:
@@ -3170,8 +3170,48 @@ def refresh_show_photos_stream(
                             },
                         )
                         started_at = time.perf_counter()
+                        fetch_result: dict[str, Any] = {"rows": [], "error": None}
+                        imdb_pid_for_stage = int(imdb_pid)
+                        person_id_for_stage = pid
+                        stage_limit = int(payload.limit_per_source)
+
+                        def run_imdb_fetch(
+                            *,
+                            result: dict[str, Any] = fetch_result,
+                            imdb_id: int = imdb_pid_for_stage,
+                            person_id: str = person_id_for_stage,
+                            limit: int = stage_limit,
+                        ) -> None:
+                            try:
+                                result["rows"] = fetch_imdb_cast_photos(
+                                    str(imdb_id),
+                                    person_id,
+                                    limit=limit,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                result["error"] = exc
+
+                        fetch_thread = Thread(target=run_imdb_fetch, daemon=True)
+                        fetch_thread.start()
+                        while fetch_thread.is_alive():
+                            fetch_thread.join(timeout=10)
+                            if fetch_thread.is_alive():
+                                yield progress(
+                                    stage="sync_imdb",
+                                    message=f"Syncing IMDb cast photos ({pid})...",
+                                    stage_current=stage_done,
+                                    stage_total=fetch_units,
+                                    extra={
+                                        "source": "imdb",
+                                        "heartbeat": True,
+                                        "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                                    },
+                                )
+                        fetch_thread.join()
                         try:
-                            rows = fetch_imdb_cast_photos(str(imdb_pid), pid, limit=int(payload.limit_per_source))
+                            if fetch_result["error"] is not None:
+                                raise fetch_result["error"]
+                            rows = fetch_result["rows"] if isinstance(fetch_result["rows"], list) else []
                             _tag_show_context(rows)
                             cast_photos_fetched += len(rows)
                             if rows:
@@ -3244,8 +3284,48 @@ def refresh_show_photos_stream(
                             },
                         )
                         started_at = time.perf_counter()
+                        fetch_result: dict[str, Any] = {"rows": [], "error": None}
+                        tmdb_pid_for_stage = int(tmdb_pid)
+                        person_id_for_stage = pid
+                        stage_limit = int(payload.limit_per_source)
+
+                        def run_tmdb_fetch(
+                            *,
+                            result: dict[str, Any] = fetch_result,
+                            tmdb_id: int = tmdb_pid_for_stage,
+                            person_id: str = person_id_for_stage,
+                            limit: int = stage_limit,
+                        ) -> None:
+                            try:
+                                result["rows"] = fetch_tmdb_cast_photos(
+                                    tmdb_id,
+                                    person_id,
+                                    limit=limit,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                result["error"] = exc
+
+                        fetch_thread = Thread(target=run_tmdb_fetch, daemon=True)
+                        fetch_thread.start()
+                        while fetch_thread.is_alive():
+                            fetch_thread.join(timeout=10)
+                            if fetch_thread.is_alive():
+                                yield progress(
+                                    stage="sync_tmdb",
+                                    message=f"Syncing TMDb cast photos ({pid})...",
+                                    stage_current=stage_done,
+                                    stage_total=fetch_units,
+                                    extra={
+                                        "source": "tmdb",
+                                        "heartbeat": True,
+                                        "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                                    },
+                                )
+                        fetch_thread.join()
                         try:
-                            rows = fetch_tmdb_cast_photos(int(tmdb_pid), pid, limit=int(payload.limit_per_source))
+                            if fetch_result["error"] is not None:
+                                raise fetch_result["error"]
+                            rows = fetch_result["rows"] if isinstance(fetch_result["rows"], list) else []
                             _tag_show_context(rows)
                             cast_photos_fetched += len(rows)
                             if rows:
