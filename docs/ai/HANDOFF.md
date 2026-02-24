@@ -3796,3 +3796,52 @@ Continuation (same session, 2026-02-24) — NO_GO follow-up patch: unscoped jobs
     - Post-check now shows Andy Cohen has approved IMDb on all 3 relevant show contexts.
   - Policy check:
     - pending person-source rows remain `0`.
+
+Continuation (same session, 2026-02-24) — Cloud Run deploy fix for requirements lockfile copy.
+- root_cause:
+  - Cloud Build failed during Docker step `pip install -r requirements.txt` because `requirements.txt` references `requirements.lock.txt` but Dockerfile only copied `requirements.txt` before install.
+- fix:
+  - Updated `/Users/thomashulihan/Projects/TRR/TRR-Backend/Dockerfile` to copy both `requirements.txt` and `requirements.lock.txt` before running pip install.
+  - Commit on `main`: `0f88008` (`fix(deploy): copy requirements.lock.txt before pip install`).
+- deploy:
+  - Service: `trr-backend`
+  - Project/region: `trr-web-25d2e` / `us-east1`
+  - New ready revision: `trr-backend-00031-dl2`
+  - Service URL: `https://trr-backend-e7yfe64hoa-ue.a.run.app`
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+- mcp_tools_used:
+  - primary: `functions.exec_command` (git/gcloud/docker validation)
+  - fallback: none
+- delegation_map:
+  - role: API Contract Owner
+    scope: verify API contract impact
+    deliverable: confirmed no API contract/schema change
+    verification_command: `curl -i $SERVICE_URL/openapi.json`
+    status: completed
+  - role: Schema Owner
+    scope: verify DB migration impact
+    deliverable: confirmed no schema/migration changes
+    verification_command: `git diff --name-only HEAD~1..HEAD`
+    status: completed
+  - role: Integration Owner
+    scope: downstream repo impact
+    deliverable: confirmed no screenalytics/TRR-APP changes required
+    verification_command: `git diff --name-only HEAD~1..HEAD`
+    status: completed
+  - role: QA Owner
+    scope: deploy/build regression validation
+    deliverable: successful Docker build + Cloud Run deploy + health/openapi check
+    verification_command: `docker build -t trr-backend:dockerfile-fix . && gcloud run services describe ... && curl -i $SERVICE_URL/openapi.json`
+    status: completed
+- risk_class: `no_contract`
+- validation_evidence:
+  - `docker build -t trr-backend:dockerfile-fix .` -> pass
+  - `gcloud run deploy trr-backend --source . --region us-east1 --project trr-web-25d2e --quiet` -> pass
+  - `gcloud run services describe trr-backend --region us-east1 --project trr-web-25d2e --format='value(status.latestReadyRevisionName,status.url)'` -> `trr-backend-00031-dl2` and service URL
+  - `curl -i "$SERVICE_URL/openapi.json"` -> `HTTP/2 200`
+- downstream_repos_impacted:
+  - TRR-Backend: yes
+  - screenalytics: no
+  - TRR-APP: no
