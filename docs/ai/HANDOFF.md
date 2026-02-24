@@ -3302,3 +3302,48 @@ Continuation (same session, 2026-02-24) — MEDIA/GALLERY hardening follow-throu
   - Script dry-run smoke:
     - `python /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/repair_gallery_hosts.py --sources imdb,tmdb,fandom,bravo --limit 10 --output-json /tmp/gallery-host-repair-post-hardening-dryrun.json`
     - Result summary: `scanned=10`, `ok=0`, `repaired=5`, `broken_unreachable=5`, `error=0`, `apply=false`.
+
+Continuation (same session, 2026-02-24) — Networks/Streaming sync hardening rollout execution (ops run).
+- Scope:
+  - Applied remote Supabase migrations through current head (`0124`-`0144`) including:
+    - `0143_network_streaming_discovery_state.sql`
+    - `0144_network_streaming_sync_runs.sql`
+  - Verified discovery-lock behavior and logo-asset reuse on targeted `network:bravo` passes.
+- Execution details:
+  - Migration apply:
+    - `supabase migration up --db-url "$SUPABASE_DB_URL" --include-all`
+  - Schema verification:
+    - Confirmed existence of:
+      - `admin.network_streaming_discovery_state`
+      - `admin.network_streaming_sync_runs`
+      - `admin.network_streaming_logo_assets`
+  - Targeted Bravo sync processor runs (`_process_entity` direct invocation):
+    - Initial state:
+      - `assets_total=30`
+      - by source: `tmdb=1`, `wikimedia=2`, `official=7`, `catalog=20`
+      - by status: `mirrored=28`, `skipped=2`
+    - Credit-safe pass (`refresh_external_sources=false`):
+      - `processed=1`
+      - `logo_assets_discovered=22`
+      - `logo_assets_mirrored=0`
+      - `logo_assets_skipped=22`
+      - `logo_assets_failed=0`
+      - no asset-count deltas (cache/S3 reuse confirmed)
+    - Refresh pass (`refresh_external_sources=true`):
+      - `processed=1`
+      - `logo_assets_discovered=22`
+      - `logo_assets_mirrored=0`
+      - `logo_assets_skipped=22`
+      - `logo_assets_failed=0`
+      - no asset-count deltas (already complete)
+    - Discovery-state deltas for Bravo:
+      - `catalog attempt_count: 1 -> 2` (`cached_candidate_count=12`)
+      - `official attempt_count: 1 -> 2` (`last_reason=download_failed`)
+  - Full-run smoke:
+    - `sync_networks_streaming_links.py --all --batch-size 25 --max-runtime-sec 180`
+    - observed long-running external-download phase; run was manually interrupted during an external image request.
+    - stale `running` run rows were reconciled in `admin.network_streaming_sync_runs` to avoid orphaned operator state.
+- Blockers:
+  - Cloud Run deploy remains blocked in this environment due non-interactive `gcloud` reauthentication:
+    - `Reauthentication failed. cannot prompt during non-interactive execution.`
+  - Backend deployment still requires interactive `gcloud auth login` (or service-account auth) before `gcloud run deploy`.
