@@ -16,11 +16,12 @@ import time
 import unicodedata
 from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime
+from threading import Thread
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -141,6 +142,19 @@ class RefreshImagesResponse(BaseModel):
     resize_crop_succeeded: int = 0
     resize_crop_failed: int = 0
     errors: list[str] = Field(default_factory=list)
+
+
+class ReprocessImagesRequest(BaseModel):
+    """Request to reprocess existing gallery assets."""
+
+    run_count: bool = Field(default=True, description="Run people auto-count stage.")
+    run_id_text: bool = Field(default=True, description="Run text overlay detection stage.")
+    run_crop: bool = Field(default=True, description="Run centering/cropping stage.")
+    run_resize: bool = Field(default=True, description="Run resize/variant generation stage.")
+    sources: list[SourceType] | None = Field(
+        default=None,
+        description="Optional source filter for cast-photo stages.",
+    )
 
 
 class FacebankSeedRequest(BaseModel):
@@ -2121,38 +2135,83 @@ async def refresh_person_images_stream(
             rows: list[dict[str, Any]] = []
             stage_started_at = time.perf_counter()
             try:
-                if stage == "sync_imdb":
-                    rows = fetch_imdb_cast_photos(
-                        imdb_person_id,
-                        person_id_str,
-                        limit=request.limit_per_source,
-                        session=None,
-                        verbose=False,
-                    )
-                elif stage == "sync_tmdb":
-                    rows = fetch_tmdb_cast_photos(
-                        int(tmdb_person_id),
-                        person_id_str,
-                        imdb_person_id=imdb_person_id,
-                        limit=request.limit_per_source,
-                        verbose=False,
-                    )
-                elif stage == "sync_fandom":
-                    rows = fetch_fandom_person_cast_photos(
-                        str(person_name),
-                        person_id_str,
-                        imdb_person_id=imdb_person_id,
-                        limit=request.limit_per_source,
-                        verbose=False,
-                    )
-                else:
-                    rows = fetch_fandom_gallery_cast_photos(
-                        str(person_name),
-                        person_id_str,
-                        imdb_person_id=imdb_person_id,
-                        limit=request.limit_per_source,
-                        verbose=False,
-                    )
+                fetch_result: dict[str, Any] = {"rows": [], "error": None}
+                stage_key = stage
+                stage_person_id = person_id_str
+                stage_imdb_person_id = imdb_person_id
+                stage_tmdb_person_id = tmdb_person_id
+                stage_person_name = str(person_name)
+                stage_limit = request.limit_per_source
+
+                def run_source_fetch(
+                    *,
+                    result: dict[str, Any] = fetch_result,
+                    stage_name: str = stage_key,
+                    person_identifier: str = stage_person_id,
+                    imdb_identifier: str | None = stage_imdb_person_id,
+                    tmdb_identifier: int | None = stage_tmdb_person_id,
+                    name: str = stage_person_name,
+                    limit: int = stage_limit,
+                ) -> None:
+                    try:
+                        if stage_name == "sync_imdb":
+                            result["rows"] = fetch_imdb_cast_photos(
+                                imdb_identifier,
+                                person_identifier,
+                                limit=limit,
+                                session=None,
+                                verbose=False,
+                            )
+                        elif stage_name == "sync_tmdb":
+                            result["rows"] = fetch_tmdb_cast_photos(
+                                int(tmdb_identifier),
+                                person_identifier,
+                                imdb_person_id=imdb_identifier,
+                                limit=limit,
+                                verbose=False,
+                            )
+                        elif stage_name == "sync_fandom":
+                            result["rows"] = fetch_fandom_person_cast_photos(
+                                name,
+                                person_identifier,
+                                imdb_person_id=imdb_identifier,
+                                limit=limit,
+                                verbose=False,
+                            )
+                        else:
+                            result["rows"] = fetch_fandom_gallery_cast_photos(
+                                name,
+                                person_identifier,
+                                imdb_person_id=imdb_identifier,
+                                limit=limit,
+                                verbose=False,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        result["error"] = exc
+
+                fetch_thread = Thread(target=run_source_fetch, daemon=True)
+                fetch_thread.start()
+                while fetch_thread.is_alive():
+                    fetch_thread.join(timeout=10)
+                    if fetch_thread.is_alive():
+                        elapsed_ms = int((time.perf_counter() - stage_started_at) * 1000)
+                        yield progress(
+                            {
+                                "stage": stage,
+                                "message": f"Syncing {label}...",
+                                "current": processed_sources,
+                                "total": total_sources,
+                                "source": source_name,
+                                "source_total": source_total,
+                                "mirrored_count": mirrored_count,
+                                "heartbeat": True,
+                                "elapsed_ms": elapsed_ms,
+                            }
+                        )
+                fetch_thread.join()
+                if fetch_result["error"] is not None:
+                    raise fetch_result["error"]
+                rows = fetch_result["rows"] if isinstance(fetch_result["rows"], list) else []
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{label}: {exc}")
                 rows = []
@@ -2893,6 +2952,7 @@ async def refresh_person_images_stream(
 @router.post("/{person_id}/reprocess-images/stream")
 async def reprocess_person_images_stream(
     person_id: UUID,
+    request: ReprocessImagesRequest = Body(default_factory=ReprocessImagesRequest),
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> StreamingResponse:
@@ -2903,10 +2963,20 @@ async def reprocess_person_images_stream(
     async def event_generator() -> AsyncGenerator[str, None]:
         errors: list[str] = []
         text_overlay_reason_counts: dict[str, int] = dict.fromkeys(TEXT_OVERLAY_FAILURE_REASONS, 0)
+        auto_counts_attempted = 0
+        auto_counts_failed = 0
         auto_counts_succeeded = 0
+        c_attempted = 0
         text_overlay_succeeded = 0
         c_succeeded = 0
+        c_failed = 0
+        c_skipped = 0
+        resize_attempted = 0
         resize_succeeded = 0
+        resize_failed = 0
+        resize_crop_attempted = 0
+        resize_crop_succeeded = 0
+        resize_crop_failed = 0
 
         def build_live_counts() -> dict[str, int]:
             return {
@@ -2937,41 +3007,51 @@ async def reprocess_person_images_stream(
             yield error_event(stage="setup", error="Person not found")
             return
 
-        sources: list[SourceType] = list(ALL_SOURCES)
+        sources: list[SourceType] = list(request.sources or ALL_SOURCES)
 
         # ---------- Auto-count (cast_photos + media_links) ----------
-        yield progress(
-            {
-                "stage": "auto_count",
-                "message": "Auto-counting people in images...",
-                "current": None,
-                "total": None,
-            }
-        )
+        if request.run_count:
+            yield progress(
+                {
+                    "stage": "auto_count",
+                    "message": "Auto-counting people in images...",
+                    "current": None,
+                    "total": None,
+                }
+            )
 
-        ac_cast, sc_cast, fc_cast = _auto_count_cast_photos(
-            db,
-            person_id_str,
-            sources,
-            force_recount=True,
-        )
-        ac_media, sc_media, fc_media = _auto_count_media_links(
-            db,
-            person_id_str,
-            force_recount=True,
-        )
-        auto_counts_attempted = ac_cast + ac_media
-        auto_counts_succeeded = sc_cast + sc_media
-        auto_counts_failed = fc_cast + fc_media
+            ac_cast, sc_cast, fc_cast = _auto_count_cast_photos(
+                db,
+                person_id_str,
+                sources,
+                force_recount=True,
+            )
+            ac_media, sc_media, fc_media = _auto_count_media_links(
+                db,
+                person_id_str,
+                force_recount=True,
+            )
+            auto_counts_attempted = ac_cast + ac_media
+            auto_counts_succeeded = sc_cast + sc_media
+            auto_counts_failed = fc_cast + fc_media
 
-        yield progress(
-            {
-                "stage": "auto_count",
-                "message": f"Counted {auto_counts_succeeded} images ({auto_counts_failed} failed).",
-                "current": auto_counts_attempted,
-                "total": auto_counts_attempted,
-            }
-        )
+            yield progress(
+                {
+                    "stage": "auto_count",
+                    "message": f"Counted {auto_counts_succeeded} images ({auto_counts_failed} failed).",
+                    "current": auto_counts_attempted,
+                    "total": auto_counts_attempted,
+                }
+            )
+        else:
+            yield progress(
+                {
+                    "stage": "auto_count",
+                    "message": "Skipping auto-count stage.",
+                    "current": 0,
+                    "total": 0,
+                }
+            )
 
         # ---------- Word ID / text overlay (cast_photos + media_links) ----------
         text_overlay_attempted = 0
@@ -2985,14 +3065,25 @@ async def reprocess_person_images_stream(
         cast_candidate_ids: list[str] = []
         media_candidate_ids: list[str] = []
 
-        try:
-            from trr_backend.vision.text_overlay import is_text_overlay_detection_configured
+        if request.run_id_text:
+            try:
+                from trr_backend.vision.text_overlay import is_text_overlay_detection_configured
 
-            text_overlay_configured = is_text_overlay_detection_configured()
-        except Exception:
-            text_overlay_configured = False
+                text_overlay_configured = is_text_overlay_detection_configured()
+            except Exception:
+                text_overlay_configured = False
+        else:
+            text_overlay_skipped_reason = "stage_disabled"
+            yield progress(
+                {
+                    "stage": "word_id",
+                    "message": "Skipping word detection stage.",
+                    "current": 0,
+                    "total": 0,
+                }
+            )
 
-        if text_overlay_configured:
+        if request.run_id_text and text_overlay_configured:
             try:
                 cast_rows = (
                     db.schema("core")
@@ -3081,7 +3172,7 @@ async def reprocess_person_images_stream(
                         "total": text_overlay_candidates,
                     }
                 )
-        else:
+        elif request.run_id_text:
             text_overlay_skipped_reason = "not_configured"
             yield progress(
                 {
@@ -3093,65 +3184,85 @@ async def reprocess_person_images_stream(
             )
 
         # ---------- Centering / cropping ----------
-        yield progress(
-            {
-                "stage": "centering_cropping",
-                "message": "Centering/cropping thumbnails...",
-                "current": None,
-                "total": None,
-            }
-        )
+        if request.run_crop:
+            yield progress(
+                {
+                    "stage": "centering_cropping",
+                    "message": "Centering/cropping thumbnails...",
+                    "current": None,
+                    "total": None,
+                }
+            )
 
-        c_attempted, c_succeeded, c_failed, c_skipped = _recenter_person_gallery_images(
-            db,
-            person_id_str,
-            sources,
-            force=True,
-        )
+            c_attempted, c_succeeded, c_failed, c_skipped = _recenter_person_gallery_images(
+                db,
+                person_id_str,
+                sources,
+                force=True,
+            )
 
-        yield progress(
-            {
-                "stage": "centering_cropping",
-                "message": f"Centered {c_succeeded} thumbnails ({c_failed} failed, {c_skipped} manual skipped).",
-                "current": c_attempted,
-                "total": c_attempted,
-            }
-        )
+            yield progress(
+                {
+                    "stage": "centering_cropping",
+                    "message": f"Centered {c_succeeded} thumbnails ({c_failed} failed, {c_skipped} manual skipped).",
+                    "current": c_attempted,
+                    "total": c_attempted,
+                }
+            )
+        else:
+            yield progress(
+                {
+                    "stage": "centering_cropping",
+                    "message": "Skipping centering/cropping stage.",
+                    "current": 0,
+                    "total": 0,
+                }
+            )
 
         # ---------- Resize / variants ----------
-        yield progress(
-            {
-                "stage": "resizing",
-                "message": "Generating resized variants...",
-                "current": 0,
-                "total": 1,
-            }
-        )
-        (
-            resize_attempted,
-            resize_succeeded,
-            resize_failed,
-            resize_crop_attempted,
-            resize_crop_succeeded,
-            resize_crop_failed,
-        ) = _resize_person_gallery_images(
-            db,
-            person_id_str,
-            sources,
-            force=True,
-        )
-        yield progress(
-            {
-                "stage": "resizing",
-                "message": (
-                    "Variant generation complete "
-                    f"({resize_succeeded}/{resize_attempted} base, "
-                    f"{resize_crop_succeeded}/{resize_crop_attempted} crop)."
-                ),
-                "current": 1,
-                "total": 1,
-            }
-        )
+        if request.run_resize:
+            yield progress(
+                {
+                    "stage": "resizing",
+                    "message": "Generating resized variants...",
+                    "current": 0,
+                    "total": 1,
+                }
+            )
+            (
+                resize_attempted,
+                resize_succeeded,
+                resize_failed,
+                resize_crop_attempted,
+                resize_crop_succeeded,
+                resize_crop_failed,
+            ) = _resize_person_gallery_images(
+                db,
+                person_id_str,
+                sources,
+                force=True,
+            )
+            yield progress(
+                {
+                    "stage": "resizing",
+                    "message": (
+                        "Variant generation complete "
+                        f"({resize_succeeded}/{resize_attempted} base, "
+                        f"{resize_crop_succeeded}/{resize_crop_attempted} crop)."
+                    ),
+                    "current": 1,
+                    "total": 1,
+                }
+            )
+        else:
+            yield progress(
+                {
+                    "stage": "resizing",
+                    "message": "Skipping resize stage.",
+                    "current": 0,
+                    "total": 0,
+                }
+            )
 
         # ---------- Complete ----------
         complete_data = {

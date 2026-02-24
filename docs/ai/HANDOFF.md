@@ -2880,3 +2880,16 @@ Continuation (same session, 2026-02-24) — news feature hardening: async Google
 - Validation:
   - `ruff check api/routers/admin_show_news.py trr_backend/scraping/google_news_parser.py tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (pass)
   - `pytest -q tests/api/routers/test_admin_show_news.py tests/scraping/test_google_news_parser.py` (`16 passed`)
+
+## 2026-02-24 Media Pipeline Stabilization (Codex)
+- Added periodic heartbeat progress emissions during blocking source fetches in:
+  - `api/routers/admin_person_images.py`
+  - `api/routers/admin_show_sync.py`
+- Added stage-selective reprocess controls via request payload in `reprocess-images/stream` (`run_count`, `run_id_text`, `run_crop`, `run_resize`).
+- Fixed sync-networks failure aggregation to avoid inflating total failures.
+- Improved show-level auto-count to:
+  - fall back from `hosted_url` to `source_url` candidates,
+  - persist `face_boxes` into link context,
+  - generate/update thumbnail crop context and variants when available.
+- Validation:
+  - `pytest -q tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_image_counts_fallback.py`

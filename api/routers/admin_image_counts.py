@@ -487,7 +487,11 @@ def auto_count_show_images(
         )
 
     assets_response = (
-        db.schema("core").table("media_assets").select("id, hosted_url, source_url").in_("id", asset_ids).execute()
+        db.schema("core")
+        .table("media_assets")
+        .select("id, hosted_url, source_url, metadata")
+        .in_("id", asset_ids)
+        .execute()
     )
     if hasattr(assets_response, "error") and assets_response.error:
         raise HTTPException(status_code=502, detail="Database error fetching media assets")
@@ -518,26 +522,83 @@ def auto_count_show_images(
             assets_skipped += 1
             continue
 
-        image_url = asset.get("hosted_url")
-        if not image_url:
+        image_urls = _build_media_asset_count_urls(asset)
+        if not image_urls:
             assets_skipped += 1
             continue
 
+        result = None
         try:
-            result = count_people(image_url)
-        except ScreenalyticsClientError:
+            for image_url in image_urls:
+                try:
+                    result = count_people(image_url)
+                    break
+                except ScreenalyticsClientError:
+                    continue
+        except Exception:
+            result = None
+
+        if result is None:
             assets_failed += 1
             continue
 
+        face_boxes = _build_face_boxes(result)
+        context_auto_update = {
+            "people_count": result.people_count,
+            "people_count_source": "auto",
+            "people_count_detector": result.detector,
+            "face_boxes": face_boxes,
+        }
         update_person_links_context(
             db,
             links_for_asset,
-            {
-                "people_count": result.people_count,
-                "people_count_source": "auto",
-                "people_count_detector": result.detector,
-            },
+            context_auto_update,
         )
+
+        generated_crop = auto_thumbnail_crop(result)
+        centroid = face_centroid(result)
+        latest_crop_payload: dict[str, Any] | None = None
+        if generated_crop is not None or centroid is not None:
+            now = datetime.now(UTC).isoformat()
+            for link in links_for_asset:
+                context = {**dict(link.get("context") or {}), **context_auto_update}
+                existing_crop = context.get("thumbnail_crop")
+                if isinstance(existing_crop, dict) and existing_crop.get("mode") == "manual":
+                    continue
+                if generated_crop is not None:
+                    context["thumbnail_crop"] = {
+                        **generated_crop,
+                        "generated_at": now,
+                    }
+                    latest_crop_payload = context["thumbnail_crop"]
+                elif centroid is not None:
+                    cx, cy = centroid
+                    context["thumbnail_crop"] = {
+                        "x": cx,
+                        "y": cy,
+                        "zoom": 1,
+                        "mode": "auto",
+                        "strategy": "face_centroid_v1",
+                        "generated_at": now,
+                    }
+                    latest_crop_payload = context["thumbnail_crop"]
+                try:
+                    db.schema("core").table("media_links").update({"context": context, "updated_at": now}).eq(
+                        "id", link["id"]
+                    ).execute()
+                except Exception:
+                    continue
+
+        if latest_crop_payload is not None:
+            try:
+                generate_media_asset_variants(
+                    db,
+                    asset_id=str(asset_id),
+                    crop=latest_crop_payload,
+                    force=False,
+                )
+            except Exception:
+                pass
         assets_counted += 1
 
     return AutoCountShowImagesResponse(
