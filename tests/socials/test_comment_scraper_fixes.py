@@ -548,6 +548,15 @@ def test_instagram_fetch_comments_resets_sticky_auth_flag(monkeypatch: pytest.Mo
     assert scraper.comments_auth_failed is False
 
 
+def test_instagram_fetch_comments_sets_invalid_shortcode_reason() -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "ok"})
+
+    comments = scraper.fetch_comments("not-valid!!!", fetch_replies=False, delay=0)
+    assert comments == []
+    assert scraper.last_comment_fetch_reason == "invalid_shortcode"
+    assert scraper.comments_auth_failed is False
+
+
 def test_instagram_fetch_comments_sets_api_status_fail_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "ok"})
 

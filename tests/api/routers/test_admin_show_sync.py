@@ -278,6 +278,21 @@ class TestSyncNetworksStreaming:
                 ),
                 unresolved_output,
             ),
+            (
+                SyncNetworksStreamingStepResult(
+                    status="success",
+                    duration_ms=1,
+                    exit_code=0,
+                    metrics={
+                        "show_logos_discovered": 0,
+                        "show_logos_imported": 0,
+                        "show_logos_skipped": 0,
+                        "show_logo_failures": 0,
+                        "failures": 0,
+                    },
+                ),
+                "",
+            ),
         ]
 
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):

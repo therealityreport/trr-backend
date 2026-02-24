@@ -1034,6 +1034,7 @@ async def get_season_ingest_runs(
         default=None
     ),
     source_scope: Literal["bravo", "creator", "community"] | None = Query(default=None),
+    run_id: UUID | None = Query(default=None),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_runs
@@ -1045,6 +1046,7 @@ async def get_season_ingest_runs(
             limit=limit,
             status=status,
             source_scope=source_scope,
+            run_id=str(run_id) if run_id else None,
         )
         duration_ms = int((perf_counter() - started_at) * 1000)
         logger.info(
@@ -1057,7 +1059,7 @@ async def get_season_ingest_runs(
         )
         return {
             "season_id": str(season_id),
-            "filters": {"status": status, "source_scope": source_scope},
+            "filters": {"status": status, "source_scope": source_scope, "run_id": str(run_id) if run_id else None},
             "runs": runs,
         }
     except Exception as exc:  # noqa: BLE001
@@ -1288,6 +1290,34 @@ async def refresh_post_comments_for_post(
             season_id,
             platform,
             source_id,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/seasons/{season_id}/instagram/mirror/requeue")
+async def requeue_instagram_mirror_jobs(
+    season_id: UUID,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    failed_only: bool = Query(default=False),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import requeue_instagram_media_mirror_jobs
+
+    try:
+        return requeue_instagram_media_mirror_jobs(
+            str(season_id),
+            source_scope=source_scope,
+            limit=limit,
+            failed_only=failed_only,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to requeue instagram media mirror jobs: season=%s source_scope=%s",
+            season_id,
+            source_scope,
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

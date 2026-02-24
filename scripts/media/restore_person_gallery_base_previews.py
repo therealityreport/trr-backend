@@ -34,7 +34,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         prog="restore_person_gallery_base_previews",
         description=(
             "Reset person gallery auto-crop preview state to base previews only "
-            "(cast_photos metadata + media_links context)."
+            "(cast_photos metadata + media_links context). "
+            "This is a preview-state rollback and does not repair original hosted-file integrity."
         ),
     )
     target = parser.add_mutually_exclusive_group(required=True)

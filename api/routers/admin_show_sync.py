@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+import hashlib
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
@@ -45,6 +46,24 @@ from trr_backend.ingestion.show_importer import (
     upsert_candidates_into_supabase,
 )
 from trr_backend.integrations.tmdb.client import resolve_api_key
+from trr_backend.media.s3_mirror import (
+    build_hosted_url,
+    build_logo_s3_key,
+    build_show_image_s3_key,
+    download_image,
+    get_s3_bucket,
+    get_s3_client,
+    guess_ext_from_content_type,
+    mirror_external_logo_row,
+    mirror_logo_monochrome_variants_row,
+    upload_bytes_to_s3,
+)
+from trr_backend.repositories.media_assets import update_asset_with_mirror_result
+from trr_backend.repositories.web_scrape_images import (
+    create_media_asset_from_scrape,
+    create_media_link_for_entity,
+    find_asset_by_sha256,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +388,41 @@ class PatchNetworksStreamingOverrideRequest(BaseModel):
     aliases_override: list[str] | None = None
     notes: str | None = None
     is_active: bool | None = None
+
+
+LogoImportTargetType = Literal["show", "network", "streaming", "production"]
+
+
+class LogoImportUrlRequest(BaseModel):
+    target_type: LogoImportTargetType
+    source_url: str
+    set_primary: bool = False
+    show_id: UUID | None = None
+    network_id: int | None = None
+    provider_id: int | None = None
+    production_company_id: int | None = None
+    entity_key: str | None = None
+
+
+class LogoSetPrimaryRequest(BaseModel):
+    target_type: LogoImportTargetType
+    asset_id: str
+    show_id: UUID | None = None
+    network_id: int | None = None
+    provider_id: int | None = None
+    production_company_id: int | None = None
+    entity_key: str | None = None
+
+
+class LogoImportResponse(BaseModel):
+    status: Literal["imported", "skipped", "failed"]
+    target_type: LogoImportTargetType
+    target_id: str
+    target_key: str | None = None
+    asset_id: str | None = None
+    hosted_logo_url: str | None = None
+    set_primary: bool = False
+    message: str | None = None
 
 
 @router.post("/sync-from-lists", response_model=SyncFromListsResponse)
@@ -698,6 +752,367 @@ def _sanitize_override_payload(raw: dict, *, partial: bool) -> dict:
     return payload
 
 
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _detect_base_logo_format(*, source_url: str | None = None, content_type: str | None = None) -> str:
+    source = _text(source_url).lower()
+    ct = _text(content_type).lower()
+    if ".svg" in source or ct == "image/svg+xml":
+        return "svg"
+    if ".png" in source or ct == "image/png":
+        return "png"
+    if ".webp" in source or ct == "image/webp":
+        return "webp"
+    if any(ext in source for ext in (".jpg", ".jpeg")) or ct in {"image/jpeg", "image/jpg"}:
+        return "jpg"
+    return "unknown"
+
+
+def _upsert_logo_import_audit(
+    db: SupabaseAdminClient,
+    *,
+    target_type: LogoImportTargetType,
+    target_id: str,
+    target_key: str | None,
+    source_type: Literal["url", "file"],
+    source_url: str | None,
+    uploaded_filename: str | None,
+    hosted_logo_url: str | None,
+    hosted_logo_sha256: str | None,
+    status: Literal["imported", "skipped", "failed"],
+    failure_reason: str | None,
+    created_by: str | None,
+) -> None:
+    payload = {
+        "target_type": target_type,
+        "target_id": target_id,
+        "target_key": target_key,
+        "source_type": source_type,
+        "source_url": source_url,
+        "uploaded_filename": uploaded_filename,
+        "hosted_logo_url": hosted_logo_url,
+        "hosted_logo_sha256": hosted_logo_sha256,
+        "status": status,
+        "failure_reason": failure_reason,
+        "created_by": created_by,
+    }
+    response = db.schema("admin").table("entity_logo_imports").insert(payload).execute()
+    if hasattr(response, "error") and response.error:
+        logger.warning("Failed to write admin.entity_logo_imports row: %s", response.error)
+
+
+def _dimension_target_config(target_type: Literal["network", "streaming", "production"]) -> dict[str, str]:
+    if target_type == "network":
+        return {
+            "table": "networks",
+            "id_field": "id",
+            "name_field": "name",
+            "entity_type": "network",
+            "logo_kind": "networks",
+        }
+    if target_type == "streaming":
+        return {
+            "table": "watch_providers",
+            "id_field": "provider_id",
+            "name_field": "provider_name",
+            "entity_type": "streaming",
+            "logo_kind": "watch-providers",
+        }
+    return {
+        "table": "production_companies",
+        "id_field": "id",
+        "name_field": "name",
+        "entity_type": "production",
+        "logo_kind": "production-companies",
+    }
+
+
+def _resolve_dimension_target(
+    db: SupabaseAdminClient,
+    *,
+    target_type: Literal["network", "streaming", "production"],
+    explicit_id: int | None,
+    entity_key: str | None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    config = _dimension_target_config(target_type)
+    table = config["table"]
+    id_field = config["id_field"]
+    name_field = config["name_field"]
+
+    query = db.schema("core").table(table).select("*")
+    if explicit_id is not None:
+        response = query.eq(id_field, explicit_id).limit(1).execute()
+    else:
+        key = _text(entity_key).casefold()
+        if not key:
+            raise HTTPException(status_code=400, detail="Missing target identifier")
+        response = query.ilike(name_field, key).limit(1).execute()
+
+    if hasattr(response, "error") and response.error:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch {table} row: {response.error}")
+    rows = response.data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"{target_type} target not found")
+    row = rows[0]
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=404, detail=f"{target_type} target not found")
+    return row, config
+
+
+def _upsert_dimension_logo_asset_row(
+    db: SupabaseAdminClient,
+    *,
+    entity_type: Literal["network", "streaming", "production"],
+    entity_key: str,
+    entity_id: str,
+    display_name: str,
+    source_url: str,
+    source_rank: int,
+    mirror_status: Literal["mirrored", "skipped", "failed"],
+    failure_reason: str | None,
+    patch: dict[str, Any],
+    is_primary: bool,
+) -> None:
+    payload = {
+        "entity_type": entity_type,
+        "entity_key": entity_key,
+        "entity_id": entity_id or None,
+        "display_name": display_name,
+        "source": "override",
+        "source_url": source_url,
+        "source_rank": source_rank,
+        "run_id": f"manual-{datetime.now(tz=UTC).strftime('%Y%m%dT%H%M%SZ')}",
+        "hosted_logo_key": patch.get("hosted_logo_key"),
+        "hosted_logo_url": patch.get("hosted_logo_url"),
+        "hosted_logo_sha256": patch.get("hosted_logo_sha256"),
+        "hosted_logo_content_type": patch.get("hosted_logo_content_type"),
+        "hosted_logo_bytes": patch.get("hosted_logo_bytes"),
+        "hosted_logo_etag": patch.get("hosted_logo_etag"),
+        "base_logo_format": _detect_base_logo_format(
+            source_url=source_url,
+            content_type=_text(patch.get("hosted_logo_content_type")) or None,
+        ),
+        "mirror_status": mirror_status,
+        "failure_reason": failure_reason,
+        "is_primary": is_primary,
+        "updated_at": datetime.now(tz=UTC).isoformat(),
+    }
+    response = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .upsert(payload, on_conflict="entity_type,entity_key,source,source_url")
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise HTTPException(status_code=502, detail=f"Failed to upsert logo asset row: {response.error}")
+
+
+def _set_dimension_asset_primary_flag(
+    db: SupabaseAdminClient,
+    *,
+    entity_type: Literal["network", "streaming", "production"],
+    entity_key: str,
+    source_url: str,
+) -> None:
+    reset = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .update({"is_primary": False, "updated_at": datetime.now(tz=UTC).isoformat()})
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+        .execute()
+    )
+    if hasattr(reset, "error") and reset.error:
+        raise HTTPException(status_code=502, detail=f"Failed to reset logo asset primary flags: {reset.error}")
+
+    set_primary = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .update({"is_primary": True, "updated_at": datetime.now(tz=UTC).isoformat()})
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+        .eq("source", "override")
+        .eq("source_url", source_url)
+        .execute()
+    )
+    if hasattr(set_primary, "error") and set_primary.error:
+        raise HTTPException(status_code=502, detail=f"Failed to set logo asset primary flag: {set_primary.error}")
+
+
+def _set_show_logo_primary(db: SupabaseAdminClient, *, show_id: str, media_asset_id: str) -> None:
+    reset = (
+        db.schema("core")
+        .table("media_links")
+        .update({"is_primary": False, "updated_at": datetime.now(tz=UTC).isoformat()})
+        .eq("entity_type", "show")
+        .eq("entity_id", show_id)
+        .eq("kind", "logo")
+        .execute()
+    )
+    if hasattr(reset, "error") and reset.error:
+        raise HTTPException(status_code=502, detail=f"Failed to reset show logo primary flags: {reset.error}")
+
+    set_primary = (
+        db.schema("core")
+        .table("media_links")
+        .update({"is_primary": True, "updated_at": datetime.now(tz=UTC).isoformat()})
+        .eq("entity_type", "show")
+        .eq("entity_id", show_id)
+        .eq("kind", "logo")
+        .eq("media_asset_id", media_asset_id)
+        .execute()
+    )
+    if hasattr(set_primary, "error") and set_primary.error:
+        raise HTTPException(status_code=502, detail=f"Failed to set show logo primary flag: {set_primary.error}")
+
+
+def _import_show_logo_bytes(
+    db: SupabaseAdminClient,
+    *,
+    show_row: dict[str, Any],
+    image_bytes: bytes,
+    content_type: str,
+    source_url: str,
+    set_primary: bool,
+) -> LogoImportResponse:
+    show_id = _text(show_row.get("id"))
+    if not show_id:
+        raise HTTPException(status_code=404, detail="Show target not found")
+
+    sha256 = hashlib.sha256(image_bytes).hexdigest()
+    existing_asset = find_asset_by_sha256(db, sha256)
+
+    if existing_asset and _text(existing_asset.get("id")):
+        asset_id = _text(existing_asset.get("id"))
+        hosted_url = _text(existing_asset.get("hosted_url"))
+
+        if not hosted_url:
+            s3_client = get_s3_client()
+            show_identifier = _text(show_row.get("imdb_id")) or show_id
+            ext = guess_ext_from_content_type(content_type)
+            key = build_show_image_s3_key(
+                show_identifier=show_identifier,
+                kind="logo",
+                source="manual-logo-import",
+                sha256=sha256,
+                ext=ext,
+            )
+            bucket = get_s3_bucket()
+            etag, file_size = upload_bytes_to_s3(
+                s3_client,
+                bucket=bucket,
+                key=key,
+                data=image_bytes,
+                content_type=content_type,
+            )
+            hosted_url = build_hosted_url(key)
+            update_asset_with_mirror_result(
+                db,
+                asset_id=asset_id,
+                sha256=sha256,
+                hosted_bucket=bucket,
+                hosted_key=key,
+                hosted_url=hosted_url,
+                hosted_bytes=file_size,
+                hosted_content_type=content_type,
+                hosted_etag=etag,
+                completed_at=datetime.now(tz=UTC).isoformat(),
+            )
+
+        create_media_link_for_entity(
+            db,
+            entity_type="show",
+            entity_id=show_id,
+            media_asset_id=asset_id,
+            kind="logo",
+            position=0,
+            context={
+                "source": "manual_logo_import",
+                "source_url": source_url,
+            },
+        )
+        if set_primary:
+            _set_show_logo_primary(db, show_id=show_id, media_asset_id=asset_id)
+
+        return LogoImportResponse(
+            status="skipped",
+            target_type="show",
+            target_id=show_id,
+            target_key=_text(show_row.get("canonical_slug")) or None,
+            asset_id=asset_id,
+            hosted_logo_url=hosted_url or None,
+            set_primary=set_primary,
+            message="Existing asset reused",
+        )
+
+    s3_client = get_s3_client()
+    show_identifier = _text(show_row.get("imdb_id")) or show_id
+    ext = guess_ext_from_content_type(content_type)
+    key = build_show_image_s3_key(
+        show_identifier=show_identifier,
+        kind="logo",
+        source="manual-logo-import",
+        sha256=sha256,
+        ext=ext,
+    )
+    bucket = get_s3_bucket()
+    etag, file_size = upload_bytes_to_s3(
+        s3_client,
+        bucket=bucket,
+        key=key,
+        data=image_bytes,
+        content_type=content_type,
+    )
+    hosted_url = build_hosted_url(key)
+
+    asset = create_media_asset_from_scrape(
+        db,
+        source="manual_logo_import",
+        source_url=source_url,
+        sha256=sha256,
+        hosted_bucket=bucket,
+        hosted_key=key,
+        hosted_url=hosted_url,
+        hosted_bytes=file_size,
+        hosted_etag=etag,
+        content_type=content_type,
+        width=None,
+        height=None,
+        caption=None,
+        metadata={"kind": "logo", "source_url": source_url},
+    )
+    asset_id = _text(asset.get("id"))
+    if not asset_id:
+        raise HTTPException(status_code=500, detail="Failed to create media asset")
+
+    create_media_link_for_entity(
+        db,
+        entity_type="show",
+        entity_id=show_id,
+        media_asset_id=asset_id,
+        kind="logo",
+        position=0,
+        context={
+            "source": "manual_logo_import",
+            "source_url": source_url,
+        },
+    )
+    if set_primary:
+        _set_show_logo_primary(db, show_id=show_id, media_asset_id=asset_id)
+
+    return LogoImportResponse(
+        status="imported",
+        target_type="show",
+        target_id=show_id,
+        target_key=_text(show_row.get("canonical_slug")) or None,
+        asset_id=asset_id,
+        hosted_logo_url=hosted_url,
+        set_primary=set_primary,
+    )
+
+
 def _run_script_step_with_metrics(
     name: str,
     fn: Callable[[list[str] | None], int],
@@ -1023,6 +1438,476 @@ def delete_networks_streaming_override(
     if not (response.data or []):
         raise HTTPException(status_code=404, detail=f"Override {override_id} not found")
     return {"status": "deleted", "id": str(override_id)}
+
+
+@router.post("/logos/import-url", response_model=LogoImportResponse)
+def import_logo_url(
+    payload: LogoImportUrlRequest,
+    db: SupabaseAdminClient = None,
+    admin: AdminUser = None,
+) -> LogoImportResponse:
+    source_url = _text(payload.source_url)
+    if not source_url.startswith("http://") and not source_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="source_url must be an absolute http(s) URL")
+
+    admin_email = _text(getattr(admin, "email", "")) or None
+
+    if payload.target_type == "show":
+        show_id = str(payload.show_id) if payload.show_id else ""
+        if not show_id:
+            raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
+        show_response = (
+            db.schema("core")
+            .table("shows")
+            .select("id,imdb_id,canonical_slug")
+            .eq("id", show_id)
+            .limit(1)
+            .execute()
+        )
+        if hasattr(show_response, "error") and show_response.error:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch show row: {show_response.error}")
+        rows = show_response.data or []
+        if not rows:
+            raise HTTPException(status_code=404, detail="Show target not found")
+        show_row = rows[0]
+
+        try:
+            image_bytes, content_type = download_image(source_url, source="manual_logo_import", referer=source_url)
+            response = _import_show_logo_bytes(
+                db,
+                show_row=show_row,
+                image_bytes=image_bytes,
+                content_type=content_type or "application/octet-stream",
+                source_url=source_url,
+                set_primary=bool(payload.set_primary),
+            )
+            _upsert_logo_import_audit(
+                db,
+                target_type="show",
+                target_id=show_id,
+                target_key=_text(show_row.get("canonical_slug")) or None,
+                source_type="url",
+                source_url=source_url,
+                uploaded_filename=None,
+                hosted_logo_url=response.hosted_logo_url,
+                hosted_logo_sha256=None,
+                status=response.status,
+                failure_reason=None,
+                created_by=admin_email,
+            )
+            return response
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _upsert_logo_import_audit(
+                db,
+                target_type="show",
+                target_id=show_id,
+                target_key=None,
+                source_type="url",
+                source_url=source_url,
+                uploaded_filename=None,
+                hosted_logo_url=None,
+                hosted_logo_sha256=None,
+                status="failed",
+                failure_reason=str(exc),
+                created_by=admin_email,
+            )
+            raise HTTPException(status_code=502, detail=f"Logo import failed: {exc}") from exc
+
+    explicit_id = payload.network_id
+    if payload.target_type == "streaming":
+        explicit_id = payload.provider_id
+    if payload.target_type == "production":
+        explicit_id = payload.production_company_id
+
+    target_row, config = _resolve_dimension_target(
+        db,
+        target_type=payload.target_type,  # type: ignore[arg-type]
+        explicit_id=explicit_id,
+        entity_key=payload.entity_key,
+    )
+    table = config["table"]
+    id_field = config["id_field"]
+    name_field = config["name_field"]
+    entity_type = config["entity_type"]  # type: ignore[assignment]
+    logo_kind = config["logo_kind"]
+    entity_id = _text(target_row.get(id_field))
+    display_name = _text(target_row.get(name_field))
+    entity_key = display_name.casefold()
+
+    try:
+        patch = (
+            mirror_external_logo_row(
+                {
+                    id_field: target_row.get(id_field),
+                    "hosted_logo_url": None,
+                    "hosted_logo_key": None,
+                    "hosted_logo_sha256": None,
+                },
+                kind=logo_kind,
+                id_field=id_field,
+                source_url=source_url,
+                force=bool(payload.set_primary),
+                s3_client=get_s3_client(),
+                source="override",
+            )
+            or {}
+        )
+        mirror_status: Literal["mirrored", "skipped", "failed"] = "mirrored" if patch else "failed"
+        failure_reason = None if patch else "logo_decode_failed"
+
+        if payload.set_primary and patch:
+            update_patch = dict(patch)
+            variant_patch = mirror_logo_monochrome_variants_row(
+                {**target_row, **patch},
+                kind=logo_kind,
+                id_field=id_field,
+                source_url=_text(patch.get("hosted_logo_url")) or source_url,
+                force=True,
+                s3_client=get_s3_client(),
+                source="override",
+            )
+            if variant_patch and isinstance(variant_patch.patch, dict):
+                update_patch.update(variant_patch.patch)
+            core_update = db.schema("core").table(table).update(update_patch).eq(id_field, target_row.get(id_field)).execute()
+            if hasattr(core_update, "error") and core_update.error:
+                raise HTTPException(status_code=502, detail=f"Failed to update {table} row: {core_update.error}")
+
+        _upsert_dimension_logo_asset_row(
+            db,
+            entity_type=entity_type,  # type: ignore[arg-type]
+            entity_key=entity_key,
+            entity_id=entity_id,
+            display_name=display_name,
+            source_url=source_url,
+            source_rank=0,
+            mirror_status=mirror_status,
+            failure_reason=failure_reason,
+            patch=patch,
+            is_primary=bool(payload.set_primary and patch),
+        )
+        if payload.set_primary and patch:
+            _set_dimension_asset_primary_flag(
+                db,
+                entity_type=entity_type,  # type: ignore[arg-type]
+                entity_key=entity_key,
+                source_url=source_url,
+            )
+
+        status: Literal["imported", "skipped", "failed"] = "imported" if patch else "failed"
+        response = LogoImportResponse(
+            status=status,
+            target_type=payload.target_type,
+            target_id=entity_id,
+            target_key=entity_key,
+            asset_id=None,
+            hosted_logo_url=_text(patch.get("hosted_logo_url")) or None,
+            set_primary=bool(payload.set_primary),
+            message=None if patch else "Unable to mirror source URL",
+        )
+        _upsert_logo_import_audit(
+            db,
+            target_type=payload.target_type,
+            target_id=entity_id,
+            target_key=entity_key,
+            source_type="url",
+            source_url=source_url,
+            uploaded_filename=None,
+            hosted_logo_url=response.hosted_logo_url,
+            hosted_logo_sha256=_text(patch.get("hosted_logo_sha256")) or None,
+            status=response.status,
+            failure_reason=response.message,
+            created_by=admin_email,
+        )
+        return response
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _upsert_logo_import_audit(
+            db,
+            target_type=payload.target_type,
+            target_id=entity_id,
+            target_key=entity_key,
+            source_type="url",
+            source_url=source_url,
+            uploaded_filename=None,
+            hosted_logo_url=None,
+            hosted_logo_sha256=None,
+            status="failed",
+            failure_reason=str(exc),
+            created_by=admin_email,
+        )
+        raise HTTPException(status_code=502, detail=f"Logo import failed: {exc}") from exc
+
+
+@router.post("/logos/import-file", response_model=LogoImportResponse)
+async def import_logo_file(
+    target_type: LogoImportTargetType = Form(...),
+    set_primary: bool = Form(False),
+    show_id: str | None = Form(None),
+    network_id: int | None = Form(None),
+    provider_id: int | None = Form(None),
+    production_company_id: int | None = Form(None),
+    entity_key: str | None = Form(None),
+    file: UploadFile = File(...),
+    db: SupabaseAdminClient = None,
+    admin: AdminUser = None,
+) -> LogoImportResponse:
+    filename = _text(file.filename) or "upload"
+    content_type = _text(file.content_type) or "application/octet-stream"
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    admin_email = _text(getattr(admin, "email", "")) or None
+    source_url = f"upload://{filename}"
+
+    if target_type == "show":
+        if not show_id:
+            raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
+        show_response = db.schema("core").table("shows").select("id,imdb_id,canonical_slug").eq("id", show_id).limit(1).execute()
+        if hasattr(show_response, "error") and show_response.error:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch show row: {show_response.error}")
+        rows = show_response.data or []
+        if not rows:
+            raise HTTPException(status_code=404, detail="Show target not found")
+        show_row = rows[0]
+        response = _import_show_logo_bytes(
+            db,
+            show_row=show_row,
+            image_bytes=image_bytes,
+            content_type=content_type,
+            source_url=source_url,
+            set_primary=set_primary,
+        )
+        _upsert_logo_import_audit(
+            db,
+            target_type="show",
+            target_id=show_id,
+            target_key=_text(show_row.get("canonical_slug")) or None,
+            source_type="file",
+            source_url=None,
+            uploaded_filename=filename,
+            hosted_logo_url=response.hosted_logo_url,
+            hosted_logo_sha256=None,
+            status=response.status,
+            failure_reason=response.message,
+            created_by=admin_email,
+        )
+        return response
+
+    explicit_id = network_id
+    if target_type == "streaming":
+        explicit_id = provider_id
+    if target_type == "production":
+        explicit_id = production_company_id
+
+    target_row, config = _resolve_dimension_target(
+        db,
+        target_type=target_type,  # type: ignore[arg-type]
+        explicit_id=explicit_id,
+        entity_key=entity_key,
+    )
+    table = config["table"]
+    id_field = config["id_field"]
+    name_field = config["name_field"]
+    entity_type = config["entity_type"]  # type: ignore[assignment]
+    logo_kind = config["logo_kind"]
+    entity_id = _text(target_row.get(id_field))
+    display_name = _text(target_row.get(name_field))
+    entity_key_value = display_name.casefold()
+
+    sha256 = hashlib.sha256(image_bytes).hexdigest()
+    ext = guess_ext_from_content_type(content_type)
+    key = build_logo_s3_key(kind=logo_kind, entity_id=entity_id, sha256=sha256, ext=ext)
+    bucket = get_s3_bucket()
+    etag, file_size = upload_bytes_to_s3(
+        get_s3_client(),
+        bucket=bucket,
+        key=key,
+        data=image_bytes,
+        content_type=content_type,
+    )
+    hosted_url = build_hosted_url(key)
+    patch = {
+        "hosted_logo_key": key,
+        "hosted_logo_url": hosted_url,
+        "hosted_logo_sha256": sha256,
+        "hosted_logo_content_type": content_type,
+        "hosted_logo_bytes": file_size,
+        "hosted_logo_etag": etag,
+        "hosted_logo_at": datetime.now(tz=UTC).isoformat(),
+    }
+
+    if set_primary:
+        variant_patch = mirror_logo_monochrome_variants_row(
+            {**target_row, **patch},
+            kind=logo_kind,
+            id_field=id_field,
+            source_url=hosted_url,
+            force=True,
+            s3_client=get_s3_client(),
+            source="override",
+        )
+        if variant_patch and isinstance(variant_patch.patch, dict):
+            patch.update(variant_patch.patch)
+        core_update = db.schema("core").table(table).update(patch).eq(id_field, target_row.get(id_field)).execute()
+        if hasattr(core_update, "error") and core_update.error:
+            raise HTTPException(status_code=502, detail=f"Failed to update {table} row: {core_update.error}")
+
+    _upsert_dimension_logo_asset_row(
+        db,
+        entity_type=entity_type,  # type: ignore[arg-type]
+        entity_key=entity_key_value,
+        entity_id=entity_id,
+        display_name=display_name,
+        source_url=source_url,
+        source_rank=0,
+        mirror_status="mirrored",
+        failure_reason=None,
+        patch=patch,
+        is_primary=bool(set_primary),
+    )
+    if set_primary:
+        _set_dimension_asset_primary_flag(
+            db,
+            entity_type=entity_type,  # type: ignore[arg-type]
+            entity_key=entity_key_value,
+            source_url=source_url,
+        )
+
+    response = LogoImportResponse(
+        status="imported",
+        target_type=target_type,
+        target_id=entity_id,
+        target_key=entity_key_value,
+        hosted_logo_url=hosted_url,
+        set_primary=set_primary,
+    )
+    _upsert_logo_import_audit(
+        db,
+        target_type=target_type,
+        target_id=entity_id,
+        target_key=entity_key_value,
+        source_type="file",
+        source_url=None,
+        uploaded_filename=filename,
+        hosted_logo_url=hosted_url,
+        hosted_logo_sha256=sha256,
+        status=response.status,
+        failure_reason=None,
+        created_by=admin_email,
+    )
+    return response
+
+
+@router.post("/logos/set-primary", response_model=LogoImportResponse)
+def set_logo_primary(
+    payload: LogoSetPrimaryRequest,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> LogoImportResponse:
+    if payload.target_type == "show":
+        show_id = str(payload.show_id) if payload.show_id else ""
+        if not show_id:
+            raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
+        asset_id = _text(payload.asset_id)
+        if not asset_id:
+            raise HTTPException(status_code=400, detail="asset_id is required")
+        _set_show_logo_primary(db, show_id=show_id, media_asset_id=asset_id)
+        return LogoImportResponse(
+            status="imported",
+            target_type="show",
+            target_id=show_id,
+            asset_id=asset_id,
+            set_primary=True,
+        )
+
+    target_type = payload.target_type
+    if target_type not in {"network", "streaming", "production"}:
+        raise HTTPException(status_code=400, detail="Unsupported target_type")
+
+    explicit_id = payload.network_id
+    if target_type == "streaming":
+        explicit_id = payload.provider_id
+    if target_type == "production":
+        explicit_id = payload.production_company_id
+
+    target_row, config = _resolve_dimension_target(
+        db,
+        target_type=target_type,
+        explicit_id=explicit_id,
+        entity_key=payload.entity_key,
+    )
+    id_field = config["id_field"]
+    name_field = config["name_field"]
+    entity_id = _text(target_row.get(id_field))
+    entity_key = _text(target_row.get(name_field)).casefold()
+    logo_kind = config["logo_kind"]
+    table = config["table"]
+
+    asset_response = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .select("*")
+        .eq("id", _text(payload.asset_id))
+        .limit(1)
+        .execute()
+    )
+    if hasattr(asset_response, "error") and asset_response.error:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch logo asset row: {asset_response.error}")
+    asset_rows = asset_response.data or []
+    if not asset_rows:
+        raise HTTPException(status_code=404, detail="Logo asset row not found")
+    asset_row = asset_rows[0]
+    if _text(asset_row.get("entity_type")) != target_type or _text(asset_row.get("entity_key")) != entity_key:
+        raise HTTPException(status_code=400, detail="Logo asset does not belong to target entity")
+
+    patch = {
+        "hosted_logo_key": asset_row.get("hosted_logo_key"),
+        "hosted_logo_url": asset_row.get("hosted_logo_url"),
+        "hosted_logo_sha256": asset_row.get("hosted_logo_sha256"),
+        "hosted_logo_content_type": asset_row.get("hosted_logo_content_type"),
+        "hosted_logo_bytes": asset_row.get("hosted_logo_bytes"),
+        "hosted_logo_etag": asset_row.get("hosted_logo_etag"),
+        "hosted_logo_at": datetime.now(tz=UTC).isoformat(),
+    }
+    hosted_logo_url = _text(asset_row.get("hosted_logo_url"))
+    if hosted_logo_url:
+        variant_patch = mirror_logo_monochrome_variants_row(
+            {**target_row, **patch},
+            kind=logo_kind,
+            id_field=id_field,
+            source_url=hosted_logo_url,
+            force=False,
+            s3_client=get_s3_client(),
+            source="override",
+        )
+        if variant_patch and isinstance(variant_patch.patch, dict):
+            patch.update(variant_patch.patch)
+
+    core_update = db.schema("core").table(table).update(patch).eq(id_field, target_row.get(id_field)).execute()
+    if hasattr(core_update, "error") and core_update.error:
+        raise HTTPException(status_code=502, detail=f"Failed to update {table} row: {core_update.error}")
+
+    _set_dimension_asset_primary_flag(
+        db,
+        entity_type=target_type,
+        entity_key=entity_key,
+        source_url=_text(asset_row.get("source_url")),
+    )
+    return LogoImportResponse(
+        status="imported",
+        target_type=target_type,
+        target_id=entity_id,
+        target_key=entity_key,
+        hosted_logo_url=hosted_logo_url or None,
+        set_primary=True,
+    )
 
 
 ShowRefreshTarget = Literal["details", "seasons_episodes", "photos", "cast_credits"]

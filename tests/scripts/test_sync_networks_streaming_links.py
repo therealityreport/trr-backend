@@ -237,28 +237,34 @@ def test_process_entity_records_unresolved_when_variant_generation_fails() -> No
             "mirror_external_logo_row",
             return_value={"hosted_logo_url": "https://cdn.example.com/peacock.png"},
         ):
-            with patch.object(mod, "_load_existing_logo_assets_sha", return_value=set()):
-                with patch.object(mod, "_upsert_logo_asset"):
-                    with patch.object(mod, "_reset_logo_asset_primary_flags"):
-                        with patch.object(mod, "_mark_logo_asset_primary"):
-                            with patch.object(
-                                mod,
-                                "mirror_logo_monochrome_variants_row",
-                                side_effect=RuntimeError("transparent_extraction_failed"),
-                            ):
-                                with patch.object(mod, "_update_core_row"):
-                                    with patch.object(mod, "_upsert_completion", return_value={"id": "completion-1"}):
-                                        with patch.object(mod, "_insert_attempts"):
-                                            mod._process_entity(
-                                                db=object(),
-                                                entity=entity,
-                                                core_row=core_row,
-                                                override=None,
-                                                run_id="test-run",
-                                                args=_args(skip_s3=False, dry_run=False),
-                                                summary=summary,
-                                                s3_client=object(),
-                                            )
+            with patch.object(mod, "_load_existing_logo_asset_source_urls", return_value={}):
+                with patch.object(mod, "_load_existing_logo_assets_sha", return_value=set()):
+                    with patch.object(mod, "_load_existing_logo_asset_index", return_value={}):
+                        with patch.object(mod, "_upsert_logo_asset"):
+                            with patch.object(mod, "_reset_logo_asset_primary_flags"):
+                                with patch.object(mod, "_mark_logo_asset_primary"):
+                                    with patch.object(
+                                        mod,
+                                        "mirror_logo_monochrome_variants_row",
+                                        side_effect=RuntimeError("transparent_extraction_failed"),
+                                    ):
+                                        with patch.object(mod, "_update_core_row"):
+                                            with patch.object(
+                                                mod,
+                                                "_upsert_completion",
+                                                return_value={"id": "completion-1"},
+                                            ):
+                                                with patch.object(mod, "_insert_attempts"):
+                                                    mod._process_entity(
+                                                        db=object(),
+                                                        entity=entity,
+                                                        core_row=core_row,
+                                                        override=None,
+                                                        run_id="test-run",
+                                                        args=_args(skip_s3=False, dry_run=False),
+                                                        summary=summary,
+                                                        s3_client=object(),
+                                                    )
 
     assert summary.logos_mirrored == 1
     assert len(summary.unresolved_logos) == 1
@@ -346,40 +352,42 @@ def test_process_entity_mirrors_all_logo_candidates_with_url_and_sha_dedupe() ->
         },
     ):
         with patch.object(mod, "_collect_external_logo_candidates", return_value=({}, [], None)):
-            with patch.object(mod, "_load_existing_logo_assets_sha", return_value=set()):
-                with patch.object(mod, "mirror_external_logo_row", side_effect=fake_mirror):
-                    with patch.object(
-                        mod,
-                        "mirror_logo_monochrome_variants_row",
-                        return_value=mod.MonochromeLogoMirrorResult(
-                            patch={
-                                "hosted_logo_black_url": "https://cdn.example.com/bravo-black.png",
-                                "hosted_logo_white_url": "https://cdn.example.com/bravo-white.png",
-                            },
-                            black_mirrored=1,
-                            white_mirrored=1,
-                        ),
-                    ) as mirror_variants:
-                        with patch.object(mod, "_upsert_logo_asset") as upsert_asset:
-                            with patch.object(mod, "_reset_logo_asset_primary_flags") as reset_primary:
-                                with patch.object(mod, "_mark_logo_asset_primary") as mark_primary:
-                                    with patch.object(mod, "_update_core_row") as update_core_row:
-                                        with patch.object(
-                                            mod,
-                                            "_upsert_completion",
-                                            return_value={"id": "completion-1"},
-                                        ):
-                                            with patch.object(mod, "_insert_attempts"):
-                                                mod._process_entity(
-                                                    db=object(),
-                                                    entity=entity,
-                                                    core_row=core_row,
-                                                    override=override,
-                                                    run_id="test-run",
-                                                    args=_args(skip_s3=False, dry_run=False),
-                                                    summary=summary,
-                                                    s3_client=object(),
-                                                )
+            with patch.object(mod, "_load_existing_logo_asset_source_urls", return_value={}):
+                with patch.object(mod, "_load_existing_logo_assets_sha", return_value=set()):
+                    with patch.object(mod, "_load_existing_logo_asset_index", return_value={}):
+                        with patch.object(mod, "mirror_external_logo_row", side_effect=fake_mirror):
+                            with patch.object(
+                                mod,
+                                "mirror_logo_monochrome_variants_row",
+                                return_value=mod.MonochromeLogoMirrorResult(
+                                    patch={
+                                        "hosted_logo_black_url": "https://cdn.example.com/bravo-black.png",
+                                        "hosted_logo_white_url": "https://cdn.example.com/bravo-white.png",
+                                    },
+                                    black_mirrored=1,
+                                    white_mirrored=1,
+                                ),
+                            ) as mirror_variants:
+                                with patch.object(mod, "_upsert_logo_asset") as upsert_asset:
+                                    with patch.object(mod, "_reset_logo_asset_primary_flags") as reset_primary:
+                                        with patch.object(mod, "_mark_logo_asset_primary") as mark_primary:
+                                            with patch.object(mod, "_update_core_row") as update_core_row:
+                                                with patch.object(
+                                                    mod,
+                                                    "_upsert_completion",
+                                                    return_value={"id": "completion-1"},
+                                                ):
+                                                    with patch.object(mod, "_insert_attempts"):
+                                                        mod._process_entity(
+                                                            db=object(),
+                                                            entity=entity,
+                                                            core_row=core_row,
+                                                            override=override,
+                                                            run_id="test-run",
+                                                            args=_args(skip_s3=False, dry_run=False),
+                                                            summary=summary,
+                                                            s3_client=object(),
+                                                        )
 
     assert summary.logo_assets_discovered == 4
     assert summary.logo_assets_mirrored == 2
@@ -407,6 +415,189 @@ def test_process_entity_mirrors_all_logo_candidates_with_url_and_sha_dedupe() ->
     update_core_row.assert_called_once()
     mirror_variants.assert_called_once()
     assert summary.unresolved_logos == []
+
+
+def test_process_entity_reuses_cached_sources_without_requerying_external_discovery() -> None:
+    entity = mod.InventoryEntity(
+        entity_type="network",
+        entity_key="bravo",
+        display_name="Bravo",
+        available_show_count=12,
+        added_show_count=5,
+    )
+    core_row = {
+        "id": 77,
+        "name": "Bravo",
+        "hosted_logo_url": None,
+        "hosted_logo_black_url": None,
+        "hosted_logo_white_url": None,
+        "wikidata_id": "Q902771",
+        "wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+        "wikimedia_logo_file": None,
+    }
+    summary = mod.SyncSummary()
+
+    with patch.object(
+        mod,
+        "_resolve_entity_metadata",
+        return_value={
+            "wikidata_id": "Q902771",
+            "wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+            "wikimedia_logo_file": None,
+        },
+    ):
+        with patch.object(
+            mod,
+            "_load_existing_logo_asset_source_urls",
+            return_value={
+                "official": ["https://logos.example.com/bravo-primary.png"],
+                "catalog": ["https://logos.fandom.com/wiki/File:Bravo_logo.svg"],
+            },
+        ):
+            with patch.object(mod, "_collect_external_logo_candidates") as collect_external:
+                with patch.object(mod, "_load_existing_logo_assets_sha", return_value=set()):
+                    with patch.object(mod, "_load_existing_logo_asset_index", return_value={}):
+                        with patch.object(
+                            mod,
+                            "mirror_external_logo_row",
+                            return_value={
+                                "hosted_logo_url": "https://cdn.example.com/bravo-primary.png",
+                                "hosted_logo_key": "logos/bravo-primary.png",
+                                "hosted_logo_sha256": "sha-primary",
+                            },
+                        ):
+                            with patch.object(
+                                mod,
+                                "mirror_logo_monochrome_variants_row",
+                                return_value=mod.MonochromeLogoMirrorResult(
+                                    patch={
+                                        "hosted_logo_black_url": "https://cdn.example.com/bravo-black.png",
+                                        "hosted_logo_white_url": "https://cdn.example.com/bravo-white.png",
+                                    },
+                                    black_mirrored=1,
+                                    white_mirrored=1,
+                                ),
+                            ):
+                                with patch.object(mod, "_upsert_logo_asset"):
+                                    with patch.object(mod, "_reset_logo_asset_primary_flags"):
+                                        with patch.object(mod, "_mark_logo_asset_primary"):
+                                            with patch.object(mod, "_update_core_row"):
+                                                with patch.object(
+                                                    mod,
+                                                    "_upsert_completion",
+                                                    return_value={"id": "completion-1"},
+                                                ):
+                                                    with patch.object(mod, "_insert_attempts"):
+                                                        mod._process_entity(
+                                                            db=object(),
+                                                            entity=entity,
+                                                            core_row=core_row,
+                                                            override=None,
+                                                            run_id="test-run",
+                                                            args=_args(skip_s3=False, dry_run=False),
+                                                            summary=summary,
+                                                            s3_client=object(),
+                                                        )
+
+    collect_external.assert_not_called()
+    assert summary.logo_assets_discovered >= 1
+
+
+def test_process_entity_skips_remirroring_cached_asset_urls() -> None:
+    entity = mod.InventoryEntity(
+        entity_type="network",
+        entity_key="bravo",
+        display_name="Bravo",
+        available_show_count=12,
+        added_show_count=5,
+    )
+    core_row = {
+        "id": 77,
+        "name": "Bravo",
+        "hosted_logo_url": None,
+        "hosted_logo_black_url": None,
+        "hosted_logo_white_url": None,
+        "wikidata_id": "Q902771",
+        "wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+        "wikimedia_logo_file": None,
+    }
+    summary = mod.SyncSummary()
+    cached_row = {
+        "source": "official",
+        "source_url": "https://logos.example.com/bravo-primary.png",
+        "mirror_status": "mirrored",
+        "hosted_logo_key": "logos/bravo-primary.png",
+        "hosted_logo_url": "https://cdn.example.com/bravo-primary.png",
+        "hosted_logo_sha256": "sha-primary",
+        "hosted_logo_content_type": "image/png",
+        "hosted_logo_bytes": 123,
+        "hosted_logo_etag": "etag-primary",
+        "base_logo_format": "png",
+    }
+
+    with patch.object(
+        mod,
+        "_resolve_entity_metadata",
+        return_value={
+            "wikidata_id": "Q902771",
+            "wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+            "wikimedia_logo_file": None,
+        },
+    ):
+        with patch.object(
+            mod,
+            "_load_existing_logo_asset_source_urls",
+            return_value={
+                "official": ["https://logos.example.com/bravo-primary.png"],
+                "catalog": ["https://logos.fandom.com/wiki/File:Bravo_logo.svg"],
+            },
+        ):
+            with patch.object(mod, "_load_existing_logo_assets_sha", return_value={"sha-primary"}):
+                with patch.object(
+                    mod,
+                    "_load_existing_logo_asset_index",
+                    return_value={("official", "https://logos.example.com/bravo-primary.png"): cached_row},
+                ):
+                    with patch.object(mod, "mirror_external_logo_row", return_value={}) as mirror_external:
+                        with patch.object(
+                            mod,
+                            "mirror_logo_monochrome_variants_row",
+                            return_value=mod.MonochromeLogoMirrorResult(
+                                patch={
+                                    "hosted_logo_black_url": "https://cdn.example.com/bravo-black.png",
+                                    "hosted_logo_white_url": "https://cdn.example.com/bravo-white.png",
+                                },
+                                black_mirrored=1,
+                                white_mirrored=1,
+                            ),
+                        ):
+                            with patch.object(mod, "_upsert_logo_asset"):
+                                with patch.object(mod, "_reset_logo_asset_primary_flags"):
+                                    with patch.object(mod, "_mark_logo_asset_primary"):
+                                        with patch.object(mod, "_update_core_row"):
+                                            with patch.object(
+                                                mod,
+                                                "_upsert_completion",
+                                                return_value={"id": "completion-1"},
+                                            ):
+                                                with patch.object(mod, "_insert_attempts"):
+                                                    mod._process_entity(
+                                                        db=object(),
+                                                        entity=entity,
+                                                        core_row=core_row,
+                                                        override=None,
+                                                        run_id="test-run",
+                                                        args=_args(skip_s3=False, dry_run=False),
+                                                        summary=summary,
+                                                        s3_client=object(),
+                                                    )
+
+    assert all(
+        call.kwargs.get("source_url") != "https://logos.example.com/bravo-primary.png"
+        for call in mirror_external.call_args_list
+    )
+    assert summary.logo_assets_skipped >= 1
+    assert summary.logos_mirrored == 0
 
 
 def test_run_sync_filters_to_unresolved_only() -> None:

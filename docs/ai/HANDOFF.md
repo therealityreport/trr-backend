@@ -2,6 +2,36 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-24) — Global original-integrity audit/repair script (IMDb strict hash)
+
+- February 24, 2026: Added an operational script to verify hosted/source integrity and apply repairs only for provable mismatches.
+  - Files:
+    - `scripts/media/restore_changed_originals.py` (new)
+    - `tests/scripts/test_restore_changed_originals.py` (new)
+    - `scripts/media/restore_person_gallery_base_previews.py`
+    - `scripts/media/README.md`
+  - Changes:
+    - Added strict hash audit/repair flow:
+      - candidate scope supports `cast_photos`, `media_assets`, or `both`
+      - default source filter is IMDb (`--source imdb`)
+      - classifies each candidate as `match`, `mismatch`, `unreachable`, or `error`
+      - apply mode (`--apply`) repairs only `mismatch` rows
+      - repair path uses canonical mirror functions + base variant regeneration (no crop payload)
+    - Added JSON reporting:
+      - summary totals and per-table/per-source breakdowns
+      - explicit `mismatch_ids`, `unreachable_ids`, `error_ids`, `repair_failed_ids`
+    - Clarified existing person rollback script purpose:
+      - preview-state metadata/context rollback only; not original integrity repair.
+  - Validation:
+    - `ruff check scripts/media/restore_changed_originals.py tests/scripts/test_restore_changed_originals.py` (pass)
+    - `pytest tests/scripts/test_restore_changed_originals.py -q` (`3 passed`)
+    - Runtime smoke (bounded):
+      - `PYTHONPATH=. python scripts/media/restore_changed_originals.py --source imdb --tables both --limit 40 --output-json /tmp/imdb-original-integrity-audit.json`
+      - `PYTHONPATH=. python scripts/media/restore_changed_originals.py --source imdb --tables both --limit 40 --apply --output-json /tmp/imdb-original-integrity-apply.json`
+      - result: `40/40 match`, `0 mismatch`, `0 repaired`.
+  - Notes:
+    - Full unbounded runtime pass is intentionally left as an operator-run command because it is network-bound and long-running.
+
 ## Latest Update (2026-02-24) — IMDb mediaindex tags normalized + show season/episode context enrichment
 
 - February 24, 2026: Implemented backend normalization for IMDb mediaindex rows so people/type/title tags are consistently persisted and episode context is inferred when IMDb title IDs match local episodes.
@@ -2728,3 +2758,28 @@ Continuation (same session, 2026-02-24) — Backend lint/format cleanup pass:
   - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check .` (pass)
   - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check .` (pass)
   - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q` (`741 passed`, `18 skipped`)
+
+Continuation (same session, 2026-02-24) — Week-view progress timeout hardening during comment fill:
+- Files:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+- Root cause evidence:
+  - App log showed repeated week-view polling timeouts (`/social/runs`/`/social/jobs` 504 around ~16s).
+  - Backend log showed `psycopg2.pool.PoolError: connection pool exhausted` during active ingest/poll overlap.
+  - Ingest paths held DB connections across slow external fetch loops, starving poll requests.
+- Changes:
+  - Refactored ingest loops to use short-lived DB scopes and moved remote fetches outside DB connection scopes across Instagram/TikTok/YouTube/Twitter ingest paths.
+  - Added optional `run_id` filter support to ingest runs listing in repository `list_runs(...)`.
+  - Extended `GET /api/v1/admin/socials/seasons/{season_id}/ingest/runs` route to accept/pass `run_id` and include it in response filters.
+  - Added/updated tests for `run_id` SQL filtering and API passthrough.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/social_season_analytics.py api/routers/socials.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "list_runs or ingest"` (`9 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py -k "ingest_runs"` (`3 passed`)
+- Ops note:
+  - For local high-concurrency social ingest + polling, set DB pool env to reduce starvation risk:
+    - `TRR_DB_POOL_MINCONN=2`
+    - `TRR_DB_POOL_MAXCONN=24`
+  - Local test dependency added during validation: `python-multipart` in backend venv (required for FastAPI form parsing in API test import path).

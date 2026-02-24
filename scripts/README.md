@@ -59,12 +59,14 @@ PYTHONPATH=. python scripts/backfill/backfill_tmdb_show_details.py --all --verbo
 PYTHONPATH=. python scripts/sync/sync_tmdb_show_entities.py --all --verbose
 PYTHONPATH=. python scripts/sync/sync_tmdb_watch_providers.py --all --verbose
 PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --verbose
+PYTHONPATH=. python scripts/sync/sync_show_logos.py --all --verbose
 ```
 
 `sync_networks_streaming_links.py` notes:
 - Processes only names currently used by the full shows inventory:
   - networks from `core.shows.networks`
   - streaming providers from `core.show_watch_providers` (`US`, `flatrate|ads`) plus fallback names from `core.shows.streaming_providers`.
+  - production companies from `core.shows.tmdb_production_company_ids` with fallback names from `core.shows.tmdb_meta.production_companies`.
 - Supports overrides via `admin.network_streaming_overrides` and tracks per-entity completion in:
   - `admin.network_streaming_completion`
   - `admin.network_streaming_completion_attempts`
@@ -74,6 +76,7 @@ PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --verbos
   - `hosted_logo_*`
   - `hosted_logo_black_*`
   - `hosted_logo_white_*`
+  - same parity for `core.production_companies`.
 - Use `--unresolved-only` to re-run just unresolved entities from completion state.
 - Prints both machine-readable counters and unresolved logo rows:
   - `completion_total=<count>`
@@ -85,7 +88,16 @@ PYTHONPATH=. python scripts/sync/sync_networks_streaming_links.py --all --verbos
   - `logo_assets_skipped=<count>`
   - `logo_assets_failed=<count>`
   - `unresolved_logos=<count>`
-  - `unresolved_logo={\"type\":\"network|streaming\",\"id\":\"...\",\"name\":\"...\",\"reason\":\"...\"}`
+  - `unresolved_logo={\"type\":\"network|streaming|production\",\"id\":\"...\",\"name\":\"...\",\"reason\":\"...\"}`
+
+`sync_show_logos.py` notes:
+- Harvests show-logo candidates from show homepage (`core.shows.tmdb_meta.homepage`) and Wikipedia sitelinks resolved via `core.shows.wikidata_id`.
+- Imports deduped logo assets into `core.media_assets` + `core.media_links` (`entity_type='show'`, `kind='logo'`).
+- Machine-readable counters:
+  - `show_logos_discovered=<count>`
+  - `show_logos_imported=<count>`
+  - `show_logos_skipped=<count>`
+  - `show_logo_failures=<count>`
 
 Or run the composite wrapper:
 

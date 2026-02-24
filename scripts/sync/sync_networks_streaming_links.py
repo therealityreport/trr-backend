@@ -1152,6 +1152,78 @@ def _load_existing_logo_assets_sha(
     return out
 
 
+def _load_existing_logo_asset_source_urls(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = defaultdict(list)
+    query = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .select("source,source_url")
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+        .order("source_rank")
+    )
+    for row in _iter_rows_paged(query):
+        source = _normalize_text(row.get("source")).lower()
+        source_url = _normalize_text(row.get("source_url"))
+        if not source or not source_url:
+            continue
+        bucket = out.setdefault(source, [])
+        if source_url in bucket:
+            continue
+        bucket.append(source_url)
+    return dict(out)
+
+
+def _load_existing_logo_asset_index(
+    db,
+    *,
+    entity_type: str,
+    entity_key: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    query = (
+        db.schema("admin")
+        .table("network_streaming_logo_assets")
+        .select(
+            "source,source_url,mirror_status,hosted_logo_key,hosted_logo_url,hosted_logo_sha256,"
+            "hosted_logo_content_type,hosted_logo_bytes,hosted_logo_etag,base_logo_format"
+        )
+        .eq("entity_type", entity_type)
+        .eq("entity_key", entity_key)
+    )
+    for row in _iter_rows_paged(query):
+        source = _normalize_text(row.get("source")).lower()
+        source_url = _normalize_text(row.get("source_url"))
+        if not source or not source_url:
+            continue
+        out[(source, source_url)] = row
+    return out
+
+
+def _logo_patch_from_asset_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hosted_logo_key": _normalize_text(row.get("hosted_logo_key")) or None,
+        "hosted_logo_url": _normalize_text(row.get("hosted_logo_url")) or None,
+        "hosted_logo_sha256": _normalize_text(row.get("hosted_logo_sha256")) or None,
+        "hosted_logo_content_type": _normalize_text(row.get("hosted_logo_content_type")) or None,
+        "hosted_logo_bytes": row.get("hosted_logo_bytes"),
+        "hosted_logo_etag": _normalize_text(row.get("hosted_logo_etag")) or None,
+    }
+
+
+def _source_has_logopedia_urls(urls: list[str]) -> bool:
+    for url in urls:
+        host = _normalize_text(urlparse(_normalize_text(url)).netloc).lower()
+        if host.endswith("logos.fandom.com") or host.endswith("fandom.com") or host.endswith("wikia.nocookie.net"):
+            return True
+    return False
+
+
 def _upsert_logo_asset(
     db,
     *,
@@ -1457,6 +1529,9 @@ def _collect_external_logo_candidates(
     override: OverrideConfig | None,
     context: SyncRunContext | None,
     tmdb_hints: dict[str, Any],
+    allow_brandfetch_lookup: bool,
+    allow_logopedia_lookup: bool,
+    allow_imdb_lookup: bool,
 ) -> tuple[dict[str, list[str]], list[AttemptRecord], str | None]:
     by_source: dict[str, list[str]] = defaultdict(list)
     attempts: list[AttemptRecord] = []
@@ -1494,104 +1569,128 @@ def _collect_external_logo_candidates(
         domain_seen.add(domain)
         ordered_domains.append(domain)
 
-    for domain in ordered_domains:
-        started = time.perf_counter()
-        try:
-            urls = fetch_brandfetch_logo_candidates(domain)
-            _merge_source_urls(by_source, "official", urls[:8])
-            attempts.append(
-                AttemptRecord(
-                    source="official",
-                    attempt_url=f"https://{domain}",
-                    outcome="success",
-                    failure_reason=None,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    details={"provider": "brandfetch", "candidate_count": len(urls)},
+    if allow_brandfetch_lookup:
+        for domain in ordered_domains:
+            started = time.perf_counter()
+            try:
+                urls = fetch_brandfetch_logo_candidates(domain)
+                _merge_source_urls(by_source, "official", urls[:8])
+                attempts.append(
+                    AttemptRecord(
+                        source="official",
+                        attempt_url=f"https://{domain}",
+                        outcome="success",
+                        failure_reason=None,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        details={"provider": "brandfetch", "candidate_count": len(urls)},
+                    )
                 )
-            )
-            if urls:
+                if urls:
+                    break
+            except BrandfetchAuthError:
+                reason = "brandfetch_auth_missing"
+                unresolved_reason = unresolved_reason or reason
+                attempts.append(
+                    AttemptRecord(
+                        source="official",
+                        attempt_url=f"https://{domain}",
+                        outcome="failed",
+                        failure_reason=reason,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        details={"provider": "brandfetch"},
+                    )
+                )
                 break
-        except BrandfetchAuthError:
-            reason = "brandfetch_auth_missing"
-            unresolved_reason = unresolved_reason or reason
-            attempts.append(
-                AttemptRecord(
-                    source="official",
-                    attempt_url=f"https://{domain}",
-                    outcome="failed",
-                    failure_reason=reason,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    details={"provider": "brandfetch"},
+            except BrandfetchNotFoundError:
+                reason = "brandfetch_not_found"
+                unresolved_reason = unresolved_reason or reason
+                attempts.append(
+                    AttemptRecord(
+                        source="official",
+                        attempt_url=f"https://{domain}",
+                        outcome="failed",
+                        failure_reason=reason,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        details={"provider": "brandfetch"},
+                    )
                 )
-            )
-            break
-        except BrandfetchNotFoundError:
-            reason = "brandfetch_not_found"
-            unresolved_reason = unresolved_reason or reason
-            attempts.append(
-                AttemptRecord(
-                    source="official",
-                    attempt_url=f"https://{domain}",
-                    outcome="failed",
-                    failure_reason=reason,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    details={"provider": "brandfetch"},
+            except BrandfetchRequestError as exc:
+                reason = _reason_from_exception(exc)
+                unresolved_reason = unresolved_reason or reason
+                attempts.append(
+                    AttemptRecord(
+                        source="official",
+                        attempt_url=f"https://{domain}",
+                        outcome="failed",
+                        failure_reason=reason,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        details={"provider": "brandfetch", "error": str(exc)},
+                    )
                 )
+    else:
+        attempts.append(
+            AttemptRecord(
+                source="official",
+                attempt_url=None,
+                outcome="skipped",
+                failure_reason="cached_discovery_reused",
+                duration_ms=0,
+                details={"provider": "brandfetch"},
             )
-        except BrandfetchRequestError as exc:
-            reason = _reason_from_exception(exc)
-            unresolved_reason = unresolved_reason or reason
-            attempts.append(
-                AttemptRecord(
-                    source="official",
-                    attempt_url=f"https://{domain}",
-                    outcome="failed",
-                    failure_reason=reason,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    details={"provider": "brandfetch", "error": str(exc)},
-                )
-            )
+        )
 
     aliases = [
         *([alias for alias in (tmdb_hints or {}).get("aliases") or [] if isinstance(alias, str)]),
         *([alias for alias in imdb_company_hints.get("aliases", []) if isinstance(alias, str)]),
     ]
-    try:
-        logopedia_urls = fetch_logopedia_logo_candidates(display_name, aliases=aliases)
-        _merge_source_urls(by_source, "catalog", logopedia_urls[:12])
-        attempts.append(
-            AttemptRecord(
-                source="catalog",
-                attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
-                outcome="success",
-                failure_reason=None,
-                duration_ms=0,
-                details={"provider": "logopedia", "candidate_count": len(logopedia_urls)},
+    if allow_logopedia_lookup:
+        try:
+            logopedia_urls = fetch_logopedia_logo_candidates(display_name, aliases=aliases)
+            _merge_source_urls(by_source, "catalog", logopedia_urls[:12])
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
+                    outcome="success",
+                    failure_reason=None,
+                    duration_ms=0,
+                    details={"provider": "logopedia", "candidate_count": len(logopedia_urls)},
+                )
             )
-        )
-    except LogopediaNoFilesError:
-        unresolved_reason = unresolved_reason or "logopedia_no_files"
+        except LogopediaNoFilesError:
+            unresolved_reason = unresolved_reason or "logopedia_no_files"
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
+                    outcome="failed",
+                    failure_reason="logopedia_no_files",
+                    duration_ms=0,
+                    details={"provider": "logopedia"},
+                )
+            )
+        except LogopediaRequestError as exc:
+            reason = _reason_from_exception(exc)
+            unresolved_reason = unresolved_reason or reason
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
+                    outcome="failed",
+                    failure_reason=reason,
+                    duration_ms=0,
+                    details={"provider": "logopedia", "error": str(exc)},
+                )
+            )
+    else:
         attempts.append(
             AttemptRecord(
                 source="catalog",
                 attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
-                outcome="failed",
-                failure_reason="logopedia_no_files",
+                outcome="skipped",
+                failure_reason="cached_discovery_reused",
                 duration_ms=0,
                 details={"provider": "logopedia"},
-            )
-        )
-    except LogopediaRequestError as exc:
-        reason = _reason_from_exception(exc)
-        unresolved_reason = unresolved_reason or reason
-        attempts.append(
-            AttemptRecord(
-                source="catalog",
-                attempt_url=f"https://logos.fandom.com/wiki/{_logopedia_title_slug(display_name)}",
-                outcome="failed",
-                failure_reason=reason,
-                duration_ms=0,
-                details={"provider": "logopedia", "error": str(exc)},
             )
         )
 
@@ -1626,7 +1725,7 @@ def _collect_external_logo_candidates(
             )
 
     # IMDb fallback for streaming providers.
-    if entity.entity_type == "streaming" and context is not None:
+    if entity.entity_type == "streaming" and context is not None and allow_imdb_lookup:
         provider_id = core_row.get("provider_id")
         imdb_ids = context.provider_imdb_ids_by_provider_id.get(provider_id, []) if isinstance(provider_id, int) else []
         imdb_candidates: list[str] = []
@@ -1671,6 +1770,17 @@ def _collect_external_logo_candidates(
                     details={"provider": "imdb_watch_box"},
                 )
             )
+    elif entity.entity_type == "streaming" and context is not None:
+        attempts.append(
+            AttemptRecord(
+                source="catalog",
+                attempt_url="https://www.imdb.com/",
+                outcome="skipped",
+                failure_reason="cached_discovery_reused",
+                duration_ms=0,
+                details={"provider": "imdb_watch_box"},
+            )
+        )
 
     return dict(by_source), attempts, unresolved_reason
 
@@ -1916,19 +2026,76 @@ def _process_entity(
 
         merged_row = {**core_row, **patch}
         has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
+        existing_asset_source_urls: dict[str, list[str]] = {}
+        if not args.skip_s3 and core_row:
+            existing_asset_source_urls = _load_existing_logo_asset_source_urls(
+                db,
+                entity_type=entity.entity_type,
+                entity_key=entity.entity_key,
+            )
+
         external_candidates: dict[str, list[str]] = {}
+        for source_name, urls in existing_asset_source_urls.items():
+            if source_name in {"official", "catalog", "imdb"}:
+                _merge_source_urls(external_candidates, source_name, urls)
+
+        has_cached_official = bool(existing_asset_source_urls.get("official"))
+        has_cached_catalog = bool(existing_asset_source_urls.get("catalog"))
+        has_cached_logopedia = _source_has_logopedia_urls(existing_asset_source_urls.get("catalog", []))
+        has_cached_imdb = bool(existing_asset_source_urls.get("imdb"))
+
+        allow_brandfetch_lookup = bool(args.force or not has_cached_official)
+        allow_logopedia_lookup = bool(args.force or not has_cached_logopedia)
+        allow_imdb_lookup = bool(args.force or not has_cached_imdb)
+        should_collect_external = bool(
+            not args.skip_s3
+            and not args.dry_run
+            and (
+                allow_brandfetch_lookup
+                or allow_logopedia_lookup
+                or (entity.entity_type == "streaming" and allow_imdb_lookup)
+                or (entity.entity_type == "production" and (not has_cached_catalog or args.force))
+            )
+        )
+
         external_attempts: list[AttemptRecord] = []
         external_reason: str | None = None
-        if (args.force or not has_base_logo) and not args.skip_s3:
-            external_candidates, external_attempts, external_reason = _collect_external_logo_candidates(
+        if should_collect_external:
+            external_new_candidates, external_attempts, external_reason = _collect_external_logo_candidates(
                 entity=entity,
                 display_name=display_name,
                 core_row=merged_row,
                 override=override,
                 context=context,
                 tmdb_hints=tmdb_hints,
+                allow_brandfetch_lookup=allow_brandfetch_lookup,
+                allow_logopedia_lookup=allow_logopedia_lookup,
+                allow_imdb_lookup=allow_imdb_lookup,
             )
+            for source_name, urls in external_new_candidates.items():
+                _merge_source_urls(external_candidates, source_name, urls)
             attempts.extend(external_attempts)
+        elif not args.skip_s3:
+            attempts.append(
+                AttemptRecord(
+                    source="official",
+                    attempt_url=None,
+                    outcome="skipped",
+                    failure_reason="cached_discovery_reused",
+                    duration_ms=0,
+                    details={"provider": "brandfetch"},
+                )
+            )
+            attempts.append(
+                AttemptRecord(
+                    source="catalog",
+                    attempt_url=None,
+                    outcome="skipped",
+                    failure_reason="cached_discovery_reused",
+                    duration_ms=0,
+                    details={"provider": "logopedia"},
+                )
+            )
 
         source_priority = _source_priority(override)
         candidates = _capped_candidates(
@@ -1954,8 +2121,14 @@ def _process_entity(
                 entity_type=entity.entity_type,
                 entity_key=entity.entity_key,
             )
+            existing_asset_index = _load_existing_logo_asset_index(
+                db,
+                entity_type=entity.entity_type,
+                entity_key=entity.entity_key,
+            )
             seen_urls: set[str] = set()
             successful_by_source: dict[str, tuple[str, dict[str, Any]]] = {}
+            mirrored_urls_this_run: set[tuple[str, str]] = set()
 
             for source_name in _ordered_candidate_sources(candidates, source_priority):
                 urls = candidates.get(source_name, [])
@@ -2015,6 +2188,65 @@ def _process_entity(
                         continue
 
                     seen_urls.add(candidate_url)
+                    source_key = _logo_asset_source_name(source_name)
+                    cached_asset_row = existing_asset_index.get((source_key, candidate_url))
+                    if cached_asset_row and not args.force:
+                        cached_status = _normalize_text(cached_asset_row.get("mirror_status"))
+                        cached_logo_patch = _logo_patch_from_asset_row(cached_asset_row)
+                        cached_hosted_url = _normalize_text(cached_logo_patch.get("hosted_logo_url"))
+                        if cached_status == "mirrored" and cached_hosted_url:
+                            summary.logo_assets_skipped += 1
+                            attempts.append(
+                                AttemptRecord(
+                                    source=_attempt_source_name(source_name),
+                                    attempt_url=candidate_url,
+                                    outcome="skipped",
+                                    failure_reason="already_mirrored",
+                                    duration_ms=0,
+                                )
+                            )
+                            cached_sha = _normalize_text(cached_logo_patch.get("hosted_logo_sha256"))
+                            if cached_sha:
+                                existing_sha.add(cached_sha)
+                            if source_name not in successful_by_source:
+                                successful_by_source[source_name] = (candidate_url, cached_logo_patch)
+                            _upsert_logo_asset(
+                                db,
+                                row={
+                                    "entity_type": entity.entity_type,
+                                    "entity_key": entity.entity_key,
+                                    "entity_id": entity_id_value or None,
+                                    "display_name": display_name,
+                                    "source": source_key,
+                                    "source_url": candidate_url,
+                                    "source_rank": source_rank,
+                                    "run_id": run_id,
+                                    "hosted_logo_key": _normalize_text(cached_logo_patch.get("hosted_logo_key"))
+                                    or None,
+                                    "hosted_logo_url": cached_hosted_url or None,
+                                    "hosted_logo_sha256": _normalize_text(cached_logo_patch.get("hosted_logo_sha256"))
+                                    or None,
+                                    "hosted_logo_content_type": (
+                                        _normalize_text(cached_logo_patch.get("hosted_logo_content_type")) or None
+                                    ),
+                                    "hosted_logo_bytes": cached_logo_patch.get("hosted_logo_bytes"),
+                                    "hosted_logo_etag": _normalize_text(cached_logo_patch.get("hosted_logo_etag"))
+                                    or None,
+                                    "base_logo_format": _normalize_text(cached_asset_row.get("base_logo_format"))
+                                    or _detect_base_logo_format(
+                                        wikimedia_logo_file="",
+                                        logo_source_url=candidate_url,
+                                        hosted_logo_url=cached_hosted_url,
+                                    ),
+                                    "pixel_width": None,
+                                    "pixel_height": None,
+                                    "mirror_status": "mirrored",
+                                    "failure_reason": None,
+                                    "is_primary": False,
+                                },
+                            )
+                            continue
+
                     started = time.perf_counter()
                     try:
                         logo_patch = (
@@ -2052,6 +2284,7 @@ def _process_entity(
                         elif logo_patch:
                             mirror_status = "mirrored"
                             summary.logo_assets_mirrored += 1
+                            mirrored_urls_this_run.add((_logo_asset_source_name(source_name), candidate_url))
                             if hosted_sha:
                                 existing_sha.add(hosted_sha)
                             attempts.append(
@@ -2137,7 +2370,8 @@ def _process_entity(
 
             if selected_logo_patch:
                 patch.update(selected_logo_patch)
-                summary.logos_mirrored += 1
+                if (_logo_asset_source_name(selected_logo_source), selected_logo_url) in mirrored_urls_this_run:
+                    summary.logos_mirrored += 1
                 merged_row = {**merged_row, **selected_logo_patch}
                 has_base_logo = bool(_normalize_text(merged_row.get("hosted_logo_url")))
                 _reset_logo_asset_primary_flags(

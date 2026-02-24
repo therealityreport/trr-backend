@@ -238,6 +238,7 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")
     season_id = str(uuid4())
+    run_id = str(uuid4())
 
     runs_payload = [
         {
@@ -250,7 +251,7 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
 
     with patch("trr_backend.repositories.social_season_analytics.list_runs", return_value=runs_payload) as mocked:
         response = client.get(
-            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs?status=completed&source_scope=bravo&limit=25",
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs?status=completed&source_scope=bravo&run_id={run_id}&limit=25",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -259,9 +260,11 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
     assert body["season_id"] == season_id
     assert body["filters"]["status"] == "completed"
     assert body["filters"]["source_scope"] == "bravo"
+    assert body["filters"]["run_id"] == run_id
     assert body["runs"] == runs_payload
     assert mocked.call_args.kwargs["status"] == "completed"
     assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["run_id"] == run_id
     assert mocked.call_args.kwargs["limit"] == 25
 
 
@@ -451,6 +454,39 @@ def test_refresh_post_comments_endpoint_returns_latest_post_detail(
     assert refresh_mock.call_args.kwargs["source_id"] == "72899887766"
     assert refresh_mock.call_args.kwargs["max_comments_per_post"] == 1000
     assert get_mock.call_args.kwargs["platform"] == "tiktok"
+
+
+def test_requeue_instagram_mirror_jobs_endpoint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "source_scope": "bravo",
+        "failed_only": True,
+        "scanned": 20,
+        "queued_jobs": 8,
+        "skipped": 10,
+        "failed": 2,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.requeue_instagram_media_mirror_jobs",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/instagram/mirror/requeue?source_scope=bravo&limit=500&failed_only=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["queued_jobs"] == 8
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["limit"] == 500
+    assert mocked.call_args.kwargs["failed_only"] is True
 
 
 def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

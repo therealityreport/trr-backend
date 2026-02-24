@@ -147,7 +147,13 @@ def _mirror_is_missing(row: dict[str, Any]) -> bool:
     if source_media and len(hosted_media) < len(source_media):
         return True
     mirror_status = str(row.get("media_mirror_status") or "").strip().lower()
-    return mirror_status in {"pending", "partial", "failed"} or mirror_status != "mirrored"
+    if mirror_status in {"pending", "partial", "failed"}:
+        return True
+    source_count = len(source_media) + (1 if source_thumbnail else 0)
+    hosted_count = len(hosted_media) + (1 if hosted_thumbnail else 0)
+    if source_count > 0 and hosted_count >= source_count:
+        return False
+    return mirror_status != "mirrored"
 
 
 def main() -> int:

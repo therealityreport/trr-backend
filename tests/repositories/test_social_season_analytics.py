@@ -359,7 +359,7 @@ def test_load_existing_posts_normalizes_account_filter(monkeypatch) -> None:
     assert isinstance(params, list)
     assert params[1] == "bravotv"
     sql = str(captured["sql"]).lower()
-    assert "lower(coalesce(nullif(source_account, ''), nullif(username, ''), '')) = %s" in sql
+    assert "ltrim(lower(coalesce(nullif(source_account, ''), nullif(username, ''), '')), '@') = %s" in sql
 
 
 def test_rows_for_platform_twitter_bravo_uses_parent_post_scoping(monkeypatch) -> None:
@@ -1554,6 +1554,7 @@ def test_list_runs_applies_filters_and_order(monkeypatch) -> None:
         limit=25,
         status="completed",
         source_scope="bravo",
+        run_id="123e4567-e89b-12d3-a456-426614174000",
     )
 
     assert rows == [{"id": "run-1", "status": "completed"}]
@@ -1567,8 +1568,9 @@ def test_list_runs_applies_filters_and_order(monkeypatch) -> None:
     assert "completed_at" in sql
     assert "and status = %s" in sql
     assert "and source_scope = %s" in sql
+    assert "and id = %s::uuid" in sql
     assert "order by created_at desc limit %s" in sql
-    assert params == ["season-1", "completed", "bravo", 25]
+    assert params == ["season-1", "completed", "bravo", "123e4567-e89b-12d3-a456-426614174000", 25]
 
 
 def test_decide_comment_refresh_matrix() -> None:
@@ -2365,8 +2367,7 @@ def test_ingest_instagram_comments_stage_skips_mark_missing_on_logical_api_failu
     assert (meta["comment_fetch_failures_by_reason"] or {}).get("api_status_fail") == 1
 
 
-def test_ingest_instagram_posts_stage_uses_savepoint_rollback_without_global_rollback(monkeypatch) -> None:
-    savepoint_calls: list[tuple[str, str]] = []
+def test_ingest_instagram_posts_stage_skips_db_write_on_comment_fetch_exception(monkeypatch) -> None:
 
     class _FakePost:
         shortcode = "abc123"
@@ -2443,22 +2444,6 @@ def test_ingest_instagram_posts_stage_uses_savepoint_rollback_without_global_rol
         "_upsert_instagram_post",
         lambda *_args, **_kwargs: {"id": "new-post"},
     )
-    monkeypatch.setattr(
-        social_repo,
-        "_create_savepoint",
-        lambda conn, name: savepoint_calls.append(("create", name)),
-    )
-    monkeypatch.setattr(
-        social_repo,
-        "_rollback_to_savepoint",
-        lambda conn, name: savepoint_calls.append(("rollback", name)),
-    )
-    monkeypatch.setattr(
-        social_repo,
-        "_release_savepoint",
-        lambda conn, name: savepoint_calls.append(("release", name)),
-    )
-
     posts, comments, meta = social_repo._ingest_instagram(
         context,
         run_id="run-1",
@@ -2472,8 +2457,9 @@ def test_ingest_instagram_posts_stage_uses_savepoint_rollback_without_global_rol
 
     assert posts == 1
     assert comments == 0
-    assert ("rollback", "ig_posts_stage_1") in savepoint_calls
-    assert meta["rolled_back_posts"] == 1
+    assert meta.get("rolled_back_posts", 0) == 0
+    assert meta.get("rolled_back_comments", 0) == 0
+    assert meta["incomplete_comment_fetches"] == 1
     assert (meta["persist_counters"] or {}).get("posts_upserted") == 0
 
 
@@ -2537,6 +2523,57 @@ def test_refresh_post_comments_instagram_returns_additive_completeness_fields(mo
     assert marked_missing == []
 
 
+def test_refresh_post_comments_instagram_zero_limit_sets_fetch_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "get_season_context",
+        lambda _season_id: SeasonContext(
+            season_id="season-1",
+            show_id="show-1",
+            show_name="Test Show",
+            season_number=6,
+            anchor_date=date(2025, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {"id": "ig-db-1", "account": "bravotv"},
+    )
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(
+        social_repo,
+        "_count_stored_comments",
+        lambda _post_ids, _platform: {"ig-db-1": 2},
+    )
+
+    class _FakeInstagramScraper:
+        comments_auth_failed = False
+        last_comment_fetch_reason = ""
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def fetch_comments(self, *args, **kwargs):
+            raise AssertionError("fetch_comments should not be called when max_comments_per_post=0")
+
+    monkeypatch.setattr("trr_backend.socials.instagram.InstagramScraper", _FakeInstagramScraper)
+
+    payload = social_repo.refresh_post_comments(
+        "season-1",
+        platform="instagram",
+        source_id="abc123",
+        max_comments_per_post=0,
+        fetch_replies=False,
+    )
+
+    assert payload["comments_fetched"] == 0
+    assert payload["is_complete"] is False
+    assert payload["incomplete_reason"] == "fetch_disabled"
+    assert payload["comment_fetch_reason"] == "fetch_disabled"
+    assert payload["comment_fail_reasons"] == ["fetch_disabled"]
+
+
 def test_mirror_instagram_media_to_s3_dedupes_thumbnail_and_media(monkeypatch) -> None:
     requests_seen: list[str] = []
     uploads_seen: list[str] = []
@@ -2562,14 +2599,15 @@ def test_mirror_instagram_media_to_s3_dedupes_thumbnail_and_media(monkeypatch) -
         requests_seen.append(url)
         return _FakeStreamResponse(b"abc")
 
+    class _FakeS3Client:
+        def upload_fileobj(self, fileobj, bucket: str, key: str, ExtraArgs=None) -> None:  # noqa: N803
+            del fileobj, bucket, ExtraArgs
+            uploads_seen.append(key)
+
     monkeypatch.setattr(social_repo.requests, "get", _fake_requests_get)
-    monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: object())
+    monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_prefix", lambda: "")
-    monkeypatch.setattr(
-        "trr_backend.media.s3_mirror.upload_bytes_to_s3",
-        lambda _client, *, bucket, key, data, content_type: uploads_seen.append(key),
-    )
     monkeypatch.setattr("trr_backend.media.s3_mirror.build_hosted_url", lambda key: f"https://cdn.test/{key}")
 
     context = SeasonContext(
@@ -2615,15 +2653,16 @@ def test_mirror_instagram_media_to_s3_enforces_asset_size_cap(monkeypatch) -> No
         def iter_content(self, chunk_size: int = 0):
             yield b"x" * 2048
 
+    class _FakeS3Client:
+        def upload_fileobj(self, fileobj, bucket: str, key: str, ExtraArgs=None) -> None:  # noqa: N803
+            del fileobj, bucket, ExtraArgs
+            uploads_seen.append(key)
+
     monkeypatch.setenv("SOCIAL_MEDIA_MIRROR_MAX_BYTES", "1024")
     monkeypatch.setattr(social_repo.requests, "get", lambda *args, **kwargs: _FakeStreamResponse())
-    monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: object())
+    monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_client", lambda: _FakeS3Client())
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_bucket", lambda: "bucket")
     monkeypatch.setattr("trr_backend.media.s3_mirror.get_s3_prefix", lambda: "")
-    monkeypatch.setattr(
-        "trr_backend.media.s3_mirror.upload_bytes_to_s3",
-        lambda _client, *, bucket, key, data, content_type: uploads_seen.append(key),
-    )
     monkeypatch.setattr("trr_backend.media.s3_mirror.build_hosted_url", lambda key: f"https://cdn.test/{key}")
 
     context = SeasonContext(
@@ -2647,6 +2686,95 @@ def test_mirror_instagram_media_to_s3_enforces_asset_size_cap(monkeypatch) -> No
     assert status == "failed"
     assert error and "asset_too_large" in error
     assert uploads_seen == []
+
+
+def test_week_detail_instagram_includes_media_mirror_diagnostics(monkeypatch) -> None:
+    post_id = "00000000-0000-0000-0000-000000000001"
+    mirror_ts = datetime(2026, 2, 24, 16, 30, tzinfo=UTC)
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        del params
+        normalized = " ".join(sql.split()).lower()
+        if "from social.instagram_posts p" in normalized:
+            return [
+                {
+                    "id": post_id,
+                    "source_id": "abc123",
+                    "author": "bravotv",
+                    "text": "hello #rhoslc @andy",
+                    "likes": 5,
+                    "comments_count": 2,
+                    "views": 10,
+                    "media_type": "image",
+                    "media_urls": ["https://src/media.jpg"],
+                    "hosted_media_urls": ["https://cdn/media.jpg"],
+                    "thumbnail_url": "https://cdn/thumb.jpg",
+                    "post_format": "post",
+                    "profile_tags": ["tagged_user"],
+                    "collaborators": ["collab_user"],
+                    "hashtags": ["RHOSLC"],
+                    "mentions": ["@andy"],
+                    "duration_seconds": None,
+                    "media_mirror_attempt_count": 3,
+                    "media_mirror_last_attempt_at": mirror_ts,
+                    "media_mirror_last_job_id": "job-123",
+                    "ts": datetime(2026, 2, 23, 12, 0, tzinfo=UTC),
+                }
+            ]
+        if "from social.instagram_comments c where c.post_id = any" in normalized:
+            return [{"post_id": post_id, "cnt": 2}]
+        if "cross join lateral" in normalized:
+            return []
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    payload = social_repo._week_detail_instagram(
+        "season-1",
+        start_dt=datetime(2026, 2, 20, tzinfo=UTC),
+        end_dt=datetime(2026, 2, 27, tzinfo=UTC),
+        account_handles=set(),
+        max_comments=10,
+    )
+
+    assert payload["posts"]
+    post = payload["posts"][0]
+    assert post["media_mirror_attempt_count"] == 3
+    assert post["media_mirror_last_attempt_at"] == mirror_ts.isoformat()
+    assert post["media_mirror_last_job_id"] == "job-123"
+
+
+def test_get_post_comments_instagram_includes_media_mirror_diagnostics(monkeypatch) -> None:
+    mirror_ts = datetime(2026, 2, 24, 16, 30, tzinfo=UTC)
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "source_id": "abc123",
+            "author": "bravotv",
+            "text": "hello #rhoslc @andy",
+            "likes": 5,
+            "comments_count": 2,
+            "views": 10,
+            "thumbnail_url": "https://cdn/thumb.jpg",
+            "post_format": "post",
+            "profile_tags": ["tagged_user"],
+            "collaborators": ["collab_user"],
+            "hashtags": ["RHOSLC"],
+            "mentions": ["@andy"],
+            "duration_seconds": None,
+            "media_mirror_attempt_count": 2,
+            "media_mirror_last_attempt_at": mirror_ts,
+            "media_mirror_last_job_id": "job-789",
+            "ts": datetime(2026, 2, 23, 12, 0, tzinfo=UTC),
+        },
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda _sql, _params: [])
+
+    payload = social_repo.get_post_comments("season-1", platform="instagram", source_id="abc123")
+    assert payload["media_mirror_attempt_count"] == 2
+    assert payload["media_mirror_last_attempt_at"] == mirror_ts.isoformat()
+    assert payload["media_mirror_last_job_id"] == "job-789"
 
 
 def test_ingest_youtube_posts_stage_reports_filter_diagnostics(monkeypatch) -> None:

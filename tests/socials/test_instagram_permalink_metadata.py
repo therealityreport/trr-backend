@@ -119,6 +119,18 @@ def test_fetch_permalink_media_item_uses_route_order_with_fallback() -> None:
     assert requested_urls[1].endswith("/p/DUHvBbEDhfw/")
 
 
+def test_fetch_permalink_media_item_rejects_malformed_shortcode_or_url() -> None:
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("network should not be called for malformed shortcode input")
+
+    found = fetch_permalink_media_item(
+        "https://www.instagram.com/reel/not-a-valid-shortcode!!!/",
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert found is None
+
+
 def test_parse_permalink_metadata_extracts_fields_from_media_item() -> None:
     efg = quote(json.dumps({"video_info": {"duration_s": 17.4}}))
     metadata = parse_permalink_metadata(
