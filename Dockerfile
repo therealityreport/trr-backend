@@ -15,9 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better layer caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy dependency manifests first for better layer caching
+COPY requirements.txt requirements.lock.txt ./
+RUN test -f requirements.lock.txt && pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
