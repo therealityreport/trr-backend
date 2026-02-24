@@ -1654,6 +1654,9 @@ def test_refresh_post_comments_youtube_reports_comment_count_sync(monkeypatch) -
         max_comments_per_post=0,
     )
     assert payload["youtube_comment_count_synced"] == 1
+    assert payload["is_complete"] is False
+    assert payload["incomplete_reason"] == "fetch_disabled"
+    assert payload["comment_fail_reasons"] == ["fetch_disabled"]
 
 
 def test_refresh_post_comments_tiktok_returns_additive_completeness_fields(monkeypatch) -> None:
@@ -2934,6 +2937,79 @@ def test_mirror_instagram_media_to_s3_enforces_asset_size_cap(monkeypatch) -> No
     assert status == "failed"
     assert error and "asset_too_large" in error
     assert uploads_seen == []
+
+
+def test_requeue_media_mirror_jobs_supports_non_instagram_platforms(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    enqueue_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: context)
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_all",
+        lambda _sql, _params: [
+            {
+                "id": "tt-db-1",
+                "source_id": "777",
+                "account": "bravotv",
+                "posted_at": datetime(2026, 2, 22, tzinfo=UTC),
+                "thumbnail_url": "https://cdn.test/source-thumb.jpg",
+                "media_urls": ["https://cdn.test/source-vid.mp4"],
+                "hosted_thumbnail_url": "",
+                "hosted_media_urls": [],
+                "media_mirror_status": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_week_windows",
+        lambda *_args, **_kwargs: (
+            [
+                WeekWindow(
+                    week_index=1,
+                    start_local=datetime(2026, 2, 20, tzinfo=UTC),
+                    end_local=datetime(2026, 2, 27, tzinfo=UTC),
+                )
+            ],
+            datetime(2026, 2, 20, tzinfo=UTC),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_week_for_timestamp",
+        lambda *_args, **_kwargs: WeekWindow(
+            week_index=1,
+            start_local=datetime(2026, 2, 20, tzinfo=UTC),
+            end_local=datetime(2026, 2, 27, tzinfo=UTC),
+        ),
+    )
+
+    def _fake_enqueue(*_args, **kwargs):
+        enqueue_calls.append(dict(kwargs))
+        return "job-1"
+
+    monkeypatch.setattr(social_repo, "_enqueue_platform_media_mirror_job", _fake_enqueue)
+
+    payload = social_repo.requeue_media_mirror_jobs(
+        "season-1",
+        platform="tiktok",
+        source_scope="bravo",
+        limit=100,
+    )
+
+    assert payload["platform"] == "tiktok"
+    assert payload["queued_jobs"] == 1
+    assert payload["failed"] == 0
+    assert len(enqueue_calls) == 1
+    assert enqueue_calls[0]["platform"] == "tiktok"
 
 
 def test_week_detail_instagram_includes_media_mirror_diagnostics(monkeypatch) -> None:

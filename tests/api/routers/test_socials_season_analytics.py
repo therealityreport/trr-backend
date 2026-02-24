@@ -489,6 +489,41 @@ def test_requeue_instagram_mirror_jobs_endpoint(
     assert mocked.call_args.kwargs["failed_only"] is True
 
 
+def test_requeue_platform_mirror_jobs_endpoint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "platform": "tiktok",
+        "source_scope": "bravo",
+        "failed_only": False,
+        "scanned": 15,
+        "queued_jobs": 4,
+        "skipped": 11,
+        "failed": 0,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.requeue_media_mirror_jobs",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/tiktok/mirror/requeue?source_scope=bravo&limit=250",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["platform"] == "tiktok"
+    assert mocked.call_args.kwargs["platform"] == "tiktok"
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["limit"] == 250
+    assert mocked.call_args.kwargs["failed_only"] is False
+
+
 def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")

@@ -85,17 +85,23 @@ def test_repair_gallery_hosts_dry_run_classification(
         lambda *_args, **_kwargs: [ok_candidate, repaired_candidate, broken_candidate],
     )
 
-    def fake_reachability(
-        *, url: str | None, source: str, timeout: float, source_page_url: str | None
-    ) -> tuple[bool, str]:
-        del source, timeout, source_page_url
+    def fake_probe(
+        *,
+        url: str | None,
+        source: str,
+        timeout: float,
+        source_page_url: str | None,
+        retry_attempts: int,
+        retry_backoff_ms: int,
+    ) -> mod.ReachabilityProbeResult:
+        del source, timeout, source_page_url, retry_attempts, retry_backoff_ms
         if url and url.endswith("/ok.jpg"):
-            return True, "http_200"
+            return mod.ReachabilityProbeResult(ok=True, reason="http_200", attempts=1, transient_failure=False)
         if url and url.endswith("/repair.jpg"):
-            return True, "http_200"
-        return False, "http_403"
+            return mod.ReachabilityProbeResult(ok=True, reason="http_200", attempts=1, transient_failure=False)
+        return mod.ReachabilityProbeResult(ok=False, reason="http_403", attempts=1, transient_failure=False)
 
-    monkeypatch.setattr(mod, "_check_url_reachability", fake_reachability)
+    monkeypatch.setattr(mod, "_probe_url_reachability", fake_probe)
     monkeypatch.setattr(mod, "_repair_candidate", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
     monkeypatch.setattr(mod, "_mark_candidate_broken", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
 
@@ -107,6 +113,9 @@ def test_repair_gallery_hosts_dry_run_classification(
         limit=None,
         apply_updates=False,
         timeout=1.0,
+        retry_attempts=2,
+        retry_backoff_ms=500,
+        confirm_unreachable_pass=True,
         verbose=False,
     )
 
@@ -140,18 +149,24 @@ def test_repair_gallery_hosts_apply_mutates_expected_targets(
         lambda *_args, **_kwargs: [repaired_candidate, broken_candidate],
     )
 
-    def fake_reachability(
-        *, url: str | None, source: str, timeout: float, source_page_url: str | None
-    ) -> tuple[bool, str]:
-        del source, timeout, source_page_url
+    def fake_probe(
+        *,
+        url: str | None,
+        source: str,
+        timeout: float,
+        source_page_url: str | None,
+        retry_attempts: int,
+        retry_backoff_ms: int,
+    ) -> mod.ReachabilityProbeResult:
+        del source, timeout, source_page_url, retry_attempts, retry_backoff_ms
         if url and url.endswith("/repair.jpg"):
-            return True, "http_200"
-        return False, "http_403"
+            return mod.ReachabilityProbeResult(ok=True, reason="http_200", attempts=1, transient_failure=False)
+        return mod.ReachabilityProbeResult(ok=False, reason="http_403", attempts=1, transient_failure=False)
 
     repaired_calls: list[str] = []
     broken_calls: list[str] = []
 
-    monkeypatch.setattr(mod, "_check_url_reachability", fake_reachability)
+    monkeypatch.setattr(mod, "_probe_url_reachability", fake_probe)
     monkeypatch.setattr(
         mod,
         "_repair_candidate",
@@ -171,6 +186,9 @@ def test_repair_gallery_hosts_apply_mutates_expected_targets(
         limit=None,
         apply_updates=True,
         timeout=1.0,
+        retry_attempts=2,
+        retry_backoff_ms=500,
+        confirm_unreachable_pass=True,
         verbose=False,
     )
 
@@ -267,3 +285,74 @@ def test_repair_candidate_regenerates_base_and_crop_variants(
     assert cast_updates == ["cast-1"]
     assert media_variant_calls == [("asset-1", False), ("asset-1", True)]
     assert cast_variant_calls == [("cast-1", False), ("cast-1", True)]
+
+
+def test_repair_gallery_hosts_transient_indeterminate_becomes_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate(
+        kind="media_link_asset",
+        row_id="asset-transient",
+        hosted_url="https://cdn.example.com/transient.jpg",
+        source_url="https://source.example.com/transient.jpg",
+    )
+    monkeypatch.setattr(mod, "_collect_candidates", lambda *_args, **_kwargs: [candidate])
+
+    def fake_probe(
+        *,
+        url: str | None,
+        source: str,
+        timeout: float,
+        source_page_url: str | None,
+        retry_attempts: int,
+        retry_backoff_ms: int,
+    ) -> mod.ReachabilityProbeResult:
+        del source, timeout, source_page_url, retry_attempts, retry_backoff_ms
+        if url and "cdn.example.com" in url:
+            return mod.ReachabilityProbeResult(
+                ok=False,
+                reason="http_503",
+                attempts=2,
+                transient_failure=True,
+            )
+        return mod.ReachabilityProbeResult(
+            ok=False,
+            reason="http_404",
+            attempts=1,
+            transient_failure=False,
+        )
+
+    marked_broken: list[str] = []
+    monkeypatch.setattr(mod, "_probe_url_reachability", fake_probe)
+    monkeypatch.setattr(
+        mod,
+        "_mark_candidate_broken",
+        lambda _db, broken_candidate, reason: marked_broken.append(f"{broken_candidate.row_id}:{reason}"),
+    )
+    monkeypatch.setattr(mod, "_repair_candidate", lambda *_args, **_kwargs: None)
+
+    report = mod.repair_gallery_hosts(
+        object(),
+        allowed_sources={"imdb"},
+        person_ids=[],
+        show_ids=[],
+        limit=None,
+        apply_updates=True,
+        timeout=1.0,
+        retry_attempts=2,
+        retry_backoff_ms=500,
+        confirm_unreachable_pass=True,
+        verbose=False,
+    )
+
+    assert report["summary"]["error"] == 1
+    assert report["summary"]["broken_unreachable"] == 0
+    assert report["error_ids"] == ["asset-transient"]
+    assert marked_broken == []
+
+
+def test_parse_args_includes_retry_and_confirm_defaults() -> None:
+    args = mod._parse_args([])
+    assert args.retry_attempts == 2
+    assert args.retry_backoff_ms == 500
+    assert args.confirm_unreachable_pass is True
