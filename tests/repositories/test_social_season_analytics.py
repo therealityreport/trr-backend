@@ -2471,6 +2471,7 @@ def test_upsert_instagram_comment_tree_reappearance_clears_missing(monkeypatch) 
 
     monkeypatch.setattr(social_repo, "_pg_upsert", _fake_upsert)
     monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda table: table == "instagram_comments")
+    monkeypatch.setattr(social_repo, "_column_exists", lambda *_args, **_kwargs: False)
 
     context = SeasonContext(
         season_id="season-1",
@@ -2518,6 +2519,7 @@ def test_upsert_instagram_comment_tree_without_run_id_preserves_last_seen_run(mo
 
     monkeypatch.setattr(social_repo, "_pg_upsert", _fake_upsert)
     monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda table: table == "instagram_comments")
+    monkeypatch.setattr(social_repo, "_column_exists", lambda *_args, **_kwargs: False)
 
     context = SeasonContext(
         season_id="season-1",
