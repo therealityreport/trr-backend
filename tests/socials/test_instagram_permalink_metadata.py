@@ -8,6 +8,7 @@ import pytest
 from trr_backend.socials.instagram.permalink_metadata import (
     fetch_permalink_media_item,
     parse_permalink_metadata,
+    resolve_instagram_media,
 )
 
 
@@ -168,3 +169,103 @@ def test_parse_permalink_metadata_duration_falls_back_to_dash_manifest() -> None
         }
     )
     assert metadata.duration_seconds == 66
+
+
+def test_parse_permalink_metadata_prefers_highest_width_media_candidates() -> None:
+    metadata = parse_permalink_metadata(
+        {
+            "taken_at": 1739481600,
+            "media_type": 2,
+            "video_versions": [
+                {"url": "https://cdn.test/video-low.mp4", "width": 640, "height": 360},
+                {"url": "https://cdn.test/video-high.mp4", "width": 1280, "height": 720},
+            ],
+            "image_versions2": {
+                "candidates": [
+                    {"url": "https://cdn.test/thumb-low.jpg", "width": 360},
+                    {"url": "https://cdn.test/thumb-high.jpg", "width": 1080},
+                ]
+            },
+        }
+    )
+
+    assert metadata.media_urls == ["https://cdn.test/video-high.mp4"]
+    assert metadata.thumbnail_url == "https://cdn.test/thumb-high.jpg"
+
+
+def test_resolve_instagram_media_uses_graphql_shortcode_fallback_when_api_fails() -> None:
+    class _FakeResponse:
+        def __init__(self, payload: dict[str, object]):
+            self._payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class _FakeSession:
+        def post(self, *_args, **_kwargs):
+            return _FakeResponse(
+                {
+                    "data": {
+                        "xdt_shortcode_media": {
+                            "__typename": "GraphVideo",
+                            "is_video": True,
+                            "video_url": "https://cdn.test/graphql-video.mp4",
+                            "display_url": "https://cdn.test/graphql-thumb.jpg",
+                            "taken_at_timestamp": 1739481600,
+                        }
+                    }
+                }
+            )
+
+    resolution = resolve_instagram_media(
+        "DUHvBbEDhfw",
+        session=_FakeSession(),  # type: ignore[arg-type]
+        fetch_post_info=lambda _shortcode: (_ for _ in ()).throw(RuntimeError("api unavailable")),
+    )
+
+    assert resolution.source == "graphql_shortcode"
+    assert resolution.media_urls == ["https://cdn.test/graphql-video.mp4"]
+    assert resolution.thumbnail_url == "https://cdn.test/graphql-thumb.jpg"
+    assert resolution.attempts[0]["source"] == "api_media_info"
+    assert resolution.attempts[0]["success"] is False
+    assert resolution.attempts[1]["source"] == "graphql_shortcode"
+    assert resolution.attempts[1]["success"] is True
+
+
+def test_resolve_instagram_media_falls_back_to_og_when_other_sources_fail() -> None:
+    html = """
+    <html>
+      <head>
+        <meta property="og:image" content="https://cdn.test/og-image.jpg" />
+      </head>
+    </html>
+    """
+
+    class _FakeGetResponse:
+        status_code = 200
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeSession:
+        def post(self, *_args, **_kwargs):
+            raise RuntimeError("graphql failed")
+
+        def get(self, *_args, **_kwargs):
+            return _FakeGetResponse()
+
+    resolution = resolve_instagram_media(
+        "DUHvBbEDhfw",
+        session=_FakeSession(),  # type: ignore[arg-type]
+        fetch_post_info=lambda _shortcode: (_ for _ in ()).throw(RuntimeError("api failed")),
+    )
+
+    assert resolution.source == "og_fallback"
+    assert resolution.media_urls == ["https://cdn.test/og-image.jpg"]
+    assert resolution.attempts[-1]["source"] == "og_fallback"
+    assert resolution.attempts[-1]["success"] is True

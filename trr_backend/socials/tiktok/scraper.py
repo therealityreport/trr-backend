@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -85,6 +86,7 @@ class TikTokComment:
     parent_comment_id: str | None  # ID of parent comment if this is a reply
     reply_count: int
     replies: list["TikTokComment"] = field(default_factory=list)
+    avatar_thumbnail_url: str | None = None
 
     # Post reference
     video_id: str = ""
@@ -237,6 +239,66 @@ class TikTokScraper:
                 self._last_api_fail_reason,
             )
             return None
+
+    @staticmethod
+    def _coerce_timestamp(value: Any) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return 0
+            if raw.isdigit():
+                return int(raw)
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return 0
+            return int(parsed.timestamp())
+        return 0
+
+    @staticmethod
+    def _dedupe_preserve_order(values: list[str]) -> list[str]:
+        output: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            token = str(value or "").strip()
+            if not token:
+                continue
+            key = token.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(token)
+        return output
+
+    @staticmethod
+    def _extract_video_id_from_url(url: str | None) -> str:
+        value = str(url or "").strip()
+        if not value:
+            return ""
+        path = urlparse(value).path
+        match = re.search(r"/video/(\d+)", path)
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _normalize_hashtag_token(value: Any) -> str | None:
+        token = str(value or "").strip().lstrip("#")
+        if not token:
+            return None
+        match = re.search(r"[A-Za-z0-9_]+", token)
+        return match.group(0) if match else None
+
+    @staticmethod
+    def _normalize_mention_token(value: Any) -> str | None:
+        token = str(value or "").strip().lstrip("@")
+        if not token:
+            return None
+        match = re.search(r"[A-Za-z0-9._]+", token)
+        if not match:
+            return None
+        normalized = match.group(0).rstrip(".,:;!?)]}>'\"")
+        return normalized if normalized else None
 
     def _find_ytdlp_cookie_file(self) -> str | None:
         """Find a Netscape-format cookie file for yt-dlp."""
@@ -453,15 +515,8 @@ class TikTokScraper:
         create_time = data.get("timestamp", 0)
         username = data.get("uploader", config.username)
         video_id = data.get("id", "")
-        media_urls: list[str] = []
-        thumbnail = data.get("thumbnail")
-        if isinstance(thumbnail, str) and thumbnail:
-            media_urls.append(thumbnail)
-        for entry in data.get("thumbnails") or []:
-            if isinstance(entry, dict):
-                url = str(entry.get("url") or "").strip()
-                if url and url not in media_urls:
-                    media_urls.append(url)
+        media_urls = self._extract_ytdlp_video_urls(data)
+        thumbnail_url = self._extract_ytdlp_thumbnail_url(data)
 
         return TikTokPost(
             video_id=video_id,
@@ -481,11 +536,90 @@ class TikTokScraper:
             music_title=data.get("track", ""),
             music_author=data.get("artist", ""),
             media_urls=media_urls,
-            thumbnail_url=media_urls[0] if media_urls else None,
+            thumbnail_url=thumbnail_url or (media_urls[0] if media_urls else None),
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
         )
+
+    @staticmethod
+    def _extract_ytdlp_video_urls(data: dict) -> list[str]:
+        urls: list[str] = []
+
+        primary_url = str(data.get("url") or "").strip()
+        if primary_url:
+            urls.append(primary_url)
+
+        best_requested_url = ""
+        best_requested_score = (-1, -1)
+        requested_formats = data.get("requested_formats")
+        if isinstance(requested_formats, list):
+            for fmt in requested_formats:
+                if not isinstance(fmt, dict):
+                    continue
+                url = str(fmt.get("url") or "").strip()
+                if not url:
+                    continue
+                has_video = str(fmt.get("vcodec") or "").lower() not in {"", "none"}
+                has_audio = str(fmt.get("acodec") or "").lower() not in {"", "none"}
+                height = int(fmt.get("height") or 0)
+                score = (1 if (has_video and has_audio) else (0 if has_video else -1), height)
+                if score > best_requested_score:
+                    best_requested_score = score
+                    best_requested_url = url
+        if best_requested_url:
+            urls.append(best_requested_url)
+
+        best_format_url = ""
+        best_format_score = (-1, -1, -1)
+        formats = data.get("formats")
+        if isinstance(formats, list):
+            for fmt in formats:
+                if not isinstance(fmt, dict):
+                    continue
+                url = str(fmt.get("url") or "").strip()
+                if not url:
+                    continue
+                has_video = str(fmt.get("vcodec") or "").lower() not in {"", "none"}
+                if not has_video:
+                    continue
+                has_audio = str(fmt.get("acodec") or "").lower() not in {"", "none"}
+                height = int(fmt.get("height") or 0)
+                tbr = int(fmt.get("tbr") or 0)
+                score = (1 if has_audio else 0, height, tbr)
+                if score > best_format_score:
+                    best_format_score = score
+                    best_format_url = url
+        if best_format_url:
+            urls.append(best_format_url)
+
+        deduped: list[str] = []
+        for url in urls:
+            if url and url not in deduped:
+                deduped.append(url)
+        return deduped[:1]
+
+    @staticmethod
+    def _extract_ytdlp_thumbnail_url(data: dict) -> str | None:
+        thumbnail = str(data.get("thumbnail") or "").strip()
+        if thumbnail:
+            return thumbnail
+        thumbnails = data.get("thumbnails")
+        if not isinstance(thumbnails, list):
+            return None
+        best_url = ""
+        best_width = -1
+        for entry in thumbnails:
+            if not isinstance(entry, dict):
+                continue
+            url = str(entry.get("url") or "").strip()
+            if not url:
+                continue
+            width = int(entry.get("width") or 0)
+            if width >= best_width:
+                best_width = width
+                best_url = url
+        return best_url or None
 
     def _scrape_via_ytdlp(
         self,
@@ -579,53 +713,141 @@ class TikTokScraper:
 
     def _extract_hashtags(self, text: str) -> list[str]:
         """Extract hashtags from text."""
-        return re.findall(r"#(\w+)", text)
+        values: list[str] = []
+        for token in re.findall(r"#([A-Za-z0-9_]+)", text or ""):
+            normalized = self._normalize_hashtag_token(token)
+            if normalized:
+                values.append(normalized)
+        return self._dedupe_preserve_order(values)
 
     def _extract_mentions(self, text: str) -> list[str]:
         """Extract @mentions from text."""
-        return re.findall(r"@(\w+)", text)
+        values: list[str] = []
+        for token in re.findall(r"@([A-Za-z0-9._]+)", text or ""):
+            normalized = self._normalize_mention_token(token)
+            if normalized:
+                values.append(normalized)
+        return self._dedupe_preserve_order(values)
+
+    def _extract_structured_hashtags(self, item: dict) -> list[str]:
+        hashtags: list[str] = []
+        for row in item.get("hashtags") or []:
+            value = row
+            if isinstance(row, dict):
+                value = row.get("name") or row.get("hashtagName")
+            normalized = self._normalize_hashtag_token(value)
+            if normalized:
+                hashtags.append(normalized)
+        return self._dedupe_preserve_order(hashtags)
+
+    def _extract_structured_mentions(self, item: dict) -> list[str]:
+        mentions: list[str] = []
+        for key in ("mentions", "detailedMentions"):
+            for row in item.get(key) or []:
+                value = row
+                if isinstance(row, dict):
+                    value = row.get("name") or row.get("username") or row.get("uniqueId")
+                normalized = self._normalize_mention_token(value)
+                if normalized:
+                    mentions.append(normalized)
+        return self._dedupe_preserve_order(mentions)
 
     def _parse_post_item(self, item: dict, config: TikTokScrapeConfig) -> TikTokPost:
         """Parse a post item into TikTokPost."""
-        video_id = item.get("id", "")
-        create_time = item.get("createTime", 0)
-        description = item.get("desc", "")
+        video_id = str(
+            item.get("id")
+            or item.get("aweme_id")
+            or item.get("videoId")
+            or self._extract_video_id_from_url(item.get("webVideoUrl") or item.get("url"))
+            or ""
+        )
+        create_time = self._coerce_timestamp(item.get("createTime") or item.get("createTimeISO"))
+        description = str(item.get("desc") or item.get("text") or "")
         media_urls = self._extract_media_urls(item)
+        thumbnail_url = self._extract_thumbnail_url(item)
 
         # Author info
-        author = item.get("author", {})
-        username = author.get("uniqueId", config.username)
-        nickname = author.get("nickname", "")
+        author = item.get("author") if isinstance(item.get("author"), dict) else {}
+        author_meta = item.get("authorMeta") if isinstance(item.get("authorMeta"), dict) else {}
+        username = str(
+            author.get("uniqueId")
+            or author.get("unique_id")
+            or author_meta.get("name")
+            or author_meta.get("uniqueId")
+            or config.username
+        )
+        nickname = str(author.get("nickname") or author_meta.get("nickName") or author_meta.get("nickname") or "")
 
         # Stats
-        stats = item.get("stats", {})
+        stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
 
         # Music info
-        music = item.get("music", {})
+        music = item.get("music") if isinstance(item.get("music"), dict) else {}
+        music_meta = item.get("musicMeta") if isinstance(item.get("musicMeta"), dict) else {}
 
         # Video info
-        video = item.get("video", {})
-        duration = video.get("duration", 0)
+        video = item.get("video") if isinstance(item.get("video"), dict) else {}
+        video_meta = item.get("videoMeta") if isinstance(item.get("videoMeta"), dict) else {}
+        duration = int(video.get("duration") or video_meta.get("duration") or 0)
+        hashtags = self._dedupe_preserve_order(
+            [*self._extract_structured_hashtags(item), *self._extract_hashtags(description)]
+        )
+        mentions = self._dedupe_preserve_order(
+            [*self._extract_structured_mentions(item), *self._extract_mentions(description)]
+        )
+        canonical_url = str(item.get("webVideoUrl") or item.get("url") or "").strip() or (
+            f"https://www.tiktok.com/@{username}/video/{video_id}" if video_id else ""
+        )
 
         return TikTokPost(
             video_id=video_id,
-            date_time=datetime.fromtimestamp(create_time).strftime("%Y-%m-%d %H:%M:%S") if create_time else "",
+            date_time=datetime.fromtimestamp(create_time, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if create_time else "",
             create_time=create_time,
             description=description,
-            hashtags=self._extract_hashtags(description),
-            mentions=self._extract_mentions(description),
-            likes=stats.get("diggCount", 0),
-            comments=stats.get("commentCount", 0),
-            shares=stats.get("shareCount", 0),
-            views=stats.get("playCount", 0),
-            url=f"https://www.tiktok.com/@{username}/video/{video_id}" if video_id else "",
+            hashtags=hashtags,
+            mentions=mentions,
+            likes=int(
+                stats.get("diggCount")
+                or stats.get("digg_count")
+                or item.get("diggCount")
+                or item.get("digg_count")
+                or 0
+            ),
+            comments=int(
+                stats.get("commentCount")
+                or stats.get("comment_count")
+                or item.get("commentCount")
+                or item.get("comment_count")
+                or 0
+            ),
+            shares=int(
+                stats.get("shareCount")
+                or stats.get("share_count")
+                or item.get("shareCount")
+                or item.get("share_count")
+                or 0
+            ),
+            views=int(
+                stats.get("playCount")
+                or stats.get("play_count")
+                or item.get("playCount")
+                or item.get("play_count")
+                or 0
+            ),
+            url=canonical_url,
             username=username,
             author_nickname=nickname,
             duration=duration,
-            music_title=music.get("title", ""),
-            music_author=music.get("authorName", ""),
+            music_title=str(music.get("title") or music_meta.get("musicName") or music_meta.get("title") or ""),
+            music_author=str(
+                music.get("authorName")
+                or music.get("author_name")
+                or music_meta.get("musicAuthor")
+                or music_meta.get("authorName")
+                or ""
+            ),
             media_urls=media_urls,
-            thumbnail_url=media_urls[0] if media_urls else None,
+            thumbnail_url=thumbnail_url or (media_urls[0] if media_urls else None),
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -769,7 +991,9 @@ class TikTokScraper:
 
         for item in html_posts:
             posts_checked += 1
-            create_time = int(item.get("createTime", 0) or 0)
+            create_time = self._coerce_timestamp(item.get("createTime") or item.get("createTimeISO"))
+            if create_time <= 0:
+                continue
 
             in_range = config.is_in_date_range(create_time)
             if in_range is None:
@@ -778,7 +1002,7 @@ class TikTokScraper:
             if in_range is False:
                 continue
 
-            description = item.get("desc", "")
+            description = str(item.get("desc") or item.get("text") or "")
             if config.matches_hashtags(description):
                 post = self._parse_post_item(item, config)
                 if post.video_id and post.video_id not in existing_ids:
@@ -818,7 +1042,9 @@ class TikTokScraper:
 
                 for item in items:
                     posts_checked += 1
-                    create_time = int(item.get("createTime", 0) or 0)
+                    create_time = self._coerce_timestamp(item.get("createTime") or item.get("createTimeISO"))
+                    if create_time <= 0:
+                        continue
 
                     in_range = config.is_in_date_range(create_time)
                     if in_range is None:
@@ -827,7 +1053,7 @@ class TikTokScraper:
                     if in_range is False:
                         continue
 
-                    description = item.get("desc", "")
+                    description = str(item.get("desc") or item.get("text") or "")
                     if config.matches_hashtags(description):
                         post = self._parse_post_item(item, config)
                         # Avoid duplicates from HTML extraction / prior pages.
@@ -1073,49 +1299,166 @@ class TikTokScraper:
         parent_id: str | None = None,
     ) -> TikTokComment:
         """Parse comment data into TikTokComment object."""
-        created_at = data.get("create_time", 0)
-        user = data.get("user", {})
+        created_at = self._coerce_timestamp(
+            data.get("create_time") or data.get("createTime") or data.get("createTimeISO") or data.get("timestamp")
+        )
+        user = data.get("user") if isinstance(data.get("user"), dict) else {}
+        resolved_post_url = str(post_url or data.get("videoWebUrl") or "").strip()
+        resolved_video_id = str(video_id or data.get("aweme_id") or data.get("item_id") or "").strip()
+        if not resolved_video_id:
+            resolved_video_id = self._extract_video_id_from_url(resolved_post_url)
+        comment_id = str(data.get("cid") or data.get("id") or "").strip()
+
+        parsed_replies: list[TikTokComment] = []
+        for row in data.get("replies") or []:
+            if not isinstance(row, dict):
+                continue
+            parsed_replies.append(
+                self._parse_comment(
+                    row,
+                    resolved_video_id,
+                    resolved_post_url,
+                    is_reply=True,
+                    parent_id=comment_id or parent_id,
+                )
+            )
+
+        reply_count = int(
+            data.get("reply_comment_total")
+            or data.get("replyCommentTotal")
+            or data.get("replyCount")
+            or data.get("repliesCount")
+            or 0
+        )
+        if parsed_replies and reply_count <= 0:
+            reply_count = len(parsed_replies)
 
         return TikTokComment(
-            comment_id=str(data.get("cid", "")),
-            text=data.get("text", ""),
-            username=user.get("unique_id", ""),
-            user_id=str(user.get("uid", "")),
-            nickname=user.get("nickname", ""),
+            comment_id=comment_id,
+            text=str(data.get("text") or ""),
+            username=str(
+                user.get("unique_id")
+                or user.get("uniqueId")
+                or user.get("username")
+                or data.get("uniqueId")
+                or data.get("ownerUsername")
+                or ""
+            ),
+            user_id=str(user.get("uid") or user.get("id") or data.get("uid") or ""),
+            nickname=str(user.get("nickname") or user.get("nickName") or data.get("nickname") or ""),
             created_at=created_at,
-            date_time=(datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S") if created_at else ""),
-            likes=data.get("digg_count", 0),
+            date_time=(datetime.fromtimestamp(created_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if created_at else ""),
+            likes=int(data.get("digg_count") or data.get("diggCount") or data.get("likesCount") or 0),
             is_reply=is_reply,
             parent_comment_id=parent_id,
-            reply_count=data.get("reply_comment_total", 0),
-            video_id=video_id,
-            post_url=post_url,
+            reply_count=reply_count,
+            replies=parsed_replies,
+            avatar_thumbnail_url=(
+                str(
+                    data.get("avatarThumbnail")
+                    or user.get("avatar_thumb")
+                    or user.get("avatar_thumb_url")
+                    or user.get("avatarLarger")
+                    or user.get("avatar_larger")
+                    or ""
+                ).strip()
+                or None
+            ),
+            video_id=resolved_video_id,
+            post_url=resolved_post_url,
         )
 
     def _extract_media_urls(self, item: dict) -> list[str]:
-        """Extract all media URLs from a post."""
-        urls = []
+        """Extract playable video URLs from a post."""
+        urls: list[str] = []
 
-        # Video URL
-        video = item.get("video", {})
-        if video:
-            # Play URL
-            play_addr = video.get("playAddr")
-            if play_addr:
-                urls.append(play_addr)
-            # Download URL
-            download_addr = video.get("downloadAddr")
-            if download_addr and download_addr not in urls:
-                urls.append(download_addr)
+        video = item.get("video") if isinstance(item.get("video"), dict) else {}
+        video_meta = item.get("videoMeta") if isinstance(item.get("videoMeta"), dict) else {}
 
-        # Cover/thumbnail
-        cover = video.get("cover") if video else None
-        if cover and cover not in urls:
-            urls.append(cover)
+        for payload in (video, video_meta):
+            if not payload:
+                continue
+            best_bitrate_url = self._extract_best_bitrate_video_url(payload)
+            if best_bitrate_url:
+                urls.append(best_bitrate_url)
+            for key in ("playAddr", "downloadAddr", "playUrl", "url"):
+                candidate = self._extract_url_value(payload.get(key))
+                if candidate and candidate not in urls:
+                    urls.append(candidate)
 
-        # Dynamic cover (animated thumbnail)
-        dynamic_cover = video.get("dynamicCover") if video else None
-        if dynamic_cover and dynamic_cover not in urls:
-            urls.append(dynamic_cover)
+        for row in item.get("mediaUrls") or []:
+            candidate = self._extract_url_value(row)
+            if candidate and candidate not in urls:
+                urls.append(candidate)
 
-        return urls
+        deduped: list[str] = []
+        for url in urls:
+            normalized = str(url or "").strip()
+            if normalized and normalized not in deduped:
+                deduped.append(normalized)
+        return deduped[:1]
+
+    @staticmethod
+    def _extract_best_bitrate_video_url(video: dict[str, Any]) -> str | None:
+        rows: list[tuple[tuple[int, int, int], str]] = []
+        for entry in video.get("bitrateInfo") or []:
+            if not isinstance(entry, dict):
+                continue
+            play_addr = entry.get("PlayAddr")
+            if not isinstance(play_addr, dict):
+                continue
+            url_list = play_addr.get("UrlList")
+            if not isinstance(url_list, list) or not url_list:
+                continue
+            url = str(url_list[0] or "").strip()
+            if not url:
+                continue
+            height = int(play_addr.get("Height") or 0)
+            width = int(play_addr.get("Width") or 0)
+            bitrate = int(entry.get("Bitrate") or 0)
+            rows.append(((max(height, width), bitrate, int(play_addr.get("DataSize") or 0)), url))
+        rows.sort(reverse=True)
+        return rows[0][1] if rows else None
+
+    @staticmethod
+    def _extract_url_value(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            for item in value:
+                candidate = TikTokScraper._extract_url_value(item)
+                if candidate:
+                    return candidate
+            return ""
+        if isinstance(value, dict):
+            for key in ("url", "playAddr", "downloadAddr"):
+                candidate = TikTokScraper._extract_url_value(value.get(key))
+                if candidate:
+                    return candidate
+            for key in ("url_list", "UrlList"):
+                candidate = TikTokScraper._extract_url_value(value.get(key))
+                if candidate:
+                    return candidate
+        return ""
+
+    @staticmethod
+    def _extract_thumbnail_url(item: dict[str, Any]) -> str | None:
+        video = item.get("video") if isinstance(item.get("video"), dict) else {}
+        video_meta = item.get("videoMeta") if isinstance(item.get("videoMeta"), dict) else {}
+
+        for payload, keys in (
+            (video, ("cover", "dynamicCover")),
+            (video_meta, ("coverUrl", "originalCoverUrl", "cover", "dynamicCover")),
+        ):
+            if not payload:
+                continue
+            for key in keys:
+                candidate = TikTokScraper._extract_url_value(payload.get(key))
+                if candidate:
+                    return candidate
+
+        for key in ("coverUrl", "originalCoverUrl", "thumbnail", "thumbnailUrl"):
+            candidate = TikTokScraper._extract_url_value(item.get(key))
+            if candidate:
+                return candidate
+        return None

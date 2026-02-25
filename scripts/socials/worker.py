@@ -14,12 +14,14 @@ import time
 from datetime import UTC, datetime
 
 from trr_backend.repositories.social_season_analytics import (
+    ensure_media_mirror_s3_ready,
     execute_run,
     mark_worker_stopped,
     process_next_queued_job,
     recover_stale_running_jobs,
     update_worker_heartbeat,
 )
+from trr_backend.utils.env import load_env
 
 logger = logging.getLogger("socials.worker")
 _UNSET = object()
@@ -135,7 +137,7 @@ def parse_args() -> argparse.Namespace:
         "--parallel",
         type=int,
         default=1,
-        help="Number of worker processes for --run-id mode (default: 1)",
+        help="Number of worker processes (default: 1). Applies to --run-id and queue mode.",
     )
     parser.add_argument(
         "--stage",
@@ -160,24 +162,89 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Worker count for comments stage in --tandem mode (default: 1)",
     )
+    parser.add_argument(
+        "--platform",
+        choices=["instagram", "tiktok", "youtube", "twitter"],
+        default=None,
+        help="Optional platform filter when claiming jobs",
+    )
     return parser.parse_args()
 
 
+def _requires_media_mirror_s3_preflight(*, stage: str | None, platform: str | None) -> bool:
+    normalized_stage = str(stage or "any").strip().lower() or "any"
+    normalized_platform = str(platform or "any").strip().lower() or "any"
+    return normalized_stage in {"any", "media_mirror"} and normalized_platform in {
+        "any",
+        "instagram",
+        "tiktok",
+        "youtube",
+        "twitter",
+    }
+
+
 def main() -> int:
+    load_env()
     args = parse_args()
     stage_filter = None if args.stage == "any" else args.stage
+    platform_filter = args.platform
     worker_id = _build_worker_id(args.worker_id)
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     logger.info("Starting socials worker: worker_id=%s", worker_id)
+    if _requires_media_mirror_s3_preflight(stage=stage_filter, platform=platform_filter):
+        try:
+            ensure_media_mirror_s3_ready()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Social media mirror S3 preflight failed: %s", exc)
+            return 2
+    if not args.run_id and args.parallel > 1:
+        logger.info(
+            "Starting queue fanout workers: parent_worker_id=%s parallel=%d stage=%s platform=%s once=%s",
+            worker_id,
+            args.parallel,
+            stage_filter or "any",
+            platform_filter or "any",
+            bool(args.once),
+        )
+        children: list[subprocess.Popen] = []
+        for index in range(max(1, int(args.parallel))):
+            child_worker_id = f"{worker_id}:p{index + 1}"
+            cmd = [
+                sys.executable,
+                "-m",
+                "scripts.socials.worker",
+                "--worker-id",
+                child_worker_id,
+                "--parallel",
+                "1",
+                "--interval",
+                str(args.interval),
+            ]
+            if stage_filter:
+                cmd.extend(["--stage", stage_filter])
+            if platform_filter:
+                cmd.extend(["--platform", platform_filter])
+            if args.once:
+                cmd.append("--once")
+            children.append(subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy()))
+        exit_code = 0
+        for proc in children:
+            rc = proc.wait()
+            if rc != 0:
+                exit_code = rc
+        return exit_code
+
     heartbeat = WorkerHeartbeat(worker_id=worker_id, stage=stage_filter, run_id=args.run_id)
     heartbeat.start()
 
     try:
         if args.run_id:
-            stale_jobs = recover_stale_running_jobs(run_id=args.run_id, stage=stage_filter, limit=50)
+            stale_jobs = recover_stale_running_jobs(
+                run_id=args.run_id, stage=stage_filter, platform=platform_filter, limit=50
+            )
             if stale_jobs:
                 logger.warning(
                     "Recovered %d stale running job(s) before executing run_id=%s",
@@ -214,6 +281,8 @@ def main() -> int:
                             "--parallel",
                             "1",
                         ]
+                        if platform_filter:
+                            cmd.extend(["--platform", platform_filter])
                         children.append(subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy()))
 
                 _spawn_group("posts", posts_workers)
@@ -247,6 +316,8 @@ def main() -> int:
                     ]
                     if stage_filter:
                         cmd.extend(["--stage", stage_filter])
+                    if platform_filter:
+                        cmd.extend(["--platform", platform_filter])
                     children.append(subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy()))
                 exit_code = 0
                 for proc in children:
@@ -254,20 +325,25 @@ def main() -> int:
                     if rc != 0:
                         exit_code = rc
                 return exit_code
-            logger.info("Executing specific run_id=%s stage=%s", args.run_id, stage_filter or "any")
+            logger.info(
+                "Executing specific run_id=%s stage=%s platform=%s",
+                args.run_id,
+                stage_filter or "any",
+                platform_filter or "any",
+            )
             heartbeat.set_state(status="working", run_id=args.run_id, stage=stage_filter or "any")
-            execute_run(args.run_id, worker_id=worker_id, stage=stage_filter)
+            execute_run(args.run_id, worker_id=worker_id, stage=stage_filter, platform=platform_filter)
             heartbeat.set_state(status="idle", current_job_id=None, metadata_updates={"processed_jobs": "run_complete"})
             return 0
 
         processed = 0
         while True:
             started = datetime.now(tz=UTC)
-            stale_jobs = recover_stale_running_jobs(run_id=None, stage=stage_filter, limit=25)
+            stale_jobs = recover_stale_running_jobs(run_id=None, stage=stage_filter, platform=platform_filter, limit=25)
             if stale_jobs:
                 logger.warning("Recovered %d stale running job(s) before claim", len(stale_jobs))
             heartbeat.set_state(status="working", stage=stage_filter or "any")
-            job = process_next_queued_job(worker_id=worker_id, stage=stage_filter)
+            job = process_next_queued_job(worker_id=worker_id, stage=stage_filter, platform=platform_filter)
             if job:
                 processed += 1
                 heartbeat.set_state(

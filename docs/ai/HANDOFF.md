@@ -2,6 +2,272 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-25) — Week 1 TikTok mirror executed, leaderboard thumbnails confirmed, resolver hardening
+
+- Executed Week 1 TikTok mirror run and measured content coverage before/after:
+  - Pre: `total_posts=405`, `week_posts=1`, `total_with_hosted=9`, `week_with_hosted=0`, `week_needs_mirror=1`
+  - Post: `total_posts=405`, `week_posts=1`, `total_with_hosted=10`, `week_with_hosted=1`, `week_needs_mirror=0`
+- Root-cause behavior observed during queue processing:
+  - a queued TikTok mirror job was consumed by another worker runtime and completed with metadata error `s3_setup_failed:Missing required environment variable: AWS_S3_BUCKET`.
+  - local runtime had valid S3 config and could execute the mirror stage.
+- TikTok mirror reliability fix implemented:
+  - Added resolver controls in `resolve_tiktok_media(...)`:
+    - `allow_ytdlp` to explicitly skip yt-dlp in mirror-stage resolution.
+    - `validate_download_url` to probe candidate media URLs before selecting source.
+  - Mirror-stage TikTok re-resolve now calls resolver with:
+    - `allow_ytdlp=False`
+    - `validate_download_url=True`
+  - This forces automatic fallback from dead `watch_page_json` video URLs (HTTP 403) to working `unofficial_api` URLs when needed.
+- Worker startup hardening:
+  - Expanded S3 preflight guard in worker from Instagram-only to all `media_mirror` platforms (`instagram`, `tiktok`, `youtube`, `twitter`).
+  - Error log text normalized to `Social media mirror S3 preflight failed: ...`.
+- Live Week 1 TikTok execution result:
+  - Post `7608346230631976205` transitioned to `media_mirror_status='mirrored'`.
+  - `hosted_media_urls` now populated with S3/CloudFront MP4 URL.
+  - `hosted_thumbnail_url` now populated with S3/CloudFront WEBP URL.
+  - Selected source at run time: `unofficial_api` after probe failure on `watch_page_json`.
+- Bravo Content Leaderboard thumbnail verification:
+  - `get_analytics(..., platforms=['tiktok'], week=23, source_scope='bravo')`
+  - `leaderboards.bravo_content[0].thumbnail_url` now returns hosted CloudFront thumbnail URL for the mirrored TikTok post.
+
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/media_resolver.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/tiktok/test_media_resolver.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py`
+
+- Validation:
+  - `./.venv/bin/ruff check trr_backend/socials/tiktok/media_resolver.py trr_backend/repositories/social_season_analytics.py scripts/socials/worker.py tests/socials/tiktok/test_media_resolver.py tests/scripts/test_social_worker.py` (pass)
+  - `./.venv/bin/ruff format --check trr_backend/socials/tiktok/media_resolver.py trr_backend/repositories/social_season_analytics.py scripts/socials/worker.py tests/socials/tiktok/test_media_resolver.py tests/scripts/test_social_worker.py` (pass)
+  - `PYTHONPATH=. ./.venv/bin/pytest -q tests/socials/tiktok/test_media_resolver.py tests/scripts/test_social_worker.py tests/repositories/test_social_season_analytics.py -k "tiktok or mirror or worker"` (`24 passed, 73 deselected`)
+  - Live mirror execution via repository stage runner for Week 1 TikTok post completed with status `mirrored`.
+
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- additive_user_skill_used: `github-repo-feature-implementer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+
+## Latest Update (2026-02-25) — TikTok media mirror hardened (Joean-style fallback + quality selection)
+
+- Reviewed [JoeanAmier/TikTokDownloader](https://github.com/JoeanAmier/TikTokDownloader) extraction/downloader strategy and aligned TRR TikTok media selection with:
+  - highest-quality video candidate preference (bitrate/resolution),
+  - no-watermark/source fallback behavior,
+  - separated video-vs-thumbnail handling.
+- Implemented TikTok media resolver with fallback chain:
+  1. `yt_dlp_manifest` (single-video manifest resolution),
+  2. `watch_page_json` (`__UNIVERSAL_DATA_FOR_REHYDRATION__` / `SIGI_STATE` parse + bitrate selection),
+  3. `unofficial_api` (`tikwm`-style fallback),
+  4. `og_fallback`.
+- Fixed TikTok ingestion parsing bug:
+  - `thumbnail_url` no longer defaults to `playAddr` video URL.
+  - `media_urls` now prioritize actual playable video URL(s) instead of mixing cover images into media list.
+  - yt-dlp metadata parsing now keeps video URL(s) in `media_urls` and thumbnail in `thumbnail_url`.
+- Mirror-stage integration:
+  - TikTok mirror stage now re-resolves media URLs on missing/stale source (`failed`/`partial`) and records:
+    - `retrieval_meta.mirror.selected_source`
+    - `retrieval_meta.mirror.attempts[]`.
+  - Missing-source reason code for TikTok now explicit: `tiktok_media_not_found`.
+- Queue eligibility update:
+  - `_platform_post_needs_media_mirror(...)` now requires non-empty `hosted_media_urls` for TikTok (same guard behavior as YouTube), preventing thumbnail-only terminal state.
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/media_resolver.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/__init__.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/tiktok/test_media_resolver.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Validation:
+  - `./.venv/bin/ruff check trr_backend/socials/tiktok/media_resolver.py trr_backend/socials/tiktok/scraper.py trr_backend/socials/tiktok/__init__.py trr_backend/repositories/social_season_analytics.py tests/socials/tiktok/test_media_resolver.py tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `./.venv/bin/ruff format --check trr_backend/socials/tiktok/media_resolver.py trr_backend/socials/tiktok/scraper.py trr_backend/socials/tiktok/__init__.py trr_backend/repositories/social_season_analytics.py tests/socials/tiktok/test_media_resolver.py tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `./.venv/bin/pytest -q tests/socials/tiktok/test_media_resolver.py tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py -k "tiktok or mirror"` (`22 passed, 103 deselected`)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- additive_user_skill_used: `github-repo-feature-implementer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+
+## Latest Update (2026-02-25) — YouTube media mirror now resolves real video streams (not thumbnail-only)
+
+- Reviewed [Tyrrrz/YoutubeDownloader](https://github.com/Tyrrrz/YoutubeDownloader) behavior and aligned backend mirroring approach with stream-manifest selection semantics.
+  - Reference behavior observed:
+    - manifest-driven stream selection (prefer muxed/highest viable quality),
+    - explicit download-option resolution before transfer.
+- Implemented backend YouTube media resolver with deterministic fallback chain:
+  1. `yt_dlp_manifest` (`yt-dlp --dump-single-json` best playable stream),
+  2. `watch_page_streaming_data` (parse `ytInitialPlayerResponse` formats/adaptiveFormats),
+  3. `og_fallback` (`og:video` / `og:image`).
+- Fixed core mirror behavior regression:
+  - removed the thumbnail-only hard-stop for YouTube in mirror path, so `media_urls` are now mirrored to S3 when resolved.
+  - YouTube mirror stage now re-resolves source media URLs on run when media is missing/stale and records:
+    - `retrieval_meta.mirror.selected_source`
+    - `retrieval_meta.mirror.attempts[]`.
+- Queue/retry semantics updated for YouTube:
+  - `_platform_post_needs_media_mirror(...)` now treats empty `hosted_media_urls` as still requiring mirror for YouTube posts (with valid source id), even if thumbnail is already hosted.
+  - mirror stage returns `youtube_media_not_found` when no video media URL is resolved.
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/media_resolver.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/__init__.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/youtube/test_media_resolver.py` (new)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Validation:
+  - `./.venv/bin/ruff check trr_backend/socials/youtube/media_resolver.py trr_backend/repositories/social_season_analytics.py tests/socials/youtube/test_media_resolver.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `./.venv/bin/pytest -q tests/socials/youtube/test_media_resolver.py tests/repositories/test_social_season_analytics.py -k "youtube or mirror"` (`23 passed, 67 deselected`)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- additive_user_skill_used: `github-repo-feature-implementer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+
+## Latest Update (2026-02-25) — Instagram auto-media resolution + mirror S3 fail-fast + jsonb persistence fix
+
+- Implemented Instagram media resolution and mirroring hardening in backend ingest/mirror jobs (no extension dependency).
+  - Fallback order now implemented in code:
+    1. `api_media_info`
+    2. `graphql_shortcode`
+    3. `html_json`
+    4. `og_fallback`
+  - Resolver emits additive structured attempts metadata per source:
+    - `source`
+    - `success`
+    - `reason_code`
+    - `http_status`
+    - `selected_url_count`
+- Root cause debug and fix:
+  - Existing mirror failures were caused by missing S3 runtime vars in job environments (for example `AWS_S3_BUCKET`).
+  - Worker/backfill startup now runs env load + S3 preflight and exits early with explicit error when config is missing.
+- Persistence fix:
+  - `social.instagram_posts.hosted_media_urls` writes now use `jsonb` assignment (`%s::jsonb`) in mirror update SQL path.
+  - Added regression test coverage for this cast behavior.
+- Mirror-stage behavior additions:
+  - Instagram mirror stage re-resolves source media URLs when missing or stale (`failed`/`partial`) before S3 download.
+  - Stage metadata now includes:
+    - `retrieval_meta.mirror.selected_source`
+    - `retrieval_meta.mirror.attempts[]`
+- Error taxonomy updates in media download/upload path:
+  - `download_failed:*` and `upload_failed:*` reasons are now explicit and propagated.
+
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/permalink_metadata.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/__init__.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_instagram_metadata_and_media.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_social_media_mirror_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_instagram_permalink_metadata.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_backfill_instagram_metadata_and_media.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_backfill_social_media_mirror_jobs.py`
+
+- Validation:
+  - `ruff check trr_backend/socials/instagram/permalink_metadata.py trr_backend/socials/instagram/__init__.py trr_backend/repositories/social_season_analytics.py scripts/socials/worker.py scripts/socials/backfill_instagram_metadata_and_media.py scripts/socials/backfill_social_media_mirror_jobs.py tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py tests/scripts/test_social_worker.py tests/scripts/test_backfill_instagram_metadata_and_media.py tests/scripts/test_backfill_social_media_mirror_jobs.py` (pass)
+  - `ruff format --check trr_backend/socials/instagram/permalink_metadata.py trr_backend/socials/instagram/__init__.py trr_backend/repositories/social_season_analytics.py scripts/socials/worker.py scripts/socials/backfill_instagram_metadata_and_media.py scripts/socials/backfill_social_media_mirror_jobs.py tests/socials/test_instagram_permalink_metadata.py tests/repositories/test_social_season_analytics.py tests/scripts/test_social_worker.py tests/scripts/test_backfill_instagram_metadata_and_media.py tests/scripts/test_backfill_social_media_mirror_jobs.py` (pass)
+  - `pytest -q tests/socials/test_instagram_permalink_metadata.py tests/scripts/test_social_worker.py tests/scripts/test_backfill_instagram_metadata_and_media.py tests/scripts/test_backfill_social_media_mirror_jobs.py tests/repositories/test_social_season_analytics.py -k "instagram or mirror or social_worker or backfill_social_media_mirror_jobs"` (`42 passed, 57 deselected`)
+
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- additive_user_skill_used: `github-repo-feature-implementer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+
+## Latest Update (2026-02-25) — Social week-window correction: BYE weeks + final-week +7 cap
+
+- Implemented backend-first weekly period model fix for season social analytics so completed seasons no longer drift to `now`.
+  - File:
+    - `trr_backend/repositories/social_season_analytics.py`
+  - Core behavior changes:
+    - Week windows now include explicit `week_type` classification:
+      - `preseason`
+      - `episode`
+      - `bye`
+    - Episode windows are fixed 7-day windows from each episode air anchor, clipped to next episode start only to avoid overlap.
+    - Gap intervals between episodes are materialized as one or more BYE weeks in 7-day segments.
+    - Final episode window always ends at `episode_start + 7 days` (no unbounded extension to current time).
+    - BYE labels now emitted as `BYE WEEK (Mon D-Mon D)`.
+  - Analytics output additions (backward-compatible additive):
+    - `week_type`
+    - `episode_number` (nullable)
+    - propagated on:
+      - `weekly`
+      - `weekly_platform_posts`
+      - `weekly_platform_engagement`
+      - `weekly_daily_activity`
+      - week detail `week` object
+  - Full-window query alignment:
+    - for `get_analytics(..., week=None)`, analysis end is capped to generated week-window horizon (`min(now, latest_window_end)`).
+  - Noise reduction:
+    - trend flags (`drop/spike/no_activity`) now skip BYE weeks to avoid false regression markers.
+- Tests added/updated:
+  - `tests/repositories/test_social_season_analytics.py`
+    - BYE insertion and final +7 window cap coverage.
+    - full-window horizon cap and metadata emission coverage.
+  - `tests/api/routers/test_socials_season_analytics.py`
+    - additive week metadata assertions for analytics + week detail.
+- Validation evidence:
+  - `pytest tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (`114 passed`)
+  - `ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `ruff format --check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+
+## Latest Update (2026-02-25) — Crawlee incremental runtime wrappers for social queue jobs
+
+- Implemented backend-only Crawlee runtime scaffolding for social ingest queue execution with legacy-safe fallbacks.
+  - Added package: `trr_backend/socials/crawlee_runtime/`
+    - `config.py` (feature flags, per-platform limits, account registry constants)
+    - `request_keys.py` (deterministic request key format)
+    - `error_taxonomy.py` (fixed taxonomy: blocked, rate_limited, auth, network, parse, unknown)
+    - `auth_preflight.py` (platform auth readiness checks + non-secret metadata)
+    - `runtime.py` (incremental wrapper with retry/telemetry and `CrawleeRuntimeError`)
+  - Added platform adapters:
+    - `trr_backend/socials/instagram/crawlee_adapter.py`
+    - `trr_backend/socials/tiktok/crawlee_adapter.py`
+    - `trr_backend/socials/twitter/crawlee_adapter.py`
+    - `trr_backend/socials/youtube/crawlee_adapter.py`
+  - Integrated queue worker execution path in `trr_backend/repositories/social_season_analytics.py`:
+    - `_execute_claimed_job(...)` now conditionally routes through Crawlee adapters when `SOCIAL_CRAWLEE_ENABLED` and platform flags allow.
+    - Added auth preflight failure handling with structured additive metadata (`auth_context`, `crawler_runtime`) and per-platform fallback controls.
+  - Expanded `.env.example` social runtime/auth contract:
+    - `SOCIAL_CRAWLEE_*` feature/limit vars
+    - explicit Twitter/TikTok auth loader vars already consumed by repository loaders
+    - optional account refs and username/password placeholders for cookie-refresh tooling only.
+  - Added tests:
+    - `tests/socials/test_crawlee_request_keys.py`
+    - `tests/socials/test_crawlee_error_taxonomy.py`
+    - `tests/socials/test_crawlee_auth_preflight.py`
+  - Updated runbook:
+    - `docs/runbooks/social_worker_queue_ops.md` with Crawlee flags, auth preflight expectations, and incident bypass guidance.
+
+## Latest Update (2026-02-25) — Default skill chain policy enforcement
+
+- Updated `AGENTS.md` to enforce the default non-trivial implementation chain:
+  1. `skillforge`
+  2. `write-plan-codex`
+  3. `senior-fullstack`
+  4. `senior-backend` or `senior-frontend` (primary-surface rule; backend tie-break for contract/schema/pipeline semantics)
+  5. `senior-qa`
+  6. `code-reviewer`
+- Added mandatory exceptions, additive-domain-skill rule, and handoff compliance keys:
+  - `default_skill_chain_applied`
+  - `default_skill_chain_used`
+  - `default_skill_chain_exception_reason`
+- Validation: workspace `rg` checks for default chain section, ordered steps, trigger scope, and key presence passed.
+
+
 ## Latest Update (2026-02-24) — Networks sync release branch + deploy preflight
 
 - February 24, 2026: Isolated and validated releasable networks sync updates in a clean branch for deployment handoff.
@@ -3845,3 +4111,327 @@ Continuation (same session, 2026-02-24) — Cloud Run deploy fix for requirement
   - TRR-Backend: yes
   - screenalytics: no
   - TRR-APP: no
+
+Continuation (same session, 2026-02-25) — Crawlee Instagram hardening for post-details/comments reliability.
+- Scope:
+  - Implemented true Crawlee primitive execution in runtime layer while preserving existing stage business logic paths.
+  - Added Instagram auth fail-open fallback to legacy execution (default) with strict override.
+  - Added additive metadata contract fields for crawlee/auth context, including explicit fallback marker.
+- Files updated:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/crawlee_runtime/config.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/crawlee_runtime/auth_preflight.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/crawlee_runtime/runtime.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/crawlee_runtime/__init__.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_crawlee_auth_preflight.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Behavior changes:
+  - `execute_platform_stage_with_crawlee` now uses `RequestQueue` + `Request` lifecycle with retries, `SessionPool`, and `ProxyConfiguration`.
+  - When Crawlee package is unavailable, runtime falls back to internal retry wrapper and still emits runtime/auth metadata.
+  - `_execute_claimed_job` now:
+    - keeps Crawlee routing for `posts/comments`,
+    - applies Instagram preflight fail-open fallback to legacy path when auth missing and strict flag is disabled,
+    - preserves strict fail-fast behavior via `SOCIAL_CRAWLEE_AUTH_STRICT_INSTAGRAM=true`.
+  - Additive metadata fields now include:
+    - `auth_context.fallback_to_legacy`
+    - `crawler_runtime.crawlee_request_count`
+    - `crawler_runtime.crawlee_retry_count`
+    - `crawler_runtime.crawlee_session_pool_used`
+- Validation:
+  - `ruff check trr_backend/socials/crawlee_runtime trr_backend/repositories/social_season_analytics.py tests/socials/test_crawlee_auth_preflight.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `ruff format --check trr_backend/socials/crawlee_runtime trr_backend/repositories/social_season_analytics.py tests/socials/test_crawlee_auth_preflight.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest -q tests/socials/test_crawlee_request_keys.py tests/socials/test_crawlee_error_taxonomy.py tests/socials/test_crawlee_auth_preflight.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/socials/test_comment_scraper_fixes.py` (pass, `155 passed`)
+- default_skill_chain_applied: true
+- default_skill_chain_used:
+  - `orchestrate-plan-execution` (fallback process; skill not present in current skill inventory)
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason:
+  - `orchestrate-plan-execution` is referenced by repo policy but not available as an installable skill in this session; proceeded with the remaining mandatory chain.
+
+Continuation (same session, 2026-02-25) — Row-level Sync Comments missing-only backend targeting.
+- primary_skill: `senior-backend`
+- supporting_skills: `skillforge`, `write-plan-codex`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `code_first`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `skillforge -> write-plan-codex -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes (consumer payload wiring)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior summary:
+  - Added additive ingest request fields: `comment_refresh_policy` (`balanced|missing_only`) and `comment_anchor_source_ids` (per-platform source-id lists).
+  - Added strict `missing_only` refresh policy path in comment refresh decisioning: refresh only on true `count_gap`; skip `stale_recheck`, `quiet_post_force_recheck`, and skip `count_drop` refreshes.
+  - Added source-id filtering support to `_load_existing_posts(...)` and threaded platform-specific source-id targets into comment-stage handlers for Instagram/TikTok/YouTube/Twitter.
+  - Persisted policy + target metadata into run/job config and ensured `comments_only + missing_only` skips comment job creation when a platform has an explicitly empty target list.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py -k "comments_only or comment_refresh or anchor_source_ids"` (pass, `4 passed`)
+
+Continuation (same session, 2026-02-25) — Sync Comments queue/runner acceleration for platform-parallel execution.
+- primary_skill: `senior-backend`
+- supporting_skills: `skillforge`, `write-plan-codex`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `code_first`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `skillforge -> write-plan-codex -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+- behavior summary:
+  - `comments_only` ingest now fans out API background runners in both inline and queue execution paths, so a single run can execute multiple comments jobs concurrently.
+  - Added `SOCIAL_COMMENTS_RUN_WORKERS` (default `4`, capped `1..8`) and backward-compatible fallback to `SOCIAL_INLINE_COMMENTS_WORKERS`.
+  - Queue worker script now supports true queue-mode fanout with `--parallel N` (without `--run-id`) by spawning child workers with unique worker IDs.
+  - Added regression tests for queue-mode API fanout and worker-script queue fanout behavior.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py scripts/socials/worker.py tests/api/routers/test_socials_season_analytics.py tests/scripts/test_social_worker.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py tests/scripts/test_social_worker.py -k "comments_only or worker or queue"` (pass, `12 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py -k "comments_only or comment_refresh or anchor_source_ids"` (pass, `5 passed`)
+
+Continuation (same session, 2026-02-25) — Social analytics daily reported-comments payload for heatmap completeness.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `code_first`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes (consumes additive fields)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+- behavior summary:
+  - Added additive daily payload fields in `weekly_daily_activity.days[]`:
+    - `reported_comments` (per-platform)
+    - `total_reported_comments` (daily total)
+  - Preserved existing weekly metadata (`week_type`, `episode_number`) and existing weekly comment-quality fields.
+  - No breaking contract changes; this is additive-only.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass, `114 passed`)
+
+Continuation (same session, 2026-02-25) — Final verification pass for additive daily reported-comments contract.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `code_first`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes
+- validation_evidence:
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py` (pass, `114 passed`)
+
+Continuation (same session, 2026-02-25) — Bravo leaderboard thumbnails now prefer S3-hosted media when available.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `code_first`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no (consumes unchanged `thumbnail_url` field)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior summary:
+  - Updated thumbnail selection expressions to prefer S3-hosted URLs in this order:
+    - `hosted_thumbnail_url`
+    - `hosted_media_urls[0]`
+    - legacy/source thumbnail (`thumbnail_url` or `media_urls[0]` for X/Twitter)
+  - This unblocks `Bravo Content Leaderboard` post thumbnails when mirror sync succeeded but only `hosted_media_urls` was populated.
+  - Response contract is unchanged (`thumbnail_url` remains the same field).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "thumbnail_expr or leaderboard"` (pass, `2 passed`)
+
+Continuation (same session, 2026-02-25) — RHOSLC social analytics revision: postseason windows + Instagram actor-style normalization.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `code_first`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+- behavior_summary:
+  - Added 3 `postseason` week windows after the final episode week (final episode week remains 7 days).
+  - Preserved additive weekly payload compatibility while emitting postseason week metadata in analytics arrays.
+  - Hardened Instagram parser for dual schemas: legacy IG fields and actor-style camelCase payloads for posts/comments/replies.
+  - Added canonical mention/hashtag normalization and collaborator/tag extraction fallbacks from `coauthorProducers`/`taggedUsers` without double-counting posts/comments.
+  - Kept non-canonical source fields in raw payload surfaces and avoided schema migrations.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/social_season_analytics.py trr_backend/socials/instagram/scraper.py tests/repositories/test_social_season_analytics.py tests/socials/test_comment_scraper_fixes.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check trr_backend/repositories/social_season_analytics.py trr_backend/socials/instagram/scraper.py tests/repositories/test_social_season_analytics.py tests/socials/test_comment_scraper_fixes.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass, `151 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check .` (fails on unrelated existing issues in `scripts/sync/sync_show_logos.py`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check .` (fails due unrelated existing workspace formatting drift)
+
+Continuation (same session, 2026-02-25) — Cloud Run env repair + networks sync verification (ops-only).
+- primary_skill: `senior-fullstack`
+- supporting_skills: `senior-devops`, `senior-backend`, `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - secondary: `mcp__playwright__*`, `mcp__chrome-devtools__*`
+- delegation_map:
+  - role: `API Contract Owner`
+    scope: `sync endpoint execution contract`
+    deliverable: `no API shape changes; verified runtime execution of existing /api/v1/admin/shows/sync-networks-streaming contract`
+    verification_command: `curl -fsS "$SERVICE_URL/openapi.json" >/dev/null`
+    status: `completed`
+  - role: `Schema Owner`
+    scope: `data/migration impact`
+    deliverable: `no schema or migration changes performed; verified run state through existing admin.network_streaming_sync_runs rows`
+    verification_command: `PYTHONPATH=. python - <<'PY' ... select from admin.network_streaming_sync_runs ... PY`
+    status: `completed`
+  - role: `Integration Owner`
+    scope: `TRR-APP admin /admin/networks runtime path`
+    deliverable: `attempted browser-triggered sync on admin route; local page rendered but API auth warnings remained in that local session`
+    verification_command: `Playwright snapshot on http://admin.localhost:3000/admin/networks`
+    status: `completed`
+  - role: `QA Owner`
+    scope: `ops verification + clean log window`
+    deliverable: `new Cloud Run revision with required env names, health check pass, sync runs terminal, and no post-window sync traceback signatures`
+    verification_command: `gcloud logging read ... textPayload:"admin sync step failed" ...`
+    status: `completed`
+- risk_class: `no_contract`
+- runtime_changes:
+  - Cloud Run service updated in `trr-web-25d2e/us-east1`:
+    - previous revision: `trr-backend-00034-hv4`
+    - new ready revision: `trr-backend-00035-ch6`
+  - Added/updated env bindings on service:
+    - `TMDB_API_KEY`
+    - `TMDB_BEARER_TOKEN`
+    - `AWS_REGION`
+    - `AWS_S3_BUCKET`
+    - `AWS_CDN_BASE_URL`
+    - `AWS_ACCESS_KEY_ID`
+    - `AWS_SECRET_ACCESS_KEY`
+    - `BRANDFETCH_API_KEY`
+  - Health gate:
+    - `GET /openapi.json` => `200`
+- sync_verification_window:
+  - `SYNC_START_UTC=2026-02-25T05:53:44Z`
+  - Terminal run-state evidence from `admin.network_streaming_sync_runs` (>= window):
+    - `run_id=network-streaming-20260225T055437Z` -> `status=stopped`, cursor `production:irwin entertainment`
+    - `run_id=network-streaming-20260225T060040Z` -> `status=stopped`, cursor `production:one potato productions`
+  - Resume-path evidence:
+    - polling captured `run_id=network-streaming-20260225T060040Z` transition `running -> stopped` with cursor progression `production:mtv networks -> production:one potato productions`.
+- validation_evidence:
+  - `gcloud run services describe trr-backend --project trr-web-25d2e --region us-east1 --format='value(status.latestReadyRevisionName,status.url,spec.template.spec.containers[0].env[].name)'`
+  - `curl -fsS "$SERVICE_URL/openapi.json" >/dev/null`
+  - `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="trr-backend" AND timestamp>="2026-02-25T05:53:44Z" AND textPayload:"admin sync step failed"' --project trr-web-25d2e --limit=100 --format='value(timestamp,textPayload)'` (no matches)
+  - `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="trr-backend" AND timestamp>="2026-02-25T05:53:44Z" AND textPayload:"Traceback (most recent call last)" AND textPayload:"/app/scripts/sync/"' --project trr-web-25d2e --limit=100 --format='value(timestamp,textPayload)'` (no matches)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (runtime verification path and handoff update only; no app source mutation)
+
+Continuation (same session, 2026-02-25) — TikTok content scraper dual-shape normalization (actor-style + legacy).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `code_first`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+- behavior_summary:
+  - Added robust dual-key parsing for TikTok posts:
+    - legacy keys (`desc`, `author`, `stats`, `music`, `video`)
+    - actor-style keys (`text`, `authorMeta`, `musicMeta`, `videoMeta`, top-level counts, `webVideoUrl`, structured hashtags/mentions)
+  - Added timestamp coercion support for unix ints, numeric strings, and ISO timestamps (`createTimeISO`).
+  - Normalized mention extraction to strip punctuation (`@hulu.` -> `hulu`) and dedupe across structured + caption-derived values.
+  - Extended comment parsing to support actor-style comment payloads:
+    - keys like `cid|id`, `uniqueId`, `uid`, `diggCount`, `replyCommentTotal`, `createTimeISO`, `avatarThumbnail`, `videoWebUrl`
+    - nested `replies` parsing into typed reply objects
+    - fallback `video_id` extraction from `videoWebUrl` when explicit IDs are missing.
+  - Expanded media/thumbnail extraction to include actor-style fields (`mediaUrls`, `videoMeta.coverUrl`, `videoMeta.originalCoverUrl`) while preserving legacy behavior.
+  - Hardened scrape loops to skip malformed rows with missing/invalid timestamps (for example actor rows containing only `error`) instead of terminating pagination early.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/socials/tiktok/scraper.py tests/socials/test_comment_scraper_fixes.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check trr_backend/socials/tiktok/scraper.py tests/socials/test_comment_scraper_fixes.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/socials/test_comment_scraper_fixes.py tests/socials/tiktok/test_media_resolver.py` (pass, `41 passed`)
+
+Continuation (same session, 2026-02-25) — Full Sync + Mirror backend contract + queue fanout hardening.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `code_first`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/start_worker_pool.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+- behavior_summary:
+  - Added `GET /api/v1/admin/socials/seasons/{season_id}/analytics/mirror-coverage` with parity to comments-coverage response shape and `_platform_post_needs_media_mirror(...)` semantics.
+  - Extended mirror requeue endpoints to support `date_start/date_end` window filtering and added response metadata: `window_applied`, `window`, `eligible_in_window`.
+  - Hardened comments-only fanout worker cap via env (`SOCIAL_COMMENTS_RUN_WORKERS`, fallback `SOCIAL_INLINE_COMMENTS_WORKERS`, bounded `1..8`).
+  - Added persistent worker pool helper script (`scripts/socials/start_worker_pool.sh`) and runbook/env documentation for general + mirror worker pools.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && .venv/bin/python -m pytest tests/api/routers/test_socials_season_analytics.py -k 'mirror_coverage or mirror_requeue or comments_only_fanout_respects_worker_cap' tests/repositories/test_social_season_analytics.py -k 'mirror_coverage or requeue_media_mirror_jobs'` (pass, `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && .venv/bin/python -m ruff check api/routers/socials.py trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && bash -n scripts/socials/start_worker_pool.sh` (pass)

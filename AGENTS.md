@@ -91,9 +91,36 @@ Before ending session:
 3. Update `docs/ai/HANDOFF.md`.
 
 ## Skill Routing (Repo)
-Use the smallest set of skills that fully covers the backend task.
+Use the smallest set of skills that fully covers the backend task after the mandatory default skill chain is applied.
+
+## Default Skill Chain (Mandatory)
+Apply this chain for all non-trivial implementation tasks (any task that changes repo-tracked files, validates behavior for a change, or prepares commit/PR/handoff artifacts):
+1. `orchestrate-plan-execution`
+2. `senior-fullstack`
+3. `senior-backend` or `senior-frontend` (pick by primary surface)
+4. `senior-qa`
+5. `code-reviewer`
+
+Backend mapping for step 3:
+- Default to `senior-backend` for this repo.
+- Use `senior-frontend` only when the task is primarily UI/rendering/interaction and has no backend/schema/API/pipeline contract risk.
+- Tie-breaker when both surfaces are touched: choose `senior-backend` if any contract/schema/pipeline semantics are changed; otherwise choose `senior-frontend`.
+
+Exceptions:
+- Trivial read-only tasks and simple Q&A.
+- Explicit user override.
+- Skill unavailable (must document fallback).
+
+Domain skills are additive:
+- `senior-architect`, `senior-devops`, `tdd-guide`, and other domain skills may be added, but the five baseline steps must not be skipped when the trigger rule applies.
+
+Handoff compliance keys for qualifying tasks (`docs/ai/HANDOFF.md`):
+- `default_skill_chain_applied` (`true|false`)
+- `default_skill_chain_used` (ordered list)
+- `default_skill_chain_exception_reason` (required when not applied)
 
 Primary skills:
+- `orchestrate-plan-execution`: Codex-primary default entrypoint for non-trivial plan + execute tasks; Claude remains secondary.
 - `senior-backend`: API routes, schema/migrations, backend performance/security.
 - `senior-architect`: system/API design tradeoffs, layering/dependency checks.
 - `senior-qa`: backend test coverage and regression validation.
@@ -106,7 +133,7 @@ Secondary skills:
 - `tech-stack-evaluator`: only for non-trivial architecture/tooling decisions.
 - `aws-solution-architect`: only if AWS migration/architecture is explicitly requested.
 
-Skill sequencing for backend feature work:
+Skill sequencing for backend feature work (after default chain):
 1. `senior-architect` (if decision-heavy)
 2. `senior-backend`
 3. `senior-qa`
