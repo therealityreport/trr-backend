@@ -47,6 +47,14 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _stub_fandom_commit_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("api.routers.admin_show_bravo._persist_valid_fandom_profile_links", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("api.routers.admin_show_bravo._persist_missing_fandom_profile_markers", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("api.routers.admin_show_bravo.upsert_cast_fandom", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.routers.admin_show_bravo._import_fandom_person_image", lambda *args, **kwargs: None)
+
+
 def _read_sse_events(raw_payload: str, event_type: str) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     normalized = raw_payload.replace("\r\n", "\n")
@@ -1768,6 +1776,186 @@ def test_commit_bravo_import_persists_season_overview_for_season_scoped_sync(
     assert response.status_code == 200
     persist_season_overview_mock.assert_called_once()
     persist_show_description_mock.assert_not_called()
+
+
+def test_commit_bravo_import_uses_canonical_show_description_when_override_not_applied(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    mock_db = MagicMock()
+
+    bundle = {
+        "show": {
+            "canonical_url": "https://www.bravotv.com/the-valley",
+            "title": "The Valley",
+            "description": "Season marketing copy from Bravo",
+            "airs_text": "Tuesdays 9/8c",
+        },
+        "videos": [],
+        "news": [],
+        "people": [
+            {
+                "canonical_url": "https://www.bravotv.com/people/janet-caperna",
+                "name": "Janet Caperna",
+                "bio": "Bio",
+                "hero_image_url": None,
+                "social_links": {},
+                "videos": [],
+                "news": [],
+            }
+        ],
+        "image_candidates": [],
+        "discovered_person_urls": ["https://www.bravotv.com/people/janet-caperna"],
+        "raw": {},
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch("api.routers.admin_show_bravo.parse_bravo_show_bundle", return_value=bundle):
+                    with patch(
+                        "api.routers.admin_show_bravo._build_show_cast_index",
+                        return_value=[{"person_id": person_id, "person_name": "Janet Caperna"}],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_bravo._upsert_show_snapshot",
+                            return_value={"show_id": show_id, "source_id": "bravo", "variant": "default"},
+                        ):
+                            with patch(
+                                "api.routers.admin_show_bravo._upsert_person_snapshot",
+                                return_value={"person_id": person_id, "source_id": "bravo", "variant": "default"},
+                            ):
+                                with patch("api.routers.admin_show_bravo._persist_person_profile"):
+                                    with patch(
+                                        "api.routers.admin_show_bravo._resolve_canonical_show_description",
+                                        return_value="Canonical show description from IMDb",
+                                    ) as resolve_canonical_mock:
+                                        with patch(
+                                            "api.routers.admin_show_bravo._persist_show_description"
+                                        ) as persist_show_description_mock:
+                                            with patch(
+                                                "api.routers.admin_show_bravo._persist_discovered_links_from_bravo_sync",
+                                                return_value=EMPTY_DISCOVERED_LINK_STATS,
+                                            ):
+                                                with patch(
+                                                    "api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync",
+                                                    return_value={
+                                                        "role_suggestions": 0,
+                                                        "role_assignments": 0,
+                                                        "announcement_people": 0,
+                                                    },
+                                                ):
+                                                    response = client.post(
+                                                        f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
+                                                        headers={"Authorization": f"Bearer {token}"},
+                                                        json={
+                                                            "show_url": "https://www.bravotv.com/the-valley",
+                                                            "description_override": "Do not apply unless toggled",
+                                                        },
+                                                    )
+
+    assert response.status_code == 200
+    resolve_canonical_mock.assert_called_once()
+    persist_show_description_mock.assert_called_once_with(
+        mock_db,
+        show_id,
+        "Canonical show description from IMDb",
+    )
+
+
+def test_commit_bravo_import_applies_show_description_override_when_opted_in(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    mock_db = MagicMock()
+
+    bundle = {
+        "show": {
+            "canonical_url": "https://www.bravotv.com/the-valley",
+            "title": "The Valley",
+            "description": "Bravo description",
+            "airs_text": "Tuesdays 9/8c",
+        },
+        "videos": [],
+        "news": [],
+        "people": [
+            {
+                "canonical_url": "https://www.bravotv.com/people/janet-caperna",
+                "name": "Janet Caperna",
+                "bio": "Bio",
+                "hero_image_url": None,
+                "social_links": {},
+                "videos": [],
+                "news": [],
+            }
+        ],
+        "image_candidates": [],
+        "discovered_person_urls": ["https://www.bravotv.com/people/janet-caperna"],
+        "raw": {},
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_bravo._show_exists", return_value=True):
+            with patch("api.routers.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+                with patch("api.routers.admin_show_bravo.parse_bravo_show_bundle", return_value=bundle):
+                    with patch(
+                        "api.routers.admin_show_bravo._build_show_cast_index",
+                        return_value=[{"person_id": person_id, "person_name": "Janet Caperna"}],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_bravo._upsert_show_snapshot",
+                            return_value={"show_id": show_id, "source_id": "bravo", "variant": "default"},
+                        ):
+                            with patch(
+                                "api.routers.admin_show_bravo._upsert_person_snapshot",
+                                return_value={"person_id": person_id, "source_id": "bravo", "variant": "default"},
+                            ):
+                                with patch("api.routers.admin_show_bravo._persist_person_profile"):
+                                    with patch(
+                                        "api.routers.admin_show_bravo._resolve_canonical_show_description"
+                                    ) as resolve_canonical_mock:
+                                        with patch(
+                                            "api.routers.admin_show_bravo._persist_show_description"
+                                        ) as persist_show_description_mock:
+                                            with patch(
+                                                "api.routers.admin_show_bravo._persist_discovered_links_from_bravo_sync",
+                                                return_value=EMPTY_DISCOVERED_LINK_STATS,
+                                            ):
+                                                with patch(
+                                                    "api.routers.admin_show_bravo._persist_cast_role_suggestions_from_bravo_sync",
+                                                    return_value={
+                                                        "role_suggestions": 0,
+                                                        "role_assignments": 0,
+                                                        "announcement_people": 0,
+                                                    },
+                                                ):
+                                                    response = client.post(
+                                                        f"/api/v1/admin/shows/{show_id}/import-bravo/commit",
+                                                        headers={"Authorization": f"Bearer {token}"},
+                                                        json={
+                                                            "show_url": "https://www.bravotv.com/the-valley",
+                                                            "description_override": "Explicit override",
+                                                            "apply_show_description_override": True,
+                                                        },
+                                                    )
+
+    assert response.status_code == 200
+    resolve_canonical_mock.assert_not_called()
+    persist_show_description_mock.assert_called_once_with(
+        mock_db,
+        show_id,
+        "Explicit override",
+    )
 
 
 def test_commit_bravo_import_uses_selected_show_image_kinds(

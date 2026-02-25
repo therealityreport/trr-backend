@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -15,7 +15,12 @@ from api.auth import AdminUser
 from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
 from trr_backend.ingestion.fandom_season_scraper import parse_fandom_season_html
-from trr_backend.integrations.fandom import is_allowlisted_fandom_domain, load_fandom_community_allowlist
+from trr_backend.integrations.fandom import (
+    is_allowlisted_fandom_domain,
+    is_fandom_page_missing,
+    load_fandom_community_allowlist,
+    load_fandom_community_allowlist_with_source,
+)
 from trr_backend.integrations.fandom_discovery import FandomCandidatePage, discover_fandom_candidate_pages
 from trr_backend.integrations.openai_fandom_cleanup import cleanup_fandom_payload_with_openai
 from trr_backend.repositories.cast_fandom import upsert_cast_fandom
@@ -43,8 +48,14 @@ def _to_iso_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _normalize_domains(requested: list[str]) -> tuple[str, ...]:
-    configured = tuple(requested) if requested else load_fandom_community_allowlist()
+def _normalize_domains(requested: list[str]) -> tuple[tuple[str, ...], str]:
+    source = "request"
+    allowlist = load_fandom_community_allowlist()
+    if requested:
+        configured = tuple(requested)
+    else:
+        configured, source = load_fandom_community_allowlist_with_source()
+        allowlist = configured
     domains: list[str] = []
     for value in configured:
         parsed = urlparse(str(value).strip())
@@ -53,11 +64,11 @@ def _normalize_domains(requested: list[str]) -> tuple[str, ...]:
             domain = domain[4:]
         if not domain:
             continue
-        if not is_allowlisted_fandom_domain(domain, allowlist=load_fandom_community_allowlist()):
+        if not is_allowlisted_fandom_domain(domain, allowlist=allowlist):
             raise HTTPException(status_code=400, detail=f"Domain is not allowlisted: {domain}")
         if domain not in domains:
             domains.append(domain)
-    return tuple(domains)
+    return tuple(domains), source
 
 
 def _validate_manual_urls(manual_urls: list[str], *, allowlist: tuple[str, ...]) -> list[str]:
@@ -92,6 +103,123 @@ def _dedupe_dict_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(marker)
         deduped.append(row)
     return deduped
+
+
+def _candidate_title_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    if "/wiki/" not in parsed.path:
+        return ""
+    raw_title = parsed.path.split("/wiki/", 1)[1].split("/", 1)[0]
+    return unquote(raw_title).replace("_", " ").strip()
+
+
+def _candidate_from_url(url: str, *, source: str) -> FandomCandidatePage:
+    parsed = urlparse(url)
+    domain = (parsed.netloc or parsed.path).strip().lower().strip(".")
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return FandomCandidatePage(
+        url=url,
+        title=_candidate_title_from_url(url) or url,
+        source=source,
+        domain=domain,
+        score=999.0 if source == "selected" else 0.0,
+    )
+
+
+def _discover_candidates(
+    *,
+    query_name: str,
+    entity_kind: str,
+    request: FandomSyncRequest,
+    domains: tuple[str, ...],
+    season_number: int | None = None,
+) -> list[FandomCandidatePage]:
+    manual_urls = _validate_manual_urls(request.manual_page_urls, allowlist=domains)
+    return discover_fandom_candidate_pages(
+        query_name=query_name,
+        entity_kind=entity_kind,
+        season_number=season_number,
+        manual_page_urls=manual_urls,
+        community_domains=domains,
+        include_allpages_scan=request.include_allpages_scan,
+        allpages_max_pages=request.allpages_max_pages,
+        max_candidates=request.max_candidates,
+    )
+
+
+def _build_selected_candidates(
+    selected_page_urls: list[str],
+    *,
+    allowlist: tuple[str, ...],
+) -> list[FandomCandidatePage]:
+    selected_urls = _validate_manual_urls(selected_page_urls, allowlist=allowlist)
+    selected: list[FandomCandidatePage] = []
+    seen: set[str] = set()
+    for url in selected_urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        selected.append(_candidate_from_url(url, source="selected"))
+    return selected
+
+
+def _parse_person_candidates(
+    candidates: list[FandomCandidatePage],
+    *,
+    domains: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    parsed_rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for candidate in candidates:
+        try:
+            html, final_url = fetch_fandom_person_html(candidate.url)
+            if not html:
+                warnings.append(f"Skipped missing page: {candidate.url} (empty content)")
+                continue
+            if not is_allowlisted_fandom_domain(final_url, allowlist=domains):
+                warnings.append(f"Skipped non-allowlisted redirect target: {final_url}")
+                continue
+            if is_fandom_page_missing(html, None):
+                warnings.append(f"Skipped missing page: {final_url}")
+                continue
+            parsed, _photos = parse_fandom_person_html(html, source_url=final_url)
+            if not parsed:
+                warnings.append(f"Parser returned no payload for {final_url}")
+                continue
+            parsed_rows.append(parsed)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Failed to parse {candidate.url}: {exc}")
+    return parsed_rows, warnings
+
+
+def _parse_season_candidates(
+    candidates: list[FandomCandidatePage],
+    *,
+    domains: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    parsed_rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for candidate in candidates:
+        try:
+            html, final_url = fetch_fandom_person_html(candidate.url)
+            if not html:
+                warnings.append(f"Skipped missing page: {candidate.url} (empty content)")
+                continue
+            if not is_allowlisted_fandom_domain(final_url, allowlist=domains):
+                warnings.append(f"Skipped non-allowlisted redirect target: {final_url}")
+                continue
+            if is_fandom_page_missing(html, None):
+                warnings.append(f"Skipped missing page: {final_url}")
+                continue
+            parsed = parse_fandom_season_html(html, source_url=final_url)
+            if not parsed:
+                warnings.append(f"Parser returned no payload for {final_url}")
+                continue
+            parsed_rows.append(parsed)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Failed to parse {candidate.url}: {exc}")
+    return parsed_rows, warnings
 
 
 def _merge_person_payload(
@@ -170,31 +298,42 @@ def _merge_person_payload(
         if use_source_variants:
             source_variants[field] = field_values
 
-    cleanup_payload, ai_model = cleanup_fandom_payload_with_openai(
+    cleanup_payload, ai_model_candidate = cleanup_fandom_payload_with_openai(
         entity_kind="person",
         entity_label=entity_label,
         aggregated=aggregated,
         source_variants=parsed_rows,
     )
+    ai_model: str | None = None
     if cleanup_payload:
+        cleanup_applied = False
         if _row_has_value(cleanup_payload.get("casting_summary")):
             aggregated["casting_summary"] = cleanup_payload.get("casting_summary")
+            cleanup_applied = True
         if isinstance(cleanup_payload.get("bio_card"), dict):
             aggregated["bio_card"] = cleanup_payload.get("bio_card")
+            cleanup_applied = True
         if isinstance(cleanup_payload.get("sections"), list):
             aggregated["dynamic_sections"] = cleanup_payload.get("sections")
+            cleanup_applied = True
         if isinstance(cleanup_payload.get("citations"), list):
             citations = cleanup_payload.get("citations")
+            cleanup_applied = True
         if isinstance(cleanup_payload.get("conflicts"), list):
             conflicts = cleanup_payload.get("conflicts")
+            cleanup_applied = True
         overrides = cleanup_payload.get("canonical_field_overrides")
         if isinstance(overrides, dict):
             for key, value in overrides.items():
                 if _row_has_value(value):
                     aggregated[str(key)] = value
+                    cleanup_applied = True
+        if cleanup_applied:
+            ai_model = ai_model_candidate
+        else:
+            warnings.append("OpenAI cleanup returned no usable fields; using deterministic merge.")
     else:
         warnings.append("OpenAI cleanup unavailable; using deterministic merge.")
-        ai_model = None
 
     primary = parsed_rows[0]
     result = {
@@ -261,24 +400,33 @@ def _merge_season_payload(
             }
         )
 
-    cleanup_payload, ai_model = cleanup_fandom_payload_with_openai(
+    cleanup_payload, ai_model_candidate = cleanup_fandom_payload_with_openai(
         entity_kind="season",
         entity_label=entity_label,
         aggregated={"summary": summary, "dynamic_sections": sections},
         source_variants=parsed_rows,
     )
+    ai_model: str | None = None
     if cleanup_payload:
+        cleanup_applied = False
         if _row_has_value(cleanup_payload.get("casting_summary")) and not _row_has_value(summary):
             summary = cleanup_payload.get("casting_summary")
+            cleanup_applied = True
         if isinstance(cleanup_payload.get("sections"), list):
             sections = cleanup_payload.get("sections")
+            cleanup_applied = True
         if isinstance(cleanup_payload.get("citations"), list):
             citations = cleanup_payload.get("citations")
+            cleanup_applied = True
         if isinstance(cleanup_payload.get("conflicts"), list):
             conflicts = cleanup_payload.get("conflicts")
+            cleanup_applied = True
+        if cleanup_applied:
+            ai_model = ai_model_candidate
+        else:
+            warnings.append("OpenAI cleanup returned no usable fields; using deterministic merge.")
     else:
         warnings.append("OpenAI cleanup unavailable; using deterministic merge.")
-        ai_model = None
 
     source_variants = parsed_rows if use_source_variants else None
     primary = parsed_rows[0]
@@ -353,37 +501,27 @@ def _collect_person_preview(
     *,
     person_name: str,
     request: FandomSyncRequest,
+    selected_page_urls: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    domains = _normalize_domains(request.community_domains)
-    manual_urls = _validate_manual_urls(request.manual_page_urls, allowlist=domains)
-    candidates = discover_fandom_candidate_pages(
+    domains, allowlist_source = _normalize_domains(request.community_domains)
+    warnings: list[str] = []
+    if not request.community_domains and allowlist_source == "database":
+        warnings.append("Using Fandom allowlist from database override.")
+    candidates = _discover_candidates(
         query_name=person_name,
         entity_kind="person",
-        manual_page_urls=manual_urls,
-        community_domains=domains,
-        include_allpages_scan=request.include_allpages_scan,
-        allpages_max_pages=request.allpages_max_pages,
-        max_candidates=request.max_candidates,
+        request=request,
+        domains=domains,
     )
-    selected = candidates[: request.max_candidates]
-    parsed_rows: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    for candidate in selected:
-        try:
-            html, final_url = fetch_fandom_person_html(candidate.url)
-            if not html:
-                warnings.append(f"No HTML returned for {candidate.url}")
-                continue
-            if not is_allowlisted_fandom_domain(final_url, allowlist=domains):
-                warnings.append(f"Skipped non-allowlisted redirect target: {final_url}")
-                continue
-            parsed, _photos = parse_fandom_person_html(html, source_url=final_url)
-            if not parsed:
-                warnings.append(f"Parser returned no payload for {final_url}")
-                continue
-            parsed_rows.append(parsed)
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"Failed to parse {candidate.url}: {exc}")
+    selected = (
+        _build_selected_candidates(selected_page_urls or [], allowlist=domains)
+        if selected_page_urls
+        else candidates[: request.max_candidates]
+    )
+    if not selected:
+        selected = candidates[: request.max_candidates]
+    parsed_rows, parse_warnings = _parse_person_candidates(selected, domains=domains)
+    warnings.extend(parse_warnings)
     return (
         [_candidate_to_json(item) for item in candidates],
         [_candidate_to_json(item) for item in selected],
@@ -397,38 +535,28 @@ def _collect_season_preview(
     query_name: str,
     season_number: int,
     request: FandomSyncRequest,
+    selected_page_urls: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    domains = _normalize_domains(request.community_domains)
-    manual_urls = _validate_manual_urls(request.manual_page_urls, allowlist=domains)
-    candidates = discover_fandom_candidate_pages(
+    domains, allowlist_source = _normalize_domains(request.community_domains)
+    warnings: list[str] = []
+    if not request.community_domains and allowlist_source == "database":
+        warnings.append("Using Fandom allowlist from database override.")
+    candidates = _discover_candidates(
         query_name=query_name,
         entity_kind="season",
+        request=request,
+        domains=domains,
         season_number=season_number,
-        manual_page_urls=manual_urls,
-        community_domains=domains,
-        include_allpages_scan=request.include_allpages_scan,
-        allpages_max_pages=request.allpages_max_pages,
-        max_candidates=request.max_candidates,
     )
-    selected = candidates[: request.max_candidates]
-    parsed_rows: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    for candidate in selected:
-        try:
-            html, final_url = fetch_fandom_person_html(candidate.url)
-            if not html:
-                warnings.append(f"No HTML returned for {candidate.url}")
-                continue
-            if not is_allowlisted_fandom_domain(final_url, allowlist=domains):
-                warnings.append(f"Skipped non-allowlisted redirect target: {final_url}")
-                continue
-            parsed = parse_fandom_season_html(html, source_url=final_url)
-            if not parsed:
-                warnings.append(f"Parser returned no payload for {final_url}")
-                continue
-            parsed_rows.append(parsed)
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"Failed to parse {candidate.url}: {exc}")
+    selected = (
+        _build_selected_candidates(selected_page_urls or [], allowlist=domains)
+        if selected_page_urls
+        else candidates[: request.max_candidates]
+    )
+    if not selected:
+        selected = candidates[: request.max_candidates]
+    parsed_rows, parse_warnings = _parse_season_candidates(selected, domains=domains)
+    warnings.extend(parse_warnings)
     return (
         [_candidate_to_json(item) for item in candidates],
         [_candidate_to_json(item) for item in selected],
@@ -486,17 +614,10 @@ def commit_person_fandom_sync(
     _: AdminUser = None,
 ):
     person_name = _resolve_person_name(db, str(person_id))
-    preview_request = FandomSyncRequest(
-        manual_page_urls=payload.selected_page_urls or payload.manual_page_urls,
-        max_candidates=payload.max_candidates,
-        include_allpages_scan=payload.include_allpages_scan,
-        allpages_max_pages=payload.allpages_max_pages,
-        community_domains=payload.community_domains,
-        save_source_variants=payload.save_source_variants,
-    )
     candidate_pages, selected_pages, parsed_rows, warnings = _collect_person_preview(
         person_name=person_name,
-        request=preview_request,
+        request=payload,
+        selected_page_urls=payload.selected_page_urls,
     )
     merged, merge_warnings = _merge_person_payload(
         parsed_rows,
@@ -574,18 +695,11 @@ def commit_season_fandom_sync(
     query_name = season_context["season_title"] or (
         f"{season_context['show_name']} season {season_context['season_number']}"
     )
-    preview_request = FandomSyncRequest(
-        manual_page_urls=payload.selected_page_urls or payload.manual_page_urls,
-        max_candidates=payload.max_candidates,
-        include_allpages_scan=payload.include_allpages_scan,
-        allpages_max_pages=payload.allpages_max_pages,
-        community_domains=payload.community_domains,
-        save_source_variants=payload.save_source_variants,
-    )
     candidate_pages, selected_pages, parsed_rows, warnings = _collect_season_preview(
         query_name=query_name,
         season_number=season_context["season_number"],
-        request=preview_request,
+        request=payload,
+        selected_page_urls=payload.selected_page_urls,
     )
     merged, merge_warnings = _merge_season_payload(
         parsed_rows,

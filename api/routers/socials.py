@@ -809,6 +809,7 @@ class SeasonSocialIngestRequest(BaseModel):
     max_replies_per_post: int = Field(default=100000, ge=0, le=1000000)
     fetch_replies: bool = Field(default=True)
     ingest_mode: Literal["posts_only", "posts_and_comments", "comments_only"] = Field(default="posts_and_comments")
+    retrieval_mode: Literal["account_complete", "show_term_strict"] = Field(default="account_complete")
     date_start: datetime | None = None
     date_end: datetime | None = None
     allow_inline_dev_fallback: bool = Field(default=False)
@@ -933,6 +934,7 @@ async def ingest_season_social(
             max_replies_per_post=payload.max_replies_per_post,
             fetch_replies=payload.fetch_replies,
             ingest_mode=payload.ingest_mode,
+            retrieval_mode=payload.retrieval_mode,
             sync_strategy=payload.sync_strategy,
             date_start=payload.date_start,
             date_end=payload.date_end,

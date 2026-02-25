@@ -135,6 +135,7 @@ def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pyte
     assert response.json()["season_id"] == season_id
     assert mocked.call_args.kwargs["max_comments_per_post"] == 0
     assert mocked.call_args.kwargs["sync_strategy"] == "incremental"
+    assert mocked.call_args.kwargs["retrieval_mode"] == "account_complete"
 
 
 def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,6 +175,7 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
     assert body["stages"] == ["posts", "comments"]
     assert ingest_mock.call_args.kwargs["ingest_mode"] == "posts_and_comments"
     assert ingest_mock.call_args.kwargs["sync_strategy"] == "full_refresh"
+    assert ingest_mock.call_args.kwargs["retrieval_mode"] == "account_complete"
 
 
 def test_ingest_accepts_comments_only_mode(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,6 +215,40 @@ def test_ingest_accepts_comments_only_mode(client: TestClient, monkeypatch: pyte
     assert body["run_id"] == "run-456"
     assert body["stages"] == ["comments"]
     assert ingest_mock.call_args.kwargs["ingest_mode"] == "comments_only"
+
+
+def test_ingest_accepts_explicit_retrieval_mode(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-mode",
+        "status": "queued",
+        "stages": ["posts"],
+        "queued_or_started_jobs": 1,
+    }
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["youtube"],
+        "ingest_mode": "posts_only",
+        "retrieval_mode": "show_term_strict",
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 200
+    assert ingest_mock.call_args.kwargs["retrieval_mode"] == "show_term_strict"
 
 
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

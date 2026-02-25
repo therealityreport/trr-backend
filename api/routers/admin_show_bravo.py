@@ -97,6 +97,7 @@ class BravoCommitRequest(BaseModel):
     selected_show_images: list[BravoSelectedShowImage] = Field(default_factory=list)
     selected_show_image_urls: list[HttpUrl] = Field(default_factory=list)
     description_override: str | None = None
+    apply_show_description_override: bool = False
     airs_override: str | None = None
     person_url_mappings: dict[str, UUID] | None = None
     person_url_candidates: list[HttpUrl] = Field(default_factory=list)
@@ -1647,6 +1648,88 @@ def _persist_show_description(db: SupabaseAdminClient, show_id: str, description
     response = db.schema("core").table("shows").update({"description": description.strip()}).eq("id", show_id).execute()
     if getattr(response, "error", None):
         raise HTTPException(status_code=502, detail="Failed to update show description")
+
+
+def _is_viable_show_description(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    if len(normalized) < 40:
+        return False
+    placeholder_tokens = {
+        "n/a",
+        "na",
+        "none",
+        "no description",
+        "no overview",
+        "description unavailable",
+        "overview unavailable",
+        "tbd",
+    }
+    return normalized.lower() not in placeholder_tokens
+
+
+def _extract_show_description_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    normalized = payload.get("normalized") if isinstance(payload.get("normalized"), dict) else {}
+    show_normalized = normalized.get("show") if isinstance(normalized.get("show"), dict) else {}
+    show_raw = payload.get("show") if isinstance(payload.get("show"), dict) else {}
+
+    candidates = [
+        show_normalized.get("description"),
+        show_normalized.get("overview"),
+        show_normalized.get("summary"),
+        normalized.get("description"),
+        normalized.get("overview"),
+        normalized.get("summary"),
+        show_raw.get("description"),
+        show_raw.get("overview"),
+        show_raw.get("summary"),
+        payload.get("description"),
+        payload.get("overview"),
+        payload.get("summary"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and _is_viable_show_description(candidate):
+            return candidate.strip()
+    return None
+
+
+def _resolve_canonical_show_description(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    fallback_description: str | None = None,
+) -> str | None:
+    source_priority = ("imdb", "tmdb", "knowledge_graph", "wikipedia", "wikidata", "fandom", "wikia")
+    try:
+        source_rows = (
+            db.schema("core")
+            .table("show_source_latest")
+            .select("source_id,payload")
+            .eq("show_id", show_id)
+            .in_("source_id", list(source_priority))
+            .execute()
+        )
+    except Exception:  # noqa: BLE001
+        source_rows = None
+    by_source = {
+        str(row.get("source_id") or "").strip().lower(): row
+        for row in ((source_rows.data if source_rows is not None else []) or [])
+        if isinstance(row, dict)
+    }
+    for source_id in source_priority:
+        row = by_source.get(source_id)
+        if not row:
+            continue
+        description = _extract_show_description_from_payload(row.get("payload"))
+        if description:
+            return description
+    if _is_viable_show_description(fallback_description):
+        return str(fallback_description).strip()
+    return None
 
 
 def _persist_season_overview(
@@ -3546,11 +3629,13 @@ def commit_bravo_import(
         refresh_from_clip_metadata=False,
     )
 
-    show_description = (
+    bravo_show_description = str((normalized.get("show") or {}).get("description") or "").strip() or None
+    explicit_show_description_override = (
         payload.description_override.strip()
         if isinstance(payload.description_override, str) and payload.description_override.strip()
-        else str((normalized.get("show") or {}).get("description") or "").strip() or None
+        else None
     )
+    show_description = explicit_show_description_override or bravo_show_description
     show_airs = (
         payload.airs_override.strip()
         if isinstance(payload.airs_override, str) and payload.airs_override.strip()
@@ -3592,7 +3677,16 @@ def commit_bravo_import(
                 overview=show_description,
             )
         else:
-            _persist_show_description(db, show_id_str, show_description)
+            if payload.apply_show_description_override and explicit_show_description_override:
+                _persist_show_description(db, show_id_str, explicit_show_description_override)
+            else:
+                canonical_description = _resolve_canonical_show_description(
+                    db,
+                    show_id=show_id_str,
+                    fallback_description=None,
+                )
+                if canonical_description:
+                    _persist_show_description(db, show_id_str, canonical_description)
     actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
     bravo_na_marked = _persist_missing_bravo_profile_markers(
         db,

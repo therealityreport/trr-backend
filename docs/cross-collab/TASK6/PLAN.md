@@ -1,7 +1,7 @@
 # Admin “Sync/Refresh Shows” Endpoints — Task 6 Plan
 
 Repo: TRR-Backend
-Last updated: February 10, 2026
+Last updated: February 24, 2026
 
 ## Goal
 
@@ -9,7 +9,10 @@ Expose admin-only endpoints that let TRR-APP trigger the existing TRR-Backend sh
 
 ## Status Snapshot
 
-Implemented (router + wiring + tests). Pending: run fast checks and update cross-repo docs/handoff.
+Implemented (router + wiring + tests). Follow-up stabilization applied on February 24, 2026 for RHOSLC closeout:
+- immediate first-event emission in `refresh/stream` and `refresh-photos/stream`
+- heartbeat continuation during long steps
+- person refresh/reprocess stream startup + heartbeat + request-id diagnostics finalized
 
 ## Scope
 

@@ -417,6 +417,106 @@ def test_list_cast_with_roles_derives_latest_season_from_role_assignments() -> N
     assert sorted(payload[0]["roles"]) == ["Friend", "Guest", "Housewife"]
 
 
+def test_list_cast_with_roles_can_exclude_zero_episode_members() -> None:
+    show_id = str(uuid4())
+    rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-zero",
+            "person_name": "Archive Person",
+            "total_episodes": 0,
+            "archive_episodes": 1,
+            "seasons_appeared": 0,
+            "season_numbers": [],
+            "latest_season": None,
+            "roles": ["Guest"],
+            "photo_url": None,
+        },
+        {
+            "show_id": show_id,
+            "person_id": "person-real",
+            "person_name": "Episode Person",
+            "total_episodes": 8,
+            "archive_episodes": 0,
+            "seasons_appeared": 2,
+            "season_numbers": [5, 6],
+            "latest_season": 6,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/real.jpg",
+        },
+    ]
+    role_rows = [
+        {
+            "person_id": "person-zero",
+            "role_names": ["Guest"],
+            "assignment_seasons": [0],
+        },
+        {
+            "person_id": "person-real",
+            "role_names": ["Housewife"],
+            "assignment_seasons": [5, 6],
+        },
+    ]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch("api.routers.admin_show_roles.pg.fetch_all", side_effect=[rows, role_rows]):
+            payload = list_cast_with_roles(
+                UUID(show_id),
+                {},
+                sort_by="episodes",
+                order="desc",
+                seasons=None,
+                roles=None,
+                has_image=None,
+                archive_mode="all",
+                exclude_zero_episode_members=True,
+            )
+
+    assert len(payload) == 1
+    assert payload[0]["person_id"] == "person-real"
+
+
+def test_list_cast_with_roles_keeps_zero_episode_members_by_default() -> None:
+    show_id = str(uuid4())
+    rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-zero",
+            "person_name": "Archive Person",
+            "total_episodes": 0,
+            "archive_episodes": 1,
+            "seasons_appeared": 0,
+            "season_numbers": [],
+            "latest_season": None,
+            "roles": ["Guest"],
+            "photo_url": None,
+        }
+    ]
+    role_rows = [
+        {
+            "person_id": "person-zero",
+            "role_names": ["Guest"],
+            "assignment_seasons": [0],
+        }
+    ]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch("api.routers.admin_show_roles.pg.fetch_all", side_effect=[rows, role_rows]):
+            payload = list_cast_with_roles(
+                UUID(show_id),
+                {},
+                sort_by="episodes",
+                order="desc",
+                seasons=None,
+                roles=None,
+                has_image=None,
+                archive_mode="all",
+            )
+
+    assert len(payload) == 1
+    assert payload[0]["person_id"] == "person-zero"
+
+
 def test_list_cast_with_roles_emits_perf_logs_when_enabled() -> None:
     show_id = str(uuid4())
 

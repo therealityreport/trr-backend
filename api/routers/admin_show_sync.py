@@ -2316,120 +2316,138 @@ def refresh_show_stream(
 
     show_id_str = str(show_id)
     request_id = str(request.headers.get("x-trr-request-id") or "").strip() or None
-    show_resp = (
-        db.schema("core").table("shows").select("id,imdb_id,external_ids").eq("id", show_id_str).limit(1).execute()
-    )
-    if hasattr(show_resp, "error") and show_resp.error:
-        raise HTTPException(status_code=502, detail="Database error fetching show")
-    if not show_resp.data:
-        raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
-    show_row = show_resp.data[0] or {}
+    def _resolve_refresh_steps() -> tuple[
+        list[ShowRefreshTarget],
+        list[tuple[str, str, Callable[[list[str] | None], int], list[str], str | None, str | None]],
+    ]:
+        show_resp = (
+            db.schema("core").table("shows").select("id,imdb_id,external_ids").eq("id", show_id_str).limit(1).execute()
+        )
+        if hasattr(show_resp, "error") and show_resp.error:
+            raise RuntimeError("Database error fetching show")
+        if not show_resp.data:
+            raise RuntimeError(f"Show {show_id_str} not found")
+        show_row = show_resp.data[0] or {}
 
-    ordered: list[ShowRefreshTarget] = []
-    seen: set[str] = set()
-    for target in payload.targets:
-        if target in seen:
-            continue
-        seen.add(target)
-        ordered.append(target)
+        ordered: list[ShowRefreshTarget] = []
+        seen: set[str] = set()
+        for target in payload.targets:
+            if target in seen:
+                continue
+            seen.add(target)
+            ordered.append(target)
 
-    if "cast_credits" in ordered:
-        _ensure_cast_refresh_imdb_id(show_row, show_id_str)
+        if "cast_credits" in ordered:
+            _ensure_cast_refresh_imdb_id(show_row, show_id_str)
 
-    # Expand targets into concrete steps so the progress bar can update while work runs.
-    # Keys are stored in results to match the non-stream endpoint's structure where possible.
-    steps: list[tuple[str, str, Callable[[list[str] | None], int], list[str], str | None, str | None]] = []
-    for target in ordered:
-        if target == "details":
-            common = ["--show-id", show_id_str, "--force"]
-            if payload.verbose:
-                common.append("--verbose")
+        steps: list[tuple[str, str, Callable[[list[str] | None], int], list[str], str | None, str | None]] = []
+        for target in ordered:
+            if target == "details":
+                common = ["--show-id", show_id_str, "--force"]
+                if payload.verbose:
+                    common.append("--verbose")
 
-            steps.append(("details", "details_sync_shows", sync_shows.main, list(common), "shows", "mixed"))
+                steps.append(("details", "details_sync_shows", sync_shows.main, list(common), "shows", "mixed"))
 
-            entity_args = list(common)
-            if payload.skip_s3:
-                entity_args.append("--skip-s3")
-            steps.append(
-                ("details", "details_tmdb_show_entities", sync_tmdb_show_entities.main, entity_args, "shows", "tmdb")
-            )
-
-            watch_args = list(common)
-            if payload.skip_s3:
-                watch_args.append("--skip-s3")
-            steps.append(
-                (
-                    "details",
-                    "details_tmdb_watch_providers",
-                    sync_tmdb_watch_providers.main,
-                    watch_args,
-                    "shows",
-                    "tmdb",
+                entity_args = list(common)
+                if payload.skip_s3:
+                    entity_args.append("--skip-s3")
+                steps.append(
+                    (
+                        "details",
+                        "details_tmdb_show_entities",
+                        sync_tmdb_show_entities.main,
+                        entity_args,
+                        "shows",
+                        "tmdb",
+                    )
                 )
-            )
-            continue
 
-        if target == "seasons_episodes":
-            common = ["--show-id", show_id_str, "--force"]
-            if payload.verbose:
-                common.append("--verbose")
-            steps.append(
-                ("seasons_episodes", "seasons_episodes_episodes", sync_episodes.main, list(common), "episodes", "imdb")
-            )
-            steps.append(
-                ("seasons_episodes", "seasons_episodes_seasons", sync_seasons.main, list(common), "seasons", "tmdb")
-            )
-            continue
-
-        if target == "photos":
-            argv = ["--show-id", show_id_str, "--force"]
-            if payload.skip_s3:
-                argv.append("--no-s3")
-            if payload.verbose:
-                argv.append("--verbose")
-            steps.append(("photos", "photos_show_images", sync_show_images.main, list(argv), "media", "mixed"))
-
-            argv2 = ["--show-id", show_id_str, "--force"]
-            if payload.skip_s3:
-                argv2.append("--no-s3")
-            if payload.verbose:
-                argv2.append("--verbose")
-            steps.append(
-                (
-                    "photos",
-                    "photos_season_episode_images",
-                    sync_season_episode_images.main,
-                    argv2,
-                    "media",
-                    "tmdb",
+                watch_args = list(common)
+                if payload.skip_s3:
+                    watch_args.append("--skip-s3")
+                steps.append(
+                    (
+                        "details",
+                        "details_tmdb_watch_providers",
+                        sync_tmdb_watch_providers.main,
+                        watch_args,
+                        "shows",
+                        "tmdb",
+                    )
                 )
-            )
-            continue
+                continue
 
-        if target == "cast_credits":
-            argv = ["--show-id", show_id_str, "--force"]
-            if payload.verbose:
-                argv.append("--verbose")
-            steps.append(("cast_credits", "cast_credits_show_cast", sync_show_cast.main, list(argv), "people", "imdb"))
-
-            argv2 = ["--show-id", show_id_str, "--force"]
-            if payload.verbose:
-                argv2.append("--verbose")
-            steps.append(
-                (
-                    "cast_credits",
-                    "cast_credits_episode_appearances",
-                    sync_episode_appearances.main,
-                    argv2,
-                    "episodes",
-                    "imdb",
+            if target == "seasons_episodes":
+                common = ["--show-id", show_id_str, "--force"]
+                if payload.verbose:
+                    common.append("--verbose")
+                steps.append(
+                    (
+                        "seasons_episodes",
+                        "seasons_episodes_episodes",
+                        sync_episodes.main,
+                        list(common),
+                        "episodes",
+                        "imdb",
+                    )
                 )
-            )
-            continue
+                steps.append(
+                    ("seasons_episodes", "seasons_episodes_seasons", sync_seasons.main, list(common), "seasons", "tmdb")
+                )
+                continue
 
-        raise HTTPException(status_code=400, detail=f"Unknown refresh target: {target}")
+            if target == "photos":
+                argv = ["--show-id", show_id_str, "--force"]
+                if payload.skip_s3:
+                    argv.append("--no-s3")
+                if payload.verbose:
+                    argv.append("--verbose")
+                steps.append(("photos", "photos_show_images", sync_show_images.main, list(argv), "media", "mixed"))
 
-    total_steps = len(steps)
+                argv2 = ["--show-id", show_id_str, "--force"]
+                if payload.skip_s3:
+                    argv2.append("--no-s3")
+                if payload.verbose:
+                    argv2.append("--verbose")
+                steps.append(
+                    (
+                        "photos",
+                        "photos_season_episode_images",
+                        sync_season_episode_images.main,
+                        argv2,
+                        "media",
+                        "tmdb",
+                    )
+                )
+                continue
+
+            if target == "cast_credits":
+                argv = ["--show-id", show_id_str, "--force"]
+                if payload.verbose:
+                    argv.append("--verbose")
+                steps.append(
+                    ("cast_credits", "cast_credits_show_cast", sync_show_cast.main, list(argv), "people", "imdb")
+                )
+
+                argv2 = ["--show-id", show_id_str, "--force"]
+                if payload.verbose:
+                    argv2.append("--verbose")
+                steps.append(
+                    (
+                        "cast_credits",
+                        "cast_credits_episode_appearances",
+                        sync_episode_appearances.main,
+                        argv2,
+                        "episodes",
+                        "imdb",
+                    )
+                )
+                continue
+
+            raise RuntimeError(f"Unknown refresh target: {target}")
+
+        return ordered, steps
 
     def _yield_event(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -2440,6 +2458,9 @@ def refresh_show_stream(
         return data
 
     def event_generator():
+        ordered: list[ShowRefreshTarget] = []
+        steps: list[tuple[str, str, Callable[[list[str] | None], int], list[str], str | None, str | None]] = []
+        total_steps = 0
         results: dict[str, RefreshStepResult] = {}
         current = 0
         current_target: str | None = None
@@ -2454,6 +2475,20 @@ def refresh_show_stream(
                         "current": current,
                         "total": total_steps,
                         "message": "Starting refresh...",
+                    }
+                ),
+            )
+
+            ordered, steps = _resolve_refresh_steps()
+            total_steps = len(steps)
+            yield _yield_event(
+                "progress",
+                _with_request_id(
+                    {
+                        "show_id": show_id_str,
+                        "current": current,
+                        "total": total_steps,
+                        "message": "Refresh plan ready.",
                     }
                 ),
             )
@@ -2655,6 +2690,14 @@ def refresh_show_photos_stream(
     show_id_str = str(show_id)
     request_id = str(request.headers.get("x-trr-request-id") or "").strip() or None
 
+    def _yield_event(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    def _with_request_id(data: dict[str, object]) -> dict[str, object]:
+        if request_id:
+            data["request_id"] = request_id
+        return data
+
     show_resp = (
         db.schema("core")
         .table("shows")
@@ -2664,14 +2707,16 @@ def refresh_show_photos_stream(
         .execute()
     )
     if hasattr(show_resp, "error") and show_resp.error:
-        raise HTTPException(status_code=502, detail="Database error fetching show")
+        raise HTTPException(status_code=500, detail="Database error fetching show")
     if not show_resp.data:
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
+
     show_row = show_resp.data[0] or {}
     show_name = str(show_row.get("name") or "").strip() or None
     external_ids = show_row.get("external_ids") if isinstance(show_row.get("external_ids"), dict) else {}
     show_imdb_id = (
-        str(show_row.get("imdb_id") or external_ids.get("imdb_id") or external_ids.get("imdb") or "").strip() or None
+        str(show_row.get("imdb_id") or external_ids.get("imdb_id") or external_ids.get("imdb") or "").strip()
+        or None
     )
     show_tmdb_id = show_row.get("tmdb_id")
     if not isinstance(show_tmdb_id, int):
@@ -2680,14 +2725,6 @@ def refresh_show_photos_stream(
             show_tmdb_id = int(external_ids.get("tmdb_id") or external_ids.get("tmdb") or 0) or None
         except Exception:
             show_tmdb_id = None
-
-    def _yield_event(event: str, data: dict) -> str:
-        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-    def _with_request_id(data: dict[str, object]) -> dict[str, object]:
-        if request_id:
-            data["request_id"] = request_id
-        return data
 
     def event_generator():
         from uuid import UUID as _UUID
@@ -2818,6 +2855,7 @@ def refresh_show_photos_stream(
             return _yield_event("progress", _with_request_id(data))
 
         yield progress(stage="starting", message="Starting refresh...")
+
 
         sources_used: set[str] = set()
         season_scope = int(payload.season_number) if isinstance(payload.season_number, int) else None

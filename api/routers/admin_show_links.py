@@ -453,11 +453,39 @@ def _normalized_person_name(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
 
+_FIRST_NAME_EQUIVALENTS = {
+    frozenset({"kate", "katie"}),
+}
+
+
+def _first_name_tokens_equivalent(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    pair = frozenset({left, right})
+    if pair in _FIRST_NAME_EQUIVALENTS:
+        return True
+    common_prefix = os.path.commonprefix([left, right])
+    return len(common_prefix) >= 3 and abs(len(left) - len(right)) <= 2
+
+
+def _person_name_tokens_loose_match(expected_tokens: list[str], candidate_tokens: list[str]) -> bool:
+    if len(expected_tokens) < 2 or len(candidate_tokens) < 2:
+        return False
+    expected_last = expected_tokens[-1]
+    candidate_last = candidate_tokens[-1]
+    if expected_last != candidate_last:
+        return False
+    expected_first = expected_tokens[0]
+    candidate_first = candidate_tokens[0]
+    return _first_name_tokens_equivalent(expected_first, candidate_first)
+
+
 def _person_name_candidates_match(expected_name: str | None, candidates: list[str | None]) -> bool:
     expected = _normalized_person_name(expected_name)
     if not expected:
         return True
-    expected_tokens = {token for token in expected.split() if token}
+    expected_tokens_list = [token for token in expected.split() if token]
+    expected_tokens = set(expected_tokens_list)
     if not expected_tokens:
         return False
 
@@ -467,8 +495,11 @@ def _person_name_candidates_match(expected_name: str | None, candidates: list[st
             continue
         if normalized == expected:
             return True
-        candidate_tokens = {token for token in normalized.split() if token}
+        candidate_tokens_list = [token for token in normalized.split() if token]
+        candidate_tokens = set(candidate_tokens_list)
         if expected_tokens.issubset(candidate_tokens):
+            return True
+        if _person_name_tokens_loose_match(expected_tokens_list, candidate_tokens_list):
             return True
     return False
 
@@ -866,6 +897,85 @@ def _validated_or_carried_person_source_url(
     return None
 
 
+def _extract_season_number_from_text(text: str | None, *, max_season: int | None = None) -> int | None:
+    if not isinstance(text, str):
+        return None
+    target = text.strip()
+    if not target:
+        return None
+    patterns = (
+        re.compile(r"\bseason[\s:_-]*(\d{1,3})\b", re.IGNORECASE),
+        re.compile(r"\bs(\d{1,3})\b", re.IGNORECASE),
+        re.compile(r"\b(\d{1,3})x\d{1,3}\b", re.IGNORECASE),
+    )
+    for pattern in patterns:
+        match = pattern.search(target)
+        if not match:
+            continue
+        try:
+            season_number = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if season_number <= 0:
+            continue
+        if isinstance(max_season, int) and max_season > 0 and season_number > max_season:
+            continue
+        return season_number
+    return None
+
+
+def _fetch_text_excerpt(url: str, *, timeout_seconds: float = 4.0, limit_bytes: int = 64_000) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        content_type = str(response.headers.get("Content-Type") or "").lower()
+        if "text/html" not in content_type and "text/plain" not in content_type:
+            return ""
+        payload = response.read(limit_bytes)
+    soup = BeautifulSoup(payload, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    return " ".join(soup.get_text(separator=" ").split())
+
+
+def _infer_cast_announcement_season_number(
+    *,
+    headline: str | None,
+    article_url: str,
+    payload_season_number: int | None,
+    latest_season_number: int | None,
+) -> tuple[int | None, str]:
+    if isinstance(payload_season_number, int) and payload_season_number > 0:
+        return payload_season_number, "snapshot_payload"
+
+    season_from_headline_or_url = _extract_season_number_from_text(
+        f"{headline or ''} {article_url}",
+        max_season=latest_season_number,
+    )
+    if isinstance(season_from_headline_or_url, int) and season_from_headline_or_url > 0:
+        return season_from_headline_or_url, "headline_or_url"
+
+    article_excerpt = ""
+    try:
+        article_excerpt = _fetch_text_excerpt(article_url, timeout_seconds=_source_timeout_seconds("bravo", default=4.0))
+    except Exception:  # noqa: BLE001
+        article_excerpt = ""
+    season_from_article = _extract_season_number_from_text(article_excerpt, max_season=latest_season_number)
+    if isinstance(season_from_article, int) and season_from_article > 0:
+        return season_from_article, "article_content"
+
+    if isinstance(latest_season_number, int) and latest_season_number > 0:
+        return latest_season_number, "latest_available_fallback"
+    return None, "unresolved"
+
+
 def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
     show = pg.fetch_one(
         """
@@ -883,6 +993,24 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
     networks = [str(n).strip().lower() for n in (show.get("networks") or []) if isinstance(n, str)]
     external_ids = show.get("external_ids") if isinstance(show.get("external_ids"), dict) else {}
     fandom_allowlist = load_fandom_community_allowlist()
+    season_rows = pg.fetch_all(
+        """
+        SELECT id, season_number
+        FROM core.seasons
+        WHERE show_id = %s
+          AND season_number > 0
+        ORDER BY season_number DESC
+        """,
+        [show_id],
+    )
+    season_id_by_number: dict[int, str] = {}
+    for row in season_rows:
+        season_id = str(row.get("id") or "").strip()
+        season_number = int(row.get("season_number") or 0)
+        if not season_id or season_number <= 0:
+            continue
+        season_id_by_number[season_number] = season_id
+    latest_season_number = max(season_id_by_number.keys(), default=0)
 
     discovered: list[dict[str, Any]] = []
 
@@ -1071,17 +1199,31 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
             continue
         if not re.search(r"\b(cast|friend\s*of|full[-\s]*time|joins|returning|returns)\b", headline, re.IGNORECASE):
             continue
+        inferred_season_number, inference_method = _infer_cast_announcement_season_number(
+            headline=headline,
+            article_url=article_url,
+            payload_season_number=int(item.get("season_number") or 0) if item.get("season_number") else None,
+            latest_season_number=latest_season_number,
+        )
+        inferred_season_number = int(inferred_season_number or 0)
+        inferred_season_id = season_id_by_number.get(inferred_season_number, show_id)
+        entity_type: EntityType = "season" if inferred_season_number > 0 and inferred_season_id != show_id else "show"
+        publisher_host = (urlparse(article_url).hostname or "").lower().strip() or None
         discovered.append(
             {
-                "entity_type": "show",
-                "entity_id": show_id,
-                "season_number": int(item.get("season_number") or 0),
+                "entity_type": entity_type,
+                "entity_id": inferred_season_id,
+                "season_number": inferred_season_number,
                 "link_group": "cast_announcements",
                 "link_kind": "cast_announcement",
                 "label": headline or "Cast announcement",
                 "url": article_url,
                 "source": "bravo_snapshot",
-                "metadata": {"published_at": item.get("published_at")},
+                "metadata": {
+                    "published_at": item.get("published_at"),
+                    "publisher_host": publisher_host,
+                    "season_inference_method": inference_method,
+                },
             }
         )
 

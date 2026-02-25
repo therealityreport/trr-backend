@@ -44,6 +44,11 @@ class RepairCandidate:
     source_page_url: str | None = None
 
 
+@dataclass(frozen=True)
+class ResumeState:
+    start_index: int
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="repair_gallery_hosts",
@@ -86,6 +91,44 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=True,
         help="Run a second confirmation probe before marking broken_unreachable (default: true).",
     )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        help="Emit progress heartbeat every N processed candidates (default: 100).",
+    )
+    parser.add_argument(
+        "--checkpoint-file",
+        type=str,
+        default=None,
+        help="Optional checkpoint sidecar JSON path for progress/resume metadata.",
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=250,
+        help="Write checkpoint sidecar every N processed candidates (default: 250).",
+    )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        action="store_true",
+        help="Resume from the provided --checkpoint-file using its last_index.",
+    )
+    parser.add_argument(
+        "--force-flush-progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Flush heartbeat/progress prints immediately (default: true).",
+    )
+    parser.add_argument(
+        "--fail-fast-on-apply-error",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When apply mode encounters an exception, stop after the current candidate "
+            "instead of continuing (default: false)."
+        ),
+    )
     parser.add_argument("--output-json", type=str, default=None, help="Optional output report path.")
     parser.add_argument("--verbose", action="store_true", help="Verbose logs.")
     return parser.parse_args(argv)
@@ -107,6 +150,93 @@ def _coerce_str_list(values: list[str]) -> list[str]:
         if text:
             out.append(text)
     return out
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_resume_state(checkpoint_file: Path | None) -> ResumeState:
+    if checkpoint_file is None or not checkpoint_file.exists():
+        return ResumeState(start_index=0)
+    try:
+        payload = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ResumeState(start_index=0)
+    last_index = _safe_int(payload.get("last_index"), -1)
+    return ResumeState(start_index=max(0, last_index + 1))
+
+
+def _write_checkpoint(
+    *,
+    checkpoint_file: Path | None,
+    mode: str,
+    apply_updates: bool,
+    processed: int,
+    scanned_in_run: int,
+    total_candidates: int,
+    last_index: int,
+    summary: dict[str, int],
+    elapsed_seconds: float,
+    sources: list[str],
+) -> None:
+    if checkpoint_file is None:
+        return
+    payload = {
+        "version": 1,
+        "mode": mode,
+        "updated_at": _utc_now_iso(),
+        "apply": bool(apply_updates),
+        "processed": int(processed),
+        "scanned_in_run": int(scanned_in_run),
+        "total_candidates": int(total_candidates),
+        "last_index": int(last_index),
+        "elapsed_seconds": round(max(0.0, float(elapsed_seconds)), 3),
+        "summary": {
+            "ok": int(summary.get("ok", 0)),
+            "repaired": int(summary.get("repaired", 0)),
+            "broken_unreachable": int(summary.get("broken_unreachable", 0)),
+            "error": int(summary.get("error", 0)),
+        },
+        "sources": list(sources),
+    }
+    checkpoint_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _emit_heartbeat(
+    *,
+    processed: int,
+    scanned_in_run: int,
+    total_candidates: int,
+    summary: dict[str, int],
+    start_monotonic: float,
+    flush: bool,
+) -> None:
+    elapsed = max(0.001, time.monotonic() - start_monotonic)
+    throughput = processed / elapsed
+    payload = {
+        "event": "heartbeat",
+        "processed": int(processed),
+        "scanned_in_run": int(scanned_in_run),
+        "total_candidates": int(total_candidates),
+        "summary": {
+            "ok": int(summary.get("ok", 0)),
+            "repaired": int(summary.get("repaired", 0)),
+            "broken_unreachable": int(summary.get("broken_unreachable", 0)),
+            "error": int(summary.get("error", 0)),
+        },
+        "elapsed_seconds": round(elapsed, 2),
+        "throughput_per_sec": round(throughput, 3),
+        "timestamp": _utc_now_iso(),
+    }
+    print(f"[heartbeat] {json.dumps(payload)}", flush=flush)
 
 
 def _safe_rows(response: Any) -> list[dict[str, Any]]:
@@ -466,28 +596,168 @@ def _collect_candidates(
 
 
 def _update_media_asset(db, asset_id: str, patch: dict[str, Any]) -> None:
-    db.schema("core").table("media_assets").update(patch).eq("id", asset_id).execute()
+    response = db.schema("core").table("media_assets").update(patch).eq("id", asset_id).execute()
+    error = getattr(response, "error", None)
+    if error:
+        raise RuntimeError(str(error))
 
 
 def _update_cast_photo(db, photo_id: str, patch: dict[str, Any]) -> None:
-    db.schema("core").table("cast_photos").update(patch).eq("id", photo_id).execute()
+    response = db.schema("core").table("cast_photos").update(patch).eq("id", photo_id).execute()
+    error = getattr(response, "error", None)
+    if error:
+        raise RuntimeError(str(error))
 
 
 def _update_media_link_context(db, link_id: str, context: dict[str, Any]) -> None:
-    db.schema("core").table("media_links").update({"context": context}).eq("id", link_id).execute()
+    response = db.schema("core").table("media_links").update({"context": context}).eq("id", link_id).execute()
+    error = getattr(response, "error", None)
+    if error:
+        raise RuntimeError(str(error))
+
+
+def _update_media_link_asset(db, link_id: str, media_asset_id: str) -> None:
+    response = (
+        db.schema("core")
+        .table("media_links")
+        .update({"media_asset_id": media_asset_id})
+        .eq("id", link_id)
+        .execute()
+    )
+    error = getattr(response, "error", None)
+    if error:
+        raise RuntimeError(str(error))
+
+
+def _is_media_asset_source_sha_conflict(error_text: str) -> bool:
+    text = str(error_text or "").strip().lower()
+    if "media_assets_source_hosted_sha_uq" in text:
+        return True
+    if "duplicate key value violates unique constraint" in text and "hosted_sha" in text:
+        return True
+    return False
+
+
+def _find_existing_media_asset_id_by_source_sha(
+    db,
+    *,
+    source: str | None,
+    hosted_sha256: str | None,
+    exclude_asset_id: str,
+) -> str | None:
+    source_value = _get_str(source)
+    sha_value = _get_str(hosted_sha256)
+    if not source_value or not sha_value:
+        return None
+    response = (
+        db.schema("core")
+        .table("media_assets")
+        .select("id")
+        .eq("source", source_value)
+        .eq("hosted_sha256", sha_value)
+        .limit(10)
+        .execute()
+    )
+    rows = _safe_rows(response)
+    for row in rows:
+        row_id = _get_str(row.get("id"))
+        if row_id and row_id != exclude_asset_id:
+            return row_id
+    return None
+
+
+def _get_media_asset_row_for_repair(db, asset_id: str) -> dict[str, Any]:
+    response = (
+        db.schema("core")
+        .table("media_assets")
+        .select("id,source,source_url,hosted_url,metadata,hosted_sha256,hosted_key,hosted_bucket")
+        .eq("id", asset_id)
+        .limit(1)
+        .execute()
+    )
+    rows = _safe_rows(response)
+    if not rows:
+        raise RuntimeError(f"Media asset not found for repair: {asset_id}")
+    return rows[0]
+
+
+def _is_missing_hosted_object_error(exc: Exception) -> bool:
+    text = str(exc or "")
+    lowered = text.lower()
+    if "nosuchkey" in lowered:
+        return True
+    if "specified key does not exist" in lowered:
+        return True
+    return False
+
+
+def _generate_media_asset_variants_resilient(
+    db,
+    *,
+    asset_id: str,
+    crop: dict[str, Any] | None,
+    force: bool,
+    verbose: bool,
+) -> None:
+    try:
+        generate_media_asset_variants(db, asset_id=asset_id, crop=crop, force=force)
+        return
+    except Exception as exc:
+        if not _is_missing_hosted_object_error(exc):
+            raise
+        asset_row = _get_media_asset_row_for_repair(db, asset_id)
+        patch = mirror_media_asset_row(asset_row, force=True)
+        if patch:
+            _update_media_asset(db, asset_id, patch)
+        if verbose:
+            print(f"[repair] media_asset {asset_id} remirrored after missing hosted object")
+    generate_media_asset_variants(db, asset_id=asset_id, crop=crop, force=force)
 
 
 def _repair_candidate(db, candidate: RepairCandidate, *, verbose: bool) -> None:
     if candidate.kind == "media_link_asset":
+        target_asset_id = candidate.row_id
         patch = mirror_media_asset_row(candidate.row, force=True)
         if patch:
-            _update_media_asset(db, candidate.row_id, patch)
-        generate_media_asset_variants(db, asset_id=candidate.row_id, crop=None, force=True)
+            try:
+                _update_media_asset(db, candidate.row_id, patch)
+            except RuntimeError as exc:
+                duplicate_asset_id = None
+                if candidate.link_id and _is_media_asset_source_sha_conflict(str(exc)):
+                    duplicate_asset_id = _find_existing_media_asset_id_by_source_sha(
+                        db,
+                        source=_get_str(patch.get("source")) or candidate.source,
+                        hosted_sha256=_get_str(patch.get("hosted_sha256")),
+                        exclude_asset_id=candidate.row_id,
+                    )
+                if duplicate_asset_id and candidate.link_id:
+                    _update_media_link_asset(db, candidate.link_id, duplicate_asset_id)
+                    target_asset_id = duplicate_asset_id
+                    if verbose:
+                        print(
+                            f"[repair] media_link {candidate.link_id} relinked "
+                            f"{candidate.row_id} -> {duplicate_asset_id} (source+sha duplicate)"
+                        )
+                else:
+                    raise
+        _generate_media_asset_variants_resilient(
+            db,
+            asset_id=target_asset_id,
+            crop=None,
+            force=True,
+            verbose=verbose,
+        )
         crop = _candidate_crop_payload(candidate)
         if crop:
-            generate_media_asset_variants(db, asset_id=candidate.row_id, crop=crop, force=True)
+            _generate_media_asset_variants_resilient(
+                db,
+                asset_id=target_asset_id,
+                crop=crop,
+                force=True,
+                verbose=verbose,
+            )
         if verbose:
-            print(f"[repair] media_asset {candidate.row_id}")
+            print(f"[repair] media_asset {target_asset_id}")
         return
 
     patch = mirror_cast_photo_row(candidate.row, force=True)
@@ -532,6 +802,12 @@ def repair_gallery_hosts(
     retry_backoff_ms: int,
     confirm_unreachable_pass: bool,
     verbose: bool,
+    progress_every: int = 100,
+    checkpoint_file: Path | None = None,
+    checkpoint_every: int = 250,
+    resume_from_index: int = 0,
+    force_flush_progress: bool = True,
+    fail_fast_on_apply_error: bool = False,
 ) -> dict[str, Any]:
     candidates = _collect_candidates(
         db,
@@ -550,8 +826,33 @@ def repair_gallery_hosts(
     broken_ids: list[str] = []
     error_ids: list[str] = []
     details: list[dict[str, Any]] = []
+    total_candidates = len(candidates)
+    effective_start_index = max(0, min(int(resume_from_index), total_candidates))
+    scanned_in_run = max(0, total_candidates - effective_start_index)
+    progress_interval = max(1, int(progress_every))
+    checkpoint_interval = max(1, int(checkpoint_every))
+    processed = 0
+    last_processed_index = effective_start_index - 1
+    start_monotonic = time.monotonic()
+    heartbeat_due = scanned_in_run > 0
+    aborted_early = False
 
-    for candidate in candidates:
+    if effective_start_index > 0:
+        print(
+            f"[resume] start_index={effective_start_index} scanned_in_run={scanned_in_run} "
+            f"total_candidates={total_candidates}",
+            flush=force_flush_progress,
+        )
+
+    for idx in range(effective_start_index, total_candidates):
+        candidate = candidates[idx]
+        processed += 1
+        last_processed_index = idx
+        operation_stage = "probe_hosted"
+        hosted_reason: str | None = None
+        source_reason: str | None = None
+        confirmation_reason: str | None = None
+        abort_after_candidate = False
         try:
             hosted_probe = _probe_url_reachability(
                 url=candidate.hosted_url,
@@ -561,6 +862,7 @@ def repair_gallery_hosts(
                 retry_attempts=retry_attempts,
                 retry_backoff_ms=retry_backoff_ms,
             )
+            hosted_reason = hosted_probe.reason
             if hosted_probe.ok:
                 summary["ok"] += 1
                 details.append(
@@ -573,6 +875,7 @@ def repair_gallery_hosts(
                 )
                 continue
 
+            operation_stage = "probe_source"
             source_probe = _probe_url_reachability(
                 url=candidate.source_url,
                 source=candidate.source,
@@ -581,7 +884,11 @@ def repair_gallery_hosts(
                 retry_attempts=retry_attempts,
                 retry_backoff_ms=retry_backoff_ms,
             )
+            source_reason = source_probe.reason
             if source_probe.ok:
+                operation_stage = "apply_repair" if apply_updates else "classify_repaired"
+                if apply_updates:
+                    _repair_candidate(db, candidate, verbose=verbose)
                 summary["repaired"] += 1
                 repaired_ids.append(candidate.row_id)
                 details.append(
@@ -592,8 +899,6 @@ def repair_gallery_hosts(
                         "reason": f"hosted={hosted_probe.reason};source={source_probe.reason}",
                     }
                 )
-                if apply_updates:
-                    _repair_candidate(db, candidate, verbose=verbose)
                 continue
 
             confirmation_probe: ReachabilityProbeResult | None = None
@@ -602,6 +907,7 @@ def repair_gallery_hosts(
                 and not hosted_probe.transient_failure
                 and not source_probe.transient_failure
             ):
+                operation_stage = "probe_source_confirmation"
                 confirmation_probe = _probe_url_reachability(
                     url=candidate.source_url,
                     source=candidate.source,
@@ -610,7 +916,11 @@ def repair_gallery_hosts(
                     retry_attempts=retry_attempts,
                     retry_backoff_ms=retry_backoff_ms,
                 )
+                confirmation_reason = confirmation_probe.reason
                 if confirmation_probe.ok:
+                    operation_stage = "apply_repair_confirmation" if apply_updates else "classify_repaired_confirmation"
+                    if apply_updates:
+                        _repair_candidate(db, candidate, verbose=verbose)
                     summary["repaired"] += 1
                     repaired_ids.append(candidate.row_id)
                     details.append(
@@ -625,8 +935,6 @@ def repair_gallery_hosts(
                             ),
                         }
                     )
-                    if apply_updates:
-                        _repair_candidate(db, candidate, verbose=verbose)
                     continue
 
             if (
@@ -634,6 +942,7 @@ def repair_gallery_hosts(
                 or source_probe.transient_failure
                 or (confirmation_probe is not None and confirmation_probe.transient_failure)
             ):
+                operation_stage = "classify_error_transient"
                 reason_parts = [
                     f"hosted={hosted_probe.reason}",
                     f"source={source_probe.reason}",
@@ -654,6 +963,7 @@ def repair_gallery_hosts(
                 )
                 continue
 
+            operation_stage = "classify_broken_unreachable"
             summary["broken_unreachable"] += 1
             broken_ids.append(candidate.row_id)
             reason_parts = [f"hosted={hosted_probe.reason}", f"source={source_probe.reason}"]
@@ -669,26 +979,90 @@ def repair_gallery_hosts(
                 }
             )
             if apply_updates:
+                operation_stage = "apply_mark_broken"
                 _mark_candidate_broken(db, candidate, reason=reason)
         except Exception as exc:  # pragma: no cover - operational protection
             summary["error"] += 1
             error_ids.append(candidate.row_id)
-            details.append(
-                {
-                    "id": candidate.row_id,
-                    "kind": candidate.kind,
-                    "status": "error",
-                    "reason": str(exc),
-                }
-            )
+            error_detail: dict[str, Any] = {
+                "id": candidate.row_id,
+                "kind": candidate.kind,
+                "status": "error",
+                "reason": str(exc),
+                "operation_stage": operation_stage,
+                "exception_type": exc.__class__.__name__,
+                "apply": bool(apply_updates),
+                "source": candidate.source,
+            }
+            if hosted_reason:
+                error_detail["hosted_probe_reason"] = hosted_reason
+            if source_reason:
+                error_detail["source_probe_reason"] = source_reason
+            if confirmation_reason:
+                error_detail["confirmation_probe_reason"] = confirmation_reason
+            details.append(error_detail)
             if verbose:
-                print(f"[error] {candidate.kind} {candidate.row_id}: {exc}")
+                print(
+                    f"[error] {candidate.kind} {candidate.row_id} stage={operation_stage}: {exc}",
+                    flush=force_flush_progress,
+                )
+            if apply_updates and fail_fast_on_apply_error:
+                abort_after_candidate = True
+                aborted_early = True
+        finally:
+            if heartbeat_due or (processed % progress_interval == 0):
+                _emit_heartbeat(
+                    processed=processed,
+                    scanned_in_run=scanned_in_run,
+                    total_candidates=total_candidates,
+                    summary=summary,
+                    start_monotonic=start_monotonic,
+                    flush=force_flush_progress,
+                )
+                heartbeat_due = False
+
+            if checkpoint_file is not None and (processed % checkpoint_interval == 0):
+                _write_checkpoint(
+                    checkpoint_file=checkpoint_file,
+                    mode="running",
+                    apply_updates=apply_updates,
+                    processed=processed,
+                    scanned_in_run=scanned_in_run,
+                    total_candidates=total_candidates,
+                    last_index=last_processed_index,
+                    summary=summary,
+                    elapsed_seconds=time.monotonic() - start_monotonic,
+                    sources=sorted(allowed_sources),
+                )
+        if abort_after_candidate:
+            break
+
+    _write_checkpoint(
+        checkpoint_file=checkpoint_file,
+        mode="completed",
+        apply_updates=apply_updates,
+        processed=processed,
+        scanned_in_run=scanned_in_run,
+        total_candidates=total_candidates,
+        last_index=last_processed_index,
+        summary=summary,
+        elapsed_seconds=time.monotonic() - start_monotonic,
+        sources=sorted(allowed_sources),
+    )
 
     return {
         "summary": {
-            "scanned": len(candidates),
+            "scanned": scanned_in_run,
             **summary,
             "apply": bool(apply_updates),
+        },
+        "run_meta": {
+            "resume_from_index": effective_start_index,
+            "processed": processed,
+            "total_candidates": total_candidates,
+            "elapsed_seconds": round(max(0.0, time.monotonic() - start_monotonic), 3),
+            "checkpoint_file": str(checkpoint_file) if checkpoint_file else None,
+            "aborted_early": bool(aborted_early),
         },
         "sources": sorted(allowed_sources),
         "repaired_ids": repaired_ids,
@@ -706,6 +1080,13 @@ def main(argv: list[str] | None = None) -> int:
     if not allowed_sources:
         allowed_sources = set(DEFAULT_ALLOWED_SOURCES)
 
+    checkpoint_file = Path(args.checkpoint_file).expanduser() if args.checkpoint_file else None
+    resume_state = (
+        _load_resume_state(checkpoint_file)
+        if bool(args.resume_from_checkpoint)
+        else ResumeState(start_index=0)
+    )
+
     report = repair_gallery_hosts(
         db,
         allowed_sources=allowed_sources,
@@ -718,6 +1099,12 @@ def main(argv: list[str] | None = None) -> int:
         retry_backoff_ms=int(args.retry_backoff_ms),
         confirm_unreachable_pass=bool(args.confirm_unreachable_pass),
         verbose=bool(args.verbose),
+        progress_every=int(args.progress_every),
+        checkpoint_file=checkpoint_file,
+        checkpoint_every=int(args.checkpoint_every),
+        resume_from_index=resume_state.start_index,
+        force_flush_progress=bool(args.force_flush_progress),
+        fail_fast_on_apply_error=bool(args.fail_fast_on_apply_error),
     )
 
     print(json.dumps(report["summary"], indent=2))

@@ -539,7 +539,7 @@ class TestRefreshShow:
         assert "missing an IMDb ID" in response.json().get("detail", "")
         p_show_cast.assert_not_called()
 
-    def test_refresh_stream_returns_409_when_cast_refresh_missing_show_imdb_id(self, client, monkeypatch):
+    def test_refresh_stream_emits_error_event_when_cast_refresh_missing_show_imdb_id(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
         token = _make_admin_token("test-secret")
 
@@ -559,8 +559,10 @@ class TestRefreshShow:
                     json={"targets": ["cast_credits"]},
                 )
 
-        assert response.status_code == 409
-        assert "missing an IMDb ID" in response.json().get("detail", "")
+        assert response.status_code == 200
+        assert response.headers.get("content-type", "").startswith("text/event-stream")
+        assert "event: error" in response.text
+        assert "missing an IMDb ID" in response.text
         p_show_cast.assert_not_called()
 
     def test_calls_script_mains_for_targets(self, client, monkeypatch):

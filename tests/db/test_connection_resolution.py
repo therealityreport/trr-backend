@@ -50,6 +50,7 @@ def test_resolve_database_url_candidates_includes_pooler_direct_fallback(
 
     derived_direct = candidates[2]
     derived_parts = urlsplit(derived_direct)
+    assert derived_parts.username == "postgres"
     assert derived_parts.hostname == "db.abcdefghijklmno.supabase.co"
     assert derived_parts.port == 5432
     assert candidates[3:] == (

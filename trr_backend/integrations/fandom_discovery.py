@@ -266,4 +266,5 @@ def discover_fandom_candidate_pages(
                 add_candidate(url, "allpages", title_hint=title)
 
     candidates.sort(key=lambda item: item.score, reverse=True)
-    return candidates[: max(1, max_candidates)]
+    filtered = [item for item in candidates if item.source == "manual" or item.score > 0]
+    return filtered[: max(1, max_candidates)]

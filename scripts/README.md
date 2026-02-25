@@ -211,6 +211,23 @@ Script exit codes:
 - `1` one or more failed shows
 - `2` threshold failure (`--fail-*` options)
 
+### 9) Duplicate person identity diagnostics (same-name conflicts)
+
+Find same-name `core.people` duplicates where at least one duplicate is cast-linked in scope and external IDs conflict:
+
+```bash
+python scripts/shows/diagnose_duplicate_person_external_ids.py --json-summary /tmp/person_duplicate_conflicts.json
+```
+
+Target specific shows:
+
+```bash
+python scripts/shows/diagnose_duplicate_person_external_ids.py \
+  --show-id <show-uuid-1> \
+  --show-id <show-uuid-2> \
+  --json-summary /tmp/person_duplicate_conflicts_targeted.json
+```
+
 ## Utilities & Validation
 
 - `scripts/verify/verify_credits_parity.py` — compare legacy vs V2 credits views
@@ -237,6 +254,84 @@ Useful options:
 - `--show-id <uuid>` to target one show
 - `--force` to remirror all Bravo video thumbnails
 - `--dry-run` to inspect pending work without writing
+
+### 10) Gallery host repair (offline operations)
+
+Primary repair script:
+
+```bash
+python scripts/media/repair_gallery_hosts.py \
+  --sources imdb,tmdb,fandom,bravo \
+  --output-json /tmp/gallery-host-repair-dryrun.json
+```
+
+Apply mode:
+
+```bash
+python scripts/media/repair_gallery_hosts.py \
+  --sources imdb,tmdb,fandom,bravo \
+  --apply \
+  --output-json /tmp/gallery-host-repair-apply.json
+```
+
+Long-run observability/resume options (all additive):
+- `--progress-every <N>` emits heartbeat lines every N processed candidates.
+- `--checkpoint-file <path>` writes sidecar progress/checkpoint JSON.
+- `--checkpoint-every <N>` controls checkpoint write cadence.
+- `--resume-from-checkpoint` resumes from checkpoint `last_index`.
+- `--force-flush-progress` flushes heartbeat prints immediately (default true).
+- `--fail-fast-on-apply-error` aborts the run after the first apply exception (default false).
+
+Offline launcher helper (launchctl + timestamped artifacts):
+
+```bash
+scripts/media/run_gallery_repair_offline.sh --apply \
+  --sources imdb,tmdb,fandom,bravo
+```
+
+The launcher prints `LABEL`, `LOG`, `JSON`, and `CHECKPOINT` paths.
+
+Monitor helper for launchctl runs:
+
+```bash
+python scripts/media/monitor_gallery_repair_run.py \
+  --label <launchctl-label> \
+  --log-path /tmp/gallery-host-repair-<ts>.log \
+  --json-path /tmp/gallery-host-repair-<ts>.json \
+  --checkpoint-path /tmp/gallery-host-repair-<ts>.checkpoint.json \
+  --stale-minutes 240
+```
+
+Monitor states:
+- `healthy/running`
+- `running-with-errors` (checkpoint summary has non-zero `error` while run is still active)
+- `stalled`
+- `completed-pass`
+- `completed-fail`
+
+Bravo snapshot bootstrap for shows missing Bravo snapshots:
+
+```bash
+PYTHONPATH=. python scripts/backfill/bootstrap_bravo_show_snapshots.py
+```
+
+Useful options:
+- `--show-id <uuid>` to scope specific show(s)
+- `--limit <n>` to cap target shows
+- `--dry-run` to inspect targets without writing
+- `--no-sync-thumbnails` to skip immediate thumbnail mirroring on bootstrap
+
+Daily News/Videos maintenance runner (bootstrap + thumbnails + Google News):
+
+```bash
+PYTHONPATH=. python scripts/backfill/run_news_video_maintenance.py --phase all --continue-on-error
+```
+
+Useful options:
+- `--phase bootstrap|thumbnails|google|all`
+- `--dry-run` for non-writing preview
+- `--show-id <uuid>` and `--limit <n>` for scoped runs
+- `--json-summary -` to emit structured summary JSON
 
 ## Artifacts Location
 

@@ -1,12 +1,12 @@
 # Other Projects — Task 6 (Admin “Sync/Refresh Shows”)
 
 Repo: TRR-Backend
-Last updated: February 10, 2026
+Last updated: February 24, 2026
 
 ## Cross-Repo Snapshot
 
-- TRR-Backend: Implemented admin endpoints. See TRR-Backend TASK6.
-- TRR-APP: Add admin proxy routes + UI buttons. See TRR-APP TASK5.
+- TRR-Backend: Implemented admin endpoints and RHOSLC stream first-event/heartbeat stabilization updates.
+- TRR-APP: Consuming stream endpoints with request-id diagnostics; RHOSLC closeout blocker resolved.
 - screenalytics: Not impacted.
 
 ## Responsibility Alignment
@@ -29,4 +29,3 @@ Last updated: February 10, 2026
 - TRR-APP → TRR-Backend base URL is `TRR_API_URL` normalized to `/api/v1`.
 - Admin endpoints must require `AdminUser` and accept service role JWTs.
 - List sync does Import + Enrich and does not fetch show images.
-

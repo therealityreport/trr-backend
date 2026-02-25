@@ -59,22 +59,33 @@ def fetch_fandom_person_html(
     if requests is not None:
         requester = session or requests
         resp = requester.get(url, headers=merged, timeout=(5, 30), allow_redirects=True)
-        resp.raise_for_status()
         html = resp.text or ""
         final_url = str(resp.url)
+        status_code = getattr(resp, "status_code", None)
+        if status_code == 403:
+            try:
+                return _fetch_api_html(final_url or url)
+            except Exception:  # noqa: BLE001
+                pass
+        resp.raise_for_status()
         if _is_client_challenge(html):
             return _fetch_api_html(final_url)
         return html, final_url
 
     request = urllib.request.Request(url, headers=merged)
-    with urllib.request.urlopen(request, timeout=30) as resp:
-        data = resp.read() or b""
-        charset = resp.headers.get_content_charset() or "utf-8"
-        html = data.decode(charset, errors="replace")
-        final_url = str(resp.geturl())
-        if _is_client_challenge(html):
-            return _fetch_api_html(final_url)
-        return html, final_url
+    try:
+        with urllib.request.urlopen(request, timeout=30) as resp:
+            data = resp.read() or b""
+            charset = resp.headers.get_content_charset() or "utf-8"
+            html = data.decode(charset, errors="replace")
+            final_url = str(resp.geturl())
+            if _is_client_challenge(html):
+                return _fetch_api_html(final_url)
+            return html, final_url
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            return _fetch_api_html(str(exc.geturl() or url))
+        raise
 
 
 def _normalize_text(value: str | None) -> str | None:

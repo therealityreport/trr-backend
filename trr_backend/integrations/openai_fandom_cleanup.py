@@ -78,17 +78,20 @@ def cleanup_fandom_payload_with_openai(
         "temperature": 0.1,
     }
 
-    response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=timeout_seconds,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        return None, model
 
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -98,7 +101,10 @@ def cleanup_fandom_payload_with_openai(
     if not isinstance(content, str) or not content.strip():
         return None, model
 
-    parsed = json.loads(content)
+    try:
+        parsed = json.loads(content)
+    except ValueError:
+        return None, model
     if not isinstance(parsed, dict):
         return None, model
     return _normalize_cleanup_payload(parsed), model

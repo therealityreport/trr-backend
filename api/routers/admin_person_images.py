@@ -21,7 +21,7 @@ from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 from uuid import UUID
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -43,6 +43,7 @@ TEXT_OVERLAY_FAILURE_REASONS = (
     "gemini_json_parse_failed",
     "db_update_failed",
 )
+STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
 class RefreshImagesRequest(BaseModel):
@@ -224,6 +225,15 @@ def _resolve_refresh_sources(
     if not request.enforce_show_source_policy:
         return requested_sources, False
     return _apply_show_source_policy(db, request.show_id, requested_sources)
+
+
+def _normalize_request_id(raw_value: str | None) -> str | None:
+    if not isinstance(raw_value, str):
+        return None
+    normalized = raw_value.strip()
+    if not normalized:
+        return None
+    return normalized[:128]
 
 
 def _extract_imdb_id(external_ids: dict | None) -> str | None:
@@ -1956,21 +1966,15 @@ def refresh_person_images(
 async def refresh_person_images_stream(
     person_id: UUID,
     request: RefreshImagesRequest | None = None,
+    http_request: Request = None,
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> StreamingResponse:
     """Refresh images with SSE streaming progress."""
-    from trr_backend.ingestion.cast_photo_sources import (
-        fetch_fandom_gallery_cast_photos,
-        fetch_fandom_person_cast_photos,
-        fetch_imdb_cast_photos,
-        fetch_tmdb_cast_photos,
-    )
-    from trr_backend.repositories.cast_photos import upsert_cast_photos
-
     request = request or RefreshImagesRequest()
     person_id_str = str(person_id)
     run_id = f"refresh-{person_id_str}-{int(datetime.now(UTC).timestamp())}"
+    request_id = _normalize_request_id(http_request.headers.get("x-trr-request-id") if http_request else None)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         errors: list[str] = []
@@ -1999,14 +2003,23 @@ async def refresh_person_images_stream(
             }
 
         def progress(payload: dict[str, Any]) -> str:
+            response_payload: dict[str, Any] = {
+                "run_id": run_id,
+                "live_counts": build_live_counts(),
+                **payload,
+            }
+            if request_id:
+                response_payload["request_id"] = request_id
             return (
                 "event: progress\ndata: "
-                + json.dumps({"run_id": run_id, "live_counts": build_live_counts(), **payload})
+                + json.dumps(response_payload)
                 + "\n\n"
             )
 
         def error_event(*, stage: str, error: str, detail: str | None = None) -> str:
             payload: dict[str, Any] = {"run_id": run_id, "stage": stage, "error": error}
+            if request_id:
+                payload["request_id"] = request_id
             if detail:
                 payload["detail"] = detail
             return f"event: error\ndata: {json.dumps(payload)}\n\n"
@@ -2021,6 +2034,19 @@ async def refresh_person_images_stream(
                 "elapsed_ms": 0,
             }
         )
+
+        try:
+            from trr_backend.ingestion.cast_photo_sources import (
+                fetch_fandom_gallery_cast_photos,
+                fetch_fandom_person_cast_photos,
+                fetch_imdb_cast_photos,
+                fetch_tmdb_cast_photos,
+            )
+            from trr_backend.repositories.cast_photos import upsert_cast_photos
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Refresh stream import setup failed for %s: %s", person_id_str, exc)
+            yield error_event(stage="setup", error="Failed to initialize refresh imports", detail=str(exc))
+            return
 
         # 1. Get person
         try:
@@ -2042,16 +2068,80 @@ async def refresh_person_images_stream(
             return
 
         # 1.5 Refresh person profiles (best-effort)
-        yield progress({"stage": "tmdb_profile", "message": "Syncing TMDb profile..."})
+        tmdb_profile_started_at = time.perf_counter()
+        yield progress({"stage": "tmdb_profile", "message": "Syncing TMDb profile...", "heartbeat": True, "elapsed_ms": 0})
         try:
-            _refresh_tmdb_profile(db, person_id_str, tmdb_person_id=tmdb_person_id)
+            tmdb_profile_result: dict[str, Exception | None] = {"error": None}
+
+            def run_tmdb_profile_sync() -> None:
+                try:
+                    _refresh_tmdb_profile(db, person_id_str, tmdb_person_id=tmdb_person_id)
+                except Exception as exc:  # noqa: BLE001
+                    tmdb_profile_result["error"] = exc
+
+            tmdb_profile_thread = Thread(target=run_tmdb_profile_sync, daemon=True)
+            tmdb_profile_thread.start()
+            while tmdb_profile_thread.is_alive():
+                tmdb_profile_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)
+                if tmdb_profile_thread.is_alive():
+                    elapsed_ms = int((time.perf_counter() - tmdb_profile_started_at) * 1000)
+                    yield progress(
+                        {
+                            "stage": "tmdb_profile",
+                            "message": "Syncing TMDb profile...",
+                            "heartbeat": True,
+                            "elapsed_ms": elapsed_ms,
+                        }
+                    )
+            tmdb_profile_thread.join()
+            if tmdb_profile_result["error"] is not None:
+                raise tmdb_profile_result["error"]
+            yield progress(
+                {
+                    "stage": "tmdb_profile",
+                    "message": "TMDb profile synced.",
+                    "elapsed_ms": int((time.perf_counter() - tmdb_profile_started_at) * 1000),
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"TMDb profile: {exc}")
 
         if "fandom" in sources or "fandom-gallery" in sources:
-            yield progress({"stage": "fandom_profile", "message": "Syncing Fandom profile..."})
+            fandom_profile_started_at = time.perf_counter()
+            yield progress({"stage": "fandom_profile", "message": "Syncing Fandom profile...", "heartbeat": True, "elapsed_ms": 0})
             try:
-                _refresh_fandom_profile(db, person_id_str, person_name=person_name)
+                fandom_profile_result: dict[str, Exception | None] = {"error": None}
+
+                def run_fandom_profile_sync() -> None:
+                    try:
+                        _refresh_fandom_profile(db, person_id_str, person_name=person_name)
+                    except Exception as exc:  # noqa: BLE001
+                        fandom_profile_result["error"] = exc
+
+                fandom_profile_thread = Thread(target=run_fandom_profile_sync, daemon=True)
+                fandom_profile_thread.start()
+                while fandom_profile_thread.is_alive():
+                    fandom_profile_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)
+                    if fandom_profile_thread.is_alive():
+                        elapsed_ms = int((time.perf_counter() - fandom_profile_started_at) * 1000)
+                        yield progress(
+                            {
+                                "stage": "fandom_profile",
+                                "message": "Syncing Fandom profile...",
+                                "heartbeat": True,
+                                "elapsed_ms": elapsed_ms,
+                            }
+                        )
+                fandom_profile_thread.join()
+                if fandom_profile_result["error"] is not None:
+                    raise fandom_profile_result["error"]
+                yield progress(
+                    {
+                        "stage": "fandom_profile",
+                        "message": "Fandom profile synced.",
+                        "elapsed_ms": int((time.perf_counter() - fandom_profile_started_at) * 1000),
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"Fandom profile: {exc}")
         else:
@@ -2203,7 +2293,7 @@ async def refresh_person_images_stream(
                 fetch_thread = Thread(target=run_source_fetch, daemon=True)
                 fetch_thread.start()
                 while fetch_thread.is_alive():
-                    fetch_thread.join(timeout=10)
+                    fetch_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)
                     if fetch_thread.is_alive():
                         elapsed_ms = int((time.perf_counter() - stage_started_at) * 1000)
                         yield progress(
@@ -2990,6 +3080,7 @@ async def refresh_person_images_stream(
         # 6. Complete
         complete_data = {
             "run_id": run_id,
+            "request_id": request_id,
             "person_id": person_id_str,
             "photos_fetched": len(photos),
             "photos_upserted": photos_upserted,
@@ -3046,12 +3137,14 @@ async def refresh_person_images_stream(
 async def reprocess_person_images_stream(
     person_id: UUID,
     request: ReprocessImagesRequest = Body(default_factory=ReprocessImagesRequest),
+    http_request: Request = None,
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> StreamingResponse:
     """Re-run counting, text-ID, centering, and resize on existing photos (no sync/mirror)."""
     person_id_str = str(person_id)
     run_id = f"reprocess-{person_id_str}-{int(datetime.now(UTC).timestamp())}"
+    request_id = _normalize_request_id(http_request.headers.get("x-trr-request-id") if http_request else None)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         errors: list[str] = []
@@ -3082,17 +3175,37 @@ async def reprocess_person_images_stream(
             }
 
         def progress(payload: dict[str, Any]) -> str:
+            response_payload: dict[str, Any] = {
+                "run_id": run_id,
+                "live_counts": build_live_counts(),
+                **payload,
+            }
+            if request_id:
+                response_payload["request_id"] = request_id
             return (
                 "event: progress\ndata: "
-                + json.dumps({"run_id": run_id, "live_counts": build_live_counts(), **payload})
+                + json.dumps(response_payload)
                 + "\n\n"
             )
 
         def error_event(*, stage: str, error: str, detail: str | None = None) -> str:
             payload: dict[str, Any] = {"run_id": run_id, "stage": stage, "error": error}
+            if request_id:
+                payload["request_id"] = request_id
             if detail:
                 payload["detail"] = detail
             return f"event: error\ndata: {json.dumps(payload)}\n\n"
+
+        yield progress(
+            {
+                "stage": "starting",
+                "message": "Initializing reprocess stream...",
+                "current": 0,
+                "total": 0,
+                "heartbeat": True,
+                "elapsed_ms": 0,
+            }
+        )
 
         # Verify person exists
         person = _get_person_details(db, person_id_str)
@@ -3104,38 +3217,85 @@ async def reprocess_person_images_stream(
 
         # ---------- Auto-count (cast_photos + media_links) ----------
         if request.run_count:
+            auto_count_started_at = time.perf_counter()
             yield progress(
                 {
                     "stage": "auto_count",
                     "message": "Auto-counting people in images...",
                     "current": None,
                     "total": None,
+                    "heartbeat": True,
+                    "elapsed_ms": 0,
                 }
             )
 
-            ac_cast, sc_cast, fc_cast = _auto_count_cast_photos(
-                db,
-                person_id_str,
-                sources,
-                force_recount=True,
-            )
-            ac_media, sc_media, fc_media = _auto_count_media_links(
-                db,
-                person_id_str,
-                force_recount=True,
-            )
-            auto_counts_attempted = ac_cast + ac_media
-            auto_counts_succeeded = sc_cast + sc_media
-            auto_counts_failed = fc_cast + fc_media
+            auto_count_result: dict[str, Any] = {
+                "counts": (0, 0, 0, 0, 0, 0),
+                "error": None,
+            }
 
-            yield progress(
-                {
-                    "stage": "auto_count",
-                    "message": f"Counted {auto_counts_succeeded} images ({auto_counts_failed} failed).",
-                    "current": auto_counts_attempted,
-                    "total": auto_counts_attempted,
-                }
-            )
+            def run_auto_count() -> None:
+                try:
+                    ac_cast, sc_cast, fc_cast = _auto_count_cast_photos(
+                        db,
+                        person_id_str,
+                        sources,
+                        force_recount=True,
+                    )
+                    ac_media, sc_media, fc_media = _auto_count_media_links(
+                        db,
+                        person_id_str,
+                        force_recount=True,
+                    )
+                    auto_count_result["counts"] = (ac_cast, sc_cast, fc_cast, ac_media, sc_media, fc_media)
+                except Exception as exc:  # noqa: BLE001
+                    auto_count_result["error"] = exc
+
+            auto_count_thread = Thread(target=run_auto_count, daemon=True)
+            auto_count_thread.start()
+            while auto_count_thread.is_alive():
+                auto_count_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)
+                if auto_count_thread.is_alive():
+                    elapsed_ms = int((time.perf_counter() - auto_count_started_at) * 1000)
+                    yield progress(
+                        {
+                            "stage": "auto_count",
+                            "message": "Auto-counting people in images...",
+                            "current": None,
+                            "total": None,
+                            "heartbeat": True,
+                            "elapsed_ms": elapsed_ms,
+                        }
+                    )
+            auto_count_thread.join()
+
+            if auto_count_result["error"] is not None:
+                auto_counts_failed += 1
+                errors.append(f"Auto-count stage failed: {auto_count_result['error']}")
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": f"Auto-count stage failed: {auto_count_result['error']}",
+                        "current": 0,
+                        "total": 0,
+                        "elapsed_ms": int((time.perf_counter() - auto_count_started_at) * 1000),
+                    }
+                )
+            else:
+                ac_cast, sc_cast, fc_cast, ac_media, sc_media, fc_media = auto_count_result["counts"]
+                auto_counts_attempted = ac_cast + ac_media
+                auto_counts_succeeded = sc_cast + sc_media
+                auto_counts_failed = fc_cast + fc_media
+
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": f"Counted {auto_counts_succeeded} images ({auto_counts_failed} failed).",
+                        "current": auto_counts_attempted,
+                        "total": auto_counts_attempted,
+                        "elapsed_ms": int((time.perf_counter() - auto_count_started_at) * 1000),
+                    }
+                )
         else:
             yield progress(
                 {
@@ -3278,30 +3438,75 @@ async def reprocess_person_images_stream(
 
         # ---------- Centering / cropping ----------
         if request.run_crop:
+            crop_started_at = time.perf_counter()
             yield progress(
                 {
                     "stage": "centering_cropping",
                     "message": "Centering/cropping thumbnails...",
                     "current": None,
                     "total": None,
+                    "heartbeat": True,
+                    "elapsed_ms": 0,
                 }
             )
 
-            c_attempted, c_succeeded, c_failed, c_skipped = _recenter_person_gallery_images(
-                db,
-                person_id_str,
-                sources,
-                force=True,
-            )
+            crop_result: dict[str, Any] = {
+                "counts": (0, 0, 0, 0),
+                "error": None,
+            }
 
-            yield progress(
-                {
-                    "stage": "centering_cropping",
-                    "message": f"Centered {c_succeeded} thumbnails ({c_failed} failed, {c_skipped} manual skipped).",
-                    "current": c_attempted,
-                    "total": c_attempted,
-                }
-            )
+            def run_centering() -> None:
+                try:
+                    crop_result["counts"] = _recenter_person_gallery_images(
+                        db,
+                        person_id_str,
+                        sources,
+                        force=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    crop_result["error"] = exc
+
+            crop_thread = Thread(target=run_centering, daemon=True)
+            crop_thread.start()
+            while crop_thread.is_alive():
+                crop_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)
+                if crop_thread.is_alive():
+                    elapsed_ms = int((time.perf_counter() - crop_started_at) * 1000)
+                    yield progress(
+                        {
+                            "stage": "centering_cropping",
+                            "message": "Centering/cropping thumbnails...",
+                            "current": None,
+                            "total": None,
+                            "heartbeat": True,
+                            "elapsed_ms": elapsed_ms,
+                        }
+                    )
+            crop_thread.join()
+
+            if crop_result["error"] is not None:
+                c_failed += 1
+                errors.append(f"Centering/cropping stage failed: {crop_result['error']}")
+                yield progress(
+                    {
+                        "stage": "centering_cropping",
+                        "message": f"Centering/cropping stage failed: {crop_result['error']}",
+                        "current": 0,
+                        "total": 0,
+                        "elapsed_ms": int((time.perf_counter() - crop_started_at) * 1000),
+                    }
+                )
+            else:
+                c_attempted, c_succeeded, c_failed, c_skipped = crop_result["counts"]
+                yield progress(
+                    {
+                        "stage": "centering_cropping",
+                        "message": f"Centered {c_succeeded} thumbnails ({c_failed} failed, {c_skipped} manual skipped).",
+                        "current": c_attempted,
+                        "total": c_attempted,
+                        "elapsed_ms": int((time.perf_counter() - crop_started_at) * 1000),
+                    }
+                )
         else:
             yield progress(
                 {
@@ -3314,39 +3519,85 @@ async def reprocess_person_images_stream(
 
         # ---------- Resize / variants ----------
         if request.run_resize:
+            resize_started_at = time.perf_counter()
             yield progress(
                 {
                     "stage": "resizing",
                     "message": "Generating resized variants...",
                     "current": 0,
                     "total": 1,
+                    "heartbeat": True,
+                    "elapsed_ms": 0,
                 }
             )
-            (
-                resize_attempted,
-                resize_succeeded,
-                resize_failed,
-                resize_crop_attempted,
-                resize_crop_succeeded,
-                resize_crop_failed,
-            ) = _resize_person_gallery_images(
-                db,
-                person_id_str,
-                sources,
-                force=True,
-            )
-            yield progress(
-                {
-                    "stage": "resizing",
-                    "message": (
-                        "Variant generation complete "
-                        f"({resize_succeeded}/{resize_attempted} base, "
-                        f"{resize_crop_succeeded}/{resize_crop_attempted} crop)."
-                    ),
-                    "current": 1,
-                    "total": 1,
-                }
-            )
+            resize_result: dict[str, Any] = {
+                "counts": (0, 0, 0, 0, 0, 0),
+                "error": None,
+            }
+
+            def run_resize() -> None:
+                try:
+                    resize_result["counts"] = _resize_person_gallery_images(
+                        db,
+                        person_id_str,
+                        sources,
+                        force=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    resize_result["error"] = exc
+
+            resize_thread = Thread(target=run_resize, daemon=True)
+            resize_thread.start()
+            while resize_thread.is_alive():
+                resize_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)
+                if resize_thread.is_alive():
+                    elapsed_ms = int((time.perf_counter() - resize_started_at) * 1000)
+                    yield progress(
+                        {
+                            "stage": "resizing",
+                            "message": "Generating resized variants...",
+                            "current": 0,
+                            "total": 1,
+                            "heartbeat": True,
+                            "elapsed_ms": elapsed_ms,
+                        }
+                    )
+            resize_thread.join()
+
+            if resize_result["error"] is not None:
+                resize_failed += 1
+                errors.append(f"Resizing stage failed: {resize_result['error']}")
+                yield progress(
+                    {
+                        "stage": "resizing",
+                        "message": f"Resize/variant stage failed: {resize_result['error']}",
+                        "current": 0,
+                        "total": 0,
+                        "elapsed_ms": int((time.perf_counter() - resize_started_at) * 1000),
+                    }
+                )
+            else:
+                (
+                    resize_attempted,
+                    resize_succeeded,
+                    resize_failed,
+                    resize_crop_attempted,
+                    resize_crop_succeeded,
+                    resize_crop_failed,
+                ) = resize_result["counts"]
+                yield progress(
+                    {
+                        "stage": "resizing",
+                        "message": (
+                            "Variant generation complete "
+                            f"({resize_succeeded}/{resize_attempted} base, "
+                            f"{resize_crop_succeeded}/{resize_crop_attempted} crop)."
+                        ),
+                        "current": 1,
+                        "total": 1,
+                        "elapsed_ms": int((time.perf_counter() - resize_started_at) * 1000),
+                    }
+                )
         else:
             yield progress(
                 {
@@ -3361,6 +3612,7 @@ async def reprocess_person_images_stream(
         complete_data = {
             "person_id": person_id_str,
             "run_id": run_id,
+            "request_id": request_id,
             "auto_counts_attempted": auto_counts_attempted,
             "auto_counts_succeeded": auto_counts_succeeded,
             "auto_counts_failed": auto_counts_failed,

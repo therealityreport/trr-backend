@@ -88,14 +88,17 @@ def resolve_database_url_candidates(*, allow_local_fallback: bool = True) -> tup
         if not host.endswith("pooler.supabase.com"):
             return None
 
-        username = parsed.username or ""
-        project_ref_match = re.match(r"^postgres\.([a-zA-Z0-9]+)$", username)
+        pooler_username = parsed.username or ""
+        project_ref_match = re.match(r"^postgres\.([a-zA-Z0-9]+)$", pooler_username)
         if not project_ref_match:
             return None
         project_ref = project_ref_match.group(1)
 
         direct_host = f"db.{project_ref}.supabase.co"
-        userinfo = quote(username, safe="")
+        # Supabase direct-host connections authenticate as the base "postgres"
+        # user, while pooler connections use "postgres.<project_ref>".
+        direct_username = "postgres"
+        userinfo = quote(direct_username, safe="")
         if parsed.password is not None:
             userinfo = f"{userinfo}:{quote(parsed.password, safe='')}"
         netloc = f"{direct_host}:5432"

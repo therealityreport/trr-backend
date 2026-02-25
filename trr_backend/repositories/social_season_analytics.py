@@ -33,6 +33,7 @@ SUPPORTED_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube")
 SUPPORTED_SCOPES = ("bravo", "creator", "community")
 SUPPORTED_INGEST_MODES = ("posts_only", "posts_and_comments", "comments_only")
 SUPPORTED_SYNC_STRATEGIES = ("incremental", "full_refresh")
+SUPPORTED_YOUTUBE_RETRIEVAL_MODES = ("account_complete", "show_term_strict")
 JOB_PROGRESS_MIN_DELTA = 5
 JOB_PROGRESS_MAX_INTERVAL_SECONDS = 3
 COMMENT_STALE_RECHECK_INTERVAL = timedelta(hours=24)
@@ -271,6 +272,7 @@ class IngestOptions:
     ingest_mode: str
     date_start: datetime | None
     date_end: datetime | None
+    retrieval_mode: str = "account_complete"
 
 
 @dataclass(slots=True)
@@ -598,6 +600,7 @@ def _relation_exists(qualified_name: str) -> bool:
 
 
 _column_exists_cache: dict[tuple[str, str, str], bool] = {}
+_column_type_cache: dict[tuple[str, str, str], str | None] = {}
 _scrape_jobs_features_cache: dict[str, bool] | None = None
 _analytics_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _analytics_cache_lock = Lock()
@@ -626,6 +629,36 @@ def _column_exists(schema: str, table: str, column: str) -> bool:
     result = bool(row.get("exists"))
     _column_exists_cache[key] = result
     return result
+
+
+def _column_type(schema: str, table: str, column: str) -> str | None:
+    key = (schema, table, column)
+    if key in _column_type_cache:
+        return _column_type_cache[key]
+    row = (
+        pg.fetch_one(
+            """
+        select
+          data_type,
+          udt_name
+        from information_schema.columns
+        where table_schema = %s
+          and table_name = %s
+          and column_name = %s
+        """,
+            [schema, table, column],
+        )
+        or {}
+    )
+    data_type = str(row.get("data_type") or "").strip().lower()
+    udt_name = str(row.get("udt_name") or "").strip().lower()
+    resolved: str | None = None
+    if data_type == "array":
+        resolved = f"{udt_name}[]"
+    elif data_type:
+        resolved = data_type
+    _column_type_cache[key] = resolved
+    return resolved
 
 
 def _scrape_jobs_features() -> dict[str, bool]:
@@ -670,6 +703,28 @@ def _platform_posts_has_column(platform: str, column: str) -> bool:
         return _column_exists("social", table, column)
     except Exception:
         return True
+
+
+def _platform_posts_column_type(platform: str, column: str) -> str | None:
+    table = PLATFORM_POST_TABLES.get((platform or "").strip().lower())
+    if not table:
+        return None
+    try:
+        return _column_type("social", table, column)
+    except Exception:
+        return None
+
+
+def _platform_hosted_media_urls_param(platform: str, value: list[str]) -> Any:
+    normalized_platform = (platform or "").strip().lower()
+    col_type = _platform_posts_column_type(normalized_platform, "hosted_media_urls") or ""
+    cleaned = [str(item).strip() for item in (value or []) if str(item).strip()]
+    if col_type.endswith("[]"):
+        return cleaned
+    # Default to JSON-compatible payload for json/jsonb and unknown schema states.
+    from psycopg2.extras import Json as PgJson
+
+    return PgJson(cleaned)
 
 
 def _platform_thumbnail_expr(alias: str, platform: str) -> str:
@@ -861,6 +916,13 @@ def _youtube_video_matches_show_terms(
         return True
 
     return _text_contains_any_term(text=description_text, hashtags=show_hashtags, keywords=show_keywords)
+
+
+def _normalize_youtube_retrieval_mode(value: Any) -> str:
+    mode = str(value or "account_complete").strip().lower()
+    if mode not in SUPPORTED_YOUTUBE_RETRIEVAL_MODES:
+        return "account_complete"
+    return mode
 
 
 def _youtube_filter_sample(
@@ -2922,12 +2984,18 @@ def _expected_comment_count_for_platform(
     snapshot: CommentLifecycleSnapshot | None = None,
 ) -> int:
     normalized_platform = (platform or "").strip().lower()
+    saved_count_hint = max(
+        _normalize_non_negative_int(row_or_post.get("saved_comments_count")),
+        _normalize_non_negative_int(row_or_post.get("comments_saved_count")),
+        _normalize_non_negative_int(row_or_post.get("db_comments_count")),
+        _normalize_non_negative_int(row_or_post.get("total_comments_in_db")),
+    )
+    snapshot_count = _normalize_non_negative_int(snapshot.active_count if snapshot is not None else 0)
     if normalized_platform == "twitter":
-        return _normalize_non_negative_int(row_or_post.get("replies_count"))
-    expected = _normalize_non_negative_int(row_or_post.get("comments_count"))
-    if normalized_platform == "youtube" and expected <= 0 and snapshot is not None:
-        return _normalize_non_negative_int(snapshot.active_count)
-    return expected
+        reported = _normalize_non_negative_int(row_or_post.get("replies_count"))
+        return max(reported, snapshot_count, saved_count_hint)
+    reported = _normalize_non_negative_int(row_or_post.get("comments_count"))
+    return max(reported, snapshot_count, saved_count_hint)
 
 
 def _pg_upsert(
@@ -3174,7 +3242,10 @@ def _update_platform_post_media_mirror_fields(
         hosted_media_urls is not FIELD_UNSET
         and _platform_posts_has_column(normalized_platform, "hosted_media_urls")
     ):
-        _add("hosted_media_urls", list(hosted_media_urls or []))
+        _add(
+            "hosted_media_urls",
+            _platform_hosted_media_urls_param(normalized_platform, list(hosted_media_urls or [])),
+        )
     if (
         media_mirror_status is not FIELD_UNSET
         and _platform_posts_has_column(normalized_platform, "media_mirror_status")
@@ -3344,6 +3415,53 @@ def _enqueue_instagram_media_mirror_job(
     )
 
 
+def _log_retrieval_stage_summary(
+    *,
+    platform: str,
+    stage: str,
+    run_id: str | None,
+    job_id: str,
+    account: str,
+    opts: IngestOptions,
+    posts_count: int,
+    comments_count: int,
+    retrieval_meta: dict[str, Any],
+    duration_ms: int,
+) -> None:
+    refresh_decisions = retrieval_meta.get("comment_refresh_decisions")
+    skip_reason = None
+    if isinstance(refresh_decisions, dict) and refresh_decisions:
+        best_key = max(refresh_decisions, key=lambda key: int(refresh_decisions.get(key) or 0))
+        skip_reason = str(best_key or "").strip() or None
+    persist = retrieval_meta.get("persist_counters")
+    persist_posts = _normalize_non_negative_int(
+        (persist or {}).get("posts_upserted") if isinstance(persist, dict) else 0
+    )
+    persist_comments = _normalize_non_negative_int(
+        (persist or {}).get("comments_upserted") if isinstance(persist, dict) else 0
+    )
+    logger.info(
+        (
+            "[social_retrieval] run_id=%s job_id=%s platform=%s stage=%s account=%s "
+            "window_start=%s window_end=%s retrieved_posts=%s retrieved_comments=%s "
+            "upserted_posts=%s upserted_comments=%s skip_reason=%s duration_ms=%s"
+        ),
+        run_id or "",
+        job_id,
+        platform,
+        stage,
+        account,
+        _iso(opts.date_start),
+        _iso(opts.date_end),
+        posts_count,
+        comments_count,
+        persist_posts,
+        persist_comments,
+        skip_reason or "",
+        duration_ms,
+    )
+
+
 def _upsert_instagram_comment_tree(
     context: SeasonContext,
     *,
@@ -3444,6 +3562,7 @@ def _ingest_instagram(
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.instagram import InstagramScraper, ScrapeConfig
 
+    stage_started_at = time_module.perf_counter()
     try:
         post_delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
     except ValueError:
@@ -3521,11 +3640,16 @@ def _ingest_instagram(
             post_db_id = str(row.get("id") or "")
             if not shortcode:
                 continue
-            expected = int(row.get("comments_count") or 0)
+            snapshot = snapshots.get(post_db_id)
+            expected = _expected_comment_count_for_platform(
+                "instagram",
+                row,
+                snapshot=snapshot,
+            )
             decision = _decide_comment_refresh(
                 sync_strategy=opts.sync_strategy,
                 expected_count=expected,
-                snapshot=snapshots.get(post_db_id),
+                snapshot=snapshot,
                 post_published_at=_coerce_dt(row.get("posted_at")),
             )
             comment_refresh_reasons[decision.reason] += 1
@@ -3687,6 +3811,7 @@ def _ingest_instagram(
                 expected_comment_count = _expected_comment_count_for_platform(
                     "instagram",
                     {"comments_count": int(getattr(post, "comments", 0) or 0)},
+                    snapshot=snapshots.get(str(existing_row.get("id") or "")),
                 )
                 decision = _decide_comment_refresh(
                     sync_strategy=opts.sync_strategy,
@@ -3885,6 +4010,18 @@ def _ingest_instagram(
         comment_errors,
         scraper.comments_auth_failed,
     )
+    _log_retrieval_stage_summary(
+        platform="instagram",
+        stage=stage,
+        run_id=run_id,
+        job_id=job_id,
+        account=account,
+        opts=opts,
+        posts_count=scraped_post_count,
+        comments_count=scraped_comment_count,
+        retrieval_meta=retrieval_meta,
+        duration_ms=int((time_module.perf_counter() - stage_started_at) * 1000),
+    )
     return scraped_post_count, scraped_comment_count, retrieval_meta
 
 
@@ -4024,6 +4161,7 @@ def _ingest_tiktok(
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
+    stage_started_at = time_module.perf_counter()
     tiktok_cookies = _load_tiktok_cookies()
     scraper = TikTokScraper(cookies=tiktok_cookies)
 
@@ -4081,11 +4219,16 @@ def _ingest_tiktok(
             post_db_id = str(row.get("id") or "")
             if not video_id:
                 continue
-            expected = int(row.get("comments_count") or 0)
+            snapshot = snapshots.get(post_db_id)
+            expected = _expected_comment_count_for_platform(
+                "tiktok",
+                row,
+                snapshot=snapshot,
+            )
             decision = _decide_comment_refresh(
                 sync_strategy=opts.sync_strategy,
                 expected_count=expected,
-                snapshot=snapshots.get(post_db_id),
+                snapshot=snapshot,
                 post_published_at=_coerce_dt(row.get("posted_at")),
             )
             comment_refresh_reasons[decision.reason] += 1
@@ -4240,6 +4383,7 @@ def _ingest_tiktok(
                 expected_comment_count = _expected_comment_count_for_platform(
                     "tiktok",
                     {"comments_count": int(getattr(post, "comments", 0) or 0)},
+                    snapshot=snapshots.get(str(existing_row.get("id") or "")),
                 )
                 decision = _decide_comment_refresh(
                     sync_strategy=opts.sync_strategy,
@@ -4420,6 +4564,18 @@ def _ingest_tiktok(
         scraped_comment_count,
         comment_errors,
     )
+    _log_retrieval_stage_summary(
+        platform="tiktok",
+        stage=stage,
+        run_id=run_id,
+        job_id=job_id,
+        account=account,
+        opts=opts,
+        posts_count=scraped_post_count,
+        comments_count=scraped_comment_count,
+        retrieval_meta=retrieval_meta,
+        duration_ms=int((time_module.perf_counter() - stage_started_at) * 1000),
+    )
     return scraped_post_count, scraped_comment_count, retrieval_meta
 
 
@@ -4553,9 +4709,11 @@ def _ingest_youtube(
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.youtube import YouTubeScrapeConfig, YouTubeScraper
 
+    stage_started_at = time_module.perf_counter()
     scraper = YouTubeScraper()
+    retrieval_mode = _normalize_youtube_retrieval_mode(opts.retrieval_mode)
 
-    retrieval_meta: dict[str, Any] = {}
+    retrieval_meta: dict[str, Any] = {"youtube_retrieval_mode": retrieval_mode}
     matched_video_count = 0
     scraped_video_count = 0
     scraped_comment_count = 0
@@ -4791,7 +4949,7 @@ def _ingest_youtube(
             activity["posts_checked"] = scraped_video_count
             video_title = str(getattr(video, "title", "") or "")
             video_id = str(getattr(video, "video_id", "") or "")
-            if not _youtube_video_matches_show_terms(
+            if retrieval_mode == "show_term_strict" and not _youtube_video_matches_show_terms(
                 title=video_title,
                 description=getattr(video, "description", ""),
                 hashtags=hashtags,
@@ -5009,6 +5167,18 @@ def _ingest_youtube(
         scraped_comment_count,
         comment_errors,
     )
+    _log_retrieval_stage_summary(
+        platform="youtube",
+        stage=stage,
+        run_id=run_id,
+        job_id=job_id,
+        account=account,
+        opts=opts,
+        posts_count=scraped_video_count,
+        comments_count=scraped_comment_count,
+        retrieval_meta=retrieval_meta,
+        duration_ms=int((time_module.perf_counter() - stage_started_at) * 1000),
+    )
     return scraped_video_count, scraped_comment_count, retrieval_meta
 
 
@@ -5088,6 +5258,7 @@ def _ingest_twitter(
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
 
+    stage_started_at = time_module.perf_counter()
     date_start = opts.date_start or datetime.combine(context.anchor_date, time.min, tzinfo=UTC)
     date_end = opts.date_end or _now_utc()
     keyword_list = [kw for kw in keywords if isinstance(kw, str) and kw.strip()]
@@ -5164,11 +5335,16 @@ def _ingest_twitter(
                 tweet_id = str(row.get("tweet_id") or "")
                 if not tweet_id:
                     continue
-                expected = int(row.get("replies_count") or 0)
+                snapshot = snapshots.get(tweet_id)
+                expected = _expected_comment_count_for_platform(
+                    "twitter",
+                    row,
+                    snapshot=snapshot,
+                )
                 decision = _decide_comment_refresh(
                     sync_strategy=opts.sync_strategy,
                     expected_count=expected,
-                    snapshot=snapshots.get(tweet_id),
+                    snapshot=snapshot,
                     post_published_at=_coerce_dt(row.get("created_at")),
                 )
                 comment_refresh_reasons[decision.reason] += 1
@@ -5317,6 +5493,7 @@ def _ingest_twitter(
                     expected_comment_count = _expected_comment_count_for_platform(
                         "twitter",
                         {"replies_count": int(getattr(tweet, "replies", 0) or 0)},
+                        snapshot=snapshots.get(str(getattr(tweet, "tweet_id", "") or "")),
                     )
                     decision = _decide_comment_refresh(
                         sync_strategy=opts.sync_strategy,
@@ -5508,6 +5685,18 @@ def _ingest_twitter(
         comment_errors,
     )
     retrieval_meta["hydrated_replies"] = hydrated_replies
+    _log_retrieval_stage_summary(
+        platform="twitter",
+        stage=stage,
+        run_id=run_id,
+        job_id=job_id,
+        account=account,
+        opts=opts,
+        posts_count=scraped_post_count,
+        comments_count=scraped_reply_count,
+        retrieval_meta=retrieval_meta,
+        duration_ms=int((time_module.perf_counter() - stage_started_at) * 1000),
+    )
     return scraped_post_count, scraped_reply_count, retrieval_meta
 
 
@@ -5988,6 +6177,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
     raw_max_comments = config.get("max_comments_per_post")
     raw_max_replies = config.get("max_replies_per_post")
     raw_mode = str(config.get("ingest_mode") or "posts_and_comments")
+    raw_retrieval_mode = config.get("retrieval_mode")
     raw_fetch_replies = bool(config.get("fetch_replies", True))
     resolved_posts, resolved_comments, resolved_replies, resolved_fetch_replies = _resolve_depth_defaults(
         max_posts_per_target=max(0, int(raw_max_posts or 1000)),
@@ -6002,6 +6192,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         resolved_fetch_replies = False
     elif normalized_mode == "comments_only":
         resolved_posts = 0
+    normalized_retrieval_mode = _normalize_youtube_retrieval_mode(raw_retrieval_mode)
     opts = IngestOptions(
         platforms=None,
         source_scope=str(config.get("source_scope") or job.get("source_scope") or "bravo"),
@@ -6013,6 +6204,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         ingest_mode=normalized_mode,
         date_start=_coerce_dt(config.get("date_start")),
         date_end=_coerce_dt(config.get("date_end")),
+        retrieval_mode=normalized_retrieval_mode,
     )
     account = str(config.get("account") or "")
     hashtags = [str(item).strip().lstrip("#") for item in (config.get("hashtags") or []) if str(item).strip()]
@@ -6260,6 +6452,7 @@ def ingest_season(
     max_replies_per_post: int | None = 100,
     fetch_replies: bool,
     ingest_mode: str = "posts_and_comments",
+    retrieval_mode: str = "account_complete",
     date_start: datetime | None,
     date_end: datetime | None,
     initiated_by: str | None,
@@ -6275,6 +6468,9 @@ def ingest_season(
     normalized_sync_strategy = (sync_strategy or "incremental").strip().lower()
     if normalized_sync_strategy not in SUPPORTED_SYNC_STRATEGIES:
         raise ValueError(f"Unsupported sync strategy: {sync_strategy}")
+    normalized_retrieval_mode = (retrieval_mode or "account_complete").strip().lower()
+    if normalized_retrieval_mode not in SUPPORTED_YOUTUBE_RETRIEVAL_MODES:
+        raise ValueError(f"Unsupported retrieval mode: {retrieval_mode}")
 
     platform_filter = {p.strip().lower() for p in platforms or [] if isinstance(p, str) and p.strip()}
     if platform_filter:
@@ -6315,6 +6511,7 @@ def ingest_season(
         ingest_mode=normalized_mode,
         date_start=date_start,
         date_end=date_end,
+        retrieval_mode=normalized_retrieval_mode,
     )
 
     targets_payload = get_targets(season_id, source_scope=source_scope)
@@ -6350,6 +6547,7 @@ def ingest_season(
         "max_replies_per_post": opts.max_replies_per_post,
         "fetch_replies": opts.fetch_replies,
         "ingest_mode": opts.ingest_mode,
+        "retrieval_mode": opts.retrieval_mode,
     }
     run_id = _create_run(
         context,
@@ -6391,6 +6589,7 @@ def ingest_season(
                 "max_replies_per_post": opts.max_replies_per_post,
                 "fetch_replies": opts.fetch_replies,
                 "ingest_mode": opts.ingest_mode,
+                "retrieval_mode": opts.retrieval_mode,
             }
             if normalized_mode != "comments_only":
                 job_ids.append(

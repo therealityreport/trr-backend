@@ -1499,7 +1499,7 @@ def test_sync_youtube_video_comment_counts_dedupes_ids_and_uses_greatest(monkeyp
     assert "from social.youtube_comments c" in sql
 
 
-def test_expected_comment_count_for_platform_youtube_uses_snapshot_fallback() -> None:
+def test_expected_comment_count_for_platform_uses_snapshot_and_saved_fallbacks() -> None:
     snapshot = social_repo.CommentLifecycleSnapshot(
         active_count=12,
         total_count=12,
@@ -1521,8 +1521,34 @@ def test_expected_comment_count_for_platform_youtube_uses_snapshot_fallback() ->
             {"comments_count": 3},
             snapshot=snapshot,
         )
-        == 3
+        == 12
     )
+    assert (
+        social_repo._expected_comment_count_for_platform(
+            "tiktok",
+            {"comments_count": 0, "saved_comments_count": 7},
+            snapshot=None,
+        )
+        == 7
+    )
+    assert (
+        social_repo._expected_comment_count_for_platform(
+            "twitter",
+            {"replies_count": 2},
+            snapshot=snapshot,
+        )
+        == 12
+    )
+
+
+def test_platform_hosted_media_urls_param_adapts_by_column_type(monkeypatch) -> None:
+    monkeypatch.setattr(social_repo, "_platform_posts_column_type", lambda *_args, **_kwargs: "text[]")
+    array_param = social_repo._platform_hosted_media_urls_param("twitter", [" https://a ", "", "https://b"])
+    assert array_param == ["https://a", "https://b"]
+
+    monkeypatch.setattr(social_repo, "_platform_posts_column_type", lambda *_args, **_kwargs: "jsonb")
+    json_param = social_repo._platform_hosted_media_urls_param("twitter", ["https://a", "https://b"])
+    assert getattr(json_param, "adapted", None) == ["https://a", "https://b"]
 
 
 def test_ingest_youtube_comments_stage_syncs_comment_counts_and_uses_snapshot_expected(monkeypatch) -> None:
@@ -2175,6 +2201,7 @@ def test_ingest_season_stores_sync_strategy_and_platform_scope(monkeypatch) -> N
         max_replies_per_post=200,
         fetch_replies=True,
         ingest_mode="posts_and_comments",
+        retrieval_mode="show_term_strict",
         date_start=datetime(2026, 1, 1, tzinfo=UTC),
         date_end=datetime(2026, 1, 10, tzinfo=UTC),
         initiated_by="admin@test",
@@ -2184,7 +2211,9 @@ def test_ingest_season_stores_sync_strategy_and_platform_scope(monkeypatch) -> N
     assert captured_run_configs
     assert captured_run_configs[0]["sync_strategy"] == "incremental"
     assert captured_run_configs[0]["platforms"] == ["instagram"]
+    assert captured_run_configs[0]["retrieval_mode"] == "show_term_strict"
     assert all(config["sync_strategy"] == "incremental" for config in created_job_configs)
+    assert all(config["retrieval_mode"] == "show_term_strict" for config in created_job_configs)
 
     captured_run_configs.clear()
     created_job_configs.clear()
@@ -2226,6 +2255,35 @@ def test_ingest_season_stores_sync_strategy_and_platform_scope(monkeypatch) -> N
     assert len(created_job_configs) == 1
     assert all(config["stage"] == "comments" for config in created_job_configs)
     assert all(config["max_posts_per_target"] == 0 for config in created_job_configs)
+
+
+def test_ingest_season_rejects_unsupported_retrieval_mode(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: context)
+
+    with pytest.raises(ValueError, match="Unsupported retrieval mode"):
+        social_repo.ingest_season(
+            "season-1",
+            platforms=["youtube"],
+            source_scope="bravo",
+            sync_strategy="incremental",
+            max_posts_per_target=100,
+            max_comments_per_post=10,
+            max_replies_per_post=0,
+            fetch_replies=False,
+            ingest_mode="posts_only",
+            retrieval_mode="invalid_mode",
+            date_start=datetime(2026, 1, 1, tzinfo=UTC),
+            date_end=datetime(2026, 1, 2, tzinfo=UTC),
+            initiated_by="admin@test",
+        )
 
 
 def test_assert_worker_available_when_queue_enabled_raises_without_healthy_worker(monkeypatch) -> None:
@@ -3230,6 +3288,7 @@ def test_ingest_youtube_posts_stage_reports_filter_diagnostics(monkeypatch) -> N
         ingest_mode="posts_and_comments",
         date_start=datetime(2026, 1, 1, tzinfo=UTC),
         date_end=datetime(2026, 1, 31, tzinfo=UTC),
+        retrieval_mode="show_term_strict",
     )
 
     monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
@@ -3292,6 +3351,84 @@ def test_ingest_youtube_posts_stage_reports_filter_diagnostics(monkeypatch) -> N
     reasons = {str(sample.get("reason") or "") for sample in filter_samples if isinstance(sample, dict)}
     assert "show_terms_filtered" in reasons
     assert "up_to_date" in reasons
+
+
+def test_ingest_youtube_account_complete_mode_includes_non_matching_titles(monkeypatch) -> None:
+    upserted_video_ids: list[str] = []
+
+    class _FakeYouTubeScraper:
+        last_retrieval_meta: dict[str, object] = {}
+
+        def scrape(self, config, progress_cb=None):
+            return [
+                SimpleNamespace(
+                    video_id="vid-no-terms",
+                    title="Bravo sneak peek",
+                    description="No show keywords here",
+                    comments=1,
+                ),
+                SimpleNamespace(
+                    video_id="vid-with-terms",
+                    title="RHOSLC teaser",
+                    description="Tonight on Bravo",
+                    comments=2,
+                ),
+            ]
+
+        def fetch_comments(self, *args, **kwargs):
+            return []
+
+    context = SeasonContext(
+        season_id="season-youtube-mode",
+        show_id="show-youtube-mode",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    opts = social_repo.IngestOptions(
+        platforms={"youtube"},
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=100,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_only",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 31, tzinfo=UTC),
+        retrieval_mode="account_complete",
+    )
+
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
+    monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_load_existing_posts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(social_repo, "_load_comment_lifecycle_snapshots", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        social_repo,
+        "_upsert_youtube_video",
+        lambda *_args, **kwargs: (
+            upserted_video_ids.append(str(getattr(kwargs.get("video"), "video_id", ""))),
+            {"id": f"db-{getattr(kwargs.get('video'), 'video_id', 'unknown')}"},
+        )[1],
+    )
+    monkeypatch.setattr(social_repo, "_sync_youtube_video_comment_counts", lambda *_args, **_kwargs: 0)
+
+    _, _, meta = social_repo._ingest_youtube(
+        context,
+        run_id="run-youtube-mode",
+        account="bravo",
+        hashtags=["RHOSLC"],
+        keywords=["RHOSLC", "Salt Lake City"],
+        opts=opts,
+        job_id="job-youtube-mode",
+        stage="posts",
+    )
+
+    assert upserted_video_ids == ["vid-no-terms", "vid-with-terms"]
+    assert meta["videos_filtered_show_terms"] == 0
+    assert meta["youtube_retrieval_mode"] == "account_complete"
 
 
 def test_ingest_twitter_comments_stage_treats_non_positive_post_limit_as_no_cap(monkeypatch) -> None:

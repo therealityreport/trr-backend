@@ -68,3 +68,30 @@ def test_fandom_person_parsing_live_infobox_family_and_main_seasons_variant() ->
     assert family[1]["name"] == "Henry Barlow"
     assert family[1]["relation"] == "Son"
     assert isinstance(payload.get("bio_card"), dict)
+
+
+def test_fandom_person_dynamic_sections_preserve_unknown_headings() -> None:
+    html = """
+    <html>
+      <body>
+        <div class="mw-parser-output">
+          <p>Intro summary.</p>
+          <h2>Biography</h2>
+          <p>Bio paragraph.</p>
+          <h3>Legacy Notes</h3>
+          <ul><li>One note</li></ul>
+        </div>
+      </body>
+    </html>
+    """
+    payload, _photos = parse_fandom_person_html(
+        html,
+        source_url="https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+    )
+
+    sections = payload.get("dynamic_sections") or []
+    assert any(section.get("canonical_title") == "Biography" for section in sections)
+    assert any(
+        section.get("title") == "Legacy Notes" and section.get("canonical_title") == "Legacy Notes"
+        for section in sections
+    )

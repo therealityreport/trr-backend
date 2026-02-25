@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -393,13 +394,18 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
                                     response = client.post(
                                         f"/api/v1/admin/person/{person_id}/refresh-images/stream",
                                         json={"skip_mirror": True},
-                                        headers={"Authorization": f"Bearer {token}"},
+                                        headers={
+                                            "Authorization": f"Bearer {token}",
+                                            "x-trr-request-id": "req-refresh-stream-1",
+                                        },
                                     )
 
         assert response.status_code == 200
         payload = response.text
         assert "event: progress" in payload
         assert '"stage": "resizing"' in payload or '"stage":"resizing"' in payload
+        assert '"stage": "starting"' in payload or '"stage":"starting"' in payload
+        assert '"request_id": "req-refresh-stream-1"' in payload or '"request_id":"req-refresh-stream-1"' in payload
 
         normalized_payload = payload.replace("\r\n", "\n")
         assert "event: complete" in normalized_payload
@@ -413,6 +419,7 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
         if json_end == -1:
             json_end = len(normalized_payload)
         complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+        assert complete_data["request_id"] == "req-refresh-stream-1"
         assert complete_data["resize_attempted"] == 4
         assert complete_data["resize_succeeded"] == 3
         assert complete_data["resize_crop_attempted"] == 2
@@ -427,6 +434,65 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
             "id_text": complete_data["text_overlay_succeeded"],
             "resized": complete_data["resize_succeeded"],
         }
+
+    def test_refresh_stream_emits_periodic_heartbeat_for_slow_source_fetch(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setattr(admin_person_images, "STREAM_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Slow Fetch Person",
+            "external_ids": {"imdb": "nm7654321"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        def slow_fetch(*_args, **_kwargs):
+            time.sleep(0.04)
+            return []
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_person_images._refresh_tmdb_profile", return_value=None):
+                with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
+                    with patch("api.routers.admin_person_images._get_known_source_total", return_value=None):
+                        with patch("trr_backend.ingestion.cast_photo_sources.fetch_imdb_cast_photos", side_effect=slow_fetch):
+                            response = client.post(
+                                f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                                json={
+                                    "sources": ["imdb"],
+                                    "skip_mirror": True,
+                                    "skip_auto_count": True,
+                                    "skip_word_detection": True,
+                                    "skip_centering": True,
+                                    "skip_resize": True,
+                                    "force_mirror": False,
+                                },
+                                headers={"Authorization": f"Bearer {token}"},
+                            )
+
+        assert response.status_code == 200
+        payload = response.text.replace("\r\n", "\n")
+        sync_progress_payloads: list[dict[str, object]] = []
+        for block in payload.split("\n\n"):
+            if not block.startswith("event: progress"):
+                continue
+            if "data:" not in block:
+                continue
+            data_part = block.split("data:", 1)[1].strip()
+            event_payload = json.loads(data_part)
+            if event_payload.get("stage") == "sync_imdb":
+                sync_progress_payloads.append(event_payload)
+
+        assert len(sync_progress_payloads) >= 2
+        assert any(entry.get("heartbeat") is True for entry in sync_progress_payloads)
+        assert any(isinstance(entry.get("elapsed_ms"), int) and int(entry["elapsed_ms"]) > 0 for entry in sync_progress_payloads)
 
     def test_stream_honors_skip_flags_for_ingest_only_mode(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
@@ -602,11 +668,15 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
                             ):
                                 response = client.post(
                                     f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
-                                    headers={"Authorization": f"Bearer {token}"},
+                                    headers={
+                                        "Authorization": f"Bearer {token}",
+                                        "x-trr-request-id": "req-reprocess-stream-1",
+                                    },
                                 )
 
         assert response.status_code == 200
         normalized_payload = response.text.replace("\r\n", "\n")
+        assert '"stage": "starting"' in normalized_payload or '"stage":"starting"' in normalized_payload
         complete_index = normalized_payload.rfind("event: complete")
         assert complete_index >= 0
         data_index = normalized_payload.find("data:", complete_index)
@@ -617,6 +687,7 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
         if json_end == -1:
             json_end = len(normalized_payload)
         complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+        assert complete_data["request_id"] == "req-reprocess-stream-1"
 
         assert complete_data["text_overlay_configured"] is False
         assert complete_data["text_overlay_candidates"] == 0
@@ -632,6 +703,56 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
         assert complete_data["resize_attempted"] == 4
         assert complete_data["resize_succeeded"] == 3
         assert complete_data["resize_crop_attempted"] == 2
+
+    def test_reprocess_stream_emits_heartbeat_for_slow_auto_count(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setattr(admin_person_images, "STREAM_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        person_data = {"id": person_id, "full_name": "Slow Reprocess", "external_ids": {}}
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        def slow_auto_count_cast(*_args, **_kwargs):
+            time.sleep(0.04)
+            return (1, 1, 0)
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_person_images._auto_count_cast_photos", side_effect=slow_auto_count_cast):
+                with patch("api.routers.admin_person_images._auto_count_media_links", return_value=(0, 0, 0)):
+                    response = client.post(
+                        f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                        json={
+                            "run_count": True,
+                            "run_id_text": False,
+                            "run_crop": False,
+                            "run_resize": False,
+                        },
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+        assert response.status_code == 200
+        payload = response.text.replace("\r\n", "\n")
+        auto_count_progress_payloads: list[dict[str, object]] = []
+        for block in payload.split("\n\n"):
+            if not block.startswith("event: progress"):
+                continue
+            if "data:" not in block:
+                continue
+            data_part = block.split("data:", 1)[1].strip()
+            event_payload = json.loads(data_part)
+            if event_payload.get("stage") == "auto_count":
+                auto_count_progress_payloads.append(event_payload)
+
+        assert len(auto_count_progress_payloads) >= 2
+        assert any(entry.get("heartbeat") is True for entry in auto_count_progress_payloads)
+        assert any(isinstance(entry.get("elapsed_ms"), int) and int(entry["elapsed_ms"]) > 0 for entry in auto_count_progress_payloads)
 
 
 class TestUpdateFacebankSeed:

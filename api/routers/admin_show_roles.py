@@ -1092,6 +1092,7 @@ def list_cast_with_roles(
     roles: str | None = Query(default=None),
     has_image: bool | None = Query(default=None),
     archive_mode: str = Query(default="all"),
+    exclude_zero_episode_members: bool = False,
 ) -> list[dict[str, Any]]:
     request_started_at = time.perf_counter()
     base_rows_query_ms = 0.0
@@ -1223,6 +1224,8 @@ def list_cast_with_roles(
             continue
         archive_episodes = int(row.get("archive_episodes") or 0)
         regular_episodes = int(row.get("total_episodes") or 0)
+        if exclude_zero_episode_members and regular_episodes <= 0:
+            continue
         if archive_mode == "exclude" and archive_episodes > 0:
             continue
         if archive_mode == "only" and not (archive_episodes > 0 and regular_episodes <= 0):
