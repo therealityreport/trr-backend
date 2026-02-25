@@ -13,6 +13,8 @@ anyio==4.12.1
     #   sse-starlette
     #   starlette
     #   watchfiles
+async-timeout==5.0.1
+    # via crawlee
 beautifulsoup4==4.14.3
     # via -r requirements.in
 boto3==1.42.50
@@ -24,7 +26,9 @@ botocore==1.42.50
 cachecontrol==0.14.4
     # via firebase-admin
 cachetools==6.2.6
-    # via pyiceberg
+    # via
+    #   crawlee
+    #   pyiceberg
 cairocffi==1.7.1
     # via cairosvg
 cairosvg==2.8.2
@@ -47,6 +51,10 @@ click==8.3.1
     #   pyiceberg
     #   typer
     #   uvicorn
+colorama==0.4.6
+    # via crawlee
+crawlee==1.4.0
+    # via -r requirements.in
 cryptography==46.0.5
     # via
     #   google-auth
@@ -63,6 +71,8 @@ distro==1.9.0
     # via google-genai
 fastapi==0.129.0
     # via -r requirements.in
+filelock==3.24.3
+    # via tldextract
 firebase-admin==7.1.0
     # via -r requirements.in
 fsspec==2026.2.0
@@ -146,7 +156,10 @@ idna==3.11
     #   anyio
     #   httpx
     #   requests
+    #   tldextract
     #   yarl
+impit==0.11.0
+    # via crawlee
 iniconfig==2.3.0
     # via pytest
 jmespath==1.1.0
@@ -159,6 +172,8 @@ mdurl==0.1.2
     # via markdown-it-py
 mmh3==5.2.0
     # via pyiceberg
+more-itertools==10.8.0
+    # via crawlee
 msgpack==1.1.2
     # via cachecontrol
 multidict==6.7.1
@@ -183,6 +198,8 @@ postgrest==2.27.0
     #   supabase
 propcache==0.4.1
     # via yarl
+protego==0.6.0
+    # via crawlee
 proto-plus==1.27.1
     # via
     #   google-api-core
@@ -194,6 +211,8 @@ protobuf==5.29.6
     #   googleapis-common-protos
     #   grpcio-status
     #   proto-plus
+psutil==7.2.2
+    # via crawlee
 psycopg2-binary==2.9.11
     # via -r requirements.in
 pyasn1==0.6.2
@@ -207,15 +226,21 @@ pycparser==3.0
 pydantic==2.12.5
     # via
     #   -r requirements.in
+    #   crawlee
     #   fastapi
     #   google-genai
     #   postgrest
+    #   pydantic-settings
     #   pyiceberg
     #   realtime
     #   storage3
     #   supabase-auth
 pydantic-core==2.41.5
     # via pydantic
+pydantic-settings==2.13.1
+    # via crawlee
+pyee==13.0.1
+    # via crawlee
 pygments==2.19.2
     # via
     #   pytest
@@ -240,6 +265,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
     # via
     #   -r requirements.in
+    #   pydantic-settings
     #   uvicorn
 python-multipart==0.0.22
     # via -r requirements.in
@@ -258,7 +284,11 @@ requests==2.32.5
     #   google-cloud-storage
     #   google-genai
     #   pyiceberg
+    #   requests-file
     #   requests-oauthlib
+    #   tldextract
+requests-file==3.0.1
+    # via tldextract
 requests-oauthlib==2.0.0
     # via google-auth-oauthlib
 rich==14.3.2
@@ -304,6 +334,8 @@ tinycss2==1.5.1
     # via
     #   cairosvg
     #   cssselect2
+tldextract==5.3.1
+    # via crawlee
 tree-sitter==0.25.2
     # via -r requirements.in
 tree-sitter-python==0.25.0
@@ -314,11 +346,13 @@ typing-extensions==4.15.0
     # via
     #   anyio
     #   beautifulsoup4
+    #   crawlee
     #   fastapi
     #   google-genai
     #   grpcio
     #   pydantic
     #   pydantic-core
+    #   pyee
     #   realtime
     #   starlette
     #   typing-inspection
@@ -326,6 +360,7 @@ typing-inspection==0.4.2
     # via
     #   fastapi
     #   pydantic
+    #   pydantic-settings
 urllib3==2.6.3
     # via
     #   botocore
@@ -347,6 +382,7 @@ websockets==15.0.1
     #   uvicorn
 yarl==1.22.0
     # via
+    #   crawlee
     #   postgrest
     #   storage3
     #   supabase

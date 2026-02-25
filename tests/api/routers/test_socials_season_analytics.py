@@ -215,6 +215,47 @@ def test_ingest_accepts_comments_only_mode(client: TestClient, monkeypatch: pyte
     assert ingest_mock.call_args.kwargs["ingest_mode"] == "comments_only"
 
 
+def test_ingest_passes_comment_targeting_options(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-789",
+        "status": "queued",
+        "stages": ["comments"],
+        "queued_or_started_jobs": 1,
+        "summary": {"total_jobs": 1},
+    }
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "sync_strategy": "incremental",
+        "ingest_mode": "comments_only",
+        "comment_refresh_policy": "missing_only",
+        "comment_anchor_source_ids": {
+            "instagram": ["abc123", "def456"],
+        },
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 200
+    assert ingest_mock.call_args.kwargs["comment_refresh_policy"] == "missing_only"
+    assert ingest_mock.call_args.kwargs["comment_anchor_source_ids"] == {"instagram": ["abc123", "def456"]}
+
+
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")
@@ -324,6 +365,46 @@ def test_get_week_detail_endpoint_returns_youtube_comment_totals(
     assert body["platforms"]["youtube"]["posts"][0]["comments_count"] == 420
 
 
+def test_get_week_detail_endpoint_includes_additive_week_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    payload = {
+        "season_id": season_id,
+        "week": {
+            "week_index": 3,
+            "label": "BYE WEEK (Jan 15-Jan 22)",
+            "start": "2026-01-16T01:00:00Z",
+            "end": "2026-01-23T00:59:59Z",
+            "week_type": "bye",
+            "episode_number": None,
+        },
+        "platforms": {
+            "youtube": {
+                "posts": [],
+                "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
+            }
+        },
+        "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["week"]["label"] == "BYE WEEK (Jan 15-Jan 22)"
+    assert body["week"]["week_type"] == "bye"
+    assert body["week"]["episode_number"] is None
+
+
 def test_get_week_detail_endpoint_includes_additive_diagnostics(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -375,6 +456,92 @@ def test_get_week_detail_endpoint_includes_additive_diagnostics(
     assert body["totals"]["saved_comments_total"] == 420
     assert body["totals"]["comments_saved_pct"] == 84.0
     assert body["diagnostics"]["run_id"] == "run-abc"
+
+
+def test_get_analytics_endpoint_includes_additive_week_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    expected = {
+        "window": {"week": None},
+        "summary": {},
+        "weekly": [
+            {
+                "week_index": 2,
+                "label": "BYE WEEK (Jan 15-Jan 22)",
+                "week_type": "bye",
+                "episode_number": None,
+                "start": "2026-01-16T01:00:00Z",
+                "end": "2026-01-23T00:59:59Z",
+                "post_volume": 0,
+                "comment_volume": 0,
+                "engagement": 0,
+                "sentiment": {"positive": 0, "neutral": 0, "negative": 0},
+            }
+        ],
+        "weekly_platform_posts": [
+            {
+                "week_index": 2,
+                "label": "BYE WEEK (Jan 15-Jan 22)",
+                "week_type": "bye",
+                "episode_number": None,
+                "start": "2026-01-16T01:00:00Z",
+                "end": "2026-01-23T00:59:59Z",
+                "posts": {"instagram": 0, "youtube": 0, "tiktok": 0, "twitter": 0},
+                "comments": {"instagram": 0, "youtube": 0, "tiktok": 0, "twitter": 0},
+                "reported_comments": {"instagram": 0, "youtube": 0, "tiktok": 0, "twitter": 0},
+                "total_posts": 0,
+                "total_comments": 0,
+                "total_reported_comments": 0,
+                "comments_saved_pct": None,
+            }
+        ],
+        "weekly_platform_engagement": [],
+        "weekly_daily_activity": [
+            {
+                "week_index": 2,
+                "label": "BYE WEEK (Jan 15-Jan 22)",
+                "week_type": "bye",
+                "episode_number": None,
+                "start": "2026-01-16T01:00:00Z",
+                "end": "2026-01-23T00:59:59Z",
+                "days": [
+                    {
+                        "day_index": 0,
+                        "date_local": "2026-01-15",
+                        "posts": {"instagram": 0, "youtube": 0, "tiktok": 0, "twitter": 0},
+                        "comments": {"instagram": 0, "youtube": 0, "tiktok": 0, "twitter": 0},
+                        "reported_comments": {"instagram": 0, "youtube": 0, "tiktok": 0, "twitter": 0},
+                        "total_posts": 0,
+                        "total_comments": 0,
+                        "total_reported_comments": 0,
+                    }
+                ],
+            }
+        ],
+        "platform_breakdown": [],
+        "themes": {"positive": [], "negative": []},
+        "leaderboards": {"bravo_content": [], "viewer_discussion": []},
+        "jobs": [],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["weekly"][0]["label"] == "BYE WEEK (Jan 15-Jan 22)"
+    assert body["weekly"][0]["week_type"] == "bye"
+    assert body["weekly"][0]["episode_number"] is None
+    assert body["weekly_daily_activity"][0]["days"][0]["reported_comments"]["instagram"] == 0
+    assert body["weekly_daily_activity"][0]["days"][0]["total_reported_comments"] == 0
 
 
 def test_get_post_comments_endpoint_returns_youtube_effective_stats(
@@ -478,7 +645,9 @@ def test_requeue_instagram_mirror_jobs_endpoint(
         return_value=expected,
     ) as mocked:
         response = client.post(
-            f"/api/v1/admin/socials/seasons/{season_id}/instagram/mirror/requeue?source_scope=bravo&limit=500&failed_only=true",
+            f"/api/v1/admin/socials/seasons/{season_id}/instagram/mirror/requeue"
+            "?source_scope=bravo&limit=500&failed_only=true"
+            "&date_start=2026-02-01T00:00:00Z&date_end=2026-02-08T00:00:00Z",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -487,6 +656,8 @@ def test_requeue_instagram_mirror_jobs_endpoint(
     assert mocked.call_args.kwargs["source_scope"] == "bravo"
     assert mocked.call_args.kwargs["limit"] == 500
     assert mocked.call_args.kwargs["failed_only"] is True
+    assert mocked.call_args.kwargs["date_start"] is not None
+    assert mocked.call_args.kwargs["date_end"] is not None
 
 
 def test_requeue_platform_mirror_jobs_endpoint(
@@ -512,7 +683,9 @@ def test_requeue_platform_mirror_jobs_endpoint(
         return_value=expected,
     ) as mocked:
         response = client.post(
-            f"/api/v1/admin/socials/seasons/{season_id}/tiktok/mirror/requeue?source_scope=bravo&limit=250",
+            f"/api/v1/admin/socials/seasons/{season_id}/tiktok/mirror/requeue"
+            "?source_scope=bravo&limit=250"
+            "&date_start=2026-02-01T00:00:00Z&date_end=2026-02-08T00:00:00Z",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -522,6 +695,8 @@ def test_requeue_platform_mirror_jobs_endpoint(
     assert mocked.call_args.kwargs["source_scope"] == "bravo"
     assert mocked.call_args.kwargs["limit"] == 250
     assert mocked.call_args.kwargs["failed_only"] is False
+    assert mocked.call_args.kwargs["date_start"] is not None
+    assert mocked.call_args.kwargs["date_end"] is not None
 
 
 def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -659,12 +834,11 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
     ingest_mock.assert_called_once()
 
 
-def test_ingest_comments_only_inline_fallback_respects_worker_cap(
+def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    monkeypatch.setenv("SOCIAL_INLINE_COMMENTS_WORKERS", "2")
     token = _make_admin_token("test-secret")
     season_id = str(uuid4())
     payload = {
@@ -711,7 +885,131 @@ def test_ingest_comments_only_inline_fallback_respects_worker_cap(
                     )
 
     assert response.status_code == 200
-    assert worker_counts == [2]
+    # One worker per platform (1 platform requested = 1 worker)
+    assert worker_counts == [1]
+
+
+def test_ingest_comments_only_queue_mode_fans_out_parallel_runners(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SOCIAL_COMMENTS_RUN_WORKERS", "3")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram", "youtube", "tiktok", "twitter"],
+        "ingest_mode": "comments_only",
+    }
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-queue-comments-only",
+        "status": "queued",
+        "stages": ["comments"],
+        "queued_or_started_jobs": 4,
+        "summary": {"total_jobs": 4},
+    }
+    worker_counts: list[int] = []
+    execute_calls: list[dict[str, object]] = []
+
+    class _FakeFuture:
+        def result(self) -> None:
+            return None
+
+    class _FakeThreadPoolExecutor:
+        def __init__(self, *, max_workers: int):
+            worker_counts.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn, *args, **kwargs):  # noqa: ANN001
+            fn(*args, **kwargs)
+            return _FakeFuture()
+
+    def _record_execute(
+        run_id: str, *, worker_id: str | None = None, stage: str | None = None, platform: str | None = None
+    ) -> None:
+        execute_calls.append(
+            {
+                "run_id": run_id,
+                "worker_id": worker_id,
+                "stage": stage,
+                "platform": platform,
+            }
+        )
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value={"healthy": True, "healthy_workers": 1},
+        ):
+            with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
+                with patch("trr_backend.repositories.social_season_analytics.execute_run", side_effect=_record_execute):
+                    with patch("api.routers.socials.ThreadPoolExecutor", _FakeThreadPoolExecutor):
+                        response = client.post(
+                            f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json=payload,
+                        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["execution_mode"] == "queue"
+    assert body["status"] == "queued"
+    assert worker_counts == [3]
+    assert len(execute_calls) == 4
+    assert all(call["run_id"] == "run-queue-comments-only" for call in execute_calls)
+    assert all(call["stage"] == "comments" for call in execute_calls)
+    assert {call["worker_id"] for call in execute_calls} == {
+        "api-background:comments:instagram",
+        "api-background:comments:youtube",
+        "api-background:comments:tiktok",
+        "api-background:comments:twitter",
+    }
+    assert {call["platform"] for call in execute_calls} == {
+        "instagram",
+        "youtube",
+        "tiktok",
+        "twitter",
+    }
+
+
+def test_get_mirror_coverage_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "up_to_date": False,
+        "needs_mirror_count": 4,
+        "mirrored_count": 9,
+        "failed_count": 1,
+        "partial_count": 2,
+        "pending_count": 1,
+        "posts_scanned": 13,
+        "by_platform": {"instagram": {"needs_mirror_count": 4}},
+        "evaluated_at": "2026-02-24T12:00:00+00:00",
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_mirror_coverage",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/mirror-coverage"
+            "?source_scope=bravo&platforms=instagram,twitter&timezone=America/New_York",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["needs_mirror_count"] == 4
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+    assert mocked.call_args.kwargs["platforms"] == ["instagram", "twitter"]
 
 
 def test_ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_flag(

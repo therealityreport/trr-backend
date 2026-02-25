@@ -11,6 +11,7 @@ Supports:
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
@@ -69,6 +70,20 @@ class ScrapeConfig:
 
 
 @dataclass
+class InstagramUserDetail:
+    """Rich user object extracted from tagged users, collaborators, and post owners."""
+
+    username: str
+    user_id: str | None = None
+    full_name: str | None = None
+    is_verified: bool | None = None
+    profile_pic_url: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class InstagramComment:
     """Represents a single Instagram comment with reply support."""
 
@@ -83,6 +98,8 @@ class InstagramComment:
     parent_comment_id: str | None  # ID of parent comment if this is a reply
     reply_count: int
     replies: list["InstagramComment"] = field(default_factory=list)
+    owner_profile_pic_url: str | None = None
+    owner_is_verified: bool | None = None
 
     # Post reference
     post_shortcode: str = ""
@@ -116,6 +133,9 @@ class InstagramPost:
     # Media URLs
     media_urls: list[str] = field(default_factory=list)
     thumbnail_url: str | None = None
+    hashtags: list[str] = field(default_factory=list)
+    mentions: list[str] = field(default_factory=list)
+    collaborators: list[str] = field(default_factory=list)
 
     # Comments (populated when fetch_comments is called)
     comment_list: list[InstagramComment] = field(default_factory=list)
@@ -124,6 +144,22 @@ class InstagramPost:
     show_id: int | None = None
     season_number: int | None = None
     person_id: int | None = None
+
+    # Rich user detail objects
+    tagged_users_detail: list[InstagramUserDetail] = field(default_factory=list)
+    collaborators_detail: list[InstagramUserDetail] = field(default_factory=list)
+    owner_detail: InstagramUserDetail | None = None
+
+    # Additional metadata
+    product_type: str | None = None
+    video_play_count: int | None = None
+    alt_text: str | None = None
+    width: int | None = None
+    height: int | None = None
+    is_comments_disabled: bool | None = None
+    music_info: dict[str, Any] | None = None
+    video_duration: float | None = None
+    child_posts_data: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -244,6 +280,67 @@ class InstagramScraper:
             time.sleep(delay)
         self._request_count += 1
 
+    @staticmethod
+    def _coerce_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _coerce_timestamp(value: Any) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return 0
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return 0
+            return int(parsed.timestamp())
+        return 0
+
+    @staticmethod
+    def _dedupe_preserve_order(values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(value)
+        return out
+
+    @staticmethod
+    def _normalize_handle_token(value: Any) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        raw = raw.lstrip("@#")
+        match = re.search(r"[A-Za-z0-9._]+", raw)
+        if not match:
+            return None
+        token = match.group(0).rstrip(".,:;!?)]}>'\"")
+        return token or None
+
+    def _normalize_mention(self, value: Any) -> str | None:
+        token = self._normalize_handle_token(value)
+        if not token:
+            return None
+        return f"@{token}"
+
+    def _normalize_hashtag(self, value: Any) -> str | None:
+        token = self._normalize_handle_token(value)
+        if not token:
+            return None
+        cleaned = token.replace(".", "")
+        if not cleaned:
+            return None
+        return cleaned
+
     def _determine_post_type(self, node: dict) -> str:
         """Determine post type from node data."""
         typename = node.get("__typename", "")
@@ -254,6 +351,20 @@ class InstagramScraper:
                 return "reel"
             return "video"
         if typename == "GraphImage":
+            return "image"
+
+        actor_product_type = str(node.get("productType") or node.get("product_type") or "").strip().lower()
+        if actor_product_type == "clips":
+            return "reel"
+
+        actor_type = str(node.get("type") or node.get("media_type_name") or "").strip().lower()
+        if actor_type in {"reel", "clips"}:
+            return "reel"
+        if actor_type in {"carousel", "sidecar"}:
+            return "carousel"
+        if actor_type == "video":
+            return "video"
+        if actor_type == "image":
             return "image"
 
         # Fallback to media_type (REST API)
@@ -306,59 +417,386 @@ class InstagramScraper:
                 if username and username not in tags:
                     tags.append(username)
 
-        return tags
+        tagged_users = node.get("taggedUsers")
+        if isinstance(tagged_users, list):
+            for tagged in tagged_users:
+                username = None
+                if isinstance(tagged, dict):
+                    username = tagged.get("username") or tagged.get("user", {}).get("username")
+                if not username:
+                    continue
+                normalized = self._normalize_handle_token(username)
+                if normalized:
+                    tags.append(normalized)
+
+        return self._dedupe_preserve_order(tags)
+
+    def _extract_collaborators(self, node: dict) -> list[str]:
+        collaborators: list[str] = []
+        for key in ("coauthor_producers", "invited_coauthor_producers", "coauthorProducers"):
+            values = node.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                username = value
+                if isinstance(value, dict):
+                    username = value.get("username") or value.get("user", {}).get("username")
+                normalized = self._normalize_handle_token(username)
+                if normalized:
+                    collaborators.append(normalized)
+        return self._dedupe_preserve_order(collaborators)
+
+    def _extract_tagged_users_detail(self, node: dict) -> list[InstagramUserDetail]:
+        """Extract full tagged user objects from post."""
+        details: list[InstagramUserDetail] = []
+        seen: set[str] = set()
+
+        def _add(
+            username: str | None,
+            user_id: Any = None,
+            full_name: str | None = None,
+            is_verified: Any = None,
+            profile_pic_url: str | None = None,
+        ) -> None:
+            normalized = self._normalize_handle_token(username)
+            if not normalized or normalized.lower() in seen:
+                return
+            seen.add(normalized.lower())
+            details.append(InstagramUserDetail(
+                username=normalized,
+                user_id=str(user_id) if user_id else None,
+                full_name=full_name or None,
+                is_verified=bool(is_verified) if is_verified is not None else None,
+                profile_pic_url=str(profile_pic_url) if profile_pic_url else None,
+            ))
+
+        # GraphQL format
+        edge_tags = node.get("edge_media_to_tagged_user", {})
+        if edge_tags:
+            for edge in edge_tags.get("edges", []):
+                user = edge.get("node", {}).get("user", {})
+                _add(
+                    user.get("username"),
+                    user.get("id") or user.get("pk"),
+                    user.get("full_name"),
+                    user.get("is_verified"),
+                    user.get("profile_pic_url"),
+                )
+
+        # REST API format
+        usertags = node.get("usertags", {})
+        if usertags and isinstance(usertags, dict):
+            for tag in usertags.get("in", []):
+                user = tag.get("user", {})
+                _add(
+                    user.get("username"),
+                    user.get("pk") or user.get("id"),
+                    user.get("full_name"),
+                    user.get("is_verified"),
+                    user.get("profile_pic_url"),
+                )
+
+        # Actor-style format
+        tagged_users = node.get("taggedUsers")
+        if isinstance(tagged_users, list):
+            for tagged in tagged_users:
+                if not isinstance(tagged, dict):
+                    continue
+                user = tagged if "username" in tagged else tagged.get("user", {})
+                _add(
+                    user.get("username"),
+                    user.get("id") or user.get("pk"),
+                    user.get("full_name") or user.get("fullName"),
+                    user.get("is_verified") or user.get("isVerified"),
+                    user.get("profile_pic_url") or user.get("profilePicUrl"),
+                )
+
+        return details
+
+    def _extract_collaborators_detail(self, node: dict) -> list[InstagramUserDetail]:
+        """Extract full collaborator user objects from post."""
+        details: list[InstagramUserDetail] = []
+        seen: set[str] = set()
+
+        for key in ("coauthor_producers", "invited_coauthor_producers", "coauthorProducers"):
+            values = node.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, dict):
+                    continue
+                user = value if "username" in value else value.get("user", {})
+                normalized = self._normalize_handle_token(user.get("username"))
+                if not normalized or normalized.lower() in seen:
+                    continue
+                seen.add(normalized.lower())
+                details.append(InstagramUserDetail(
+                    username=normalized,
+                    user_id=str(user.get("id") or user.get("pk") or "") or None,
+                    full_name=user.get("full_name") or user.get("fullName") or None,
+                    is_verified=bool(user.get("is_verified") or user.get("isVerified"))
+                    if (user.get("is_verified") is not None or user.get("isVerified") is not None)
+                    else None,
+                    profile_pic_url=str(
+                        user.get("profile_pic_url") or user.get("profilePicUrl") or ""
+                    ) or None,
+                ))
+
+        return details
+
+    def _extract_owner_detail(self, node: dict) -> InstagramUserDetail | None:
+        """Extract post owner/author detail."""
+        owner = node.get("owner", {}) if isinstance(node.get("owner"), dict) else {}
+        username = str(
+            node.get("ownerUsername") or owner.get("username") or ""
+        ).strip()
+        if not username:
+            return None
+        return InstagramUserDetail(
+            username=username,
+            user_id=str(
+                owner.get("id") or owner.get("pk") or node.get("ownerId") or ""
+            ) or None,
+            full_name=str(
+                owner.get("full_name") or node.get("ownerFullName") or ""
+            ).strip() or None,
+            is_verified=bool(owner.get("is_verified"))
+            if "is_verified" in owner
+            else None,
+            profile_pic_url=str(
+                owner.get("profile_pic_url") or node.get("ownerProfilePicUrl") or ""
+            ).strip() or None,
+        )
+
+    def _extract_child_posts_data(self, node: dict) -> list[dict[str, Any]]:
+        """Extract carousel child post details."""
+        children: list[dict[str, Any]] = []
+
+        # Actor-style format (childPosts)
+        child_posts = node.get("childPosts")
+        if isinstance(child_posts, list):
+            for child in child_posts:
+                if not isinstance(child, dict):
+                    continue
+                dims = child.get("dimensions", {})
+                children.append({
+                    "type": child.get("type") or child.get("__typename"),
+                    "display_url": child.get("displayUrl") or child.get("display_url"),
+                    "video_url": child.get("videoUrl") or child.get("video_url"),
+                    "width": self._coerce_int(
+                        dims.get("width") if isinstance(dims, dict) else child.get("original_width"), 0
+                    ) or None,
+                    "height": self._coerce_int(
+                        dims.get("height") if isinstance(dims, dict) else child.get("original_height"), 0
+                    ) or None,
+                    "alt": child.get("alt") or child.get("accessibility_caption"),
+                })
+            if children:
+                return children
+
+        # REST API format (carousel_media)
+        carousel = node.get("carousel_media")
+        if isinstance(carousel, list):
+            for item in carousel:
+                if not isinstance(item, dict):
+                    continue
+                display_url = None
+                video_url = None
+                if item.get("image_versions2"):
+                    candidates = item["image_versions2"].get("candidates", [])
+                    if candidates:
+                        display_url = candidates[0].get("url")
+                if item.get("video_versions"):
+                    versions = item["video_versions"]
+                    if versions:
+                        video_url = versions[0].get("url")
+                children.append({
+                    "type": "Video" if video_url else "Image",
+                    "display_url": display_url,
+                    "video_url": video_url,
+                    "width": self._coerce_int(item.get("original_width"), 0) or None,
+                    "height": self._coerce_int(item.get("original_height"), 0) or None,
+                    "alt": item.get("accessibility_caption"),
+                })
+            if children:
+                return children
+
+        # GraphQL format (edge_sidecar_to_children)
+        sidecar = node.get("edge_sidecar_to_children") or {}
+        for edge in sidecar.get("edges", []):
+            child = edge.get("node", {})
+            dims = child.get("dimensions", {})
+            children.append({
+                "type": child.get("__typename", "").replace("Graph", ""),
+                "display_url": child.get("display_url"),
+                "video_url": child.get("video_url"),
+                "width": self._coerce_int(dims.get("width"), 0) or None,
+                "height": self._coerce_int(dims.get("height"), 0) or None,
+                "alt": child.get("accessibility_caption"),
+            })
+
+        return children
+
+    def _extract_additional_post_fields(self, node: dict) -> dict[str, Any]:
+        """Extract supplementary post metadata not covered by primary fields."""
+        result: dict[str, Any] = {}
+
+        # product_type (e.g., "clips" for reels, "feed" for feed posts)
+        result["product_type"] = (
+            str(node.get("productType") or node.get("product_type") or "").strip() or None
+        )
+
+        # video_play_count (distinct from video_view_count)
+        vpc = node.get("videoPlayCount") or node.get("video_play_count")
+        result["video_play_count"] = self._coerce_int(vpc, 0) if vpc is not None else None
+
+        # alt text
+        result["alt_text"] = (
+            str(
+                node.get("accessibilityCaption")
+                or node.get("accessibility_caption")
+                or node.get("alt")
+                or ""
+            ).strip()
+            or None
+        )
+
+        # dimensions
+        dims = node.get("dimensions")
+        if isinstance(dims, dict):
+            result["width"] = self._coerce_int(dims.get("width"), 0) or None
+            result["height"] = self._coerce_int(dims.get("height"), 0) or None
+        else:
+            w = node.get("dimensionsWidth") or node.get("original_width")
+            h = node.get("dimensionsHeight") or node.get("original_height")
+            result["width"] = self._coerce_int(w, 0) or None if w is not None else None
+            result["height"] = self._coerce_int(h, 0) or None if h is not None else None
+
+        # is_comments_disabled
+        icd = node.get("comments_disabled")
+        if icd is None:
+            icd = node.get("isCommentsDisabled")
+        result["is_comments_disabled"] = bool(icd) if icd is not None else None
+
+        # music_info
+        music = node.get("musicInfo") or node.get("music_info")
+        result["music_info"] = music if isinstance(music, dict) else None
+
+        # video_duration
+        vd = node.get("videoDuration") or node.get("video_duration")
+        if vd is not None:
+            try:
+                result["video_duration"] = float(vd)
+            except (TypeError, ValueError):
+                result["video_duration"] = None
+        else:
+            result["video_duration"] = None
+
+        return result
+
+    def _extract_hashtags(self, node: dict, caption: str) -> list[str]:
+        tags: list[str] = []
+        if isinstance(node.get("hashtags"), list):
+            for item in node.get("hashtags", []):
+                value = item.get("name") if isinstance(item, dict) else item
+                normalized = self._normalize_hashtag(value)
+                if normalized:
+                    tags.append(normalized)
+        if caption:
+            for item in re.findall(r"(?<![\w.])#([A-Za-z0-9_]+)", caption):
+                normalized = self._normalize_hashtag(item)
+                if normalized:
+                    tags.append(normalized)
+        return self._dedupe_preserve_order(tags)
+
+    def _extract_mentions(self, node: dict, caption: str) -> list[str]:
+        mentions: list[str] = []
+        if isinstance(node.get("mentions"), list):
+            for item in node.get("mentions", []):
+                value = item.get("username") if isinstance(item, dict) else item
+                normalized = self._normalize_mention(value)
+                if normalized:
+                    mentions.append(normalized)
+        if caption:
+            for item in re.findall(r"(?<![\w.])@([A-Za-z0-9_.]+)", caption):
+                normalized = self._normalize_mention(item)
+                if normalized:
+                    mentions.append(normalized)
+        return self._dedupe_preserve_order(mentions)
 
     def _extract_like_count(self, node: dict) -> int:
         """Extract like count."""
         if "like_count" in node:
-            return node.get("like_count", 0)
+            return self._coerce_int(node.get("like_count"), 0)
+        if "likesCount" in node:
+            return self._coerce_int(node.get("likesCount"), 0)
         edge_liked = node.get("edge_liked_by") or node.get("edge_media_preview_like")
         if edge_liked:
-            return edge_liked.get("count", 0)
+            return self._coerce_int(edge_liked.get("count"), 0)
         return 0
 
     def _extract_comment_count(self, node: dict) -> int:
         """Extract comment count."""
         if "comment_count" in node:
-            return node.get("comment_count", 0)
+            return self._coerce_int(node.get("comment_count"), 0)
+        if "commentsCount" in node:
+            return self._coerce_int(node.get("commentsCount"), 0)
         edge_comments = node.get("edge_media_to_comment")
         if edge_comments:
-            return edge_comments.get("count", 0)
+            return self._coerce_int(edge_comments.get("count"), 0)
         return 0
 
     def _extract_timestamp(self, node: dict) -> int:
         """Extract Unix timestamp."""
-        return node.get("taken_at_timestamp") or node.get("taken_at", 0)
+        return self._coerce_timestamp(node.get("taken_at_timestamp") or node.get("taken_at") or node.get("timestamp"))
 
     def _extract_shortcode(self, node: dict) -> str:
         """Extract shortcode."""
-        return node.get("shortcode") or node.get("code", "")
+        return str(node.get("shortcode") or node.get("shortCode") or node.get("code", ""))
 
     def _parse_post_node(self, node: dict, config: ScrapeConfig) -> InstagramPost:
         """Parse a post node into InstagramPost."""
         shortcode = self._extract_shortcode(node)
         taken_at = self._extract_timestamp(node)
+        caption = self._extract_caption(node)
         media_urls = self._extract_media_urls(node)
+        mentions = self._extract_mentions(node, caption)
+        extras = self._extract_additional_post_fields(node)
 
         return InstagramPost(
             shortcode=shortcode,
             post_type=self._determine_post_type(node),
             date_time=datetime.fromtimestamp(taken_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if taken_at else "",
             taken_at=taken_at,
-            caption=self._extract_caption(node),
+            caption=caption,
             profile_tags=self._extract_profile_tags(node),
             sponsored=bool(node.get("is_paid_partnership")),
             likes=self._extract_like_count(node),
             comments=self._extract_comment_count(node),
-            video_views=node.get("video_view_count", 0),
+            video_views=self._coerce_int(node.get("video_view_count") or node.get("videoViewCount"), 0),
             url=f"https://www.instagram.com/p/{shortcode}/" if shortcode else "",
             pk=str(node.get("pk") or node.get("id", "")),
-            username=config.username,
+            username=str(node.get("ownerUsername") or node.get("owner", {}).get("username") or config.username),
             media_urls=media_urls,
             thumbnail_url=media_urls[0] if media_urls else None,
+            hashtags=self._extract_hashtags(node, caption),
+            mentions=mentions,
+            collaborators=self._extract_collaborators(node),
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
+            tagged_users_detail=self._extract_tagged_users_detail(node),
+            collaborators_detail=self._extract_collaborators_detail(node),
+            owner_detail=self._extract_owner_detail(node),
+            product_type=extras.get("product_type"),
+            video_play_count=extras.get("video_play_count"),
+            alt_text=extras.get("alt_text"),
+            width=extras.get("width"),
+            height=extras.get("height"),
+            is_comments_disabled=extras.get("is_comments_disabled"),
+            music_info=extras.get("music_info"),
+            video_duration=extras.get("video_duration"),
+            child_posts_data=self._extract_child_posts_data(node),
         )
 
     def fetch_profile_info(self, username: str, delay: float = 2.0) -> dict | None:
@@ -543,7 +981,7 @@ class InstagramScraper:
                         content_type or "unknown",
                     )
                     break
-                status_value = str(data.get("status") or "").strip().lower()
+                status_value = str(data.get("status") or "").strip().lower() if isinstance(data, dict) else ""
                 if status_value and status_value != "ok":
                     self.last_comment_fetch_reason = "api_status_fail"
                     message = str(data.get("message") or data.get("error_message") or "").strip().lower()
@@ -569,13 +1007,19 @@ class InstagramScraper:
                 break
 
             # Parse comments
-            for comment_data in data.get("comments", []):
+            if isinstance(data, list):
+                comment_rows = data
+            elif isinstance(data, dict):
+                comment_rows = data.get("comments", [])
+            else:
+                comment_rows = []
+            for comment_data in comment_rows:
                 comment = self._parse_comment(comment_data, shortcode, post_url)
                 comments.append(comment)
                 comments_fetched += 1
 
                 # Fetch replies if requested and comment has replies
-                if fetch_replies and comment.reply_count > 0:
+                if fetch_replies and comment.reply_count > 0 and not comment.replies:
                     replies = self._fetch_comment_replies(media_id, comment.comment_id, shortcode, post_url, delay)
                     comment.replies = replies
                     logger.info(f"  Comment {comment.comment_id}: {comment.reply_count} replies fetched")
@@ -588,13 +1032,14 @@ class InstagramScraper:
             # Check for more pages.
             if max_comments and comments_fetched >= max_comments:
                 break
-            has_more = bool(data.get("has_more_comments", False))
+            has_more = bool(data.get("has_more_comments", False)) if isinstance(data, dict) else False
             # Instagram often reports `has_more_comments=false` while still providing
             # `has_more_headload_comments=true` with a valid `next_min_id`.
-            has_more = has_more or bool(data.get("has_more_headload_comments", False))
+            if isinstance(data, dict):
+                has_more = has_more or bool(data.get("has_more_headload_comments", False))
             if not has_more:
                 break
-            next_cursor = data.get("next_min_id") or data.get("next_max_id")
+            next_cursor = (data.get("next_min_id") or data.get("next_max_id")) if isinstance(data, dict) else None
             if not next_cursor or next_cursor == cursor:
                 break
             cursor = next_cursor
@@ -648,7 +1093,7 @@ class InstagramScraper:
                         content_type or "unknown",
                     )
                     break
-                status_value = str(data.get("status") or "").strip().lower()
+                status_value = str(data.get("status") or "").strip().lower() if isinstance(data, dict) else ""
                 if status_value and status_value != "ok":
                     self.last_comment_fetch_reason = "api_status_fail"
                     message = str(data.get("message") or data.get("error_message") or "").strip().lower()
@@ -669,14 +1114,23 @@ class InstagramScraper:
                 break
 
             # Parse child comments (replies)
-            for reply_data in data.get("child_comments", []):
+            if isinstance(data, dict):
+                reply_rows = data.get("child_comments", [])
+                if not reply_rows and isinstance(data.get("replies"), list):
+                    reply_rows = data.get("replies", [])
+            elif isinstance(data, list):
+                reply_rows = data
+            else:
+                reply_rows = []
+            for reply_data in reply_rows:
                 reply = self._parse_comment(reply_data, shortcode, post_url, is_reply=True, parent_id=comment_id)
                 replies.append(reply)
 
             # Check for more pages
-            if not data.get("has_more_tail_child_comments", False):
+            has_more_tail = bool(data.get("has_more_tail_child_comments", False)) if isinstance(data, dict) else False
+            if not has_more_tail:
                 break
-            cursor = data.get("next_min_child_cursor")
+            cursor = data.get("next_min_child_cursor") if isinstance(data, dict) else None
             if not cursor:
                 break
 
@@ -691,23 +1145,55 @@ class InstagramScraper:
         parent_id: str | None = None,
     ) -> InstagramComment:
         """Parse comment data into InstagramComment object."""
-        created_at = data.get("created_at", 0)
-        user = data.get("user", {})
+        user = data.get("user", {}) if isinstance(data.get("user"), dict) else {}
+        owner = data.get("owner", {}) if isinstance(data.get("owner"), dict) else {}
+        created_at = self._coerce_timestamp(data.get("created_at") or data.get("timestamp"))
+        username = data.get("ownerUsername") or owner.get("username") or user.get("username") or ""
+        user_id = data.get("ownerId") or owner.get("id") or user.get("pk") or user.get("id") or ""
+        likes = data.get("comment_like_count")
+        if likes is None:
+            likes = data.get("likesCount")
+        if likes is None:
+            likes = data.get("like_count")
+        reply_count = data.get("child_comment_count")
+        if reply_count is None:
+            reply_count = data.get("repliesCount")
 
-        return InstagramComment(
-            comment_id=str(data.get("pk", "")),
-            text=data.get("text", ""),
-            username=user.get("username", ""),
-            user_id=str(user.get("pk", "")),
+        comment = InstagramComment(
+            comment_id=str(data.get("pk") or data.get("id") or ""),
+            text=str(data.get("text") or ""),
+            username=str(username or ""),
+            user_id=str(user_id or ""),
             created_at=created_at,
             date_time=datetime.fromtimestamp(created_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if created_at else "",
-            likes=data.get("comment_like_count", 0),
+            likes=self._coerce_int(likes, 0),
             is_reply=is_reply,
             parent_comment_id=parent_id,
-            reply_count=data.get("child_comment_count", 0),
+            reply_count=self._coerce_int(reply_count, 0),
+            owner_profile_pic_url=str(
+                data.get("ownerProfilePicUrl") or owner.get("profile_pic_url") or user.get("profile_pic_url") or ""
+            )
+            or None,
+            owner_is_verified=(
+                bool(owner.get("is_verified"))
+                if "is_verified" in owner
+                else bool(user.get("is_verified"))
+                if "is_verified" in user
+                else None
+            ),
             post_shortcode=shortcode,
             post_url=post_url,
         )
+        nested_replies = data.get("replies")
+        if isinstance(nested_replies, list):
+            comment.replies = [
+                self._parse_comment(reply, shortcode, post_url, is_reply=True, parent_id=comment.comment_id)
+                for reply in nested_replies
+                if isinstance(reply, dict)
+            ]
+            if comment.reply_count <= 0:
+                comment.reply_count = len(comment.replies)
+        return comment
 
     def _extract_media_urls(self, node: dict) -> list[str]:
         """Extract all media URLs from a post."""
@@ -740,10 +1226,16 @@ class InstagramScraper:
         display_url = node.get("display_url")
         if display_url and display_url not in urls:
             urls.append(display_url)
+        actor_display_url = node.get("displayUrl")
+        if actor_display_url and actor_display_url not in urls:
+            urls.append(actor_display_url)
 
         video_url = node.get("video_url")
         if video_url and video_url not in urls:
             urls.append(video_url)
+        actor_video_url = node.get("videoUrl")
+        if actor_video_url and actor_video_url not in urls:
+            urls.append(actor_video_url)
 
         # Sidecar (carousel) in GraphQL format
         sidecar = node.get("edge_sidecar_to_children") or {}
@@ -753,6 +1245,31 @@ class InstagramScraper:
                 urls.append(child["display_url"])
             if child.get("video_url"):
                 urls.append(child["video_url"])
+
+        images = node.get("images")
+        if isinstance(images, list):
+            for image in images:
+                if isinstance(image, str):
+                    if image and image not in urls:
+                        urls.append(image)
+                    continue
+                if not isinstance(image, dict):
+                    continue
+                candidate = image.get("url") or image.get("displayUrl") or image.get("display_url")
+                if candidate and candidate not in urls:
+                    urls.append(candidate)
+
+        child_posts = node.get("childPosts")
+        if isinstance(child_posts, list):
+            for child in child_posts:
+                if not isinstance(child, dict):
+                    continue
+                candidate_display = child.get("displayUrl") or child.get("display_url")
+                candidate_video = child.get("videoUrl") or child.get("video_url")
+                if candidate_display and candidate_display not in urls:
+                    urls.append(candidate_display)
+                if candidate_video and candidate_video not in urls:
+                    urls.append(candidate_video)
 
         return urls
 

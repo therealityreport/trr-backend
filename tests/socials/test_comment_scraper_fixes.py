@@ -498,6 +498,91 @@ def test_instagram_parse_post_node_handles_null_carousel_media() -> None:
     assert parsed.thumbnail_url == "https://example.com/ig-fallback.jpg"
 
 
+def test_instagram_parse_post_node_supports_actor_style_payload_and_normalizes_metadata() -> None:
+    scraper = InstagramScraper(cookies={})
+    config = InstagramScrapeConfig(username="fallback-user")
+    node = {
+        "id": "3706348645359165044",
+        "shortCode": "DNvmHS0Yh50",
+        "type": "Video",
+        "productType": "clips",
+        "timestamp": "2025-08-24T16:00:37.000Z",
+        "caption": "Stream next day on @DisneyPlus and @hulu.",
+        "hashtags": ["TheLastRhinosANewHope"],
+        "mentions": ["DisneyPlus", "hulu."],
+        "taggedUsers": [
+            {"username": "natgeo"},
+            {"username": "natgeoanimals"},
+        ],
+        "coauthorProducers": [
+            {"username": "amivitale"},
+            {"username": "natgeoanimals"},
+        ],
+        "likesCount": 44193,
+        "commentsCount": 187,
+        "videoViewCount": 528654,
+        "ownerUsername": "natgeotv",
+        "displayUrl": "https://example.com/cover.jpg",
+        "videoUrl": "https://example.com/video.mp4",
+    }
+
+    parsed = scraper._parse_post_node(node, config)  # noqa: SLF001
+    assert parsed.shortcode == "DNvmHS0Yh50"
+    assert parsed.post_type == "reel"
+    assert parsed.likes == 44193
+    assert parsed.comments == 187
+    assert parsed.video_views == 528654
+    assert parsed.username == "natgeotv"
+    assert parsed.media_urls == ["https://example.com/cover.jpg", "https://example.com/video.mp4"]
+    assert parsed.thumbnail_url == "https://example.com/cover.jpg"
+    assert parsed.hashtags == ["TheLastRhinosANewHope"]
+    assert parsed.mentions == ["@DisneyPlus", "@hulu"]
+    assert parsed.profile_tags == ["natgeo", "natgeoanimals"]
+    assert parsed.collaborators == ["amivitale", "natgeoanimals"]
+
+
+def test_instagram_parse_comment_supports_actor_style_payload_with_nested_replies() -> None:
+    scraper = InstagramScraper(cookies={})
+    comment_payload = {
+        "id": "17949788698583607",
+        "text": "Imagine scrolling to find the end of these comments! 😂",
+        "ownerUsername": "gabriel2005120",
+        "ownerProfilePicUrl": "https://scontent.example/profile.jpg",
+        "timestamp": "2021-11-19T13:54:13.000Z",
+        "likesCount": 12,
+        "repliesCount": 1,
+        "replies": [
+            {
+                "id": "17891234567890123",
+                "text": "@gabriel2005120 right? It never ends 😅",
+                "ownerUsername": "maria_adventures",
+                "timestamp": "2021-11-19T14:02:45.000Z",
+                "likesCount": 3,
+                "repliesCount": 0,
+                "replies": [],
+            }
+        ],
+    }
+
+    parsed = scraper._parse_comment(  # noqa: SLF001
+        comment_payload,
+        "DNvmHS0Yh50",
+        "https://www.instagram.com/p/DNvmHS0Yh50/",
+    )
+    assert parsed.comment_id == "17949788698583607"
+    assert parsed.username == "gabriel2005120"
+    assert parsed.likes == 12
+    assert parsed.reply_count == 1
+    assert parsed.owner_profile_pic_url == "https://scontent.example/profile.jpg"
+    assert len(parsed.replies) == 1
+    reply = parsed.replies[0]
+    assert reply.is_reply is True
+    assert reply.parent_comment_id == parsed.comment_id
+    assert reply.comment_id == "17891234567890123"
+    assert reply.username == "maria_adventures"
+    assert reply.likes == 3
+
+
 def test_instagram_fetch_comments_paginates_with_headload_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "ok"})
     seen_params: list[dict[str, str]] = []
@@ -651,7 +736,90 @@ def test_tiktok_parse_post_item_populates_media_urls_and_thumbnail() -> None:
 
     parsed = scraper._parse_post_item(item, config)  # noqa: SLF001
     assert parsed.media_urls[0] == "https://example.com/play.mp4"
-    assert parsed.thumbnail_url == "https://example.com/play.mp4"
+    assert parsed.thumbnail_url == "https://example.com/cover.jpg"
+
+
+def test_tiktok_parse_post_item_supports_actor_style_payload() -> None:
+    scraper = TikTokScraper()
+    config = TikTokScrapeConfig(username="bravotv")
+    item = {
+        "id": "7553309587378539831",
+        "text": "Unexpected prank#funny#prank#fyp @hulu.",
+        "createTimeISO": "2025-09-23T15:39:30.000Z",
+        "authorMeta": {"name": "chunniuc", "nickName": "chunniuc"},
+        "musicMeta": {"musicName": "original sound", "musicAuthor": "chunniuc"},
+        "webVideoUrl": "https://www.tiktok.com/@chunniuc/video/7553309587378539831",
+        "mediaUrls": ["https://cdn.example.com/video.mp4"],
+        "videoMeta": {
+            "duration": 70,
+            "coverUrl": "https://cdn.example.com/cover.jpg",
+        },
+        "diggCount": 1500000,
+        "commentCount": 17300,
+        "shareCount": 94900,
+        "playCount": 147200000,
+        "hashtags": [{"name": "funny"}, {"name": "fyp"}],
+        "mentions": ["@hulu.", {"name": "DisneyPlus"}],
+        "detailedMentions": [{"uniqueId": "hulu."}],
+    }
+
+    parsed = scraper._parse_post_item(item, config)  # noqa: SLF001
+
+    assert parsed.video_id == "7553309587378539831"
+    assert parsed.create_time == int(datetime(2025, 9, 23, 15, 39, 30, tzinfo=UTC).timestamp())
+    assert parsed.username == "chunniuc"
+    assert parsed.author_nickname == "chunniuc"
+    assert parsed.likes == 1500000
+    assert parsed.comments == 17300
+    assert parsed.shares == 94900
+    assert parsed.views == 147200000
+    assert parsed.url == "https://www.tiktok.com/@chunniuc/video/7553309587378539831"
+    assert parsed.media_urls == ["https://cdn.example.com/video.mp4"]
+    assert parsed.thumbnail_url == "https://cdn.example.com/cover.jpg"
+    assert parsed.hashtags == ["funny", "fyp", "prank"]
+    assert parsed.mentions == ["hulu", "DisneyPlus"]
+
+
+def test_tiktok_parse_comment_supports_actor_style_payload_with_nested_replies() -> None:
+    scraper = TikTokScraper()
+    data = {
+        "text": "Bella poarch -67.3M",
+        "diggCount": 246,
+        "replyCommentTotal": 3,
+        "createTimeISO": "2024-08-06T11:21:16.000Z",
+        "uniqueId": "rizqirxq",
+        "uid": "6904063862041396225",
+        "cid": "7399984975553086214",
+        "avatarThumbnail": "https://cdn.example.com/avatar.jpg",
+        "videoWebUrl": "https://www.tiktok.com/@bellapoarch/video/6862153058223197445",
+        "replies": [
+            {
+                "id": "7399984975553086215",
+                "text": "reply",
+                "diggCount": 3,
+                "createTimeISO": "2024-08-06T11:25:00.000Z",
+                "uniqueId": "reply_user",
+                "uid": "6904063862041396226",
+                "replies": [],
+            }
+        ],
+    }
+
+    parsed = scraper._parse_comment(data, video_id="", post_url="")  # noqa: SLF001
+
+    assert parsed.comment_id == "7399984975553086214"
+    assert parsed.username == "rizqirxq"
+    assert parsed.user_id == "6904063862041396225"
+    assert parsed.likes == 246
+    assert parsed.reply_count == 3
+    assert parsed.video_id == "6862153058223197445"
+    assert parsed.post_url == "https://www.tiktok.com/@bellapoarch/video/6862153058223197445"
+    assert parsed.avatar_thumbnail_url == "https://cdn.example.com/avatar.jpg"
+    assert parsed.created_at == int(datetime(2024, 8, 6, 11, 21, 16, tzinfo=UTC).timestamp())
+    assert len(parsed.replies) == 1
+    assert parsed.replies[0].is_reply is True
+    assert parsed.replies[0].parent_comment_id == "7399984975553086214"
+    assert parsed.replies[0].comment_id == "7399984975553086215"
 
 
 def test_tiktok_parse_ytdlp_metadata_populates_thumbnail_from_metadata() -> None:
@@ -662,12 +830,13 @@ def test_tiktok_parse_ytdlp_metadata_populates_thumbnail_from_metadata() -> None
         "title": "Clip",
         "timestamp": 1735689600,
         "uploader": "bravotv",
+        "url": "https://example.com/video.mp4",
         "thumbnail": "https://example.com/thumb-main.jpg",
         "thumbnails": [{"url": "https://example.com/thumb-alt.jpg"}],
     }
 
     parsed = scraper._parse_ytdlp_metadata(metadata, config)  # noqa: SLF001
-    assert parsed.media_urls[0] == "https://example.com/thumb-main.jpg"
+    assert parsed.media_urls[0] == "https://example.com/video.mp4"
     assert parsed.thumbnail_url == "https://example.com/thumb-main.jpg"
 
 
@@ -815,6 +984,54 @@ def test_tiktok_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) 
 
     assert any(event.get("phase") == "scrape_api_page" for event in events)
     assert any(int(event.get("pages_scanned") or 0) >= 1 for event in events)
+
+
+def test_tiktok_scrape_skips_items_without_valid_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper(cookies={})
+    config = TikTokScrapeConfig(
+        username="bravotv",
+        date_start=datetime(2025, 1, 1, tzinfo=UTC),
+        date_end=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+    parsed_ids: list[str] = []
+
+    monkeypatch.setattr(
+        scraper,
+        "fetch_user_detail",
+        lambda username, delay=0: {"userInfo": {"user": {"secUid": "sec-1", "nickname": "Bravo"}}},
+    )
+    monkeypatch.setattr(
+        scraper,
+        "fetch_posts",
+        lambda username, sec_uid, cursor=0, delay=0: {
+            "itemList": [
+                {
+                    "url": "https://www.tiktok.com/@shaiie_foeva/video/7533731959172861206",
+                    "error": "Post not found or private.",
+                },
+                {
+                    "id": "vid-2",
+                    "createTime": 1735689600,
+                    "desc": "clip",
+                },
+            ],
+            "hasMore": False,
+            "cursor": 0,
+        },
+    )
+
+    def _fake_parse(item: dict, cfg: TikTokScrapeConfig) -> SimpleNamespace:
+        del cfg
+        parsed_ids.append(str(item.get("id") or ""))
+        return SimpleNamespace(video_id=str(item.get("id") or ""), date_time="2026-01-01", views=100)
+
+    monkeypatch.setattr(scraper, "_parse_post_item", _fake_parse)
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: False)
+
+    posts = scraper.scrape(config)
+
+    assert parsed_ids == ["vid-2"]
+    assert [post.video_id for post in posts] == ["vid-2"]
 
 
 def test_twitter_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) -> None:

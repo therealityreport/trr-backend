@@ -10,6 +10,7 @@ from typing import Any
 from trr_backend.db import pg
 from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.socials.instagram import InstagramScraper
+from trr_backend.utils.env import load_env
 
 
 @dataclass(slots=True)
@@ -157,7 +158,13 @@ def _mirror_is_missing(row: dict[str, Any]) -> bool:
 
 
 def main() -> int:
+    load_env()
     args = _parse_args()
+    if not args.dry_run:
+        try:
+            social_repo.ensure_media_mirror_s3_ready()
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(f"Instagram media mirror S3 preflight failed: {exc}") from exc
     now_utc = datetime.now(tz=UTC)
     stale_before = now_utc - timedelta(hours=max(1, int(args.metadata_stale_hours)))
     rows = _load_candidate_rows(weeks=args.weeks, limit=args.limit)

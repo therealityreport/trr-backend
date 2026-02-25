@@ -1,4 +1,4 @@
-# TRR-Backend — Claude/Codex Playbook
+# TRR-Backend — Codex/Claude Playbook
 
 Canonical repo rules: `/Users/thomashulihan/Projects/TRR/TRR-Backend/AGENTS.md`.
 Workspace coordination rules: `/Users/thomashulihan/Projects/TRR/AGENTS.md`.
@@ -32,6 +32,7 @@ pytest
 4. Update `docs/ai/HANDOFF.md` before ending session.
 
 ## Skill Activation (Repo)
+- `orchestrate-plan-execution`: Codex-primary default entrypoint for non-trivial plan + execute tasks; routes checkpoint, parallel, or strict review-loop execution (Claude secondary).
 - `senior-backend`: default for API/schema/backend logic work.
 - `senior-architect`: design/contract decisions or dependency/layer analysis.
 - `senior-qa`: backend testing and regression hardening.

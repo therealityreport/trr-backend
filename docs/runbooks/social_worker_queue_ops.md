@@ -13,6 +13,21 @@ This runbook covers production operations for social ingest queue mode:
 - `SOCIAL_QUEUE_ENABLED=true` only when at least one worker process is running.
 - `SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS` (optional, default `180`)
 - `SOCIAL_WORKER_HEARTBEAT_INTERVAL_SEC` (optional, default `15`, minimum `5`)
+- `SOCIAL_COMMENTS_RUN_WORKERS` (optional, default `4`, min `1`, max `8`; API-assisted comments-only fanout)
+- `SOCIAL_WORKER_POOL_GENERAL` (optional, default `4`; persistent general queue fanout workers)
+- `SOCIAL_WORKER_POOL_MEDIA_MIRROR` (optional, default `2`; persistent mirror-stage workers)
+- `SOCIAL_WORKER_POOL_INTERVAL_SEC` (optional, default `2`; worker idle sleep interval)
+- `SOCIAL_CRAWLEE_ENABLED` (optional, default `false`)
+- `SOCIAL_CRAWLEE_PLATFORMS` (optional, default `instagram,tiktok,twitter,youtube`)
+- `SOCIAL_CRAWLEE_FORCE_LEGACY_PLATFORMS` (optional emergency bypass)
+- `SOCIAL_CRAWLEE_MAX_CONCURRENCY_*` and `SOCIAL_CRAWLEE_MAX_RETRIES_*` (optional per-platform limits)
+
+When Crawlee runtime is enabled for a platform, auth preflight checks run before execution:
+
+- Instagram: requires `SOCIAL_INSTAGRAM_COOKIES_JSON` or `SOCIAL_INSTAGRAM_COOKIES_FILE`
+- TikTok: requires `SOCIAL_TIKTOK_COOKIES_JSON` / `SOCIAL_TIKTOK_COOKIES_FILE` (or legacy `TIKTOK_COOKIES_*`)
+- Twitter/X: requires one of cookie auth (`SOCIAL_TWITTER_COOKIES_*`), bearer auth (`SOCIAL_TWITTER_BEARER_TOKEN`), or `TWIKIT_*` credentials
+- YouTube: public mode supported (no auth required)
 
 ## Worker Start Commands
 
@@ -36,6 +51,23 @@ Run one specific run id:
 ```bash
 cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 SOCIAL_QUEUE_ENABLED=true python -m scripts.socials.worker --run-id <run_uuid>
+```
+
+Run with multiple workers to process queued jobs in parallel:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+SOCIAL_QUEUE_ENABLED=true python -m scripts.socials.worker --parallel 4 --interval 2
+```
+
+Start a persistent full-sync worker pool (general + media mirror):
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+SOCIAL_QUEUE_ENABLED=true \
+SOCIAL_WORKER_POOL_GENERAL=4 \
+SOCIAL_WORKER_POOL_MEDIA_MIRROR=2 \
+./scripts/socials/start_worker_pool.sh
 ```
 
 ## API Behavior Guardrail
@@ -191,3 +223,7 @@ Expected: all zero after migration `0130_social_worker_heartbeat_and_comment_id_
 4. If `comments_fetched` is high but `comments_upserted` is low:
    - inspect `comments_skipped_missing_id`,
    - review scraper payload quality for missing IDs by platform.
+5. If jobs fail with `crawlee_auth_preflight_failed:*`:
+   - verify platform auth env vars are populated,
+   - verify secrets are available to worker runtime (not only API runtime),
+   - use `SOCIAL_CRAWLEE_FORCE_LEGACY_PLATFORMS=<platform>` for temporary bypass.

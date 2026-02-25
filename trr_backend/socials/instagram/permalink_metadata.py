@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from html import unescape
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -11,6 +14,23 @@ import requests
 
 _DATA_SJS_RE = re.compile(r"<script[^>]*data-sjs[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
 _WRAPPED_JSON_CALL_RE = re.compile(r"^[A-Za-z0-9_$.]+\([^,]*,\s*(\{.*\})\s*\)\s*;?$", re.DOTALL)
+_SHARED_DATA_RE = re.compile(r"window\._sharedData\s*=\s*(\{.*?\})\s*;", re.DOTALL)
+_ADDITIONAL_DATA_RE = re.compile(
+    r"__additionalDataLoaded\s*\(\s*['\"].*?['\"]\s*,\s*(\{.*?\})\s*\)\s*;?",
+    re.DOTALL,
+)
+_LD_JSON_RE = re.compile(
+    r"<script[^>]+type=['\"]application/ld\+json['\"][^>]*>(.*?)</script>",
+    re.IGNORECASE | re.DOTALL,
+)
+_OG_IMAGE_RE = re.compile(
+    r"<meta\s+property=['\"]og:image['\"]\s+content=['\"](.*?)['\"]",
+    re.IGNORECASE,
+)
+_OG_VIDEO_RE = re.compile(
+    r"<meta\s+property=['\"]og:video['\"]\s+content=['\"](.*?)['\"]",
+    re.IGNORECASE,
+)
 _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]{5,32}$")
 _DURATION_RE = re.compile(
     r'mediaPresentationDuration="PT(?:(?P<h>\d+)H)?(?:(?P<m>\d+)M)?(?:(?P<s>\d+(?:\.\d+)?)S)?"',
@@ -18,6 +38,11 @@ _DURATION_RE = re.compile(
 )
 _HASHTAG_RE = re.compile(r"(?<![\w.])#([A-Za-z0-9_]+)")
 _MENTION_RE = re.compile(r"(?<![\w.])@([A-Za-z0-9_.]+)")
+
+_GRAPHQL_URL = "https://www.instagram.com/graphql/query/"
+_MEDIA_INFO_URL = "https://www.instagram.com/api/v1/media/{media_id}/info/"
+_SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+_DEFAULT_GRAPHQL_SHORTCODE_DOC_ID = "8845758582119845"
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -43,6 +68,16 @@ class InstagramPermalinkMetadata:
     media_urls: list[str]
     thumbnail_url: str | None
     raw_media: dict[str, Any]
+
+
+@dataclass(slots=True)
+class InstagramMediaResolution:
+    source: str | None
+    media_type: str | None
+    media_urls: list[str]
+    thumbnail_url: str | None
+    metadata: InstagramPermalinkMetadata | None
+    attempts: list[dict[str, Any]]
 
 
 def _normalize_unique(values: list[str]) -> list[str]:
@@ -72,11 +107,6 @@ def _extract_shortcode_and_route(shortcode_or_url: str) -> tuple[str, str]:
         candidate = str(parts[1] or "").strip()
         return (candidate, parts[0]) if _SHORTCODE_RE.match(candidate) else ("", parts[0])
     return "", "p"
-
-
-def _extract_shortcode(shortcode_or_url: str) -> str:
-    shortcode, _route = _extract_shortcode_and_route(shortcode_or_url)
-    return shortcode
 
 
 def _decode_data_sjs_payload(body: str) -> dict[str, Any] | None:
@@ -179,6 +209,69 @@ def fetch_permalink_media_item(
     return None
 
 
+def _candidate_resolution_score(value: Any) -> tuple[int, int]:
+    if not isinstance(value, dict):
+        return (0, 0)
+    width = int(value.get("width") or value.get("config_width") or 0)
+    height = int(value.get("height") or value.get("config_height") or 0)
+    return width, height
+
+
+def _pick_best_url(candidates: Any) -> str | None:
+    if not isinstance(candidates, list):
+        return None
+    best: dict[str, Any] | None = None
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate.get("url"):
+            continue
+        if best is None:
+            best = candidate
+            continue
+        if _candidate_resolution_score(candidate) > _candidate_resolution_score(best):
+            best = candidate
+    return str(best.get("url") or "").strip() if best else None
+
+
+def _best_image_url(node: dict[str, Any]) -> str | None:
+    image_versions = node.get("image_versions2")
+    if isinstance(image_versions, dict):
+        direct = str(image_versions.get("url") or "").strip()
+        if direct:
+            return direct
+        best = _pick_best_url(image_versions.get("candidates"))
+        if best:
+            return best
+    display_resources = node.get("display_resources")
+    best_display = _pick_best_url(display_resources)
+    if best_display:
+        return best_display
+    for key in ("display_url", "thumbnail_src"):
+        value = str(node.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _best_video_url(node: dict[str, Any]) -> str | None:
+    best = _pick_best_url(node.get("video_versions"))
+    if best:
+        return best
+    for key in ("video_url",):
+        value = str(node.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _media_url_for_node(node: dict[str, Any]) -> str | None:
+    if not isinstance(node, dict):
+        return None
+    video_url = _best_video_url(node)
+    if video_url:
+        return video_url
+    return _best_image_url(node)
+
+
 def _classify_post_format(media: dict[str, Any]) -> str:
     if str(media.get("product_type") or "").strip().lower() == "clips":
         return "reel"
@@ -238,52 +331,19 @@ def _extract_hashtags_mentions(text: str) -> tuple[list[str], list[str]]:
 
 
 def _extract_media_urls(media: dict[str, Any]) -> list[str]:
-    urls: list[str] = []
-
-    image_versions = media.get("image_versions2")
-    if isinstance(image_versions, dict):
-        candidates = image_versions.get("candidates")
-        if isinstance(candidates, list):
-            for candidate in candidates:
-                if isinstance(candidate, dict) and candidate.get("url"):
-                    urls.append(str(candidate["url"]))
-                    break
-
-    video_versions = media.get("video_versions")
-    if isinstance(video_versions, list):
-        for version in video_versions:
-            if isinstance(version, dict) and version.get("url"):
-                urls.append(str(version["url"]))
-
     carousel_media = media.get("carousel_media")
-    if isinstance(carousel_media, list):
-        for item in carousel_media:
-            if not isinstance(item, dict):
-                continue
-            image_versions = item.get("image_versions2")
-            if isinstance(image_versions, dict):
-                candidates = image_versions.get("candidates")
-                if isinstance(candidates, list):
-                    for candidate in candidates:
-                        if isinstance(candidate, dict) and candidate.get("url"):
-                            urls.append(str(candidate["url"]))
-                            break
-            item_video_versions = item.get("video_versions")
-            if isinstance(item_video_versions, list):
-                for version in item_video_versions:
-                    if isinstance(version, dict) and version.get("url"):
-                        urls.append(str(version["url"]))
-    return _normalize_unique(urls)
+    if isinstance(carousel_media, list) and carousel_media:
+        urls = [url for item in carousel_media if isinstance(item, dict) for url in [_media_url_for_node(item)] if url]
+        return _normalize_unique(urls)
+
+    primary = _media_url_for_node(media)
+    return [primary] if primary else []
 
 
 def _extract_thumbnail_url(media: dict[str, Any], media_urls: list[str]) -> str | None:
-    image_versions = media.get("image_versions2")
-    if isinstance(image_versions, dict):
-        candidates = image_versions.get("candidates")
-        if isinstance(candidates, list):
-            for candidate in candidates:
-                if isinstance(candidate, dict) and candidate.get("url"):
-                    return str(candidate["url"])
+    best_image = _best_image_url(media)
+    if best_image:
+        return best_image
     return media_urls[0] if media_urls else None
 
 
@@ -378,6 +438,588 @@ def parse_permalink_metadata(media: dict[str, Any]) -> InstagramPermalinkMetadat
     )
 
 
+def _extract_media_item_from_post_info(post_info: Any) -> dict[str, Any] | None:
+    if not isinstance(post_info, dict):
+        return None
+    items = post_info.get("items")
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return items[0]
+    nested = post_info.get("data")
+    if isinstance(nested, dict):
+        nested_items = nested.get("items")
+        if isinstance(nested_items, list) and nested_items and isinstance(nested_items[0], dict):
+            return nested_items[0]
+    return None
+
+
+def _shortcode_to_media_id(shortcode: str) -> str:
+    media_id = 0
+    for char in shortcode:
+        media_id = media_id * 64 + _SHORTCODE_ALPHABET.index(char)
+    return str(media_id)
+
+
+def _http_status_from_exception(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolution_attempt(
+    *,
+    source: str,
+    success: bool,
+    reason_code: str | None = None,
+    http_status: int | None = None,
+    selected_url_count: int = 0,
+    error: Exception | str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "source": source,
+        "success": bool(success),
+        "reason_code": reason_code,
+        "http_status": http_status,
+        "selected_url_count": max(0, int(selected_url_count)),
+    }
+    if error:
+        payload["error_type"] = error.__class__.__name__ if isinstance(error, Exception) else "Error"
+        payload["error_message"] = str(error)[:240]
+    return payload
+
+
+def _graphql_doc_ids() -> list[str]:
+    override = str(os.getenv("INSTAGRAM_SHORTCODE_GRAPHQL_DOC_ID") or "").strip()
+    ids: list[str] = []
+    if override:
+        ids.append(override)
+    if _DEFAULT_GRAPHQL_SHORTCODE_DOC_ID not in ids:
+        ids.append(_DEFAULT_GRAPHQL_SHORTCODE_DOC_ID)
+    return ids
+
+
+def _graphql_caption_text(node: dict[str, Any]) -> str:
+    edge_caption = node.get("edge_media_to_caption")
+    if isinstance(edge_caption, dict):
+        edges = edge_caption.get("edges")
+        if isinstance(edges, list):
+            for edge in edges:
+                if not isinstance(edge, dict):
+                    continue
+                text = str((edge.get("node") or {}).get("text") or "").strip()
+                if text:
+                    return text
+    return str(node.get("accessibility_caption") or "")
+
+
+def _graphql_node_media_type(node: dict[str, Any]) -> str:
+    typename = str(node.get("__typename") or "").strip()
+    if typename == "GraphSidecar":
+        return "carousel"
+    if typename == "GraphVideo" or bool(node.get("is_video")):
+        return "video"
+    return "image"
+
+
+def _graphql_node_post_format(node: dict[str, Any]) -> str:
+    media_type = _graphql_node_media_type(node)
+    if media_type == "carousel":
+        return "carousel"
+    if str(node.get("product_type") or "").strip().lower() == "clips":
+        return "reel"
+    return "post"
+
+
+def _graphql_node_media_urls(node: dict[str, Any]) -> list[str]:
+    if not isinstance(node, dict):
+        return []
+    sidecar = node.get("edge_sidecar_to_children")
+    if isinstance(sidecar, dict):
+        edges = sidecar.get("edges")
+        if isinstance(edges, list) and edges:
+            urls = []
+            for edge in edges:
+                child = (edge or {}).get("node") if isinstance(edge, dict) else None
+                if isinstance(child, dict):
+                    url = _media_url_for_node(child)
+                    if url:
+                        urls.append(url)
+            return _normalize_unique(urls)
+    single = _media_url_for_node(node)
+    return [single] if single else []
+
+
+def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetadata | None:
+    if not isinstance(node, dict):
+        return None
+    media_urls = _graphql_node_media_urls(node)
+    thumbnail = _best_image_url(node) or (media_urls[0] if media_urls else None)
+    caption_text = _graphql_caption_text(node)
+    hashtags, mentions = _extract_hashtags_mentions(caption_text)
+    taken_at: datetime | None = None
+    raw_taken = node.get("taken_at_timestamp")
+    if isinstance(raw_taken, (int, float)) and raw_taken > 0:
+        taken_at = datetime.fromtimestamp(int(raw_taken), tz=UTC)
+    return InstagramPermalinkMetadata(
+        taken_at=taken_at,
+        post_format=_graphql_node_post_format(node),
+        profile_tags=[],
+        collaborators=[],
+        hashtags=hashtags,
+        mentions=mentions,
+        duration_seconds=None,
+        media_type=_graphql_node_media_type(node),
+        media_urls=media_urls,
+        thumbnail_url=thumbnail,
+        raw_media=dict(node),
+    )
+
+
+def _fetch_shortcode_graphql_node(
+    *,
+    shortcode: str,
+    client: requests.Session,
+    timeout: tuple[int, int],
+    headers: dict[str, str],
+    cookies: dict[str, str] | None,
+) -> tuple[dict[str, Any] | None, int | None]:
+    body_base = {
+        "fb_api_caller_class": "RelayModern",
+        "fb_api_req_friendly_name": "PolarisPostActionLoadPostQueryQuery",
+        "variables": json.dumps({"shortcode": shortcode}),
+    }
+    req_headers = {
+        **headers,
+        "content-type": "application/x-www-form-urlencoded",
+        "x-fb-friendly-name": "PolarisPostActionLoadPostQueryQuery",
+    }
+    last_error: requests.RequestException | None = None
+    for doc_id in _graphql_doc_ids():
+        body = {**body_base, "doc_id": doc_id}
+        try:
+            response = client.post(
+                _GRAPHQL_URL,
+                data=body,
+                headers=req_headers,
+                cookies=(cookies or None),
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            last_error = exc
+            continue
+        node = (payload.get("data") or {}).get("xdt_shortcode_media")
+        if isinstance(node, dict):
+            return node, response.status_code
+    if last_error is not None:
+        raise last_error
+    return None, None
+
+
+def _html_shared_data_node(html: str) -> dict[str, Any] | None:
+    shared = _SHARED_DATA_RE.search(html or "")
+    if shared:
+        try:
+            payload = json.loads(shared.group(1))
+            post = (((payload.get("entry_data") or {}).get("PostPage") or [{}])[0] or {}).get("graphql") or {}
+            node = post.get("shortcode_media")
+            if isinstance(node, dict):
+                return node
+        except Exception:
+            pass
+    for match in _ADDITIONAL_DATA_RE.finditer(html or ""):
+        try:
+            payload = json.loads(match.group(1))
+        except Exception:
+            continue
+        node = ((payload.get("graphql") or {}).get("shortcode_media")) if isinstance(payload, dict) else None
+        if isinstance(node, dict):
+            return node
+    return None
+
+
+def _iter_ld_json_objects(html: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for match in _LD_JSON_RE.finditer(html or ""):
+        body = str(match.group(1) or "").strip()
+        if not body:
+            continue
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+        elif isinstance(parsed, list):
+            out.extend(item for item in parsed if isinstance(item, dict))
+    return out
+
+
+def _metadata_from_ld_json(html: str) -> InstagramPermalinkMetadata | None:
+    for item in _iter_ld_json_objects(html):
+        media_type = "image"
+        media_url = ""
+        thumbnail_url = ""
+
+        video = item.get("video")
+        if isinstance(video, list) and video and isinstance(video[0], dict):
+            media_type = "video"
+            media_url = str(video[0].get("contentUrl") or "").strip()
+            thumbnail_url = str(item.get("thumbnailUrl") or "").strip()
+        elif isinstance(video, dict):
+            media_type = "video"
+            media_url = str(video.get("contentUrl") or "").strip()
+            thumbnail_url = str(item.get("thumbnailUrl") or "").strip()
+        else:
+            image = item.get("image")
+            if isinstance(image, str):
+                media_url = image.strip()
+            elif isinstance(image, list) and image:
+                media_url = str(image[0] or "").strip()
+
+        if not media_url:
+            continue
+        return InstagramPermalinkMetadata(
+            taken_at=None,
+            post_format="post",
+            profile_tags=[],
+            collaborators=[],
+            hashtags=[],
+            mentions=[],
+            duration_seconds=None,
+            media_type=media_type,
+            media_urls=[media_url],
+            thumbnail_url=thumbnail_url or media_url,
+            raw_media=dict(item),
+        )
+    return None
+
+
+def _metadata_from_og_html(html: str) -> InstagramPermalinkMetadata | None:
+    og_video = _OG_VIDEO_RE.search(html or "")
+    og_image = _OG_IMAGE_RE.search(html or "")
+    if og_video:
+        video_url = unescape(str(og_video.group(1) or "").strip())
+        thumb = unescape(str(og_image.group(1) or "").strip()) if og_image else ""
+        if video_url:
+            return InstagramPermalinkMetadata(
+                taken_at=None,
+                post_format="post",
+                profile_tags=[],
+                collaborators=[],
+                hashtags=[],
+                mentions=[],
+                duration_seconds=None,
+                media_type="video",
+                media_urls=[video_url],
+                thumbnail_url=thumb or video_url,
+                raw_media={"og_video": video_url, "og_image": thumb or None},
+            )
+    if og_image:
+        image_url = unescape(str(og_image.group(1) or "").strip())
+        if image_url:
+            return InstagramPermalinkMetadata(
+                taken_at=None,
+                post_format="post",
+                profile_tags=[],
+                collaborators=[],
+                hashtags=[],
+                mentions=[],
+                duration_seconds=None,
+                media_type="image",
+                media_urls=[image_url],
+                thumbnail_url=image_url,
+                raw_media={"og_image": image_url},
+            )
+    return None
+
+
+def _fetch_permalink_html(
+    *,
+    shortcode_or_url: str,
+    client: requests.Session,
+    timeout: tuple[int, int],
+    headers: dict[str, str],
+    cookies: dict[str, str] | None,
+) -> tuple[str | None, int | None]:
+    shortcode, preferred_route = _extract_shortcode_and_route(shortcode_or_url)
+    if not shortcode:
+        return None, None
+    routes = [preferred_route, *[route for route in ("p", "reel", "tv") if route != preferred_route]]
+    last_error: requests.RequestException | None = None
+    for route in routes:
+        url = f"https://www.instagram.com/{route}/{shortcode}/"
+        try:
+            response = client.get(url, headers=headers, cookies=(cookies or None), timeout=timeout)
+            response.raise_for_status()
+            return response.text or "", response.status_code
+        except requests.RequestException as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    return None, None
+
+
+def _fetch_media_info_via_shortcode(
+    *,
+    shortcode: str,
+    client: requests.Session,
+    timeout: tuple[int, int],
+    headers: dict[str, str],
+    cookies: dict[str, str] | None,
+) -> tuple[dict[str, Any] | None, int | None]:
+    media_id = _shortcode_to_media_id(shortcode)
+    response = client.get(
+        _MEDIA_INFO_URL.format(media_id=media_id),
+        headers=headers,
+        cookies=(cookies or None),
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json(), response.status_code
+
+
+def resolve_instagram_media(
+    shortcode_or_url: str,
+    *,
+    session: requests.Session | None = None,
+    timeout: tuple[int, int] = (10, 45),
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    fetch_post_info: Callable[[str], dict[str, Any] | None] | None = None,
+) -> InstagramMediaResolution:
+    shortcode, _ = _extract_shortcode_and_route(shortcode_or_url)
+    attempts: list[dict[str, Any]] = []
+    if not shortcode:
+        attempts.append(
+            _resolution_attempt(
+                source="api_media_info",
+                success=False,
+                reason_code="instagram_media_not_found",
+            )
+        )
+        return InstagramMediaResolution(
+            source=None,
+            media_type=None,
+            media_urls=[],
+            thumbnail_url=None,
+            metadata=None,
+            attempts=attempts,
+        )
+
+    req_headers = {**_DEFAULT_HEADERS, **(headers or {})}
+    client = session or requests.Session()
+    html_cache: str | None = None
+
+    # 1) Existing API-based media info path.
+    try:
+        post_info = fetch_post_info(shortcode) if fetch_post_info is not None else None
+        if post_info is None:
+            post_info, http_status = _fetch_media_info_via_shortcode(
+                shortcode=shortcode,
+                client=client,
+                timeout=timeout,
+                headers=req_headers,
+                cookies=cookies,
+            )
+        else:
+            http_status = None
+        media_item = _extract_media_item_from_post_info(post_info)
+        metadata = parse_permalink_metadata(media_item) if media_item else None
+        if metadata and (metadata.media_urls or metadata.thumbnail_url):
+            attempts.append(
+                _resolution_attempt(
+                    source="api_media_info",
+                    success=True,
+                    selected_url_count=len(metadata.media_urls),
+                    http_status=http_status,
+                )
+            )
+            return InstagramMediaResolution(
+                source="api_media_info",
+                media_type=metadata.media_type,
+                media_urls=list(metadata.media_urls),
+                thumbnail_url=metadata.thumbnail_url,
+                metadata=metadata,
+                attempts=attempts,
+            )
+        attempts.append(
+            _resolution_attempt(
+                source="api_media_info",
+                success=False,
+                reason_code="instagram_media_not_found",
+                selected_url_count=0,
+                http_status=http_status,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(
+            _resolution_attempt(
+                source="api_media_info",
+                success=False,
+                reason_code="instagram_api_failed",
+                http_status=_http_status_from_exception(exc),
+                error=exc,
+            )
+        )
+
+    # 2) HOAIAN-style GraphQL fallback by shortcode.
+    try:
+        node, status_code = _fetch_shortcode_graphql_node(
+            shortcode=shortcode,
+            client=client,
+            timeout=timeout,
+            headers=req_headers,
+            cookies=cookies,
+        )
+        metadata = _metadata_from_graphql_node(node or {})
+        if metadata and (metadata.media_urls or metadata.thumbnail_url):
+            attempts.append(
+                _resolution_attempt(
+                    source="graphql_shortcode",
+                    success=True,
+                    selected_url_count=len(metadata.media_urls),
+                    http_status=status_code,
+                )
+            )
+            return InstagramMediaResolution(
+                source="graphql_shortcode",
+                media_type=metadata.media_type,
+                media_urls=list(metadata.media_urls),
+                thumbnail_url=metadata.thumbnail_url,
+                metadata=metadata,
+                attempts=attempts,
+            )
+        attempts.append(
+            _resolution_attempt(
+                source="graphql_shortcode",
+                success=False,
+                reason_code="instagram_media_not_found",
+                http_status=status_code,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(
+            _resolution_attempt(
+                source="graphql_shortcode",
+                success=False,
+                reason_code="instagram_graphql_failed",
+                http_status=_http_status_from_exception(exc),
+                error=exc,
+            )
+        )
+
+    # 3) mikesmith-style HTML/JSON extraction fallback.
+    try:
+        html_cache, html_status = _fetch_permalink_html(
+            shortcode_or_url=shortcode_or_url,
+            client=client,
+            timeout=timeout,
+            headers=req_headers,
+            cookies=cookies,
+        )
+        metadata: InstagramPermalinkMetadata | None = None
+        media_item = None
+        if html_cache:
+            payloads = _iter_data_sjs_payloads(html_cache)
+            for payload in payloads:
+                media_item = _find_shortcode_media_item(payload)
+                if media_item is not None:
+                    break
+            if media_item is not None:
+                metadata = parse_permalink_metadata(media_item)
+            if metadata is None:
+                node = _html_shared_data_node(html_cache)
+                metadata = _metadata_from_graphql_node(node or {})
+            if metadata is None:
+                metadata = _metadata_from_ld_json(html_cache)
+        if metadata and (metadata.media_urls or metadata.thumbnail_url):
+            attempts.append(
+                _resolution_attempt(
+                    source="html_json",
+                    success=True,
+                    selected_url_count=len(metadata.media_urls),
+                    http_status=html_status,
+                )
+            )
+            return InstagramMediaResolution(
+                source="html_json",
+                media_type=metadata.media_type,
+                media_urls=list(metadata.media_urls),
+                thumbnail_url=metadata.thumbnail_url,
+                metadata=metadata,
+                attempts=attempts,
+            )
+        attempts.append(
+            _resolution_attempt(
+                source="html_json",
+                success=False,
+                reason_code="instagram_media_not_found",
+                http_status=html_status,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        attempts.append(
+            _resolution_attempt(
+                source="html_json",
+                success=False,
+                reason_code="instagram_html_parse_failed",
+                http_status=_http_status_from_exception(exc),
+                error=exc,
+            )
+        )
+
+    # 4) Open Graph fallback.
+    if html_cache is None:
+        try:
+            html_cache, _ = _fetch_permalink_html(
+                shortcode_or_url=shortcode_or_url,
+                client=client,
+                timeout=timeout,
+                headers=req_headers,
+                cookies=cookies,
+            )
+        except Exception:
+            html_cache = None
+    metadata = _metadata_from_og_html(html_cache or "")
+    if metadata and (metadata.media_urls or metadata.thumbnail_url):
+        attempts.append(
+            _resolution_attempt(
+                source="og_fallback",
+                success=True,
+                selected_url_count=len(metadata.media_urls),
+            )
+        )
+        return InstagramMediaResolution(
+            source="og_fallback",
+            media_type=metadata.media_type,
+            media_urls=list(metadata.media_urls),
+            thumbnail_url=metadata.thumbnail_url,
+            metadata=metadata,
+            attempts=attempts,
+        )
+
+    attempts.append(
+        _resolution_attempt(
+            source="og_fallback",
+            success=False,
+            reason_code="instagram_media_not_found",
+        )
+    )
+    return InstagramMediaResolution(
+        source=None,
+        media_type=None,
+        media_urls=[],
+        thumbnail_url=None,
+        metadata=None,
+        attempts=attempts,
+    )
+
+
 def fetch_permalink_metadata(
     shortcode_or_url: str,
     *,
@@ -386,13 +1028,12 @@ def fetch_permalink_metadata(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
 ) -> InstagramPermalinkMetadata | None:
-    media = fetch_permalink_media_item(
+    resolution = resolve_instagram_media(
         shortcode_or_url,
         session=session,
         timeout=timeout,
         headers=headers,
         cookies=cookies,
+        fetch_post_info=None,
     )
-    if not media:
-        return None
-    return parse_permalink_metadata(media)
+    return resolution.metadata

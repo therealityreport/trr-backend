@@ -10,6 +10,7 @@ from typing import Any
 
 from trr_backend.db import pg
 from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.utils.env import load_env
 
 
 @dataclass(slots=True)
@@ -86,7 +87,12 @@ def _load_rows(*, platform: str, cutoff: datetime, limit: int) -> list[dict[str,
 
 
 def main() -> int:
+    load_env()
     args = _parse_args()
+    try:
+        social_repo.ensure_media_mirror_s3_ready()
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"Social media mirror S3 preflight failed: {exc}") from exc
     now_utc = datetime.now(tz=UTC)
     cutoff = now_utc - timedelta(weeks=max(1, int(args.weeks)))
     platforms = [item.strip().lower() for item in str(args.platforms or "").split(",") if item.strip()]

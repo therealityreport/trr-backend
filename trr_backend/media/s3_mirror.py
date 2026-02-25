@@ -357,6 +357,29 @@ def build_season_image_s3_key(
     return "/".join(segments)
 
 
+def build_instagram_profile_pic_s3_key(
+    username: str,
+    sha256: str,
+    ext: str,
+) -> str:
+    """
+    Build S3 key for Instagram profile pictures.
+
+    Path: social/instagram/profile-pics/{username}/{sha256}{ext}
+
+    Content-addressed: same user + same image bytes = same key (dedup across posts).
+    """
+    safe_username = _sanitize_path_segment(username)
+    segments = [
+        "social",
+        "instagram",
+        "profile-pics",
+        safe_username,
+        f"{sha256}{ext}",
+    ]
+    return "/".join(segments)
+
+
 def build_episode_image_s3_key(
     episode_identifier: str,
     source: str,

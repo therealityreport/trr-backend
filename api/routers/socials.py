@@ -47,6 +47,23 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+def _comments_run_workers_cap() -> int:
+    legacy_default = _env_int("SOCIAL_INLINE_COMMENTS_WORKERS", 4, minimum=1, maximum=8)
+    return _env_int("SOCIAL_COMMENTS_RUN_WORKERS", legacy_default, minimum=1, maximum=8)
+
+
+def _normalize_target_platforms(platforms: list[str] | None) -> list[str]:
+    ordered = platforms or ["instagram", "tiktok", "youtube", "twitter"]
+    deduped: list[str] = []
+    for platform in ordered:
+        normalized = str(platform or "").strip().lower()
+        if not normalized or normalized in deduped:
+            continue
+        deduped.append(normalized)
+    return deduped or ["instagram", "tiktok", "youtube", "twitter"]
+
+
+
 def _is_local_or_dev_runtime() -> bool:
     runtime_markers = [
         os.getenv("APP_ENV"),
@@ -804,6 +821,10 @@ class SeasonSocialIngestRequest(BaseModel):
     source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
     platforms: list[Literal["instagram", "tiktok", "twitter", "youtube"]] | None = Field(default=None)
     sync_strategy: Literal["incremental", "full_refresh"] = Field(default="incremental")
+    comment_refresh_policy: Literal["balanced", "missing_only"] = Field(default="balanced")
+    comment_anchor_source_ids: dict[Literal["instagram", "tiktok", "twitter", "youtube"], list[str]] | None = Field(
+        default=None
+    )
     max_posts_per_target: int = Field(default=100000, ge=1, le=1000000)
     max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
     max_replies_per_post: int = Field(default=100000, ge=0, le=1000000)
@@ -934,33 +955,55 @@ async def ingest_season_social(
             fetch_replies=payload.fetch_replies,
             ingest_mode=payload.ingest_mode,
             sync_strategy=payload.sync_strategy,
+            comment_refresh_policy=payload.comment_refresh_policy,
+            comment_anchor_source_ids=payload.comment_anchor_source_ids,
             date_start=payload.date_start,
             date_end=payload.date_end,
             initiated_by=email,
         )
 
         run_id = str(run_payload.get("run_id") or "")
-        if run_id and not queue_enabled:
+        if run_id and (not queue_enabled or payload.ingest_mode == "comments_only"):
 
             def _run_sync() -> None:
                 try:
                     if payload.ingest_mode == "comments_only":
-                        max_workers = _env_int("SOCIAL_INLINE_COMMENTS_WORKERS", 1, minimum=1, maximum=4)
-                        worker_count = min(max_workers, max(1, int(run_payload.get("queued_or_started_jobs") or 1)))
-                        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                        target_platforms = _normalize_target_platforms(payload.platforms)
+                        max_workers = min(_comments_run_workers_cap(), max(1, len(target_platforms)))
+                        with ThreadPoolExecutor(max_workers=max_workers) as pool:
                             futures = [
                                 pool.submit(
                                     execute_run,
                                     run_id,
-                                    worker_id=f"api-background:comments:{index + 1}",
+                                    worker_id=f"api-background:comments:{plat}",
                                     stage="comments",
+                                    platform=plat,
                                 )
-                                for index in range(worker_count)
+                                for plat in target_platforms
                             ]
                             for future in futures:
                                 future.result()
                     else:
-                        execute_run(run_id, worker_id="api-background")
+                        target_platforms = _normalize_target_platforms(payload.platforms)
+                        if len(target_platforms) > 1:
+                            with ThreadPoolExecutor(max_workers=len(target_platforms)) as pool:
+                                futures = [
+                                    pool.submit(
+                                        execute_run,
+                                        run_id,
+                                        worker_id=f"api-background:{plat}",
+                                        platform=plat,
+                                    )
+                                    for plat in target_platforms
+                                ]
+                                for future in futures:
+                                    future.result()
+                        else:
+                            execute_run(
+                                run_id,
+                                worker_id="api-background",
+                                platform=target_platforms[0] if target_platforms else None,
+                            )
                 except Exception:  # noqa: BLE001
                     logger.exception("Background social ingest run failed: season=%s run_id=%s", sid, run_id)
 
@@ -997,7 +1040,7 @@ async def ingest_season_social(
 
 
 @router.get("/ingest/worker-health")
-async def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
+def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
     from trr_backend.repositories.social_season_analytics import get_worker_health, is_queue_enabled
 
     try:
@@ -1275,6 +1318,38 @@ async def get_season_comments_coverage(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/seasons/{season_id}/analytics/mirror-coverage")
+async def get_season_mirror_coverage(
+    season_id: UUID,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    timezone: str = Query(default="America/New_York"),
+    platforms: str | None = Query(default=None, description="Comma-separated platform list"),
+    date_start: datetime | None = Query(default=None),
+    date_end: datetime | None = Query(default=None),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import get_mirror_coverage
+
+    parsed_platforms = None
+    if platforms and platforms.strip():
+        parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
+
+    try:
+        return get_mirror_coverage(
+            str(season_id),
+            platforms=parsed_platforms,
+            timezone=timezone,
+            source_scope=source_scope,
+            date_start=date_start,
+            date_end=date_end,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to compute mirror coverage: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/seasons/{season_id}/analytics/posts/{platform}/{source_id}")
 async def get_post_comments(
     season_id: UUID,
@@ -1344,6 +1419,8 @@ async def requeue_instagram_mirror_jobs(
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
     limit: int = Query(default=1000, ge=1, le=5000),
     failed_only: bool = Query(default=False),
+    date_start: datetime | None = Query(default=None),
+    date_end: datetime | None = Query(default=None),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import requeue_instagram_media_mirror_jobs
@@ -1354,6 +1431,8 @@ async def requeue_instagram_mirror_jobs(
             source_scope=source_scope,
             limit=limit,
             failed_only=failed_only,
+            date_start=date_start,
+            date_end=date_end,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1373,6 +1452,8 @@ async def requeue_platform_mirror_jobs(
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
     limit: int = Query(default=1000, ge=1, le=5000),
     failed_only: bool = Query(default=False),
+    date_start: datetime | None = Query(default=None),
+    date_end: datetime | None = Query(default=None),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import requeue_media_mirror_jobs
@@ -1385,6 +1466,8 @@ async def requeue_platform_mirror_jobs(
             source_scope=source_scope,
             limit=limit,
             failed_only=failed_only,
+            date_start=date_start,
+            date_end=date_end,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
