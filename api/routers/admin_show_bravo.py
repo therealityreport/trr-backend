@@ -22,6 +22,11 @@ from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
 from trr_backend.ingestion.show_cast_matrix_scraper import is_missing_fandom_page
 from trr_backend.integrations.fandom import is_allowlisted_fandom_domain, load_fandom_community_allowlist
+from trr_backend.integrations.franchise_rules import (
+    classify_show_franchise,
+    default_rules_by_key,
+    get_candidate_urls_for_rule,
+)
 from trr_backend.repositories.cast_fandom import upsert_cast_fandom
 from trr_backend.scraping.bravo_parser import (
     parse_bravo_show_bundle,
@@ -77,6 +82,7 @@ class BravoPreviewRequest(BaseModel):
 BravoImageKind = Literal[
     "poster",
     "backdrop",
+    "banner",
     "logo",
     "episode_still",
     "cast",
@@ -347,6 +353,35 @@ def _load_fandom_probe_domains(
                 continue
             seen_domains.add(domain)
             domains.append(domain)
+
+    if not domains:
+        show_response = (
+            db.schema("core")
+            .table("shows")
+            .select("name,networks")
+            .eq("id", show_id)
+            .limit(1)
+            .execute()
+        )
+        if not getattr(show_response, "error", None) and show_response.data:
+            show_row = show_response.data[0] if isinstance(show_response.data[0], dict) else {}
+            rule_key = classify_show_franchise(
+                str(show_row.get("name") or "").strip(),
+                show_row.get("networks"),
+                default_rules_by_key(),
+            )
+            rule = default_rules_by_key().get(rule_key) if rule_key else None
+            for candidate in get_candidate_urls_for_rule(rule or {}):
+                candidate_url = str(candidate.get("url") or "").strip()
+                domain = _extract_fandom_domain_from_url(candidate_url)
+                if not domain:
+                    continue
+                if not is_allowlisted_fandom_domain(domain, allowlist=allowlist):
+                    continue
+                if domain in seen_domains:
+                    continue
+                seen_domains.add(domain)
+                domains.append(domain)
 
     fallback_domain = _DEFAULT_FANDOM_COMMUNITY_DOMAIN
     if not domains and is_allowlisted_fandom_domain(fallback_domain, allowlist=allowlist):

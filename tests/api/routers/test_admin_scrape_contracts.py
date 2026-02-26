@@ -17,6 +17,13 @@ def test_import_image_item_accepts_new_kinds() -> None:
     )
     assert item.kind == "promo"
 
+    banner = ImportImageItem(
+        candidate_id="def",
+        url="https://example.com/banner.jpg",
+        kind="banner",
+    )
+    assert banner.kind == "banner"
+
 
 def test_import_image_item_rejects_unknown_kind() -> None:
     with pytest.raises(ValidationError):

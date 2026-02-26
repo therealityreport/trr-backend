@@ -11,6 +11,7 @@ Supports:
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -168,6 +169,8 @@ class YouTubeScraper:
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_TIMEOUT_SECONDS = (10, 45)
+    DEFAULT_PRE_WINDOW_PAGE_CAP = 12
+    DEFAULT_YTDLP_TIMEOUT_SECONDS = 120
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
@@ -180,6 +183,17 @@ class YouTubeScraper:
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
+        self._last_processed_videos_rendered = 0
+
+    @staticmethod
+    def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+        raw = str(os.getenv(name) or "").strip()
+        if not raw:
+            return max(minimum, int(default))
+        try:
+            return max(minimum, int(raw))
+        except (TypeError, ValueError):
+            return max(minimum, int(default))
 
     @staticmethod
     def _is_auth_related_failure(reason: str | None) -> bool:
@@ -695,6 +709,13 @@ class YouTubeScraper:
         in_range_hits = 0
         no_hit_pages = 0
         pre_window_pages = 0
+        videos_rendered = 0
+        scan_capped_reason: str | None = None
+        pre_window_page_cap = self._env_int(
+            "SOCIAL_YOUTUBE_PRE_WINDOW_PAGE_CAP",
+            self.DEFAULT_PRE_WINDOW_PAGE_CAP,
+            minimum=1,
+        )
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
@@ -709,11 +730,12 @@ class YouTubeScraper:
         # Process initial page
         initial_page_videos = self._process_video_data(data, config)
         videos.extend(initial_page_videos)
+        videos_rendered += max(0, int(self._last_processed_videos_rendered))
         self._emit_progress(
             progress_cb,
             phase="scrape_initial_page",
             pages_scanned=1,
-            posts_checked=len(videos),
+            posts_checked=videos_rendered,
             matched_posts=len(videos),
         )
         continuation_token = self._extract_channel_continuation_token(data)
@@ -746,6 +768,7 @@ class YouTubeScraper:
                 video = self._parse_video_renderer(renderer, config)
                 if not video:
                     continue
+                videos_rendered += 1
 
                 in_range: bool | None = None
                 if video.published_at > 0:
@@ -779,13 +802,28 @@ class YouTubeScraper:
                 progress_cb,
                 phase="scrape_continuation_page",
                 pages_scanned=page_num,
-                posts_checked=len(videos),
+                posts_checked=videos_rendered,
                 matched_posts=len(videos),
             )
             logger.info(f"Page {page_num}: {len(page_videos)} matches, {len(videos)} total")
             if page_hits == 0:
                 if (config.date_start or config.date_end) and not page_window_candidates:
                     pre_window_pages += 1
+                    if pre_window_pages >= pre_window_page_cap:
+                        scan_capped_reason = "pre_window_cap"
+                        self._emit_progress(
+                            progress_cb,
+                            phase="scrape_pre_window_cap",
+                            pages_scanned=page_num,
+                            posts_checked=videos_rendered,
+                            matched_posts=len(videos),
+                        )
+                        logger.info(
+                            "Stopping continuation crawl after %d pre-window pages (cap=%d)",
+                            pre_window_pages,
+                            pre_window_page_cap,
+                        )
+                        break
                 else:
                     no_hit_pages += 1
                     if no_hit_pages >= 5 and (config.date_start or config.date_end):
@@ -806,6 +844,7 @@ class YouTubeScraper:
         if len(unique_videos) < 10 and config.keywords and shutil.which("yt-dlp"):
             logger.info(f"Channel browsing found only {len(unique_videos)} videos; supplementing with yt-dlp search...")
             search_videos = self._search_via_ytdlp(config)
+            videos_rendered += len(search_videos)
             existing_ids = {v.video_id for v in unique_videos}
             added = 0
             for sv in search_videos:
@@ -819,7 +858,7 @@ class YouTubeScraper:
                     progress_cb,
                     phase="scrape_ytdlp_fallback",
                     pages_scanned=continuation_pages + 1,
-                    posts_checked=len(unique_videos),
+                    posts_checked=videos_rendered,
                     matched_posts=len(unique_videos),
                 )
 
@@ -831,7 +870,7 @@ class YouTubeScraper:
             progress_cb,
             phase="scrape_complete",
             pages_scanned=max(1, continuation_pages + 1),
-            posts_checked=len(unique_videos),
+            posts_checked=videos_rendered,
             matched_posts=len(unique_videos),
         )
         self.last_retrieval_meta = {
@@ -840,6 +879,9 @@ class YouTubeScraper:
             "timestamp_unknown_count": timestamp_unknown_count,
             "in_range_hits": in_range_hits,
             "pre_window_pages": pre_window_pages,
+            "pre_window_page_cap": pre_window_page_cap,
+            "scan_capped_reason": scan_capped_reason,
+            "videos_rendered": videos_rendered,
             "first_page_count": len(initial_page_videos),
             "precise_publish_attempts": self._precise_publish_attempts,
             "precise_publish_successes": self._precise_publish_successes,
@@ -887,7 +929,17 @@ class YouTubeScraper:
             logger.info(f"yt-dlp searching YouTube: '{query}'")
 
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                timeout_seconds = self._env_int(
+                    "SOCIAL_YOUTUBE_YTDLP_TIMEOUT_SECONDS",
+                    self.DEFAULT_YTDLP_TIMEOUT_SECONDS,
+                    minimum=30,
+                )
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
             except subprocess.TimeoutExpired:
                 logger.warning(f"yt-dlp search timed out for '{query}'")
                 continue
@@ -948,10 +1000,12 @@ class YouTubeScraper:
     def _process_video_data(self, data: dict, config: YouTubeScrapeConfig) -> list[YouTubeVideo]:
         """Process video data and apply filters."""
         videos = []
+        rendered_count = 0
         for renderer in self._iter_video_renderers(data):
             video = self._parse_video_renderer(renderer, config)
             if not video:
                 continue
+            rendered_count += 1
 
             # Check date range if publish date is known
             in_range: bool | None = None
@@ -970,7 +1024,7 @@ class YouTubeScraper:
                 videos.append(video)
                 title_short = video.title[:50] + "..." if len(video.title) > 50 else video.title
                 logger.info(f"Found: {video.video_id} - {title_short} ({video.date_time})")
-
+        self._last_processed_videos_rendered = rendered_count
         return videos
 
     def fetch_comments(

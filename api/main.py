@@ -72,6 +72,7 @@ app.add_middleware(
 from api.routers import (  # noqa: E402
     admin_asset_batch_jobs,
     admin_asset_flags,
+    admin_brands,
     admin_cast,
     admin_cast_photos,
     admin_fandom_sync,
@@ -103,6 +104,7 @@ app.include_router(screenalytics.router, prefix="/api/v1")
 app.include_router(screenalytics_runs_v2.router, prefix="/api/v1")
 app.include_router(admin_asset_flags.router, prefix="/api/v1")
 app.include_router(admin_asset_batch_jobs.router, prefix="/api/v1")
+app.include_router(admin_brands.router, prefix="/api/v1")
 app.include_router(admin_cast.router, prefix="/api/v1")
 app.include_router(admin_cast_photos.router, prefix="/api/v1")
 app.include_router(admin_fandom_sync.router, prefix="/api/v1")

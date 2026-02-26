@@ -207,6 +207,39 @@ def test_ensure_png_bytes_rasterizes_svg_with_cairosvg(monkeypatch: pytest.Monke
     assert result == (png_bytes, "image/png", ".png")
 
 
+def test_mirror_show_image_row_logo_normalizes_upload_to_png(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    upload_mock = MagicMock(return_value=("etag", 9))
+    monkeypatch.setattr(s3_mirror, "download_image", lambda *args, **kwargs: (b"raw-logo", "image/svg+xml"))
+    monkeypatch.setattr(
+        s3_mirror,
+        "ensure_logo_png_bytes",
+        lambda data, content_type: (b"png-logo", "image/png", ".png"),
+    )
+    monkeypatch.setattr(s3_mirror, "_head_object", lambda *args, **kwargs: None)
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
+
+    row = {
+        "id": "show-image-1",
+        "show_id": "show-1",
+        "source": "imdb",
+        "kind": "logo",
+        "url": "https://example.com/logo.svg",
+    }
+
+    patch = s3_mirror.mirror_show_image_row(row, s3_client=MagicMock())
+
+    assert patch is not None
+    assert patch["hosted_key"].endswith(".png")
+    assert patch["hosted_content_type"] == "image/png"
+    upload_call = upload_mock.call_args.kwargs
+    assert upload_call["data"] == b"png-logo"
+    assert upload_call["content_type"] == "image/png"
+
+
 def test_normalize_fandom_file_url_strips_revision_latest_suffix() -> None:
     url = "https://static.wikia.nocookie.net/real-housewives/images/0/08/angie_k_s3.jpeg/revision/latest"
     normalized = s3_mirror.normalize_fandom_file_url(url, referer="https://real-housewives.fandom.com/wiki/Test")

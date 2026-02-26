@@ -512,6 +512,16 @@ def _ensure_png_bytes(
         return None
 
 
+def ensure_logo_png_bytes(
+    data: bytes,
+    content_type: str | None,
+) -> tuple[bytes, str, str] | None:
+    """
+    Public helper for logo pipelines that enforce canonical PNG mirroring.
+    """
+    return _ensure_png_bytes(data, content_type)
+
+
 def _sanitize_etag(value: str | None) -> str | None:
     if not value:
         return None
@@ -1222,13 +1232,20 @@ def mirror_show_image_row(
 
     # Download the image (no special referer needed for TMDb/IMDb)
     data, content_type = download_image(candidate_url, source=source)
+    ext: str
+    if kind == "logo":
+        png_payload = ensure_logo_png_bytes(data, content_type)
+        if not png_payload:
+            return None
+        data, content_type, ext = png_payload
+    else:
+        ext = guess_ext_from_content_type(content_type)
     sha256 = _sha256_bytes(data)
     current_sha = row.get("hosted_sha256")
 
     if current_sha and current_sha == sha256 and hosted_url and not force:
         return None
 
-    ext = guess_ext_from_content_type(content_type)
     key = build_show_image_s3_key(
         show_identifier=str(show_identifier),
         kind=kind,

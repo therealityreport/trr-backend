@@ -1051,6 +1051,23 @@ def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/ingest/queue-status")
+def get_social_ingest_queue_status(_: AdminUser = None) -> dict:
+    from trr_backend.repositories.social_season_analytics import get_queue_status, get_worker_health, is_queue_enabled
+
+    try:
+        worker_health = get_worker_health()
+        queue = get_queue_status()
+        return {
+            "queue_enabled": is_queue_enabled(),
+            "workers": worker_health,
+            "queue": queue,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch queue status")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/seasons/{season_id}/ingest/jobs")
 async def get_season_ingest_jobs(
     season_id: UUID,

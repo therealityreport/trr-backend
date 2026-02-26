@@ -417,6 +417,26 @@ def test_youtube_video_matches_show_terms_excludes_wife_swap_housewives_edition(
     )
 
 
+def test_youtube_video_matches_show_terms_blocks_wrong_housewives_franchise() -> None:
+    assert not _youtube_video_matches_show_terms(
+        title='Does Tamra Judge Terrify Heather Dubrow?: "Tamra Can Be Scary" | RHOC After Show (S19 E11) | Bravo',
+        description="About The Real Housewives of Orange County After Show.",
+        hashtags=["RealHousewives"],
+        keywords=["Real Housewives", "After Show"],
+        show_name="The Real Housewives of Salt Lake City",
+    )
+
+
+def test_youtube_video_matches_show_terms_allows_expected_housewives_franchise() -> None:
+    assert _youtube_video_matches_show_terms(
+        title="RHOSLC After Show (S6 E1) | Bravo",
+        description="About The Real Housewives of Salt Lake City After Show.",
+        hashtags=["RealHousewives"],
+        keywords=["Real Housewives", "After Show"],
+        show_name="The Real Housewives of Salt Lake City",
+    )
+
+
 def test_load_instagram_cookies_prefers_env_json(monkeypatch) -> None:
     monkeypatch.setenv(
         "SOCIAL_INSTAGRAM_COOKIES_JSON",
@@ -655,6 +675,38 @@ def test_load_existing_posts_applies_source_id_filter(monkeypatch) -> None:
     assert "shortcode = any(%s)" in sql
 
 
+def test_load_existing_posts_youtube_excludes_cross_show_titles(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+
+    rows = social_repo._load_existing_posts(
+        "youtube",
+        context,
+        "@Bravo",
+        date_start=datetime(2025, 1, 1, tzinfo=UTC),
+        date_end=datetime(2025, 1, 31, tzinfo=UTC),
+    )
+
+    assert rows == []
+    sql = str(captured["sql"]).lower()
+    assert "from social.youtube_videos" in sql
+    assert "wife swap" in sql
+    assert "real housewives edition" in sql
+
+
 def test_rows_for_platform_twitter_bravo_uses_parent_post_scoping(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -709,6 +761,34 @@ def test_rows_for_platform_twitter_bravo_uses_parent_post_scoping(monkeypatch) -
         end_dt,
         expected_accounts,
     ]
+
+
+def test_rows_for_platform_youtube_excludes_cross_show_titles(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    start_dt = datetime(2025, 1, 1, tzinfo=UTC)
+    end_dt = datetime(2025, 1, 31, tzinfo=UTC)
+    rows = _rows_for_platform(
+        "season-1",
+        platform="youtube",
+        start_dt=start_dt,
+        end_dt=end_dt,
+        source_scope="bravo",
+        target_accounts_by_platform={"youtube": {"bravo"}},
+    )
+
+    assert rows == []
+    sql = str(captured["sql"]).lower()
+    assert "from social.youtube_videos v" in sql
+    assert "wife swap" in sql
+    assert "real housewives edition" in sql
 
 
 def test_rows_for_platform_twitter_non_bravo_keeps_open_comment_scope(monkeypatch) -> None:
@@ -1428,6 +1508,29 @@ def test_get_mirror_coverage_aggregates_platform_totals(monkeypatch) -> None:
             }
         ),
     )
+    monkeypatch.setattr(
+        social_repo,
+        "_comment_mirror_coverage_for_platform",
+        lambda _season_id, *, platform, **_kwargs: (
+            {
+                "comment_media_items_scanned": 10,
+                "comment_media_needs_mirror_count": 1,
+                "comment_media_mirrored_count": 9,
+                "comment_media_failed_count": 1,
+                "comment_media_partial_count": 0,
+                "comment_media_pending_count": 0,
+            }
+            if platform == "instagram"
+            else {
+                "comment_media_items_scanned": 8,
+                "comment_media_needs_mirror_count": 0,
+                "comment_media_mirrored_count": 8,
+                "comment_media_failed_count": 0,
+                "comment_media_partial_count": 0,
+                "comment_media_pending_count": 0,
+            }
+        ),
+    )
     monkeypatch.setattr(social_repo, "_now_utc", lambda: datetime(2026, 2, 24, 12, 0, tzinfo=UTC))
 
     payload = get_mirror_coverage(
@@ -1445,6 +1548,12 @@ def test_get_mirror_coverage_aggregates_platform_totals(monkeypatch) -> None:
     assert payload["failed_count"] == 1
     assert payload["partial_count"] == 1
     assert payload["pending_count"] == 0
+    assert payload["comment_media_items_scanned"] == 18
+    assert payload["comment_media_needs_mirror_count"] == 1
+    assert payload["comment_media_mirrored_count"] == 17
+    assert payload["comment_media_failed_count"] == 1
+    assert payload["comment_media_partial_count"] == 0
+    assert payload["comment_media_pending_count"] == 0
     assert payload["up_to_date"] is False
     assert payload["by_platform"]["instagram"]["up_to_date"] is False
     assert payload["by_platform"]["twitter"]["up_to_date"] is True
@@ -1485,6 +1594,41 @@ def test_comments_coverage_twitter_recursive_filter_uses_reply_aliases(monkeypat
     ) in normalized
     assert "where child.season_id = %s and child.is_reply = true and child.is_missing = false" in normalized
     assert "and t.is_missing = false and r.reply_to_tweet_id in" not in normalized
+
+
+def test_comments_coverage_youtube_excludes_cross_show_titles(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_one(query: str, params=None):
+        captured["query"] = query
+        captured["params"] = params
+        return {
+            "posts_scanned": 0,
+            "stale_posts_count": 0,
+            "saved_comments": 0,
+            "reported_comments": 0,
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(
+        social_repo,
+        "_comment_lifecycle_supported",
+        lambda table: table == "youtube_comments",
+    )
+
+    social_repo._comments_coverage_for_platform(
+        "season-1",
+        platform="youtube",
+        start_dt=datetime(2026, 2, 1, tzinfo=UTC),
+        end_dt=datetime(2026, 2, 2, tzinfo=UTC),
+        source_scope="bravo",
+        target_accounts_by_platform={"youtube": {"bravo"}},
+    )
+
+    normalized = " ".join(str(captured.get("query") or "").split()).lower()
+    assert "from social.youtube_videos v" in normalized
+    assert "wife swap" in normalized
+    assert "real housewives edition" in normalized
 
 
 def test_weekly_daily_activity_indexes_by_calendar_day_not_elapsed_hours(monkeypatch) -> None:
@@ -1645,7 +1789,7 @@ def test_rows_for_platform_instagram_uses_schema_safe_thumbnail_expr(monkeypatch
     assert "to_jsonb(p) -> 'hosted_media_urls' ->> 0" in sql
 
 
-def test_platform_thumbnail_expr_prefers_hosted_media_fallback() -> None:
+def test_platform_thumbnail_expr_prefers_explicit_thumbnail_before_hosted_media_fallback() -> None:
     instagram_expr = social_repo._instagram_posts_thumbnail_expr("p")
     tiktok_expr = social_repo._platform_thumbnail_expr("p", "tiktok")
     youtube_expr = social_repo._platform_thumbnail_expr("p", "youtube")
@@ -1653,9 +1797,16 @@ def test_platform_thumbnail_expr_prefers_hosted_media_fallback() -> None:
 
     assert "to_jsonb(p) ->> 'hosted_thumbnail_url'" in instagram_expr
     assert "to_jsonb(p) -> 'hosted_media_urls' ->> 0" in instagram_expr
+    assert instagram_expr.index("to_jsonb(p) ->> 'hosted_thumbnail_url'") < instagram_expr.index("p.thumbnail_url")
+    assert instagram_expr.index("p.thumbnail_url") < instagram_expr.index("to_jsonb(p) -> 'hosted_media_urls' ->> 0")
 
     assert "to_jsonb(p) -> 'hosted_media_urls' ->> 0" in tiktok_expr
     assert "to_jsonb(p) -> 'hosted_media_urls' ->> 0" in youtube_expr
+    assert tiktok_expr.index("to_jsonb(p) ->> 'hosted_thumbnail_url'") < tiktok_expr.index("p.thumbnail_url")
+    assert tiktok_expr.index("p.thumbnail_url") < tiktok_expr.index("to_jsonb(p) -> 'hosted_media_urls' ->> 0")
+    assert youtube_expr.index("to_jsonb(p) ->> 'hosted_thumbnail_url'") < youtube_expr.index("p.thumbnail_url")
+    assert youtube_expr.index("p.thumbnail_url") < youtube_expr.index("to_jsonb(p) -> 'hosted_media_urls' ->> 0")
+
     assert "to_jsonb(p) -> 'hosted_media_urls' ->> 0" in twitter_expr
     assert "p.media_urls ->> 0" in twitter_expr
 
@@ -1693,6 +1844,48 @@ def test_week_detail_tiktok_includes_thumbnail_url(monkeypatch) -> None:
     assert payload["posts"][0]["thumbnail_url"] == "https://example.com/tt-thumb.jpg"
 
 
+def test_week_detail_instagram_author_sql_falls_back_to_source_account(monkeypatch) -> None:
+    seen_queries: list[str] = []
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        seen_queries.append(sql)
+        del params
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    payload = _week_detail_instagram(
+        "season-1",
+        start_dt=datetime(2025, 1, 1, tzinfo=UTC),
+        end_dt=datetime(2025, 1, 8, tzinfo=UTC),
+        account_handles={"bravotv"},
+        max_comments=0,
+    )
+    assert payload["posts"] == []
+    normalized = " ".join(" ".join(seen_queries).split()).lower()
+    assert "coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '') as author" in normalized
+
+
+def test_week_detail_tiktok_author_sql_falls_back_to_source_account(monkeypatch) -> None:
+    seen_queries: list[str] = []
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        seen_queries.append(sql)
+        del params
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    payload = _week_detail_tiktok(
+        "season-1",
+        start_dt=datetime(2025, 1, 1, tzinfo=UTC),
+        end_dt=datetime(2025, 1, 8, tzinfo=UTC),
+        account_handles={"bravotv"},
+        max_comments=0,
+    )
+    assert payload["posts"] == []
+    normalized = " ".join(" ".join(seen_queries).split()).lower()
+    assert "coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '') as author" in normalized
+
+
 def test_get_post_comments_instagram_includes_metadata_fields(monkeypatch) -> None:
     monkeypatch.setattr(
         social_repo.pg,
@@ -1728,7 +1921,10 @@ def test_get_post_comments_instagram_includes_metadata_fields(monkeypatch) -> No
 
 
 def test_week_detail_youtube_uses_effective_saved_comment_count(monkeypatch) -> None:
+    seen_queries: list[str] = []
+
     def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        seen_queries.append(sql)
         if "from social.youtube_videos v" in sql:
             return [
                 {
@@ -1764,6 +1960,74 @@ def test_week_detail_youtube_uses_effective_saved_comment_count(monkeypatch) -> 
     assert post["comments_count"] == 5
     assert post["engagement"] == 110
     assert payload["totals"]["total_comments"] == 5
+    normalized = " ".join(" ".join(seen_queries).split()).lower()
+    assert "coalesce(nullif(v.source_account, ''), nullif(v.channel_title, ''), '') as author" in normalized
+    assert (
+        "ltrim(lower(coalesce(nullif(v.source_account, ''), nullif(v.channel_title, ''), '')), '@') = any(%s)"
+        in normalized
+    )
+    assert "wife swap" in normalized
+    assert "real housewives edition" in normalized
+
+
+def test_get_post_comments_instagram_author_sql_falls_back_to_source_account(monkeypatch) -> None:
+    captured_sql: dict[str, str] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object]) -> dict[str, object]:
+        captured_sql["sql"] = sql
+        del params
+        return {
+            "id": "ig-db-1",
+            "source_id": "abc123",
+            "author": "bravotv",
+            "text": "caption #RHOSLC",
+            "likes": 50,
+            "comments_count": 10,
+            "views": 700,
+            "thumbnail_url": "https://cdn.example/ig-thumb.jpg",
+            "post_format": "reel",
+            "profile_tags": ["tagged_user"],
+            "collaborators": ["collab_a"],
+            "hashtags": ["RHOSLC"],
+            "mentions": ["@bravotv"],
+            "duration_seconds": 21,
+            "media_mirror_attempt_count": 0,
+            "media_mirror_last_attempt_at": None,
+            "media_mirror_last_job_id": None,
+            "ts": datetime(2025, 1, 1, tzinfo=UTC),
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda sql, params: [])
+    get_post_comments("season-1", platform="instagram", source_id="abc123")
+    normalized = " ".join(captured_sql["sql"].split()).lower()
+    assert "coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '') as author" in normalized
+
+
+def test_get_post_comments_tiktok_author_sql_falls_back_to_source_account(monkeypatch) -> None:
+    captured_sql: dict[str, str] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object]) -> dict[str, object]:
+        captured_sql["sql"] = sql
+        del params
+        return {
+            "id": "tt-db-1",
+            "source_id": "vid123",
+            "author": "bravotv",
+            "text": "caption",
+            "likes": 10,
+            "comments_count": 2,
+            "shares": 3,
+            "views": 30,
+            "thumbnail_url": "https://example.com/tt-thumb.jpg",
+            "ts": datetime(2025, 1, 1, tzinfo=UTC),
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda sql, params: [])
+    get_post_comments("season-1", platform="tiktok", source_id="vid123")
+    normalized = " ".join(captured_sql["sql"].split()).lower()
+    assert "coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '') as author" in normalized
 
 
 def test_get_post_comments_youtube_includes_thumbnail_url(monkeypatch) -> None:
@@ -1786,6 +2050,32 @@ def test_get_post_comments_youtube_includes_thumbnail_url(monkeypatch) -> None:
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda sql, params: [])
     payload = get_post_comments("season-1", platform="youtube", source_id="vid123")
     assert payload["thumbnail_url"] == "https://example.com/yt-thumb.jpg"
+
+
+def test_get_post_comments_youtube_author_sql_falls_back_to_source_account(monkeypatch) -> None:
+    captured_sql: dict[str, str] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object]) -> dict[str, object]:
+        captured_sql["sql"] = sql
+        del params
+        return {
+            "id": "db-1",
+            "source_id": "vid123",
+            "author": "Bravo",
+            "title": "RHOSLC Trailer",
+            "text": "desc",
+            "views": 100,
+            "likes": 5,
+            "comments_count": 2,
+            "thumbnail_url": "https://example.com/yt-thumb.jpg",
+            "ts": datetime(2025, 1, 1, tzinfo=UTC),
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda sql, params: [])
+    get_post_comments("season-1", platform="youtube", source_id="vid123")
+    normalized = " ".join(captured_sql["sql"].split()).lower()
+    assert "coalesce(nullif(v.source_account, ''), nullif(v.channel_title, ''), '') as author" in normalized
 
 
 def test_get_post_comments_youtube_uses_effective_saved_comment_count(monkeypatch) -> None:
@@ -1850,6 +2140,24 @@ def test_get_post_comments_youtube_uses_effective_saved_comment_count(monkeypatc
     assert payload["total_comments_in_db"] == 3
 
 
+def test_get_post_comments_youtube_excludes_cross_show_rows(monkeypatch) -> None:
+    captured_sql: dict[str, str] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object]):
+        captured_sql["sql"] = sql
+        captured_sql["params"] = str(params)
+        return None
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    with pytest.raises(ValueError, match="Post not found"):
+        get_post_comments("season-1", platform="youtube", source_id="Z5BfX-IhSj4")
+
+    sql = str(captured_sql["sql"]).lower()
+    assert "wife swap" in sql
+    assert "real housewives edition" in sql
+
+
 def test_sync_youtube_video_comment_counts_dedupes_ids_and_uses_greatest(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -1869,6 +2177,43 @@ def test_sync_youtube_video_comment_counts_dedupes_ids_and_uses_greatest(monkeyp
     assert "update social.youtube_videos" in sql
     assert "greatest(" in sql
     assert "from social.youtube_comments c" in sql
+
+
+def test_purge_excluded_youtube_videos_for_scope_deletes_only_cross_show_rows(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all_with_cursor(cur, sql: str, params: list[object]) -> list[dict[str, object]]:
+        del cur
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"id": "yt-1"}, {"id": "yt-2"}]
+
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+
+    purged = social_repo._purge_excluded_youtube_videos_for_scope(
+        context,
+        account="@Bravo",
+        date_start=datetime(2025, 1, 1, tzinfo=UTC),
+        date_end=datetime(2025, 1, 31, tzinfo=UTC),
+    )
+
+    assert purged == 2
+    sql = str(captured["sql"]).lower()
+    params = captured["params"]
+    assert "delete from social.youtube_videos v" in sql
+    assert "wife swap" in sql
+    assert "real housewives edition" in sql
+    assert isinstance(params, list)
+    assert params[0] == "season-1"
+    assert params[1] == "bravo"
 
 
 def test_expected_comment_count_for_platform_youtube_uses_snapshot_fallback() -> None:
@@ -1926,6 +2271,7 @@ def test_ingest_youtube_comments_stage_syncs_comment_counts_and_uses_snapshot_ex
     )
 
     monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
+    monkeypatch.setattr(social_repo, "_purge_excluded_youtube_videos_for_scope", lambda *args, **kwargs: 0)
     monkeypatch.setattr(
         social_repo,
         "_load_existing_posts",
@@ -1983,6 +2329,93 @@ def test_ingest_youtube_comments_stage_syncs_comment_counts_and_uses_snapshot_ex
     assert synced_video_ids == ["youtube-db-1"]
     assert meta["youtube_comment_count_synced"] == 1
     assert meta["youtube_comment_count_sync_targets"] == 1
+
+
+def test_ingest_youtube_comments_stage_skips_cross_show_existing_posts(monkeypatch) -> None:
+    expected_counts: list[int] = []
+    synced_video_ids: list[str] = []
+
+    class _FakeYouTubeScraper:
+        def fetch_comments(self, *args, **kwargs):
+            return []
+
+    context = SeasonContext(
+        season_id="season-youtube-comments",
+        show_id="show-youtube-comments",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    opts = social_repo.IngestOptions(
+        platforms={"youtube"},
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=0,
+        max_comments_per_post=100,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="comments_only",
+        date_start=datetime(2025, 1, 1, tzinfo=UTC),
+        date_end=datetime(2025, 1, 8, tzinfo=UTC),
+    )
+
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
+    monkeypatch.setattr(social_repo, "_purge_excluded_youtube_videos_for_scope", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        social_repo,
+        "_load_existing_posts",
+        lambda *args, **kwargs: [
+            {
+                "id": "youtube-db-cross",
+                "video_id": "Z5BfX-IhSj4",
+                "title": "SNEAK PEEK: Wife Swap: The Real Housewives Edition",
+                "comments_count": 0,
+                "published_at": datetime(2025, 1, 2, tzinfo=UTC),
+            },
+            {
+                "id": "youtube-db-keep",
+                "video_id": "vid-keep",
+                "title": "RHOSLC clip",
+                "comments_count": 0,
+                "published_at": datetime(2025, 1, 3, tzinfo=UTC),
+            },
+        ],
+    )
+    monkeypatch.setattr(social_repo, "_load_comment_lifecycle_snapshots", lambda *args, **kwargs: {})
+
+    def _fake_decide_comment_refresh(**kwargs):
+        expected_counts.append(int(kwargs["expected_count"]))
+        return social_repo.CommentRefreshDecision(should_refresh=True, reason="count_gap")
+
+    monkeypatch.setattr(social_repo, "_decide_comment_refresh", _fake_decide_comment_refresh)
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
+    monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_mark_missing_comments_for_anchor", lambda **kwargs: 0)
+    monkeypatch.setattr(social_repo, "_reconcile_post_comment_count", lambda **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_sync_youtube_video_comment_counts",
+        lambda ids, conn=None: synced_video_ids.extend(ids) or len(ids),
+    )
+
+    _, _, meta = social_repo._ingest_youtube(
+        context,
+        run_id="run-youtube-comments",
+        account="bravo",
+        hashtags=["RHOSLC"],
+        keywords=["RHOSLC"],
+        opts=opts,
+        job_id="job-youtube-comments",
+        stage="comments",
+    )
+
+    assert expected_counts == [0]
+    assert synced_video_ids == ["youtube-db-keep"]
+    assert meta["videos_filtered_show_terms"] == 1
+    assert meta["youtube_comment_count_sync_targets"] == 1
+    filter_samples = meta.get("filter_samples") or []
+    assert any(sample.get("video_id") == "Z5BfX-IhSj4" for sample in filter_samples if isinstance(sample, dict))
 
 
 def test_refresh_post_comments_youtube_reports_comment_count_sync(monkeypatch) -> None:
@@ -4153,6 +4586,7 @@ def test_ingest_youtube_posts_stage_reports_filter_diagnostics(monkeypatch) -> N
         )[1],
     )
     monkeypatch.setattr(social_repo, "_sync_youtube_video_comment_counts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_purge_excluded_youtube_videos_for_scope", lambda *args, **kwargs: 2)
 
     posts, comments, meta = social_repo._ingest_youtube(
         context,
@@ -4172,6 +4606,7 @@ def test_ingest_youtube_posts_stage_reports_filter_diagnostics(monkeypatch) -> N
     assert meta["videos_matched_show_terms"] == 2
     assert meta["videos_filtered_show_terms"] == 1
     assert meta["videos_skipped_up_to_date"] == 1
+    assert meta["videos_purged_cross_show"] == 2
     assert (meta.get("persist_counters") or {}).get("posts_upserted") == 1
 
     filter_samples = meta.get("filter_samples") or []

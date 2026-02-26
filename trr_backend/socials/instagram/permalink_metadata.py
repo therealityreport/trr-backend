@@ -551,6 +551,50 @@ def _graphql_node_media_urls(node: dict[str, Any]) -> list[str]:
     return [single] if single else []
 
 
+def _extract_profile_tags_from_node(node: dict[str, Any]) -> list[str]:
+    """Extract tagged usernames from a GraphQL or REST API node."""
+    tags: list[str] = []
+    # GraphQL format: edge_media_to_tagged_user
+    edge_tags = node.get("edge_media_to_tagged_user")
+    if isinstance(edge_tags, dict):
+        for edge in edge_tags.get("edges", []):
+            username = (edge.get("node") or {}).get("user", {}).get("username")
+            if username:
+                tags.append(str(username).strip().lower().lstrip("@"))
+    # REST API format: usertags.in
+    usertags = node.get("usertags")
+    if isinstance(usertags, dict):
+        for tag in usertags.get("in", []):
+            username = (tag.get("user") or {}).get("username")
+            if username:
+                tags.append(str(username).strip().lower().lstrip("@"))
+    # Alternative REST format: taggedUsers
+    tagged_users = node.get("taggedUsers")
+    if isinstance(tagged_users, list):
+        for tagged in tagged_users:
+            if isinstance(tagged, dict):
+                username = tagged.get("username") or (tagged.get("user") or {}).get("username")
+                if username:
+                    tags.append(str(username).strip().lower().lstrip("@"))
+    return _normalize_unique(tags)
+
+
+def _extract_collaborators_from_node(node: dict[str, Any]) -> list[str]:
+    """Extract collaborator/coauthor usernames from a GraphQL or REST API node."""
+    collaborators: list[str] = []
+    for key in ("coauthor_producers", "invited_coauthor_producers", "coauthorProducers"):
+        values = node.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            username = value
+            if isinstance(value, dict):
+                username = value.get("username") or (value.get("user") or {}).get("username")
+            if username and isinstance(username, str):
+                collaborators.append(username.strip().lower().lstrip("@"))
+    return _normalize_unique(collaborators)
+
+
 def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetadata | None:
     if not isinstance(node, dict):
         return None
@@ -565,8 +609,8 @@ def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetad
     return InstagramPermalinkMetadata(
         taken_at=taken_at,
         post_format=_graphql_node_post_format(node),
-        profile_tags=[],
-        collaborators=[],
+        profile_tags=_extract_profile_tags_from_node(node),
+        collaborators=_extract_collaborators_from_node(node),
         hashtags=hashtags,
         mentions=mentions,
         duration_seconds=None,

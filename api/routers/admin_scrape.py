@@ -9,6 +9,7 @@ Provides endpoints to:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -76,6 +77,7 @@ class ScrapePreviewResponse(BaseModel):
 ImageKind = Literal[
     "poster",
     "backdrop",
+    "banner",
     "logo",
     "episode_still",
     "cast",
@@ -194,6 +196,38 @@ def _build_people_tags_context(db: SupabaseAdminClient, person_ids: set[str]) ->
         "people_ids": people_ids,
         "people_names": people_names,
     }
+
+
+def _build_link_context_for_image(
+    *,
+    base_context: dict,
+    image_url: str,
+    source_page_url: str,
+) -> dict:
+    ctx = {**base_context}
+    # Keep page/article provenance separate from the original source file URL.
+    ctx["source_page_url"] = source_page_url
+    ctx["source_url"] = image_url
+    ctx["source_image_url"] = image_url
+    return ctx
+
+
+def _normalize_logo_import_payload(
+    *,
+    image_data: bytes,
+    content_type: str,
+    image_kind: str,
+) -> tuple[bytes, str, str]:
+    if image_kind != "logo":
+        return image_data, content_type, hashlib.sha256(image_data).hexdigest()
+
+    from trr_backend.media.s3_mirror import ensure_logo_png_bytes
+
+    png_payload = ensure_logo_png_bytes(image_data, content_type)
+    if not png_payload:
+        raise RuntimeError("Failed to normalize logo image to PNG")
+    png_bytes, png_content_type, _ = png_payload
+    return png_bytes, png_content_type, hashlib.sha256(png_bytes).hexdigest()
 
 
 class MediaAssetSummary(BaseModel):
@@ -435,7 +469,7 @@ def import_images(
             "entity_id": entity_id,
             "show_id": resolved_show_id,
             "season_number": resolved_season_number,
-            "source_url": str(request.source_url),
+            "source_page_url": str(request.source_url),
         }
 
     elif request.entity_type == "show":
@@ -453,7 +487,7 @@ def import_images(
             "entity_type": "show",
             "entity_id": entity_id,
             "show_id": resolved_show_id,
-            "source_url": str(request.source_url),
+            "source_page_url": str(request.source_url),
         }
         if request.season_number is not None:
             link_context["season_number"] = int(request.season_number)
@@ -473,7 +507,7 @@ def import_images(
             "entity_type": "person",
             "entity_id": entity_id,
             "person_full_name": person_info.get("full_name"),
-            "source_url": str(request.source_url),
+            "source_page_url": str(request.source_url),
         }
 
     # Fetch cast members for matching if enabled
@@ -533,6 +567,11 @@ def import_images(
             image_data, sha256, content_type = download_and_hash_image(
                 str(img.url),
                 referer=str(request.source_url),
+            )
+            image_data, content_type, sha256 = _normalize_logo_import_payload(
+                image_data=image_data,
+                content_type=content_type,
+                image_kind=img.kind,
             )
 
             # Build S3 key based on entity type (used for mirror updates too)
@@ -607,7 +646,11 @@ def import_images(
                 tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
                 link_kind = img.kind if request.entity_type in ("season", "show") else "gallery"
-                season_link_ctx = {**link_context, **tags_ctx}
+                season_link_ctx = _build_link_context_for_image(
+                    base_context={**link_context, **tags_ctx},
+                    image_url=str(img.url),
+                    source_page_url=str(request.source_url),
+                )
                 if page_published_at:
                     season_link_ctx["source_created_at"] = page_published_at
                 if img.context_section:
@@ -650,7 +693,9 @@ def import_images(
                         "entity_id": matched_person["person_id"],
                         "matched_from_season": True,
                         "match_confidence": match_confidence,
-                        "source_url": str(request.source_url),
+                        "source_page_url": str(request.source_url),
+                        "source_url": str(img.url),
+                        "source_image_url": str(img.url),
                     }
                     if page_published_at:
                         person_link_ctx["source_created_at"] = page_published_at
@@ -681,7 +726,9 @@ def import_images(
                             "entity_type": "person",
                             "entity_id": person_id,
                             "assigned_from_season": True,
-                            "source_url": str(request.source_url),
+                            "source_page_url": str(request.source_url),
+                            "source_url": str(img.url),
+                            "source_image_url": str(img.url),
                             "show_id": resolved_show_id,
                             "season_number": resolved_season_number,
                         }
@@ -769,6 +816,9 @@ def import_images(
                     "source_page_url": str(request.source_url),
                     "source_page_title": page_title,
                     "page_title": page_title,
+                    "source_url": str(img.url),
+                    "source_image_url": str(img.url),
+                    "original_image_url": str(img.url),
                     "source_created_at": page_published_at,
                     "candidate_id": img.candidate_id,
                     "source_logo": img.source_logo,
@@ -785,7 +835,11 @@ def import_images(
             tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
             link_kind = img.kind if request.entity_type in ("season", "show") else "gallery"
-            season_link_ctx = {**link_context, **tags_ctx}
+            season_link_ctx = _build_link_context_for_image(
+                base_context={**link_context, **tags_ctx},
+                image_url=str(img.url),
+                source_page_url=str(request.source_url),
+            )
             if page_published_at:
                 season_link_ctx["source_created_at"] = page_published_at
             if img.context_section:
@@ -828,7 +882,9 @@ def import_images(
                     "entity_id": matched_person["person_id"],
                     "matched_from_season": True,
                     "match_confidence": match_confidence,
-                    "source_url": str(request.source_url),
+                    "source_page_url": str(request.source_url),
+                    "source_url": str(img.url),
+                    "source_image_url": str(img.url),
                 }
                 if page_published_at:
                     person_link_ctx["source_created_at"] = page_published_at
@@ -859,7 +915,9 @@ def import_images(
                         "entity_type": "person",
                         "entity_id": person_id,
                         "assigned_from_season": True,
-                        "source_url": str(request.source_url),
+                        "source_page_url": str(request.source_url),
+                        "source_url": str(img.url),
+                        "source_image_url": str(img.url),
                         "show_id": resolved_show_id,
                         "season_number": resolved_season_number,
                     }
@@ -1067,7 +1125,7 @@ async def import_images_stream(
                 "entity_id": entity_id,
                 "show_id": resolved_show_id,
                 "season_number": resolved_season_number,
-                "source_url": str(request.source_url),
+                "source_page_url": str(request.source_url),
             }
         elif request.entity_type == "show":
             show_info = _get_show_identifier(db, str(request.show_id))
@@ -1083,7 +1141,7 @@ async def import_images_stream(
                 "entity_type": "show",
                 "entity_id": entity_id,
                 "show_id": resolved_show_id,
-                "source_url": str(request.source_url),
+                "source_page_url": str(request.source_url),
             }
             if request.season_number is not None:
                 link_context["season_number"] = int(request.season_number)
@@ -1101,7 +1159,7 @@ async def import_images_stream(
                 "entity_type": "person",
                 "entity_id": entity_id,
                 "person_full_name": person_info.get("full_name"),
-                "source_url": str(request.source_url),
+                "source_page_url": str(request.source_url),
             }
 
         # Fetch cast members for matching if enabled
@@ -1172,6 +1230,11 @@ async def import_images_stream(
                 image_data, sha256, content_type = download_and_hash_image(
                     img_url,
                     referer=str(request.source_url),
+                )
+                image_data, content_type, sha256 = _normalize_logo_import_payload(
+                    image_data=image_data,
+                    content_type=content_type,
+                    image_kind=img.kind,
                 )
 
                 # Build S3 key based on entity type (used for mirror updates too)
@@ -1249,7 +1312,11 @@ async def import_images_stream(
                     tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
                     link_kind = img.kind if request.entity_type in ("season", "show") else "gallery"
-                    season_link_ctx = {**link_context, **tags_ctx}
+                    season_link_ctx = _build_link_context_for_image(
+                        base_context={**link_context, **tags_ctx},
+                        image_url=img_url,
+                        source_page_url=str(request.source_url),
+                    )
                     if page_published_at:
                         season_link_ctx["source_created_at"] = page_published_at
                     if img.context_section:
@@ -1292,7 +1359,9 @@ async def import_images_stream(
                             "entity_id": matched_person["person_id"],
                             "matched_from_season": True,
                             "match_confidence": match_confidence,
-                            "source_url": str(request.source_url),
+                            "source_page_url": str(request.source_url),
+                            "source_url": img_url,
+                            "source_image_url": img_url,
                         }
                         if page_published_at:
                             person_link_ctx["source_created_at"] = page_published_at
@@ -1323,7 +1392,9 @@ async def import_images_stream(
                                 "entity_type": "person",
                                 "entity_id": person_id,
                                 "assigned_from_season": True,
-                                "source_url": str(request.source_url),
+                                "source_page_url": str(request.source_url),
+                                "source_url": img_url,
+                                "source_image_url": img_url,
                                 "show_id": resolved_show_id,
                                 "season_number": resolved_season_number,
                             }
@@ -1421,6 +1492,9 @@ async def import_images_stream(
                         "source_page_url": str(request.source_url),
                         "source_page_title": page_title,
                         "page_title": page_title,
+                        "source_url": img_url,
+                        "source_image_url": img_url,
+                        "original_image_url": img_url,
                         "source_created_at": page_published_at,
                         "candidate_id": img.candidate_id,
                         "source_logo": img.source_logo,
@@ -1437,7 +1511,11 @@ async def import_images_stream(
                 tags_ctx = _build_people_tags_context(db, tag_person_ids)
 
                 link_kind = img.kind if request.entity_type in ("season", "show") else "gallery"
-                season_link_ctx = {**link_context, **tags_ctx}
+                season_link_ctx = _build_link_context_for_image(
+                    base_context={**link_context, **tags_ctx},
+                    image_url=img_url,
+                    source_page_url=str(request.source_url),
+                )
                 if page_published_at:
                     season_link_ctx["source_created_at"] = page_published_at
                 if img.context_section:
@@ -1480,7 +1558,9 @@ async def import_images_stream(
                         "entity_id": matched_person["person_id"],
                         "matched_from_season": True,
                         "match_confidence": match_confidence,
-                        "source_url": str(request.source_url),
+                        "source_page_url": str(request.source_url),
+                        "source_url": img_url,
+                        "source_image_url": img_url,
                     }
                     if page_published_at:
                         person_link_ctx["source_created_at"] = page_published_at
@@ -1511,7 +1591,9 @@ async def import_images_stream(
                             "entity_type": "person",
                             "entity_id": person_id,
                             "assigned_from_season": True,
-                            "source_url": str(request.source_url),
+                            "source_page_url": str(request.source_url),
+                            "source_url": img_url,
+                            "source_image_url": img_url,
                             "show_id": resolved_show_id,
                             "season_number": resolved_season_number,
                         }

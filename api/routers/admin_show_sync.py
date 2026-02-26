@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from threading import Thread
@@ -46,12 +46,14 @@ from trr_backend.ingestion.show_importer import (
     parse_imdb_headers_json_env,
     upsert_candidates_into_supabase,
 )
+from trr_backend.integrations.franchise_rules import classify_show_franchise, default_rules_by_key
 from trr_backend.integrations.tmdb.client import resolve_api_key
 from trr_backend.media.s3_mirror import (
     build_hosted_url,
     build_logo_s3_key,
     build_show_image_s3_key,
     download_image,
+    ensure_logo_png_bytes,
     get_s3_bucket,
     get_s3_client,
     guess_ext_from_content_type,
@@ -89,6 +91,10 @@ def _is_real_housewives_show(show_name: str | None) -> bool:
         return False
     normalized = show_name.strip().lower()
     return bool(normalized) and "real housewives" in normalized
+
+
+def _supports_configured_fandom_sources(show_name: str | None, networks: Any = None) -> bool:
+    return classify_show_franchise(show_name, networks, default_rules_by_key()) is not None
 
 
 def _count_mirrored_cast_photos_for_source(
@@ -428,7 +434,9 @@ class LogoImportUrlRequest(BaseModel):
 
 class LogoSetPrimaryRequest(BaseModel):
     target_type: LogoImportTargetType
-    asset_id: str
+    asset_id: str | None = None
+    media_asset_id: str | None = None
+    show_image_id: UUID | None = None
     show_id: UUID | None = None
     network_id: int | None = None
     provider_id: int | None = None
@@ -1009,7 +1017,53 @@ def _set_dimension_asset_primary_flag(
         raise HTTPException(status_code=502, detail=f"Failed to set logo asset primary flag: {set_primary.error}")
 
 
-def _set_show_logo_primary(db: SupabaseAdminClient, *, show_id: str, media_asset_id: str) -> None:
+def _extract_logo_variant_urls(metadata: Mapping[str, Any] | None) -> tuple[str | None, str | None]:
+    if not isinstance(metadata, Mapping):
+        return None, None
+    black = _text(metadata.get("logo_black_url")) or _text(metadata.get("hosted_logo_black_url"))
+    white = _text(metadata.get("logo_white_url")) or _text(metadata.get("hosted_logo_white_url"))
+    return black, white
+
+
+def _logo_variant_metadata_from_patch(patch: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    black_url = _text(patch.get("hosted_logo_black_url"))
+    white_url = _text(patch.get("hosted_logo_white_url"))
+    if black_url:
+        out["logo_black_url"] = black_url
+        out["hosted_logo_black_url"] = black_url
+    if white_url:
+        out["logo_white_url"] = white_url
+        out["hosted_logo_white_url"] = white_url
+    for key in (
+        "hosted_logo_black_key",
+        "hosted_logo_black_sha256",
+        "hosted_logo_white_key",
+        "hosted_logo_white_sha256",
+    ):
+        value = patch.get(key)
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def _set_show_logo_primary_media_asset(db: SupabaseAdminClient, *, show_id: str, media_asset_id: str) -> None:
+    link_check = (
+        db.schema("core")
+        .table("media_links")
+        .select("id")
+        .eq("entity_type", "show")
+        .eq("entity_id", show_id)
+        .eq("kind", "logo")
+        .eq("media_asset_id", media_asset_id)
+        .limit(1)
+        .execute()
+    )
+    if hasattr(link_check, "error") and link_check.error:
+        raise HTTPException(status_code=502, detail=f"Failed to verify show logo media link: {link_check.error}")
+    if not (link_check.data or []):
+        raise HTTPException(status_code=404, detail="Show logo media asset is not linked to this show")
+
     reset = (
         db.schema("core")
         .table("media_links")
@@ -1035,6 +1089,140 @@ def _set_show_logo_primary(db: SupabaseAdminClient, *, show_id: str, media_asset
     if hasattr(set_primary, "error") and set_primary.error:
         raise HTTPException(status_code=502, detail=f"Failed to set show logo primary flag: {set_primary.error}")
 
+    clear_show_image_primary = (
+        db.schema("core")
+        .table("shows")
+        .update({"primary_logo_image_id": None, "updated_at": datetime.now(tz=UTC).isoformat()})
+        .eq("id", show_id)
+        .execute()
+    )
+    if hasattr(clear_show_image_primary, "error") and clear_show_image_primary.error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to clear show primary_logo_image_id: {clear_show_image_primary.error}",
+        )
+
+
+def _set_show_logo_primary_show_image(db: SupabaseAdminClient, *, show_id: str, show_image_id: str) -> None:
+    show_image = (
+        db.schema("core")
+        .table("show_images")
+        .select("id,kind,image_type")
+        .eq("id", show_image_id)
+        .eq("show_id", show_id)
+        .limit(1)
+        .execute()
+    )
+    if hasattr(show_image, "error") and show_image.error:
+        raise HTTPException(status_code=502, detail=f"Failed to verify show image logo row: {show_image.error}")
+    rows = show_image.data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Show image logo row not found for this show")
+    row = rows[0] if isinstance(rows[0], dict) else {}
+    image_kind = _text(row.get("image_type")) or _text(row.get("kind")) or ""
+    if image_kind.casefold() != "logo":
+        raise HTTPException(status_code=400, detail="show_image_id must reference a show_images logo row")
+
+    reset = (
+        db.schema("core")
+        .table("media_links")
+        .update({"is_primary": False, "updated_at": datetime.now(tz=UTC).isoformat()})
+        .eq("entity_type", "show")
+        .eq("entity_id", show_id)
+        .eq("kind", "logo")
+        .execute()
+    )
+    if hasattr(reset, "error") and reset.error:
+        raise HTTPException(status_code=502, detail=f"Failed to reset show logo primary flags: {reset.error}")
+
+    set_show_image_primary = (
+        db.schema("core")
+        .table("shows")
+        .update({"primary_logo_image_id": show_image_id, "updated_at": datetime.now(tz=UTC).isoformat()})
+        .eq("id", show_id)
+        .execute()
+    )
+    if hasattr(set_show_image_primary, "error") and set_show_image_primary.error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to set show primary_logo_image_id: {set_show_image_primary.error}",
+        )
+
+
+def _ensure_show_logo_asset_variants(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    asset_id: str,
+    hosted_logo_url: str,
+    metadata: Mapping[str, Any] | None,
+    source: str,
+) -> dict[str, Any]:
+    metadata_out: dict[str, Any] = dict(metadata) if isinstance(metadata, Mapping) else {}
+    existing_black, existing_white = _extract_logo_variant_urls(metadata_out)
+
+    variant_result = None
+    try:
+        variant_result = mirror_logo_monochrome_variants_row(
+            {
+                "id": show_id,
+                "hosted_logo_black_url": existing_black,
+                "hosted_logo_white_url": existing_white,
+            },
+            kind="shows",
+            id_field="id",
+            source_url=hosted_logo_url,
+            force=False,
+            s3_client=get_s3_client(),
+            source=source,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "show logo variant generation failed (non-blocking): show_id=%s asset_id=%s error=%s",
+            show_id,
+            asset_id,
+            exc,
+        )
+
+    metadata_changed = False
+    if variant_result and isinstance(variant_result.patch, dict):
+        metadata_patch = _logo_variant_metadata_from_patch(variant_result.patch)
+        if metadata_patch:
+            metadata_out.update(metadata_patch)
+            metadata_changed = True
+    else:
+        if existing_black and "logo_black_url" not in metadata_out:
+            metadata_out["logo_black_url"] = existing_black
+            metadata_changed = True
+        if existing_white and "logo_white_url" not in metadata_out:
+            metadata_out["logo_white_url"] = existing_white
+            metadata_changed = True
+
+    if metadata_changed:
+        try:
+            update_response = (
+                db.schema("core")
+                .table("media_assets")
+                .update({"metadata": metadata_out, "updated_at": datetime.now(tz=UTC).isoformat()})
+                .eq("id", asset_id)
+                .execute()
+            )
+            if hasattr(update_response, "error") and update_response.error:
+                logger.warning(
+                    "show logo variant metadata update failed (non-blocking): show_id=%s asset_id=%s error=%s",
+                    show_id,
+                    asset_id,
+                    update_response.error,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "show logo variant metadata update failed (non-blocking): show_id=%s asset_id=%s error=%s",
+                show_id,
+                asset_id,
+                exc,
+            )
+    return metadata_out
+
 
 def _import_show_logo_bytes(
     db: SupabaseAdminClient,
@@ -1049,17 +1237,30 @@ def _import_show_logo_bytes(
     if not show_id:
         raise HTTPException(status_code=404, detail="Show target not found")
 
-    sha256 = hashlib.sha256(image_bytes).hexdigest()
+    png_payload = ensure_logo_png_bytes(image_bytes, content_type)
+    if not png_payload:
+        raise HTTPException(status_code=400, detail="Unable to normalize logo image to PNG")
+    png_bytes, png_content_type, ext = png_payload
+    sha256 = hashlib.sha256(png_bytes).hexdigest()
     existing_asset = find_asset_by_sha256(db, sha256)
 
     if existing_asset and _text(existing_asset.get("id")):
         asset_id = _text(existing_asset.get("id"))
         hosted_url = _text(existing_asset.get("hosted_url"))
+        hosted_key = _text(existing_asset.get("hosted_key"))
+        hosted_content_type = _text(existing_asset.get("hosted_content_type"))
+        existing_metadata = (
+            dict(existing_asset.get("metadata")) if isinstance(existing_asset.get("metadata"), dict) else {}
+        )
 
-        if not hosted_url:
+        if (
+            not hosted_url
+            or not hosted_key
+            or not hosted_key.casefold().endswith(".png")
+            or (hosted_content_type and hosted_content_type.casefold() != "image/png")
+        ):
             s3_client = get_s3_client()
             show_identifier = _text(show_row.get("imdb_id")) or show_id
-            ext = guess_ext_from_content_type(content_type)
             key = build_show_image_s3_key(
                 show_identifier=show_identifier,
                 kind="logo",
@@ -1072,8 +1273,8 @@ def _import_show_logo_bytes(
                 s3_client,
                 bucket=bucket,
                 key=key,
-                data=image_bytes,
-                content_type=content_type,
+                data=png_bytes,
+                content_type=png_content_type,
             )
             hosted_url = build_hosted_url(key)
             update_asset_with_mirror_result(
@@ -1084,10 +1285,22 @@ def _import_show_logo_bytes(
                 hosted_key=key,
                 hosted_url=hosted_url,
                 hosted_bytes=file_size,
-                hosted_content_type=content_type,
+                hosted_content_type=png_content_type,
                 hosted_etag=etag,
                 completed_at=datetime.now(tz=UTC).isoformat(),
+                metadata=existing_metadata,
             )
+        if not hosted_url:
+            raise HTTPException(status_code=500, detail="Failed to create hosted logo URL")
+
+        _ensure_show_logo_asset_variants(
+            db,
+            show_id=show_id,
+            asset_id=asset_id,
+            hosted_logo_url=hosted_url,
+            metadata=existing_metadata,
+            source="manual_logo_import",
+        )
 
         create_media_link_for_entity(
             db,
@@ -1102,7 +1315,7 @@ def _import_show_logo_bytes(
             },
         )
         if set_primary:
-            _set_show_logo_primary(db, show_id=show_id, media_asset_id=asset_id)
+            _set_show_logo_primary_media_asset(db, show_id=show_id, media_asset_id=asset_id)
 
         return LogoImportResponse(
             status="skipped",
@@ -1117,7 +1330,6 @@ def _import_show_logo_bytes(
 
     s3_client = get_s3_client()
     show_identifier = _text(show_row.get("imdb_id")) or show_id
-    ext = guess_ext_from_content_type(content_type)
     key = build_show_image_s3_key(
         show_identifier=show_identifier,
         kind="logo",
@@ -1130,11 +1342,12 @@ def _import_show_logo_bytes(
         s3_client,
         bucket=bucket,
         key=key,
-        data=image_bytes,
-        content_type=content_type,
+        data=png_bytes,
+        content_type=png_content_type,
     )
     hosted_url = build_hosted_url(key)
 
+    metadata_base = {"kind": "logo", "source_url": source_url}
     asset = create_media_asset_from_scrape(
         db,
         source="manual_logo_import",
@@ -1145,15 +1358,24 @@ def _import_show_logo_bytes(
         hosted_url=hosted_url,
         hosted_bytes=file_size,
         hosted_etag=etag,
-        content_type=content_type,
+        content_type=png_content_type,
         width=None,
         height=None,
         caption=None,
-        metadata={"kind": "logo", "source_url": source_url},
+        metadata=metadata_base,
     )
     asset_id = _text(asset.get("id"))
     if not asset_id:
         raise HTTPException(status_code=500, detail="Failed to create media asset")
+
+    _ensure_show_logo_asset_variants(
+        db,
+        show_id=show_id,
+        asset_id=asset_id,
+        hosted_logo_url=hosted_url,
+        metadata=metadata_base,
+        source="manual_logo_import",
+    )
 
     create_media_link_for_entity(
         db,
@@ -1168,7 +1390,7 @@ def _import_show_logo_bytes(
         },
     )
     if set_primary:
-        _set_show_logo_primary(db, show_id=show_id, media_asset_id=asset_id)
+        _set_show_logo_primary_media_asset(db, show_id=show_id, media_asset_id=asset_id)
 
     return LogoImportResponse(
         status="imported",
@@ -1599,12 +1821,7 @@ def import_logo_url(
         if not show_id:
             raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
         show_response = (
-            db.schema("core")
-            .table("shows")
-            .select("id,imdb_id,canonical_slug")
-            .eq("id", show_id)
-            .limit(1)
-            .execute()
+            db.schema("core").table("shows").select("id,imdb_id,canonical_slug").eq("id", show_id).limit(1).execute()
         )
         if hasattr(show_response, "error") and show_response.error:
             raise HTTPException(status_code=502, detail=f"Failed to fetch show row: {show_response.error}")
@@ -1713,11 +1930,7 @@ def import_logo_url(
             if variant_patch and isinstance(variant_patch.patch, dict):
                 update_patch.update(variant_patch.patch)
             core_update = (
-                db.schema("core")
-                .table(table)
-                .update(update_patch)
-                .eq(id_field, target_row.get(id_field))
-                .execute()
+                db.schema("core").table(table).update(update_patch).eq(id_field, target_row.get(id_field)).execute()
             )
             if hasattr(core_update, "error") and core_update.error:
                 raise HTTPException(status_code=502, detail=f"Failed to update {table} row: {core_update.error}")
@@ -1818,12 +2031,7 @@ async def import_logo_file(
         if not show_id:
             raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
         show_response = (
-            db.schema("core")
-            .table("shows")
-            .select("id,imdb_id,canonical_slug")
-            .eq("id", show_id)
-            .limit(1)
-            .execute()
+            db.schema("core").table("shows").select("id,imdb_id,canonical_slug").eq("id", show_id).limit(1).execute()
         )
         if hasattr(show_response, "error") and show_response.error:
             raise HTTPException(status_code=502, detail=f"Failed to fetch show row: {show_response.error}")
@@ -1970,21 +2178,43 @@ def set_logo_primary(
         show_id = str(payload.show_id) if payload.show_id else ""
         if not show_id:
             raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
-        asset_id = _text(payload.asset_id)
-        if not asset_id:
-            raise HTTPException(status_code=400, detail="asset_id is required")
-        _set_show_logo_primary(db, show_id=show_id, media_asset_id=asset_id)
+        media_asset_id = _text(payload.media_asset_id) or _text(payload.asset_id)
+        show_image_id = str(payload.show_image_id) if payload.show_image_id else ""
+        if media_asset_id and show_image_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either media_asset_id (or asset_id) or show_image_id, not both",
+            )
+        if not media_asset_id and not show_image_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Either media_asset_id (or asset_id) or show_image_id is required",
+            )
+        if show_image_id:
+            _set_show_logo_primary_show_image(db, show_id=show_id, show_image_id=show_image_id)
+            return LogoImportResponse(
+                status="imported",
+                target_type="show",
+                target_id=show_id,
+                asset_id=show_image_id,
+                set_primary=True,
+            )
+
+        _set_show_logo_primary_media_asset(db, show_id=show_id, media_asset_id=media_asset_id)
         return LogoImportResponse(
             status="imported",
             target_type="show",
             target_id=show_id,
-            asset_id=asset_id,
+            asset_id=media_asset_id,
             set_primary=True,
         )
 
     target_type = payload.target_type
     if target_type not in {"network", "streaming", "production"}:
         raise HTTPException(status_code=400, detail="Unsupported target_type")
+    asset_id = _text(payload.asset_id)
+    if not asset_id:
+        raise HTTPException(status_code=400, detail="asset_id is required")
 
     explicit_id = payload.network_id
     if target_type == "streaming":
@@ -2006,12 +2236,7 @@ def set_logo_primary(
     table = config["table"]
 
     asset_response = (
-        db.schema("admin")
-        .table("network_streaming_logo_assets")
-        .select("*")
-        .eq("id", _text(payload.asset_id))
-        .limit(1)
-        .execute()
+        db.schema("admin").table("network_streaming_logo_assets").select("*").eq("id", asset_id).limit(1).execute()
     )
     if hasattr(asset_response, "error") and asset_response.error:
         raise HTTPException(status_code=502, detail=f"Failed to fetch logo asset row: {asset_response.error}")
@@ -2658,7 +2883,7 @@ def refresh_show_photos_stream(
     show_resp = (
         db.schema("core")
         .table("shows")
-        .select("id,name,imdb_id,tmdb_id,external_ids")
+        .select("id,name,imdb_id,tmdb_id,external_ids,networks")
         .eq("id", show_id_str)
         .limit(1)
         .execute()
@@ -2669,6 +2894,7 @@ def refresh_show_photos_stream(
         raise HTTPException(status_code=404, detail=f"Show {show_id_str} not found")
     show_row = show_resp.data[0] or {}
     show_name = str(show_row.get("name") or "").strip() or None
+    show_networks = show_row.get("networks")
     external_ids = show_row.get("external_ids") if isinstance(show_row.get("external_ids"), dict) else {}
     show_imdb_id = (
         str(show_row.get("imdb_id") or external_ids.get("imdb_id") or external_ids.get("imdb") or "").strip() or None
@@ -3231,13 +3457,13 @@ def refresh_show_photos_stream(
             episode_images_mirrored = 0
 
         # ------------------------------------------------------------------
-        # Stage 4: Cast photos (IMDb + TMDb, and Fandom only for Real Housewives)
+        # Stage 4: Cast photos (IMDb + TMDb + configured Fandom franchise sources)
         # ------------------------------------------------------------------
         cast_photos_fetched = 0
         cast_photos_failed = 0
         cast_photos_pruned = 0
         source_skip_details: list[dict[str, object]] = []
-        allow_fandom_sources = _is_real_housewives_show(show_name)
+        allow_fandom_sources = _supports_configured_fandom_sources(show_name, show_networks)
 
         # Determine cast people ids for show.
         def _fetch_person_ids_for_show(season_number: int | None = None) -> list[str]:
@@ -3371,7 +3597,7 @@ def refresh_show_photos_stream(
             if not allow_fandom_sources:
                 yield progress(
                     stage="sync_fandom",
-                    message="Skipping Fandom cast photos for non-Real Housewives shows.",
+                    message="Skipping Fandom cast photos for shows without configured franchise rules.",
                 )
 
             stage_done = 0

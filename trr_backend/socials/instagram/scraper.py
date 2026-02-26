@@ -97,6 +97,7 @@ class InstagramComment:
     is_reply: bool
     parent_comment_id: str | None  # ID of parent comment if this is a reply
     reply_count: int
+    owner: dict[str, Any] | None = None
     replies: list["InstagramComment"] = field(default_factory=list)
     owner_profile_pic_url: str | None = None
     owner_is_verified: bool | None = None
@@ -129,6 +130,7 @@ class InstagramPost:
     url: str
     pk: str
     username: str
+    user_id: str | None = None
 
     # Media URLs
     media_urls: list[str] = field(default_factory=list)
@@ -152,6 +154,7 @@ class InstagramPost:
 
     # Additional metadata
     product_type: str | None = None
+    content_type: str | None = None
     video_play_count: int | None = None
     alt_text: str | None = None
     width: int | None = None
@@ -159,6 +162,7 @@ class InstagramPost:
     is_comments_disabled: bool | None = None
     music_info: dict[str, Any] | None = None
     video_duration: float | None = None
+    location: dict[str, Any] | None = None
     child_posts_data: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -462,13 +466,15 @@ class InstagramScraper:
             if not normalized or normalized.lower() in seen:
                 return
             seen.add(normalized.lower())
-            details.append(InstagramUserDetail(
-                username=normalized,
-                user_id=str(user_id) if user_id else None,
-                full_name=full_name or None,
-                is_verified=bool(is_verified) if is_verified is not None else None,
-                profile_pic_url=str(profile_pic_url) if profile_pic_url else None,
-            ))
+            details.append(
+                InstagramUserDetail(
+                    username=normalized,
+                    user_id=str(user_id) if user_id else None,
+                    full_name=full_name or None,
+                    is_verified=bool(is_verified) if is_verified is not None else None,
+                    profile_pic_url=str(profile_pic_url) if profile_pic_url else None,
+                )
+            )
 
         # GraphQL format
         edge_tags = node.get("edge_media_to_tagged_user", {})
@@ -530,42 +536,32 @@ class InstagramScraper:
                 if not normalized or normalized.lower() in seen:
                     continue
                 seen.add(normalized.lower())
-                details.append(InstagramUserDetail(
-                    username=normalized,
-                    user_id=str(user.get("id") or user.get("pk") or "") or None,
-                    full_name=user.get("full_name") or user.get("fullName") or None,
-                    is_verified=bool(user.get("is_verified") or user.get("isVerified"))
-                    if (user.get("is_verified") is not None or user.get("isVerified") is not None)
-                    else None,
-                    profile_pic_url=str(
-                        user.get("profile_pic_url") or user.get("profilePicUrl") or ""
-                    ) or None,
-                ))
+                details.append(
+                    InstagramUserDetail(
+                        username=normalized,
+                        user_id=str(user.get("id") or user.get("pk") or "") or None,
+                        full_name=user.get("full_name") or user.get("fullName") or None,
+                        is_verified=bool(user.get("is_verified") or user.get("isVerified"))
+                        if (user.get("is_verified") is not None or user.get("isVerified") is not None)
+                        else None,
+                        profile_pic_url=str(user.get("profile_pic_url") or user.get("profilePicUrl") or "") or None,
+                    )
+                )
 
         return details
 
     def _extract_owner_detail(self, node: dict) -> InstagramUserDetail | None:
         """Extract post owner/author detail."""
         owner = node.get("owner", {}) if isinstance(node.get("owner"), dict) else {}
-        username = str(
-            node.get("ownerUsername") or owner.get("username") or ""
-        ).strip()
+        username = str(node.get("ownerUsername") or owner.get("username") or "").strip()
         if not username:
             return None
         return InstagramUserDetail(
             username=username,
-            user_id=str(
-                owner.get("id") or owner.get("pk") or node.get("ownerId") or ""
-            ) or None,
-            full_name=str(
-                owner.get("full_name") or node.get("ownerFullName") or ""
-            ).strip() or None,
-            is_verified=bool(owner.get("is_verified"))
-            if "is_verified" in owner
-            else None,
-            profile_pic_url=str(
-                owner.get("profile_pic_url") or node.get("ownerProfilePicUrl") or ""
-            ).strip() or None,
+            user_id=str(owner.get("id") or owner.get("pk") or node.get("ownerId") or "") or None,
+            full_name=str(owner.get("full_name") or node.get("ownerFullName") or "").strip() or None,
+            is_verified=bool(owner.get("is_verified")) if "is_verified" in owner else None,
+            profile_pic_url=str(owner.get("profile_pic_url") or node.get("ownerProfilePicUrl") or "").strip() or None,
         )
 
     def _extract_child_posts_data(self, node: dict) -> list[dict[str, Any]]:
@@ -579,18 +575,22 @@ class InstagramScraper:
                 if not isinstance(child, dict):
                     continue
                 dims = child.get("dimensions", {})
-                children.append({
-                    "type": child.get("type") or child.get("__typename"),
-                    "display_url": child.get("displayUrl") or child.get("display_url"),
-                    "video_url": child.get("videoUrl") or child.get("video_url"),
-                    "width": self._coerce_int(
-                        dims.get("width") if isinstance(dims, dict) else child.get("original_width"), 0
-                    ) or None,
-                    "height": self._coerce_int(
-                        dims.get("height") if isinstance(dims, dict) else child.get("original_height"), 0
-                    ) or None,
-                    "alt": child.get("alt") or child.get("accessibility_caption"),
-                })
+                children.append(
+                    {
+                        "type": child.get("type") or child.get("__typename"),
+                        "display_url": child.get("displayUrl") or child.get("display_url"),
+                        "video_url": child.get("videoUrl") or child.get("video_url"),
+                        "width": self._coerce_int(
+                            dims.get("width") if isinstance(dims, dict) else child.get("original_width"), 0
+                        )
+                        or None,
+                        "height": self._coerce_int(
+                            dims.get("height") if isinstance(dims, dict) else child.get("original_height"), 0
+                        )
+                        or None,
+                        "alt": child.get("alt") or child.get("accessibility_caption"),
+                    }
+                )
             if children:
                 return children
 
@@ -610,14 +610,16 @@ class InstagramScraper:
                     versions = item["video_versions"]
                     if versions:
                         video_url = versions[0].get("url")
-                children.append({
-                    "type": "Video" if video_url else "Image",
-                    "display_url": display_url,
-                    "video_url": video_url,
-                    "width": self._coerce_int(item.get("original_width"), 0) or None,
-                    "height": self._coerce_int(item.get("original_height"), 0) or None,
-                    "alt": item.get("accessibility_caption"),
-                })
+                children.append(
+                    {
+                        "type": "Video" if video_url else "Image",
+                        "display_url": display_url,
+                        "video_url": video_url,
+                        "width": self._coerce_int(item.get("original_width"), 0) or None,
+                        "height": self._coerce_int(item.get("original_height"), 0) or None,
+                        "alt": item.get("accessibility_caption"),
+                    }
+                )
             if children:
                 return children
 
@@ -626,14 +628,16 @@ class InstagramScraper:
         for edge in sidecar.get("edges", []):
             child = edge.get("node", {})
             dims = child.get("dimensions", {})
-            children.append({
-                "type": child.get("__typename", "").replace("Graph", ""),
-                "display_url": child.get("display_url"),
-                "video_url": child.get("video_url"),
-                "width": self._coerce_int(dims.get("width"), 0) or None,
-                "height": self._coerce_int(dims.get("height"), 0) or None,
-                "alt": child.get("accessibility_caption"),
-            })
+            children.append(
+                {
+                    "type": child.get("__typename", "").replace("Graph", ""),
+                    "display_url": child.get("display_url"),
+                    "video_url": child.get("video_url"),
+                    "width": self._coerce_int(dims.get("width"), 0) or None,
+                    "height": self._coerce_int(dims.get("height"), 0) or None,
+                    "alt": child.get("accessibility_caption"),
+                }
+            )
 
         return children
 
@@ -642,9 +646,7 @@ class InstagramScraper:
         result: dict[str, Any] = {}
 
         # product_type (e.g., "clips" for reels, "feed" for feed posts)
-        result["product_type"] = (
-            str(node.get("productType") or node.get("product_type") or "").strip() or None
-        )
+        result["product_type"] = str(node.get("productType") or node.get("product_type") or "").strip() or None
 
         # video_play_count (distinct from video_view_count)
         vpc = node.get("videoPlayCount") or node.get("video_play_count")
@@ -652,12 +654,7 @@ class InstagramScraper:
 
         # alt text
         result["alt_text"] = (
-            str(
-                node.get("accessibilityCaption")
-                or node.get("accessibility_caption")
-                or node.get("alt")
-                or ""
-            ).strip()
+            str(node.get("accessibilityCaption") or node.get("accessibility_caption") or node.get("alt") or "").strip()
             or None
         )
 
@@ -691,6 +688,19 @@ class InstagramScraper:
                 result["video_duration"] = None
         else:
             result["video_duration"] = None
+
+        # content_type
+        content_type = node.get("type") or node.get("media_type_name") or node.get("content_type") or ""
+        result["content_type"] = str(content_type).strip() or None
+
+        # location metadata
+        location = node.get("location")
+        if isinstance(location, dict):
+            result["location"] = dict(location)
+        elif location is None or location == "":
+            result["location"] = None
+        else:
+            result["location"] = {"name": str(location)}
 
         return result
 
@@ -762,6 +772,8 @@ class InstagramScraper:
         media_urls = self._extract_media_urls(node)
         mentions = self._extract_mentions(node, caption)
         extras = self._extract_additional_post_fields(node)
+        owner_detail = self._extract_owner_detail(node)
+        owner_user_id = owner_detail.user_id if owner_detail and hasattr(owner_detail, "user_id") else None
 
         return InstagramPost(
             shortcode=shortcode,
@@ -777,8 +789,9 @@ class InstagramScraper:
             url=f"https://www.instagram.com/p/{shortcode}/" if shortcode else "",
             pk=str(node.get("pk") or node.get("id", "")),
             username=str(node.get("ownerUsername") or node.get("owner", {}).get("username") or config.username),
+            user_id=owner_user_id,
             media_urls=media_urls,
-            thumbnail_url=media_urls[0] if media_urls else None,
+            thumbnail_url=self._extract_thumbnail_url(node, media_urls),
             hashtags=self._extract_hashtags(node, caption),
             mentions=mentions,
             collaborators=self._extract_collaborators(node),
@@ -787,8 +800,9 @@ class InstagramScraper:
             person_id=config.person_id,
             tagged_users_detail=self._extract_tagged_users_detail(node),
             collaborators_detail=self._extract_collaborators_detail(node),
-            owner_detail=self._extract_owner_detail(node),
+            owner_detail=owner_detail,
             product_type=extras.get("product_type"),
+            content_type=extras.get("content_type"),
             video_play_count=extras.get("video_play_count"),
             alt_text=extras.get("alt_text"),
             width=extras.get("width"),
@@ -796,6 +810,7 @@ class InstagramScraper:
             is_comments_disabled=extras.get("is_comments_disabled"),
             music_info=extras.get("music_info"),
             video_duration=extras.get("video_duration"),
+            location=extras.get("location"),
             child_posts_data=self._extract_child_posts_data(node),
         )
 
@@ -1170,6 +1185,7 @@ class InstagramScraper:
             is_reply=is_reply,
             parent_comment_id=parent_id,
             reply_count=self._coerce_int(reply_count, 0),
+            owner=owner or None,
             owner_profile_pic_url=str(
                 data.get("ownerProfilePicUrl") or owner.get("profile_pic_url") or user.get("profile_pic_url") or ""
             )
@@ -1271,7 +1287,91 @@ class InstagramScraper:
                 if candidate_video and candidate_video not in urls:
                     urls.append(candidate_video)
 
-        return urls
+        deduped: list[str] = []
+        for url in urls:
+            normalized = str(url or "").strip()
+            if normalized and normalized not in deduped:
+                deduped.append(normalized)
+        return deduped
+
+    @staticmethod
+    def _looks_like_video_url(url: str) -> bool:
+        normalized = str(url or "").strip().lower()
+        if not normalized:
+            return False
+        return any(
+            marker in normalized
+            for marker in (
+                ".mp4",
+                ".m3u8",
+                ".mov",
+                ".webm",
+                "mime_type=video",
+                "/video/tos/",
+                "_video_dashinit",
+            )
+        )
+
+    def _extract_thumbnail_url(self, node: dict, media_urls: list[str]) -> str | None:
+        """Select an image thumbnail URL without falling back to video media URLs."""
+        candidates: list[str] = []
+
+        image_versions = node.get("image_versions2")
+        if isinstance(image_versions, dict):
+            version_candidates = image_versions.get("candidates")
+            if isinstance(version_candidates, list) and version_candidates:
+                first = version_candidates[0]
+                if isinstance(first, dict):
+                    candidate = str(first.get("url") or "").strip()
+                    if candidate:
+                        candidates.append(candidate)
+
+        for key in ("display_url", "displayUrl", "thumbnail_src"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+
+        images = node.get("images")
+        if isinstance(images, list):
+            for image in images:
+                if isinstance(image, str) and image.strip():
+                    candidates.append(image.strip())
+                    continue
+                if not isinstance(image, dict):
+                    continue
+                candidate = image.get("url") or image.get("displayUrl") or image.get("display_url")
+                if isinstance(candidate, str) and candidate.strip():
+                    candidates.append(candidate.strip())
+
+        child_posts = node.get("childPosts")
+        if isinstance(child_posts, list):
+            for child in child_posts:
+                if not isinstance(child, dict):
+                    continue
+                candidate = child.get("displayUrl") or child.get("display_url")
+                if isinstance(candidate, str) and candidate.strip():
+                    candidates.append(candidate.strip())
+
+        sidecar = node.get("edge_sidecar_to_children") or {}
+        if isinstance(sidecar, dict):
+            for edge in sidecar.get("edges", []):
+                if not isinstance(edge, dict):
+                    continue
+                child = edge.get("node")
+                if not isinstance(child, dict):
+                    continue
+                candidate = child.get("display_url")
+                if isinstance(candidate, str) and candidate.strip():
+                    candidates.append(candidate.strip())
+
+        for candidate in candidates:
+            if candidate and not self._looks_like_video_url(candidate):
+                return candidate
+
+        for media_url in media_urls:
+            if media_url and not self._looks_like_video_url(media_url):
+                return media_url
+        return None
 
     def _emit_progress(
         self,

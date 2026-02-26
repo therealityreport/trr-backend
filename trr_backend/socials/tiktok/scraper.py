@@ -536,7 +536,7 @@ class TikTokScraper:
             music_title=data.get("track", ""),
             music_author=data.get("artist", ""),
             media_urls=media_urls,
-            thumbnail_url=thumbnail_url or (media_urls[0] if media_urls else None),
+            thumbnail_url=thumbnail_url or None,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -847,7 +847,7 @@ class TikTokScraper:
                 or ""
             ),
             media_urls=media_urls,
-            thumbnail_url=thumbnail_url or (media_urls[0] if media_urls else None),
+            thumbnail_url=thumbnail_url or None,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,

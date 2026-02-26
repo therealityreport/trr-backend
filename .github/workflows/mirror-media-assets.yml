@@ -50,7 +50,6 @@ jobs:
           AWS_CDN_BASE_URL: ${{ secrets.AWS_CDN_BASE_URL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          MEDIA_MIRROR_ALLOWED_DOMAINS: ${{ secrets.MEDIA_MIRROR_ALLOWED_DOMAINS }}
         run: |
           PYTHONPATH=. python scripts/mirror_media_assets_to_s3.py \
             --status ${{ inputs.status || 'pending' }} \

@@ -21,6 +21,8 @@ This runbook covers production operations for social ingest queue mode:
 - `SOCIAL_CRAWLEE_PLATFORMS` (optional, default `instagram,tiktok,twitter,youtube`)
 - `SOCIAL_CRAWLEE_FORCE_LEGACY_PLATFORMS` (optional emergency bypass)
 - `SOCIAL_CRAWLEE_MAX_CONCURRENCY_*` and `SOCIAL_CRAWLEE_MAX_RETRIES_*` (optional per-platform limits)
+- `SOCIAL_YOUTUBE_PRE_WINDOW_PAGE_CAP` (optional, default `12`; continuation-page cap before yt-dlp fallback when scans stay pre-window)
+- `SOCIAL_YOUTUBE_YTDLP_TIMEOUT_SECONDS` (optional, default `120`; per-query yt-dlp timeout)
 
 When Crawlee runtime is enabled for a platform, auth preflight checks run before execution:
 
@@ -227,3 +229,48 @@ Expected: all zero after migration `0130_social_worker_heartbeat_and_comment_id_
    - verify platform auth env vars are populated,
    - verify secrets are available to worker runtime (not only API runtime),
    - use `SOCIAL_CRAWLEE_FORCE_LEGACY_PLATFORMS=<platform>` for temporary bypass.
+
+## YouTube Cross-Show Cleanup (Season Scoped)
+
+Use this only when older excluded YouTube rows were saved before the current guardrails and still appear in RHOSLC analytics/detail views.
+
+1. Inspect candidate rows:
+
+```sql
+select id, video_id, source_account, channel_title, title, published_at
+from social.youtube_videos
+where season_id = 'e9161955-6ee4-4985-865e-3386a0f670fb'
+  and ltrim(lower(coalesce(nullif(source_account, ''), nullif(channel_title, ''), '')), '@') = 'bravo'
+  and published_at >= timestamptz '2025-08-14T04:00:00+00:00'
+  and published_at <= timestamptz '2025-09-16T23:59:59.999999+00:00'
+  and coalesce(lower(title), '') like '%wife swap%'
+  and coalesce(lower(title), '') like '%real housewives edition%';
+```
+
+2. Delete only scoped excluded rows (comments cascade automatically via FK):
+
+```sql
+delete from social.youtube_videos v
+where v.season_id = 'e9161955-6ee4-4985-865e-3386a0f670fb'
+  and ltrim(lower(coalesce(nullif(v.source_account, ''), nullif(v.channel_title, ''), '')), '@') = 'bravo'
+  and v.published_at >= timestamptz '2025-08-14T04:00:00+00:00'
+  and v.published_at <= timestamptz '2025-09-16T23:59:59.999999+00:00'
+  and coalesce(lower(v.title), '') like '%wife swap%'
+  and coalesce(lower(v.title), '') like '%real housewives edition%'
+returning v.id, v.video_id, v.title;
+```
+
+3. Re-run YouTube posts+comments for that exact window:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/socials/seasons/e9161955-6ee4-4985-865e-3386a0f670fb/ingest" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "platforms": ["youtube"],
+    "source_scope": "bravo",
+    "ingest_mode": "posts_and_comments",
+    "sync_strategy": "incremental",
+    "date_start": "2025-08-14T04:00:00+00:00",
+    "date_end": "2025-09-16T23:59:59.999999+00:00"
+  }'
+```

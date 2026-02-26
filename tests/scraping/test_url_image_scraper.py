@@ -216,3 +216,59 @@ def test_scrape_msn_uses_detail_api_for_images_and_context(monkeypatch) -> None:
     assert result.images[0].context is not None
     assert result.images[0].context.startswith("Reza Farahan")
     assert "new chapter" in result.images[0].context
+
+
+def test_download_and_hash_image_retries_without_querystring(monkeypatch) -> None:
+    import trr_backend.scraping.url_image_scraper as scraper
+
+    calls: list[str] = []
+    target = (
+        "https://www.bravotv.com/sites/bravo/files/styles/fp_scale_crop_1920x1071/public/2025/09/"
+        "rhoslc_s6-web-dynamiclead-desktop-1920x1080_copy.jpg?itok=Azx6hvcY"
+    )
+    stripped = target.split("?", 1)[0]
+
+    class FakeResponse:
+        def __init__(self, *, content_type: str, content: bytes) -> None:
+            self.headers = {"Content-Type": content_type}
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def fake_get(url, headers=None, timeout=None, stream=None, allow_redirects=None):  # noqa: ANN001
+        calls.append(url)
+        if url == target:
+            return FakeResponse(content_type="text/html", content=b"<html>blocked</html>")
+        if url == stripped:
+            return FakeResponse(content_type="image/jpeg", content=b"\xff\xd8\xffbinary")
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(scraper.requests, "get", fake_get)
+
+    data, sha256, content_type = scraper.download_and_hash_image(
+        target,
+        referer="https://www.bravotv.com/the-daily-dish/example",
+    )
+    assert data.startswith(b"\xff\xd8\xff")
+    assert len(sha256) == 64
+    assert content_type == "image/jpeg"
+    assert target in calls
+    assert stripped in calls
+    assert calls.index(stripped) > calls.index(target)
+
+
+def test_download_and_hash_image_accepts_sniffed_image_when_header_is_wrong(monkeypatch) -> None:
+    import trr_backend.scraping.url_image_scraper as scraper
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain"}
+        content = b"\x89PNG\r\n\x1a\nrest"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(scraper.requests, "get", lambda *args, **kwargs: FakeResponse())
+
+    _, _, content_type = scraper.download_and_hash_image("https://example.com/mislabeled")
+    assert content_type == "image/png"

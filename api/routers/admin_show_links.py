@@ -30,6 +30,12 @@ from trr_backend.integrations.fandom import (
     search_allowlisted_fandom_wikis,
     search_real_housewives_wiki,
 )
+from trr_backend.integrations.franchise_rules import (
+    classify_show_franchise,
+    default_rules_by_key,
+    get_candidate_urls_for_rule,
+    is_fallback_link_metadata,
+)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-links"])
 fandom_router = APIRouter(prefix="/admin/fandom", tags=["admin-fandom"])
@@ -913,7 +919,7 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
         )
         existing_show_fandom_links = pg.fetch_all(
             """
-            SELECT url
+            SELECT url, metadata, source, status
             FROM core.entity_links
             WHERE show_id = %s
               AND entity_type = 'show'
@@ -925,7 +931,8 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
             """,
             [show_id],
         )
-        fandom_urls: list[tuple[str, str]] = []
+        explicit_fandom_urls: list[tuple[str, str]] = []
+        fallback_fandom_urls: list[tuple[str, str]] = []
         seen_fandom_urls: set[str] = set()
         for row in existing_show_fandom_links:
             raw_url = str(row.get("url") or "").strip()
@@ -940,11 +947,45 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
             if normalized in seen_fandom_urls:
                 continue
             seen_fandom_urls.add(normalized)
-            fandom_urls.append((normalized, "core.entity_links"))
-        if not fandom_urls:
-            derived_fandom_url = f"https://real-housewives.fandom.com/wiki/{quote(show_name.replace(' ', '_'))}"
-            fandom_urls.append((derived_fandom_url, "derived"))
-        for fandom_url, fandom_source in fandom_urls:
+            if is_fallback_link_metadata(row.get("metadata"), str(row.get("source") or "")):
+                fallback_fandom_urls.append((normalized, "franchise_rule"))
+            else:
+                explicit_fandom_urls.append((normalized, "core.entity_links"))
+
+        fandom_urls: list[tuple[str, str, dict[str, Any] | None]] = []
+        if explicit_fandom_urls:
+            fandom_urls.extend((url, source, None) for url, source in explicit_fandom_urls)
+        elif fallback_fandom_urls:
+            fandom_urls.extend((url, source, None) for url, source in fallback_fandom_urls)
+        else:
+            franchise_rules = default_rules_by_key()
+            franchise_key = classify_show_franchise(show_name, show.get("networks"), franchise_rules)
+            derived_rule = franchise_rules.get(franchise_key) if franchise_key else None
+            derived_candidates = get_candidate_urls_for_rule(derived_rule or {})
+            if derived_candidates:
+                for candidate in derived_candidates:
+                    candidate_url = str(candidate.get("url") or "").strip()
+                    if not candidate_url:
+                        continue
+                    fandom_urls.append(
+                        (
+                            candidate_url,
+                            "franchise_rule_derived",
+                            {
+                                "rule_scope": "franchise_fallback",
+                                "franchise_key": franchise_key,
+                                "is_fallback": True,
+                                "source_rank": int(candidate.get("source_rank") or 100),
+                                "include_allpages_scan": bool(candidate.get("include_allpages_scan")),
+                                "rule_version": int(derived_rule.get("rule_version") or 1) if derived_rule else 1,
+                            },
+                        )
+                    )
+            elif "real housewives" in show_name.lower():
+                derived_fandom_url = f"https://real-housewives.fandom.com/wiki/{quote(show_name.replace(' ', '_'))}"
+                fandom_urls.append((derived_fandom_url, "derived", None))
+
+        for fandom_url, fandom_source, fandom_metadata in fandom_urls:
             discovered.append(
                 {
                     "entity_type": "show",
@@ -955,6 +996,7 @@ def _discover_show_links(show_id: str) -> list[dict[str, Any]]:
                     "label": "Fandom",
                     "url": fandom_url,
                     "source": fandom_source,
+                    "metadata": fandom_metadata or {},
                 }
             )
 

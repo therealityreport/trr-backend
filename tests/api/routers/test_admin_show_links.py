@@ -78,6 +78,12 @@ def test_discover_show_links_uses_default_bravo_snapshot_variant() -> None:
         and str(link.get("url") or "").startswith("https://real-housewives.fandom.com/wiki/")
         for link in links
     )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "fandom"
+        and str(link.get("url") or "").startswith("https://realitytv-girl.fandom.com/wiki/Special:AllPages")
+        for link in links
+    )
 
 
 def test_discover_show_links_prefers_existing_show_level_fandom_links() -> None:
@@ -105,6 +111,43 @@ def test_discover_show_links_prefers_existing_show_level_fandom_links() -> None:
     assert len(fandom_links) == 1
     assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
     assert fandom_links[0]["source"] == "core.entity_links"
+
+
+def test_discover_show_links_prefers_explicit_links_over_fallback_links() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch(
+            "api.routers.admin_show_links.pg.fetch_all",
+            return_value=[
+                {
+                    "url": "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                    "metadata": {},
+                    "source": "manual",
+                    "status": "approved",
+                },
+                {
+                    "url": "https://real-housewives.fandom.com/wiki/Home_Page",
+                    "metadata": {"rule_scope": "franchise_fallback", "is_fallback": True},
+                    "source": "franchise_rule",
+                    "status": "approved",
+                },
+            ],
+        ):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Real Housewives of Salt Lake City",
+                    "networks": ["bravo"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"payload": {"normalized": {}}},
+            ]
+            links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    assert len(fandom_links) == 1
+    assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
 
 
 def test_canonicalize_url_normalizes_host_scheme_port_fragment_and_trailing_slash() -> None:

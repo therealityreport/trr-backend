@@ -88,6 +88,31 @@ _IMAGE_CONTENT_TYPES = {
 }
 
 
+def _looks_like_svg(data: bytes) -> bool:
+    if not data:
+        return False
+    head = data.lstrip()[:4096].lower()
+    if head.startswith(b"<svg"):
+        return True
+    return head.startswith(b"<?xml") and b"<svg" in head
+
+
+def _sniff_image_content_type(data: bytes) -> str | None:
+    if not data:
+        return None
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+    if _looks_like_svg(data):
+        return "image/svg+xml"
+    return None
+
+
 @dataclass
 class ImageCandidate:
     """Represents an image candidate extracted from a web page."""
@@ -1276,6 +1301,55 @@ def scrape_url_for_images(
         )
 
 
+def _build_download_url_candidates(url: str) -> list[str]:
+    raw = (url or "").strip()
+    if not raw:
+        return []
+    parsed = urlparse(raw)
+    candidates = [raw]
+
+    # Some CMS image URLs add tokenized query strings (e.g. ?itok=...) that can fail
+    # intermittently for non-browser clients. Retry once without query params.
+    if parsed.query:
+        stripped = parsed._replace(query="", fragment="").geturl()
+        if stripped and stripped != raw:
+            candidates.append(stripped)
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return deduped
+
+
+def _build_download_referer_candidates(url: str, referer: str | None) -> list[str]:
+    candidates: list[str] = []
+    if referer and referer.strip():
+        candidates.append(referer.strip())
+
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    mapped = _CDN_REFERER_MAP.get(host)
+    if mapped:
+        candidates.append(mapped)
+
+    origin = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme and parsed.netloc else None
+    if origin:
+        candidates.append(origin)
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return deduped
+
+
 def download_and_hash_image(
     url: str,
     *,
@@ -1296,19 +1370,50 @@ def download_and_hash_image(
     Raises:
         RuntimeError: If download fails or response is empty
     """
-    headers = {**_DEFAULT_HEADERS}
-    if referer:
-        headers["referer"] = referer
+    url_candidates = _build_download_url_candidates(url)
+    referer_candidates: list[str | None] = _build_download_referer_candidates(url, referer)
+    if not referer_candidates:
+        referer_candidates = [None]
 
-    resp = requests.get(url, headers=headers, timeout=timeout, stream=True)
-    resp.raise_for_status()
+    last_error: Exception | None = None
+    for candidate_url in url_candidates:
+        for candidate_referer in referer_candidates:
+            headers = {**_DEFAULT_HEADERS}
+            if isinstance(candidate_referer, str) and candidate_referer:
+                headers["referer"] = candidate_referer
+            try:
+                resp = requests.get(
+                    candidate_url,
+                    headers=headers,
+                    timeout=timeout,
+                    stream=True,
+                    allow_redirects=True,
+                )
+                resp.raise_for_status()
+                data = resp.content
+                if not data:
+                    raise RuntimeError("Empty image response")
 
-    content_type = resp.headers.get("Content-Type", "image/jpeg")
-    data = resp.content
+                raw_content_type = resp.headers.get("Content-Type", "")
+                content_type = raw_content_type.split(";", 1)[0].strip().lower()
+                sniffed_content_type = _sniff_image_content_type(data)
 
-    if not data:
-        raise RuntimeError("Empty image response")
+                if not content_type.startswith("image/"):
+                    if sniffed_content_type:
+                        content_type = sniffed_content_type
+                    else:
+                        raise RuntimeError(
+                            f"Non-image response content-type: {content_type or 'unknown'}"
+                        )
+                elif not content_type and sniffed_content_type:
+                    content_type = sniffed_content_type
 
-    sha256 = hashlib.sha256(data).hexdigest()
+                sha256 = hashlib.sha256(data).hexdigest()
+                return data, sha256, content_type or "image/jpeg"
+            except Exception as exc:  # noqa: PERF203
+                last_error = exc
+                continue
 
-    return data, sha256, content_type
+    if last_error is None:
+        raise RuntimeError("Failed to download image")
+    raise RuntimeError(f"Failed to download image: {last_error}") from last_error
