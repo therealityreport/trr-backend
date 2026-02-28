@@ -5,7 +5,6 @@ Auto-generated schema diagram showing columns and data types.
 erDiagram
     CORE_SHOWS {
         TEXT name
-        TEXT slug
         INTEGER show_total_seasons
         INTEGER show_total_episodes
         TEXT imdb_id

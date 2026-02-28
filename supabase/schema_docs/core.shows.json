@@ -353,14 +353,6 @@
       "default": "'{}'::jsonb",
       "is_identity": "NO",
       "is_generated": "NEVER"
-    },
-    {
-      "name": "slug",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -432,14 +424,6 @@
       ],
       "unique": false,
       "definition": "CREATE INDEX core_shows_networks_gin ON core.shows USING gin (networks)"
-    },
-    {
-      "name": "core_shows_slug_unique",
-      "columns": [
-        "slug) WHERE ((slug IS NOT NULL) AND (btrim(slug) <> ''::text)"
-      ],
-      "unique": true,
-      "definition": "CREATE UNIQUE INDEX core_shows_slug_unique ON core.shows USING btree (slug) WHERE ((slug IS NOT NULL) AND (btrim(slug) <> ''::text))"
     },
     {
       "name": "core_shows_streaming_providers_gin",
@@ -535,7 +519,6 @@
     "tmdb_network_ids": [],
     "tmdb_production_company_ids": [],
     "alternative_names": [],
-    "most_recent_episode": {},
-    "slug": "example"
+    "most_recent_episode": {}
   }
 }
