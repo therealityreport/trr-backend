@@ -12,11 +12,14 @@ Provides endpoints to:
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from time import monotonic
 from time import perf_counter
+from threading import Lock
 from typing import Any, Literal
 from uuid import UUID
 
@@ -30,6 +33,11 @@ from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
+
+_WEEK_DETAIL_CACHE_TTL_SECONDS = int(os.getenv("WEEK_DETAIL_CACHE_TTL_SECONDS", "90"))
+_WEEK_DETAIL_CACHE_MAX_ENTRIES = int(os.getenv("WEEK_DETAIL_CACHE_MAX_ENTRIES", "256"))
+_WEEK_DETAIL_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_WEEK_DETAIL_CACHE_LOCK = Lock()
 
 
 def _env_truthy(name: str) -> bool:
@@ -62,6 +70,58 @@ def _normalize_target_platforms(platforms: list[str] | None) -> list[str]:
             continue
         deduped.append(normalized)
     return deduped or list(SOCIAL_SUPPORTED_PLATFORMS)
+
+
+def _week_detail_cache_key(
+    *,
+    season_id: str,
+    week_index: int,
+    source_scope: str,
+    platforms: list[str] | None,
+    timezone: str,
+    max_comments_per_post: int,
+) -> tuple[Any, ...]:
+    platform_key = ",".join(_normalize_target_platforms(platforms))
+    return (
+        season_id,
+        week_index,
+        source_scope.strip().lower(),
+        platform_key,
+        timezone,
+        int(max_comments_per_post),
+    )
+
+
+def _get_week_detail_cached_payload(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
+    now = monotonic()
+    with _WEEK_DETAIL_CACHE_LOCK:
+        cached = _WEEK_DETAIL_CACHE.get(cache_key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at <= now:
+            _WEEK_DETAIL_CACHE.pop(cache_key, None)
+            return None
+        return copy.deepcopy(payload)
+
+
+def _set_week_detail_cached_payload(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> None:
+    with _WEEK_DETAIL_CACHE_LOCK:
+        _WEEK_DETAIL_CACHE[cache_key] = (monotonic() + _WEEK_DETAIL_CACHE_TTL_SECONDS, copy.deepcopy(payload))
+        if len(_WEEK_DETAIL_CACHE) <= _WEEK_DETAIL_CACHE_MAX_ENTRIES:
+            return
+        items_by_expiry = sorted(
+            _WEEK_DETAIL_CACHE.items(),
+            key=lambda item: item[1][0],
+        )
+        for key, _ in items_by_expiry[: - _WEEK_DETAIL_CACHE_MAX_ENTRIES]:
+            _WEEK_DETAIL_CACHE.pop(key, None)
+
+
+def invalidate_week_detail_cache() -> None:
+    """Clear in-memory week-detail cache (placeholder for future mutation hook integration)."""
+    with _WEEK_DETAIL_CACHE_LOCK:
+        _WEEK_DETAIL_CACHE.clear()
 
 
 
@@ -904,6 +964,10 @@ class FacebookPostResponse(BaseModel):
     thumbnail_url: str | None = None
     media_urls: list[str] = Field(default_factory=list)
     posted_at: str | None = None
+    reactions: dict[str, int] = Field(
+        default_factory=dict,
+        description="Per-reaction breakdown (Like, Love, Haha, etc.)",
+    )
 
 
 class FacebookScrapeResponse(BaseModel):
@@ -972,6 +1036,7 @@ async def scrape_facebook(
                         if post.posted_at is not None
                         else None
                     ),
+                    reactions=dict(getattr(post, "reactions", {}) or {}),
                 )
                 for post in filtered
             ],
@@ -1019,6 +1084,91 @@ async def preview_facebook_page(page_handle: str, user: AdminUser) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.error("Facebook preview failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class FacebookPostScrapeRequest(BaseModel):
+    post_url: str = Field(..., description="Facebook post/video/reel URL (supports /share/v/ short links)")
+    fetch_comments: bool = Field(default=True, description="Also extract comments from the page")
+    max_comments: int = Field(default=100, ge=0, le=1000, description="Max comments to extract")
+
+
+class FacebookCommentResponse(BaseModel):
+    comment_id: str
+    username: str
+    text: str
+    likes: int = 0
+    created_at: int | None = None
+    is_reply: bool = False
+    reply_count: int = 0
+
+
+class FacebookPostScrapeResponse(BaseModel):
+    success: bool
+    post: FacebookPostResponse | None = None
+    comments: list[FacebookCommentResponse] = Field(default_factory=list)
+    comments_found: int = 0
+    error: str | None = None
+
+
+@router.post("/facebook/scrape-post", response_model=FacebookPostScrapeResponse)
+async def scrape_facebook_post(
+    request: FacebookPostScrapeRequest,
+    user: AdminUser,
+) -> FacebookPostScrapeResponse:
+    from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
+    from trr_backend.socials.facebook import FacebookScraper
+
+    logger.info("Facebook post scrape requested by %s for %s", user.get("email"), request.post_url)
+    try:
+        scraper = FacebookScraper(cookies=_load_facebook_cookies())
+        post, comments = scraper.scrape_post(
+            request.post_url,
+            fetch_comment_list=request.fetch_comments,
+            max_comments=request.max_comments,
+        )
+        if post is None:
+            return FacebookPostScrapeResponse(success=False, error="Failed to fetch post")
+
+        post_resp = FacebookPostResponse(
+            post_id=str(post.post_id or ""),
+            post_type=str(post.post_type or "feed"),
+            username=str(post.username or ""),
+            caption=str(post.caption or ""),
+            likes=post.likes,
+            comments=post.comments,
+            shares=post.shares,
+            views=post.views,
+            url=str(post.url or ""),
+            thumbnail_url=post.thumbnail_url or None,
+            media_urls=[str(u) for u in (post.media_urls or []) if str(u)],
+            posted_at=(
+                datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat()
+                if post.posted_at is not None
+                else None
+            ),
+            reactions=dict(post.reactions or {}),
+        )
+        comment_resps = [
+            FacebookCommentResponse(
+                comment_id=c.comment_id,
+                username=c.username,
+                text=c.text,
+                likes=c.likes,
+                created_at=c.created_at,
+                is_reply=c.is_reply,
+                reply_count=c.reply_count,
+            )
+            for c in comments
+        ]
+        return FacebookPostScrapeResponse(
+            success=True,
+            post=post_resp,
+            comments=comment_resps,
+            comments_found=len(comment_resps),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Facebook post scrape failed: %s", exc, exc_info=True)
+        return FacebookPostScrapeResponse(success=False, error=str(exc))
 
 
 # Threads Models / Endpoints
@@ -1205,6 +1355,40 @@ class PostCommentRefreshRequest(BaseModel):
     fetch_replies: bool = Field(default=True)
 
 
+class RedditRefreshRunRequest(BaseModel):
+    community_id: UUID
+    season_id: UUID
+    period_key: str = Field(..., min_length=1, max_length=160)
+    subreddit: str = Field(..., min_length=1, max_length=120)
+    show_name: str = Field(..., min_length=1, max_length=200)
+    show_aliases: list[str] = Field(default_factory=list)
+    cast_names: list[str] = Field(default_factory=list)
+    is_show_focused: bool = Field(default=False)
+    analysis_flares: list[str] = Field(default_factory=list)
+    analysis_all_flares: list[str] = Field(default_factory=list)
+    force_include_flares: list[str] = Field(default_factory=list)
+    sort_modes: list[Literal["new", "hot", "top"]] | None = Field(default=None)
+    limit_per_mode: int = Field(default=35, ge=1, le=100)
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    exhaustive_window: bool = Field(default=True)
+    search_backfill: bool = Field(default=True)
+    seed_post_urls: list[str] = Field(default_factory=list)
+    fetch_comments: bool = Field(default=False)
+    max_pages: int = Field(default=500, ge=10, le=1000)
+
+
+def _serialize_reddit_refresh_payload(payload: RedditRefreshRunRequest) -> dict[str, Any]:
+    data = payload.model_dump()
+    if isinstance(payload.period_start, datetime):
+        data["period_start"] = payload.period_start.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(payload.period_end, datetime):
+        data["period_end"] = payload.period_end.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    data["community_id"] = str(payload.community_id)
+    data["season_id"] = str(payload.season_id)
+    return data
+
+
 @router.get("/seasons/{season_id}/targets")
 async def get_season_targets(
     season_id: UUID,
@@ -1310,6 +1494,7 @@ async def ingest_season_social(
                         },
                     ) from exc
 
+        inline_worker_id = "api-background" if not queue_enabled else None
         run_payload = ingest_season(
             sid,
             platforms=payload.platforms,
@@ -1325,6 +1510,7 @@ async def ingest_season_social(
             date_start=payload.date_start,
             date_end=payload.date_end,
             initiated_by=email,
+            inline_worker_id=inline_worker_id,
         )
 
         run_id = str(run_payload.get("run_id") or "")
@@ -1413,6 +1599,93 @@ def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
         return {"queue_enabled": is_queue_enabled(), **health}
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest worker health")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/ingest/queue-status")
+def get_social_ingest_queue_status(_: AdminUser = None) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_queue_status
+
+    try:
+        return get_queue_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch social ingest queue status")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/reddit/runs")
+async def start_reddit_refresh_run(
+    payload: RedditRefreshRunRequest,
+    background_tasks: BackgroundTasks,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.reddit_refresh import (
+        create_or_reuse_refresh_run,
+        execute_refresh_run,
+        get_refresh_run,
+    )
+
+    try:
+        serialized = _serialize_reddit_refresh_payload(payload)
+        run_row = create_or_reuse_refresh_run(payload=serialized)
+        run_id = str(run_row.get("id"))
+        reused = bool(run_row.get("reused"))
+        if not reused:
+            background_tasks.add_task(execute_refresh_run, run_id)
+        run = get_refresh_run(run_id)
+        return {"run": run, "reused": reused}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to start reddit refresh run: community_id=%s season_id=%s period_key=%s",
+            payload.community_id,
+            payload.season_id,
+            payload.period_key,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/reddit/runs/{run_id}")
+async def get_reddit_refresh_run(run_id: UUID, _: AdminUser = None) -> dict[str, Any]:
+    from trr_backend.repositories.reddit_refresh import get_refresh_run
+
+    try:
+        return get_refresh_run(str(run_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch reddit refresh run: run_id=%s", run_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/reddit/cache")
+async def get_reddit_cached_period_payload(
+    community_id: UUID = Query(...),
+    season_id: UUID = Query(...),
+    period_key: str = Query(..., min_length=1, max_length=160),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.reddit_refresh import get_cached_period_payload
+
+    try:
+        payload = get_cached_period_payload(
+            community_id=str(community_id),
+            season_id=str(season_id),
+            period_key=period_key.strip(),
+        )
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Cached reddit payload not found")
+        return {"discovery": payload}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch cached reddit payload: community_id=%s season_id=%s period_key=%s",
+            community_id,
+            season_id,
+            period_key,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1628,7 +1901,9 @@ async def get_season_analytics_week_detail(
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
     timezone: str = Query(default="America/New_York"),
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
-    max_comments_per_post: int = Query(default=50, ge=0, le=500),
+    max_comments_per_post: int = Query(default=25, ge=0, le=500),
+    post_limit: int = Query(default=20, ge=1, le=100),
+    post_offset: int = Query(default=0, ge=0),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_week_detail
@@ -1636,16 +1911,104 @@ async def get_season_analytics_week_detail(
     parsed_platforms = None
     if platforms and platforms.strip():
         parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
+    normalized_platforms = _normalize_target_platforms(parsed_platforms)
+    normalized_timezone = str(timezone or "").strip() or "America/New_York"
+    cache_key = _week_detail_cache_key(
+        season_id=str(season_id),
+        week_index=week_index,
+        source_scope=source_scope,
+        platforms=normalized_platforms,
+        timezone=normalized_timezone,
+        max_comments_per_post=max_comments_per_post,
+    )
+    cached_payload: dict[str, Any] | None = _get_week_detail_cached_payload(cache_key)
+    requested_end = post_limit + post_offset
 
     try:
-        return get_week_detail(
-            str(season_id),
-            week_index=week_index,
-            platforms=parsed_platforms,
-            timezone=timezone,
-            source_scope=source_scope,
-            max_comments_per_post=max_comments_per_post,
-        )
+        base_payload: dict[str, Any] | None = cached_payload
+        if base_payload is None:
+            base_payload = get_week_detail(
+                str(season_id),
+                week_index=week_index,
+                platforms=normalized_platforms,
+                timezone=normalized_timezone,
+                source_scope=source_scope,
+                max_comments_per_post=max_comments_per_post,
+                post_limit=requested_end,
+                post_offset=0,
+            )
+            _set_week_detail_cached_payload(cache_key, base_payload)
+        else:
+            cached_posts = 0
+            cached_total = 0
+            for platform_payload in (base_payload.get("platforms") or {}).values():
+                platform_posts = platform_payload.get("posts") if isinstance(platform_payload, dict) else []
+                cached_posts += len(platform_posts) if isinstance(platform_posts, list) else 0
+                cached_total += int(platform_payload.get("total_posts", len(platform_posts) if isinstance(platform_posts, list) else 0) or 0)
+
+            if requested_end > cached_posts and cached_total > cached_posts:
+                base_payload = get_week_detail(
+                    str(season_id),
+                    week_index=week_index,
+                    platforms=normalized_platforms,
+                    timezone=normalized_timezone,
+                    source_scope=source_scope,
+                    max_comments_per_post=max_comments_per_post,
+                    post_limit=requested_end,
+                    post_offset=0,
+                )
+            _set_week_detail_cached_payload(cache_key, base_payload)
+
+        base_payload = copy.deepcopy(base_payload)
+        total_posts = 0
+        all_posts: list[tuple[str, str, dict[str, Any]]] = []
+        source_index_cache: dict[str, set[str]] = {}
+        for platform_name, platform_payload in (base_payload.get("platforms") or {}).items():
+            platform_posts = platform_payload.get("posts") if isinstance(platform_payload, dict) else []
+            if isinstance(platform_posts, list):
+                for post in platform_posts:
+                    if isinstance(post, dict):
+                        source_id = str(post.get("source_id") or "").strip()
+                        post_key = f"{platform_name}:{source_id}"
+                        if post_key in source_index_cache.get(platform_name, set()):
+                            continue
+                        source_index_cache.setdefault(platform_name, set()).add(post_key)
+                        all_posts.append((str(post.get("posted_at") or ""), platform_name, post))
+            total_posts += int(platform_payload.get("total_posts", len(platform_posts) if isinstance(platform_posts, list) else 0) or 0)
+
+        all_posts.sort(key=lambda item: item[0], reverse=True)
+        page_end = post_offset + post_limit
+        page_posts = all_posts[post_offset:page_end]
+        posts_by_platform: dict[str, list[dict[str, Any]]] = {}
+        for _, platform_name, post in page_posts:
+            posts_by_platform.setdefault(platform_name, []).append(post)
+
+        if isinstance(base_payload.get("totals"), dict):
+            base_payload["totals"]["posts"] = total_posts
+
+        for platform_name, payload in (base_payload.get("platforms") or {}).items():
+            if isinstance(payload, dict):
+                payload["totals"] = payload.get("totals") or {}
+                platform_payload_posts = payload.get("posts")
+                if isinstance(payload.get("total_posts"), int):
+                    payload["totals"]["posts"] = int(payload["total_posts"] or 0)
+                elif isinstance(platform_payload_posts, list):
+                    payload["totals"]["posts"] = int(len(platform_payload_posts))
+
+        paged_payload = base_payload
+        for platform_name, payload in (paged_payload.get("platforms") or {}).items():
+            payload["posts"] = posts_by_platform.get(platform_name, [])
+            if not payload["posts"]:
+                payload["posts"] = []
+
+        paged_payload["pagination"] = {
+            "limit": post_limit,
+            "offset": post_offset,
+            "returned": len(page_posts),
+            "total": total_posts,
+            "has_more": page_end < total_posts,
+        }
+        return paged_payload
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

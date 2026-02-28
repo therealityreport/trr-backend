@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -456,6 +457,197 @@ def test_get_week_detail_endpoint_includes_additive_diagnostics(
     assert body["totals"]["saved_comments_total"] == 420
     assert body["totals"]["comments_saved_pct"] == 84.0
     assert body["diagnostics"]["run_id"] == "run-abc"
+
+
+def test_get_week_detail_endpoint_defaults_to_25_comments_and_paginated_page(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    posts = [
+        {
+            "source_id": f"p{i}",
+            "author": "bravotv",
+            "text": f"Post {i}",
+            "url": "https://instagram.com/p/abc",
+            "posted_at": (datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=i)).isoformat(),
+            "engagement": 10 + i,
+            "total_comments_available": 0,
+            "comments": [],
+            "likes": 0,
+            "comments_count": 0,
+            "views": 100,
+            "thumbnail_url": None,
+        }
+        for i in range(25)
+    ]
+    payload: dict[str, Any] = {
+        "season_id": season_id,
+        "week": {
+            "week_index": 3,
+            "label": "Week 3",
+            "start": "2025-09-30T00:00:00Z",
+            "end": "2025-10-07T00:00:00Z",
+        },
+        "platforms": {
+            "instagram": {
+                "posts": posts[:20],
+                "total_posts": 25,
+                "totals": {"posts": 20, "total_comments": 0, "total_engagement": 0},
+            }
+        },
+        "totals": {"posts": 25, "total_comments": 0, "total_engagement": 0},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"] == {
+        "limit": 20,
+        "offset": 0,
+        "returned": 20,
+        "total": 25,
+        "has_more": True,
+    }
+    assert mocked.call_count == 1
+    assert mocked.call_args.kwargs["max_comments_per_post"] == 25
+    assert mocked.call_args.kwargs["post_limit"] == 20
+    assert mocked.call_args.kwargs["post_offset"] == 0
+
+
+def test_get_week_detail_endpoint_supports_page_offset_and_de_duplicated_newest_first_order(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    posts = [
+        {
+            "source_id": f"p{i}",
+            "author": "bravotv",
+            "text": f"Post {i}",
+            "url": "https://instagram.com/p/abc",
+            "posted_at": (datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=i)).isoformat(),
+            "engagement": 10 + i,
+            "total_comments_available": 0,
+            "comments": [],
+            "likes": 0,
+            "comments_count": 0,
+            "views": 100,
+            "thumbnail_url": None,
+        }
+        for i in range(40)
+    ]
+    payload: dict[str, Any] = {
+        "season_id": season_id,
+        "week": {
+            "week_index": 3,
+            "label": "Week 3",
+            "start": "2025-09-30T00:00:00Z",
+            "end": "2025-10-07T00:00:00Z",
+        },
+        "platforms": {
+            "instagram": {
+                "posts": posts,
+                "total_posts": 40,
+                "totals": {"posts": 40, "total_comments": 0, "total_engagement": 0},
+            }
+        },
+        "totals": {"posts": 40, "total_comments": 0, "total_engagement": 0},
+    }
+
+    from api.routers import socials as socials_router
+
+    socials_router.invalidate_week_detail_cache()
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+        response_page1 = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response_page2 = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo&post_limit=20&post_offset=20",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response_page1.status_code == 200
+    assert response_page2.status_code == 200
+
+    page1 = response_page1.json()
+    page2 = response_page2.json()
+    assert page1["pagination"]["returned"] == 20
+    assert page1["pagination"]["offset"] == 0
+    assert page1["pagination"]["has_more"] is True
+    assert [post["source_id"] for post in page1["platforms"]["instagram"]["posts"]] == [f"p{i}" for i in range(39, 19, -1)]
+    assert page1["pagination"]["total"] == 40
+
+    assert page2["pagination"]["returned"] == 20
+    assert page2["pagination"]["offset"] == 20
+    assert page2["pagination"]["has_more"] is False
+    assert page2["pagination"]["total"] == 40
+    assert [post["source_id"] for post in page2["platforms"]["instagram"]["posts"]] == [f"p{i}" for i in range(19, -1, -1)]
+    assert len({post["source_id"] for post in page1["platforms"]["instagram"]["posts"]}) == 20
+    assert len({post["source_id"] for post in page2["platforms"]["instagram"]["posts"]}) == 20
+    assert mocked.call_count == 1
+
+
+def test_get_week_detail_endpoint_uses_cached_payload_when_repeating_same_page_request(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    payload: dict[str, Any] = {
+        "season_id": season_id,
+        "week": {
+            "week_index": 3,
+            "label": "Week 3",
+            "start": "2025-09-30T00:00:00Z",
+            "end": "2025-10-07T00:00:00Z",
+        },
+        "platforms": {
+            "instagram": {
+                "posts": [
+                    {"source_id": "cached-1", "posted_at": "2026-10-01T00:00:00Z"},
+                    {"source_id": "cached-2", "posted_at": "2026-09-30T00:00:00Z"},
+                    {"source_id": "cached-3", "posted_at": "2026-09-29T00:00:00Z"},
+                    {"source_id": "cached-4", "posted_at": "2026-09-28T00:00:00Z"},
+                    {"source_id": "cached-5", "posted_at": "2026-09-27T00:00:00Z"},
+                ],
+                "total_posts": 5,
+                "totals": {"posts": 5, "total_comments": 0, "total_engagement": 0},
+            }
+        },
+        "totals": {"posts": 5, "total_comments": 0, "total_engagement": 0},
+    }
+
+    from api.routers import socials as socials_router
+
+    socials_router.invalidate_week_detail_cache()
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+        response_first = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response_second = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response_first.status_code == 200
+    assert response_second.status_code == 200
+    assert mocked.call_count == 1
 
 
 def test_get_analytics_endpoint_includes_additive_week_metadata(
@@ -1158,6 +1350,69 @@ def test_get_worker_health_endpoint_returns_health_payload(
     assert body["queue_enabled"] is True
     assert body["healthy"] is True
     assert body["healthy_workers"] == 2
+
+
+def test_get_queue_status_endpoint_returns_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    expected = {
+        "queue_enabled": True,
+        "workers": {
+            "healthy": True,
+            "healthy_workers": 1,
+            "active_workers": 1,
+            "total_workers": 1,
+            "stale_after_seconds": 180,
+            "workers": [{"worker_id": "social-worker:host:1"}],
+            "reason": None,
+        },
+        "queue": {
+            "by_status": {
+                "queued": 1,
+                "pending": 0,
+                "running": 0,
+                "retrying": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "completed": 0,
+            },
+            "by_platform": {"instagram": {"queued": 1}},
+            "by_job_type": {"ingest_posts": {"queued": 1}},
+            "recent_failures": [],
+        },
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_queue_status", return_value=expected):
+        response = client.get(
+            "/api/v1/admin/socials/ingest/queue-status",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+def test_get_queue_status_endpoint_returns_500_on_unhandled_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_queue_status",
+        side_effect=RuntimeError("queue status failed"),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/ingest/queue-status",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "queue status failed"
 
 
 def test_get_comments_coverage_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
