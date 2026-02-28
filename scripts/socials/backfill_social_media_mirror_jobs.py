@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from trr_backend.db import pg
 from trr_backend.repositories import social_season_analytics as social_repo
@@ -37,7 +38,21 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit-per-platform", type=int, default=5000, help="Max scanned rows per platform")
     parser.add_argument("--failed-only", action="store_true", help="Only requeue failed/partial mirror rows")
+    parser.add_argument(
+        "--hosted-html-only",
+        action="store_true",
+        help="Only requeue rows with hosted_media_urls entries ending in .html/.htm",
+    )
     return parser.parse_args()
+
+
+def _row_has_html_hosted_media(row: dict[str, Any]) -> bool:
+    hosted_urls = social_repo._as_text_list(row.get("hosted_media_urls"))  # noqa: SLF001
+    for url in hosted_urls:
+        path = (urlparse(url).path or "").strip().lower()
+        if path.endswith(".html") or path.endswith(".htm"):
+            return True
+    return False
 
 
 def _load_rows(*, platform: str, cutoff: datetime, limit: int) -> list[dict[str, Any]]:
@@ -111,6 +126,9 @@ def main() -> int:
                 counters[platform].scanned += 1
                 mirror_status = str(row.get("media_mirror_status") or "").strip().lower()
                 if args.failed_only and mirror_status not in {"failed", "partial"}:
+                    counters[platform].skipped += 1
+                    continue
+                if args.hosted_html_only and not _row_has_html_hosted_media(row):
                     counters[platform].skipped += 1
                     continue
                 if not social_repo._platform_post_needs_media_mirror(platform, row):  # noqa: SLF001
@@ -190,6 +208,7 @@ def main() -> int:
                 "cutoff": social_repo._iso(cutoff),  # noqa: SLF001
                 "platforms": platforms,
                 "failed_only": bool(args.failed_only),
+                "hosted_html_only": bool(args.hosted_html_only),
                 "totals": {
                     "scanned": totals.scanned,
                     "queued": totals.queued,

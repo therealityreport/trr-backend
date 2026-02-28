@@ -1359,32 +1359,68 @@ def _fetch_imdb_title_fallback_metadata(
     return out
 
 
+def _normalize_show_lookup_key(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _iter_show_aliases(show_row: dict[str, Any]) -> list[str]:
+    aliases: list[str] = []
+    show_name = show_row.get("name")
+    if isinstance(show_name, str) and show_name.strip():
+        aliases.append(show_name.strip())
+    alternative_names = show_row.get("alternative_names")
+    if isinstance(alternative_names, list):
+        for alias in alternative_names:
+            if isinstance(alias, str) and alias.strip():
+                aliases.append(alias.strip())
+    return aliases
+
+
+def _build_show_lookup_maps(
+    db: SupabaseAdminClient,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    by_imdb_id: dict[str, dict[str, Any]] = {}
+    by_alias: dict[str, dict[str, Any]] = {}
+    by_show_id: dict[str, dict[str, Any]] = {}
+    try:
+        response = db.schema("core").table("shows").select("id,name,imdb_id,alternative_names").execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Show lookup bootstrap failed: %s", exc)
+        return by_imdb_id, by_alias, by_show_id
+    if hasattr(response, "error") and response.error:
+        logger.debug("Show lookup bootstrap error: %s", response.error)
+        return by_imdb_id, by_alias, by_show_id
+
+    for row in response.data or []:
+        if not isinstance(row, dict):
+            continue
+        show_id = str(row.get("id") or "").strip()
+        show_imdb_id = str(row.get("imdb_id") or "").strip()
+        if show_id:
+            by_show_id[show_id] = row
+        if show_imdb_id:
+            by_imdb_id[show_imdb_id] = row
+        for alias in _iter_show_aliases(row):
+            normalized = _normalize_show_lookup_key(alias)
+            if normalized and normalized not in by_alias:
+                by_alias[normalized] = row
+
+    return by_imdb_id, by_alias, by_show_id
+
+
 def _lookup_show_ids_by_name(db: SupabaseAdminClient, show_names: list[str]) -> dict[str, str]:
     mapping: dict[str, str] = {}
+    _, by_alias, _ = _build_show_lookup_maps(db)
     for raw_name in show_names:
         show_name = str(raw_name or "").strip()
         if not show_name or show_name in mapping:
             continue
-        try:
-            response = (
-                db.schema("core")
-                .table("shows")
-                .select("id,name")
-                .ilike("name", show_name)
-                .limit(1)
-                .execute()
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Show lookup failed show_name=%s error=%s", show_name, exc)
-            continue
-        if hasattr(response, "error") and response.error:
-            logger.debug("Show lookup error show_name=%s error=%s", show_name, response.error)
-            continue
-        data = response.data or []
-        if isinstance(data, list) and data:
-            show_id = data[0].get("id")
-            if isinstance(show_id, str) and show_id.strip():
-                mapping[show_name] = show_id.strip()
+        match = by_alias.get(_normalize_show_lookup_key(show_name))
+        show_id = str(match.get("id") or "").strip() if isinstance(match, dict) else ""
+        if show_id:
+            mapping[show_name] = show_id
     return mapping
 
 
@@ -1429,14 +1465,7 @@ def _enrich_cast_photos_with_episode_metadata(
 
     unresolved_ids = [imdb_id for imdb_id in imdb_ids if imdb_id not in episodes_by_imdb]
     imdb_fallback_by_id = _fetch_imdb_title_fallback_metadata(unresolved_ids)
-    fallback_show_names = sorted(
-        {
-            str(item.get("show_name") or "").strip()
-            for item in imdb_fallback_by_id.values()
-            if isinstance(item, dict) and str(item.get("show_name") or "").strip()
-        }
-    )
-    show_ids_by_name = _lookup_show_ids_by_name(db, fallback_show_names) if fallback_show_names else {}
+    show_lookup_by_imdb_id, show_lookup_by_alias, show_lookup_by_id = _build_show_lookup_maps(db)
 
     if not episodes_by_imdb and not imdb_fallback_by_id:
         return tagged, failed
@@ -1461,6 +1490,16 @@ def _enrich_cast_photos_with_episode_metadata(
 
         metadata = dict(row.get("metadata") or {})
         if episode:
+            episode_show_id = str(episode.get("show_id") or "").strip() or None
+            resolved_show_row = show_lookup_by_id.get(episode_show_id) if episode_show_id else None
+            resolved_show_name = (
+                str(resolved_show_row.get("name") or "").strip()
+                if isinstance(resolved_show_row, dict)
+                else str(episode.get("show_name") or "").strip()
+            ) or None
+            resolved_show_imdb_id = (
+                str(resolved_show_row.get("imdb_id") or "").strip() if isinstance(resolved_show_row, dict) else ""
+            ) or None
             metadata.update(
                 {
                     "episode_id": episode.get("id"),
@@ -1469,18 +1508,33 @@ def _enrich_cast_photos_with_episode_metadata(
                     "episode_number": episode.get("episode_number"),
                     "season_number": episode.get("season_number"),
                     "episode_air_date": episode.get("air_date"),
-                    "show_id": episode.get("show_id"),
-                    "show_name": episode.get("show_name"),
+                    "show_id": episode_show_id,
+                    "show_name": resolved_show_name,
+                    "show_imdb_id": resolved_show_imdb_id,
                     "source_created_at": episode.get("air_date"),
+                    "show_context_source": "episode_table",
                 }
             )
             if not metadata.get("show_short_code"):
-                metadata["show_short_code"] = _derive_real_housewives_short_code(
-                    str(episode.get("show_name") or "")
-                )
+                metadata["show_short_code"] = _derive_real_housewives_short_code(resolved_show_name)
         elif fallback:
             show_name = str(fallback.get("show_name") or "").strip() or None
-            fallback_show_id = show_ids_by_name.get(show_name) if show_name else None
+            show_imdb_id = str(fallback.get("show_imdb_id") or "").strip() or None
+            resolved_show_row: dict[str, Any] | None = None
+            if show_imdb_id and show_imdb_id in show_lookup_by_imdb_id:
+                resolved_show_row = show_lookup_by_imdb_id.get(show_imdb_id)
+            if not resolved_show_row and show_name:
+                resolved_show_row = show_lookup_by_alias.get(_normalize_show_lookup_key(show_name))
+            resolved_show_id = (
+                str(resolved_show_row.get("id") or "").strip() if isinstance(resolved_show_row, dict) else ""
+            ) or None
+            resolved_show_name = (
+                str(resolved_show_row.get("name") or "").strip() if isinstance(resolved_show_row, dict) else ""
+            ) or None
+            resolved_show_imdb_id = (
+                str(resolved_show_row.get("imdb_id") or "").strip() if isinstance(resolved_show_row, dict) else ""
+            ) or show_imdb_id
+            resolved_show_short_code = _derive_real_housewives_short_code(resolved_show_name or show_name)
             metadata.update(
                 {
                     "episode_imdb_id": fallback.get("episode_imdb_id"),
@@ -1488,15 +1542,20 @@ def _enrich_cast_photos_with_episode_metadata(
                     "episode_number": fallback.get("episode_number"),
                     "season_number": fallback.get("season_number"),
                     "episode_air_date": fallback.get("episode_air_date"),
-                    "show_name": show_name,
-                    "show_imdb_id": fallback.get("show_imdb_id"),
-                    "show_short_code": fallback.get("show_short_code"),
+                    "show_name": resolved_show_name,
+                    "show_imdb_id": resolved_show_imdb_id,
+                    "show_short_code": resolved_show_short_code if resolved_show_id else None,
                     "imdb_title_type": fallback.get("imdb_title_type"),
                     "source_created_at": fallback.get("episode_air_date"),
+                    "show_context_source": "imdb_title_fallback" if resolved_show_id else "imdb_episode_unresolved",
                 }
             )
-            if fallback_show_id:
-                metadata["show_id"] = fallback_show_id
+            metadata["show_id"] = resolved_show_id
+            if not resolved_show_id:
+                metadata["show_id"] = None
+                metadata["show_name"] = None
+                metadata["show_imdb_id"] = None
+                metadata["show_short_code"] = None
 
             title_names = row.get("title_names")
             if isinstance(title_names, list):
@@ -1520,6 +1579,28 @@ def _enrich_cast_photos_with_episode_metadata(
             row["season"] = season_number
         tagged += 1
     return tagged, failed
+
+
+def _is_imdb_episode_or_title_evidence(
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+) -> bool:
+    if str(row.get("source") or "").strip().lower() != "imdb":
+        return False
+    title_ids = row.get("title_imdb_ids")
+    if isinstance(title_ids, list) and any(isinstance(item, str) and item.strip() for item in title_ids):
+        return True
+    title_names = row.get("title_names")
+    if isinstance(title_names, list) and any(isinstance(item, str) and item.strip() for item in title_names):
+        return True
+    if isinstance(metadata.get("episode_imdb_id"), str) and str(metadata.get("episode_imdb_id")).strip():
+        return True
+    if isinstance(metadata.get("episode_title"), str) and str(metadata.get("episode_title")).strip():
+        return True
+    imdb_title_type = str(metadata.get("imdb_title_type") or "").strip().upper()
+    if imdb_title_type == "TVEPISODE":
+        return True
+    return False
 
 
 def _apply_show_context_to_photos(
@@ -1550,14 +1631,112 @@ def _apply_show_context_to_photos(
         metadata = dict(row.get("metadata") or {})
         before_show_id = metadata.get("show_id")
         before_show_name = metadata.get("show_name")
-        if show_id_str:
-            metadata.setdefault("show_id", show_id_str)
-        if show_name_val:
-            metadata.setdefault("show_name", show_name_val)
+        show_context_source = str(metadata.get("show_context_source") or "").strip().lower()
+
+        # Only apply requested show context when this photo has no show metadata.
+        has_show_metadata = (
+            bool(before_show_id and isinstance(before_show_id, str) and before_show_id.strip())
+            or bool(before_show_name and isinstance(before_show_name, str) and before_show_name.strip())
+        )
+        has_unresolved_imdb_episode_evidence = (
+            show_context_source == "imdb_episode_unresolved"
+            or (
+                not has_show_metadata
+                and _is_imdb_episode_or_title_evidence(row, metadata)
+            )
+        )
+        if not has_show_metadata:
+            if has_unresolved_imdb_episode_evidence:
+                row["metadata"] = metadata
+                continue
+            if show_id_str:
+                metadata["show_id"] = show_id_str
+            if show_name_val:
+                metadata["show_name"] = show_name_val
+            if metadata.get("show_id") or metadata.get("show_name"):
+                metadata["show_context_source"] = "request_context"
+
         row["metadata"] = metadata
         if metadata.get("show_id") != before_show_id or metadata.get("show_name") != before_show_name:
             tagged += 1
     return tagged, failed
+
+
+def _load_existing_imdb_cast_photos_for_person(
+    db: SupabaseAdminClient,
+    person_id: str,
+) -> list[dict[str, Any]]:
+    try:
+        response = (
+            db.schema("core")
+            .table("cast_photos")
+            .select(
+                "id,person_id,imdb_person_id,source,source_image_id,source_asset_id,source_page_url,"
+                "image_url,image_url_canonical,url,thumb_url,caption,width,height,season,context_section,"
+                "context_type,people_names,people_ids,title_names,title_imdb_ids,metadata"
+            )
+            .eq("person_id", person_id)
+            .eq("source", "imdb")
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Existing IMDb photo lookup failed person_id=%s error=%s", person_id, exc)
+        return []
+    if hasattr(response, "error") and response.error:
+        logger.warning("Existing IMDb photo lookup error person_id=%s error=%s", person_id, response.error)
+        return []
+    rows = response.data or []
+    return rows if isinstance(rows, list) else []
+
+
+def _repair_existing_imdb_cast_photos(
+    db: SupabaseAdminClient,
+    person_id: str,
+    *,
+    show_id: UUID | None,
+    show_name: str | None,
+) -> tuple[int, int]:
+    from trr_backend.repositories.cast_photos import upsert_cast_photos
+
+    rows = _load_existing_imdb_cast_photos_for_person(db, person_id)
+    if not rows:
+        return 0, 0
+
+    metadata_failures = 0
+    try:
+        _, episode_failed = _enrich_cast_photos_with_episode_metadata(db, rows)
+        metadata_failures += episode_failed
+    except Exception as exc:  # noqa: BLE001
+        metadata_failures += 1
+        logger.warning("Existing IMDb repair enrichment failed person_id=%s error=%s", person_id, exc)
+
+    try:
+        _, show_failed = _apply_show_context_to_photos(
+            db,
+            rows,
+            show_id=show_id,
+            show_name=show_name,
+        )
+        metadata_failures += show_failed
+    except Exception as exc:  # noqa: BLE001
+        metadata_failures += 1
+        logger.warning("Existing IMDb repair show-context failed person_id=%s error=%s", person_id, exc)
+
+    repair_rows = [
+        row
+        for row in rows
+        if isinstance(row.get("source_image_id"), str) and str(row.get("source_image_id")).strip()
+    ]
+    if not repair_rows:
+        return 0, metadata_failures
+
+    try:
+        upserted = upsert_cast_photos(db, repair_rows, dedupe_on="source_image_id")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Existing IMDb repair upsert failed person_id=%s error=%s", person_id, exc)
+        return 0, metadata_failures + 1
+
+    return len(upserted), metadata_failures
 
 
 def _refresh_tmdb_profile(
@@ -1968,6 +2147,27 @@ def refresh_person_images(
             logger.exception(f"Upsert error for {person_id}")
             errors.append(f"Upsert: {exc}")
 
+    # 3.5 Repair existing IMDb rows for this person so refresh is self-healing.
+    existing_imdb_rows_repaired = 0
+    try:
+        existing_imdb_rows_repaired, existing_imdb_repair_failed = _repair_existing_imdb_cast_photos(
+            db,
+            person_id_str,
+            show_id=request.show_id,
+            show_name=request.show_name,
+        )
+        metadata_enrichment_failed += existing_imdb_repair_failed
+        if existing_imdb_rows_repaired > 0:
+            logger.info(
+                "Existing IMDb rows repaired person_id=%s repaired=%s",
+                person_id_str,
+                existing_imdb_rows_repaired,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Existing IMDb repair stage failed for %s: %s", person_id, exc)
+        metadata_enrichment_failed += 1
+        errors.append(f"IMDb repair: {exc}")
+
     # 4. Mirror to S3
     cast_photos_mirrored, cast_photos_failed = 0, 0
     media_assets_mirrored, media_assets_failed = 0, 0
@@ -2153,6 +2353,7 @@ async def refresh_person_images_stream(
         show_context_tagged = 0
         metadata_enrichment_failed = 0
         photos_upserted = 0
+        existing_imdb_rows_repaired = 0
         photos_mirrored = 0
         cast_photos_mirrored = 0
         media_assets_mirrored = 0
@@ -2273,36 +2474,6 @@ async def refresh_person_images_stream(
                 if source_name and source_total is not None
                 else None
             )
-            if (
-                source_name
-                and source_total is not None
-                and mirrored_count is not None
-                and mirrored_count >= source_total
-                and not request.force_mirror
-            ):
-                processed_sources += 1
-                source_skip_details.append(
-                    {
-                        "source": source_name,
-                        "reason": "already_mirrored",
-                        "source_total": source_total,
-                        "mirrored_count": mirrored_count,
-                    }
-                )
-                yield progress(
-                    {
-                        "stage": stage,
-                        "message": f"Skipping {label} (already mirrored {mirrored_count}/{source_total}).",
-                        "current": processed_sources,
-                        "total": total_sources,
-                        "source": source_name,
-                        "skip_reason": "already_mirrored",
-                        "source_total": source_total,
-                        "mirrored_count": mirrored_count,
-                    }
-                )
-                continue
-
             yield progress(
                 {
                     "stage": stage,
@@ -2376,7 +2547,7 @@ async def refresh_person_images_stream(
                 fetch_thread = Thread(target=run_source_fetch, daemon=True)
                 fetch_thread.start()
                 while fetch_thread.is_alive():
-                    fetch_thread.join(timeout=10)
+                    fetch_thread.join(timeout=2)
                     if fetch_thread.is_alive():
                         elapsed_ms = int((time.perf_counter() - stage_started_at) * 1000)
                         yield progress(
@@ -2501,6 +2672,43 @@ async def refresh_person_images_stream(
             )
         else:
             yield progress({"stage": "upserting", "message": "No photos to upsert.", "current": 0, "total": 0})
+
+        # 3.5 Repair existing IMDb rows for this person.
+        yield progress(
+            {
+                "stage": "metadata_repair",
+                "message": "Repairing existing IMDb metadata...",
+                "current": 0,
+                "total": 1,
+            }
+        )
+        try:
+            existing_imdb_rows_repaired, repair_failed = _repair_existing_imdb_cast_photos(
+                db,
+                person_id_str,
+                show_id=request.show_id,
+                show_name=request.show_name,
+            )
+            metadata_enrichment_failed += repair_failed
+            yield progress(
+                {
+                    "stage": "metadata_repair",
+                    "message": f"Existing IMDb metadata repaired ({existing_imdb_rows_repaired} rows).",
+                    "current": 1,
+                    "total": 1,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            metadata_enrichment_failed += 1
+            errors.append(f"Metadata repair: {exc}")
+            yield progress(
+                {
+                    "stage": "metadata_repair",
+                    "message": f"Existing IMDb metadata repair failed: {exc}",
+                    "current": 1,
+                    "total": 1,
+                }
+            )
 
         # 4. Mirror
         cast_photos_mirrored, cast_photos_failed = 0, 0
@@ -3176,6 +3384,7 @@ async def refresh_person_images_stream(
             "episode_metadata_tagged": episode_metadata_tagged,
             "show_context_tagged": show_context_tagged,
             "metadata_enrichment_failed": metadata_enrichment_failed,
+            "existing_imdb_rows_repaired": existing_imdb_rows_repaired,
             "auto_counts_attempted": auto_counts_attempted,
             "auto_counts_succeeded": auto_counts_succeeded,
             "auto_counts_failed": auto_counts_failed,

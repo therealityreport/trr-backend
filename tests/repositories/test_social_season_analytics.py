@@ -88,6 +88,9 @@ def test_default_targets_include_rhoslc_aliases() -> None:
 
     defaults = _default_targets(context)
     assert defaults
+    assert {"instagram", "tiktok", "twitter", "youtube", "facebook", "threads"} <= {
+        str(item.get("platform") or "") for item in defaults
+    }
     hashtag_hit = False
     for target in defaults:
         hashtags = [str(item).lower().lstrip("#") for item in target.get("hashtags", [])]
@@ -479,6 +482,111 @@ def test_upsert_youtube_video_persists_short_flags(monkeypatch) -> None:
     assert saved["source_surface"] == "shorts"
 
 
+def test_upsert_tiktok_post_persists_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn=None):
+        del conn
+        captured["table"] = table
+        captured["payload"] = payload
+        captured["conflict_col"] = conflict_col
+        return {"id": "db-tt-1"}
+
+    monkeypatch.setattr(social_repo, "_pg_upsert", _fake_upsert)
+    monkeypatch.setattr(
+        social_repo,
+        "_platform_posts_has_column",
+        lambda platform, column: platform == "tiktok" and column in {"mentions", "media_urls"},
+    )
+
+    context = SeasonContext(
+        season_id="season-tt-upsert",
+        show_id="show-tt-upsert",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    post = SimpleNamespace(
+        video_id="tt-1",
+        username="bravotv",
+        author_nickname="BravoTV",
+        description="Tune in with @BravoTV and @bravotv #RHOSLC",
+        hashtags=[],
+        mentions=[],
+        media_urls=[],
+        likes=1,
+        comments=2,
+        shares=3,
+        views=4,
+        duration=10,
+        create_time=datetime(2026, 2, 1, tzinfo=UTC),
+        to_dict=lambda: {"video_id": "tt-1"},
+    )
+
+    payload = social_repo._upsert_tiktok_post(context, job_id="job-tt", account="bravotv", post=post)
+    assert payload == {"id": "db-tt-1"}
+    assert captured["table"] == "tiktok_posts"
+    saved = captured["payload"]
+    assert isinstance(saved, dict)
+    assert saved["mentions"] == ["@BravoTV"]
+    assert saved["hashtags"] == ["RHOSLC"]
+
+
+def test_upsert_youtube_video_persists_hashtags_and_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn=None):
+        del conn
+        captured["table"] = table
+        captured["payload"] = payload
+        captured["conflict_col"] = conflict_col
+        return {"id": "db-yt-2"}
+
+    monkeypatch.setattr(social_repo, "_pg_upsert", _fake_upsert)
+    monkeypatch.setattr(
+        social_repo,
+        "_platform_posts_has_column",
+        lambda platform, column: platform == "youtube" and column in {"hashtags", "mentions"},
+    )
+
+    context = SeasonContext(
+        season_id="season-yt-upsert",
+        show_id="show-yt-upsert",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 8, 14),
+    )
+    video = SimpleNamespace(
+        video_id="vid-hash-1",
+        channel_id="channel-1",
+        channel_title="Bravo",
+        title="RHOSLC #RHOSLC",
+        description="Feat @BravoTV",
+        duration="PT45S",
+        duration_seconds=45,
+        views=100,
+        likes=10,
+        comments=5,
+        thumbnail_url="https://img.test/short.jpg",
+        published_at=datetime(2025, 8, 14, tzinfo=UTC),
+        to_dict=lambda: {"video_id": "vid-hash-1"},
+    )
+
+    payload = social_repo._upsert_youtube_video(
+        context,
+        job_id="job-yt-upsert",
+        account="bravo",
+        video=video,
+        conn=None,
+    )
+
+    assert payload == {"id": "db-yt-2"}
+    saved = captured["payload"]
+    assert isinstance(saved, dict)
+    assert saved["hashtags"] == ["RHOSLC"]
+    assert saved["mentions"] == ["@BravoTV"]
+
+
 def test_load_instagram_cookies_prefers_env_json(monkeypatch) -> None:
     monkeypatch.setenv(
         "SOCIAL_INSTAGRAM_COOKIES_JSON",
@@ -625,6 +733,41 @@ def test_upsert_instagram_post_skips_missing_optional_columns(monkeypatch) -> No
     assert "post_format" not in payload
     assert "hosted_thumbnail_url" not in payload
     assert "hosted_media_urls" not in payload
+
+
+def test_enrich_instagram_post_preserves_existing_collaborators_when_metadata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_utc = datetime(2026, 2, 28, 12, 0, tzinfo=UTC)
+
+    metadata = SimpleNamespace(
+        taken_at=None,
+        profile_tags=None,
+        collaborators=None,
+        hashtags=None,
+        mentions=None,
+        duration_seconds=None,
+        post_format=None,
+        thumbnail_url=None,
+        media_urls=[],
+    )
+    resolution = SimpleNamespace(source="permalink_html", metadata=metadata, attempts=[])
+    monkeypatch.setattr("trr_backend.socials.instagram.resolve_instagram_media", lambda *_args, **_kwargs: resolution)
+
+    post = SimpleNamespace(
+        shortcode="abc123",
+        caption="Watch #RHOSLC with @BravoTV",
+        collaborators=["existing_collab"],
+        profile_tags=[],
+        post_type="reel",
+        media_urls=[],
+        thumbnail_url=None,
+    )
+    scraper = SimpleNamespace(session=None, cookies={})
+
+    social_repo._enrich_instagram_post_from_permalink(post=post, scraper=scraper, now_utc=now_utc)
+
+    assert post.collaborators == ["existing_collab"]
 
 
 def test_resolve_depth_defaults_respects_explicit_values_and_env_defaults(monkeypatch) -> None:
@@ -1274,7 +1417,31 @@ def test_target_accounts_by_platform_uses_direct_targets_query(monkeypatch) -> N
     monkeypatch.setattr(
         social_repo,
         "get_season_context",
-        lambda _season_id: (_ for _ in ()).throw(AssertionError("get_season_context should not be called")),
+        lambda _season_id: SeasonContext(
+            season_id=season_id,
+            show_id="show-1",
+            show_name="Test Show",
+            season_number=6,
+            anchor_date=date(2026, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_default_targets",
+        lambda _context, source_scope="bravo": [
+            {
+                "platform": "facebook",
+                "accounts": ["default_fb"],
+                "is_active": True,
+            },
+            {
+                "platform": "threads",
+                "accounts": ["default_threads"],
+                "is_active": True,
+            },
+        ]
+        if source_scope == "bravo"
+        else [],
     )
 
     payload = social_repo._target_accounts_by_platform(season_id, source_scope="bravo")
@@ -1283,6 +1450,100 @@ def test_target_accounts_by_platform_uses_direct_targets_query(monkeypatch) -> N
     assert "from social.season_targets" in str(captured["sql"]).lower()
     assert payload["youtube"] == {"bravo", "wwhl"}
     assert payload["instagram"] == set()
+    assert payload["facebook"] == {"default_fb"}
+    assert payload["threads"] == {"default_threads"}
+
+
+def test_target_accounts_by_platform_does_not_override_explicit_platform_rows(monkeypatch) -> None:
+    season_id = "season-target-accounts-explicit"
+
+    def _fake_fetch_all(_sql: str, _params: list[object]) -> list[dict[str, object]]:
+        return [
+            {"platform": "youtube", "accounts": ["bravo"], "is_active": True},
+            {"platform": "facebook", "accounts": [], "is_active": False},
+        ]
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(
+        social_repo,
+        "get_season_context",
+        lambda _season_id: SeasonContext(
+            season_id=season_id,
+            show_id="show-1",
+            show_name="Test Show",
+            season_number=6,
+            anchor_date=date(2026, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_default_targets",
+        lambda _context, source_scope="bravo": [
+            {"platform": "facebook", "accounts": ["default_fb"], "is_active": True},
+            {"platform": "threads", "accounts": ["default_threads"], "is_active": True},
+        ]
+        if source_scope == "bravo"
+        else [],
+    )
+
+    payload = social_repo._target_accounts_by_platform(season_id, source_scope="bravo")
+
+    assert payload["youtube"] == {"bravo"}
+    assert payload["facebook"] == set()
+    assert payload["threads"] == {"default_threads"}
+
+
+def test_compute_post_metadata_counts_tags_and_mentions_for_cross_platform_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_has_column(platform: str, column: str) -> bool:
+        supported = {
+            ("tiktok", "hashtags"),
+            ("tiktok", "mentions"),
+            ("youtube", "hashtags"),
+            ("youtube", "mentions"),
+            ("facebook", "hashtags"),
+            ("facebook", "mentions"),
+            ("facebook", "post_type"),
+            ("threads", "hashtags"),
+            ("threads", "mentions"),
+            ("threads", "media_type"),
+        }
+        return (platform, column) in supported
+
+    def _fake_fetch_all(sql: str, _params: list[object]) -> list[dict[str, object]]:
+        normalized = " ".join(sql.split()).lower()
+        if "from social.tiktok_posts p" in normalized:
+            return [{"total": 3, "has_caption": 3, "has_tags": 2, "has_mentions": 3}]
+        if "from social.youtube_videos p" in normalized:
+            return [{"total": 2, "has_caption": 2, "has_tags": 2, "has_mentions": 1}]
+        if "from social.facebook_posts p" in normalized:
+            return [{"total": 1, "has_caption": 1, "has_tags": 1, "has_mentions": 1, "mtype": "reel"}]
+        if "from social.meta_threads_posts p" in normalized:
+            return [{"total": 1, "has_caption": 1, "has_tags": 1, "has_mentions": 1, "mtype": "text"}]
+        return []
+
+    monkeypatch.setattr(social_repo, "_platform_posts_has_column", _fake_has_column)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    payload = social_repo._compute_post_metadata(
+        "season-1",
+        platforms=["tiktok", "youtube", "facebook", "threads"],
+        start_dt=datetime(2026, 1, 1, tzinfo=UTC),
+        end_dt=datetime(2026, 1, 8, tzinfo=UTC),
+        target_accounts_by_platform={
+            "tiktok": {"bravotv"},
+            "youtube": {"bravo"},
+            "facebook": {"bravo"},
+            "threads": {"bravotv"},
+        },
+    )
+
+    assert payload is not None
+    assert payload["total_posts"] == 7
+    assert payload["tags"]["posts_with"] == 6
+    assert payload["mentions"]["posts_with"] == 6
+    assert payload["collaborators"]["posts_with"] == 0
 
 
 def test_get_analytics_weekly_daily_activity_uses_dynamic_day_count(monkeypatch) -> None:
@@ -1998,6 +2259,8 @@ def test_get_post_comments_tiktok_includes_comment_media_and_metadata(monkeypatc
     assert payload["media_urls"] == ["https://cdn.example/tiktok.mp4"]
     assert payload["stats"]["engagement"] == 1089
     assert payload["stats"]["saves"] == 471
+    assert payload["hashtags"] == []
+    assert payload["mentions"] == []
     assert payload["total_comments_in_db"] == 1
     assert payload["comments"][0]["comment_language"] == "es"
     assert payload["comments"][0]["aweme_id"] == "6862153058223197445"
@@ -2017,10 +2280,12 @@ def test_week_detail_youtube_uses_effective_saved_comment_count(monkeypatch) -> 
                     "source_id": "vid123",
                     "author": "Bravo",
                     "title": "RHOSLC trailer",
-                    "text": "desc",
+                    "text": "desc #RHOSLC @BravoTV",
                     "views": 100,
                     "likes": 5,
                     "comments_count": 0,
+                    "hashtags": [],
+                    "mentions": [],
                     "thumbnail_url": "https://example.com/thumb.jpg",
                     "duration_seconds": 90,
                     "ts": datetime(2025, 1, 1, tzinfo=UTC),
@@ -2044,7 +2309,79 @@ def test_week_detail_youtube_uses_effective_saved_comment_count(monkeypatch) -> 
     post = payload["posts"][0]
     assert post["comments_count"] == 5
     assert post["engagement"] == 110
+    assert post["hashtags"] == ["RHOSLC"]
+    assert post["mentions"] == ["@BravoTV"]
     assert payload["totals"]["total_comments"] == 5
+
+
+def test_week_detail_facebook_includes_token_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_fetch_all(sql: str, _params: list[object]) -> list[dict[str, object]]:
+        if "from social.facebook_posts p" in sql:
+            return [
+                {
+                    "id": "fb-db-1",
+                    "source_id": "fb-1",
+                    "author": "bravo",
+                    "text": "Watch #RHOSLC with @BravoTV",
+                    "post_type": "feed",
+                    "likes": 10,
+                    "comments_count": 3,
+                    "shares": 2,
+                    "views": 20,
+                    "hashtags": [],
+                    "mentions": [],
+                    "thumbnail_url": "https://img.test/fb.jpg",
+                    "ts": datetime(2026, 1, 1, tzinfo=UTC),
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    payload = social_repo._week_detail_facebook(
+        "season-1",
+        start_dt=datetime(2026, 1, 1, tzinfo=UTC),
+        end_dt=datetime(2026, 1, 8, tzinfo=UTC),
+        account_handles={"bravo"},
+        max_comments=0,
+    )
+    post = payload["posts"][0]
+    assert post["hashtags"] == ["RHOSLC"]
+    assert post["mentions"] == ["@BravoTV"]
+
+
+def test_week_detail_threads_includes_token_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_fetch_all(sql: str, _params: list[object]) -> list[dict[str, object]]:
+        if "from social.meta_threads_posts p" in sql:
+            return [
+                {
+                    "id": "th-db-1",
+                    "source_id": "th-1",
+                    "author": "bravotv",
+                    "text": "Watch #RHOSLC with @BravoTV",
+                    "likes": 10,
+                    "replies_count": 3,
+                    "reposts": 2,
+                    "quotes": 1,
+                    "views": 20,
+                    "hashtags": [],
+                    "mentions": [],
+                    "thumbnail_url": "https://img.test/th.jpg",
+                    "ts": datetime(2026, 1, 1, tzinfo=UTC),
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    payload = social_repo._week_detail_threads(
+        "season-1",
+        start_dt=datetime(2026, 1, 1, tzinfo=UTC),
+        end_dt=datetime(2026, 1, 8, tzinfo=UTC),
+        account_handles={"bravotv"},
+        max_comments=0,
+    )
+    post = payload["posts"][0]
+    assert post["hashtags"] == ["RHOSLC"]
+    assert post["mentions"] == ["@BravoTV"]
 
 
 def test_get_post_comments_youtube_includes_thumbnail_url(monkeypatch) -> None:
@@ -2067,6 +2404,8 @@ def test_get_post_comments_youtube_includes_thumbnail_url(monkeypatch) -> None:
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda sql, params: [])
     payload = get_post_comments("season-1", platform="youtube", source_id="vid123")
     assert payload["thumbnail_url"] == "https://example.com/yt-thumb.jpg"
+    assert payload["hashtags"] == []
+    assert payload["mentions"] == []
 
 
 def test_get_post_comments_youtube_uses_effective_saved_comment_count(monkeypatch) -> None:
@@ -2129,6 +2468,56 @@ def test_get_post_comments_youtube_uses_effective_saved_comment_count(monkeypatc
     assert payload["stats"]["comments_count"] == 3
     assert payload["stats"]["engagement"] == 108
     assert payload["total_comments_in_db"] == 3
+
+
+def test_get_post_comments_facebook_includes_hashtags_and_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": "fb-db-1",
+            "source_id": "fb-1",
+            "author": "bravo",
+            "text": "Watch #RHOSLC with @BravoTV",
+            "post_type": "feed",
+            "likes": 10,
+            "comments_count": 2,
+            "shares": 1,
+            "views": 20,
+            "thumbnail_url": "https://img.test/fb.jpg",
+            "ts": datetime(2026, 1, 1, tzinfo=UTC),
+        },
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda _sql, _params: [])
+
+    payload = get_post_comments("season-1", platform="facebook", source_id="fb-1")
+    assert payload["hashtags"] == ["RHOSLC"]
+    assert payload["mentions"] == ["@BravoTV"]
+
+
+def test_get_post_comments_threads_includes_hashtags_and_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": "th-db-1",
+            "source_id": "th-1",
+            "author": "bravotv",
+            "text": "Watch #RHOSLC with @BravoTV",
+            "likes": 10,
+            "replies_count": 2,
+            "reposts": 1,
+            "quotes": 1,
+            "views": 20,
+            "thumbnail_url": "https://img.test/th.jpg",
+            "ts": datetime(2026, 1, 1, tzinfo=UTC),
+        },
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda _sql, _params: [])
+
+    payload = get_post_comments("season-1", platform="threads", source_id="th-1")
+    assert payload["hashtags"] == ["RHOSLC"]
+    assert payload["mentions"] == ["@BravoTV"]
 
 
 def test_get_post_comments_twitter_returns_separate_quotes_payload(monkeypatch) -> None:
@@ -4129,6 +4518,139 @@ def test_platform_post_needs_media_mirror_tiktok_requires_hosted_media_urls() ->
     assert social_repo._platform_post_needs_media_mirror("tiktok", post_row) is True
 
 
+def test_platform_post_needs_media_mirror_flags_non_cdn_thumbnail_host(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "fb-db-1",
+            "post_id": "post-123",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://video.test/main.mp4"],
+            "hosted_thumbnail_url": "https://trr-backend.s3.amazonaws.com/social/facebook/x/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/facebook/x/media-01.mp4"],
+            "media_mirror_status": "mirrored",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("facebook", post_row) is True
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_platform_post_needs_media_mirror_flags_non_cdn_media_host(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "yt-db-2",
+            "video_id": "video-123",
+            "thumbnail_url": "",
+            "media_urls": [],
+            "hosted_thumbnail_url": "https://cdn.test/social/youtube/x/thumb.jpg",
+            "hosted_media_urls": ["https://trr-backend.s3.amazonaws.com/social/youtube/x/media-01.mp4"],
+            "media_mirror_status": "mirrored",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("youtube", post_row) is True
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_platform_post_needs_media_mirror_flags_html_hosted_media_urls(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "tt-db-html-1",
+            "video_id": "video-123",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://video.test/main.mp4"],
+            "hosted_thumbnail_url": "https://cdn.test/social/tiktok/x/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/tiktok/x/media-01.html"],
+            "media_mirror_status": "mirrored",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("tiktok", post_row) is True
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_platform_post_needs_media_mirror_flags_page_like_hosted_media_urls(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "tt-db-page-1",
+            "video_id": "video-123",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://video.test/main.mp4"],
+            "hosted_thumbnail_url": "https://cdn.test/social/tiktok/x/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/@bravotv/video/7540327205503601933"],
+            "media_mirror_status": "mirrored",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("tiktok", post_row) is True
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_platform_post_needs_media_mirror_flags_non_video_hosted_urls_for_youtube(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "yt-db-nonvideo-1",
+            "video_id": "video-123",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://video.test/main.mp4"],
+            "hosted_thumbnail_url": "https://cdn.test/social/youtube/x/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/youtube/x/media-01.jpg"],
+            "media_mirror_status": "mirrored",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("youtube", post_row) is True
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_platform_post_needs_media_mirror_accepts_matching_cdn_hosts(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "fb-db-2",
+            "post_id": "post-456",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://video.test/main.mp4"],
+            "hosted_thumbnail_url": "https://cdn.test/social/facebook/x/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/facebook/x/media-01.mp4"],
+            "media_mirror_status": "mirrored",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("facebook", post_row) is False
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_platform_post_needs_media_mirror_ignores_failed_status_when_hosted_urls_are_complete(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "yt-db-complete-1",
+            "video_id": "video-123",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": [],
+            "hosted_thumbnail_url": "https://cdn.test/social/youtube/x/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/youtube/x/media-01.mp4"],
+            "media_mirror_status": "failed",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("youtube", post_row) is False
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
 def test_update_platform_post_media_mirror_fields_writes_hosted_media_urls_as_jsonb(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -4342,10 +4864,232 @@ def test_run_platform_media_mirror_stage_tiktok_resolves_source_media(monkeypatc
 
     assert posts == 1
     assert mirrored == 2
-    assert mirrored_inputs and mirrored_inputs[0]["media_urls"] == ["https://video.test/main.mp4"]
+    assert mirrored_inputs and mirrored_inputs[0]["media_urls"] == ["https://www.tiktok.com/@bravotv/video/tt-video-123"]
     assert metadata["mirror"]["selected_source"] == "yt_dlp_manifest"
     assert metadata["mirror"]["attempts"][0]["source"] == "yt_dlp_manifest"
     assert updates and updates[0]["media_mirror_status"] == "pending"
+
+
+def test_run_platform_media_mirror_stage_tiktok_resolves_page_like_source_media(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    post_id = "00000000-0000-0000-0000-000000000002"
+    updates: list[dict[str, object]] = []
+    mirrored_inputs: list[dict[str, object]] = []
+    resolver_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": post_id,
+            "source_id": "7540327205503601933",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://video.test/media-tokenized.bin"],
+            "raw_data": {},
+            "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+            "hosted_thumbnail_url": "https://cdn.test/social/tiktok/x/thumbnail.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/tiktok/x/media-01.html"],
+            "media_mirror_status": "pending",
+            "media_mirror_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_platform_post_media_mirror_fields",
+        lambda **kwargs: updates.append(dict(kwargs)),
+    )
+    def _fake_resolve_tiktok(**kwargs):  # noqa: ANN001
+        resolver_calls.append(dict(kwargs))
+        return {
+            "source": "yt_dlp_manifest",
+            "media_urls": ["https://video.test/main.mp4"],
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "attempts": [
+                {
+                    "source": "yt_dlp_manifest",
+                    "success": True,
+                    "reason_code": None,
+                    "http_status": None,
+                    "selected_url_count": 1,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(social_repo, "_resolve_tiktok_media_for_video_id", _fake_resolve_tiktok)
+
+    def _fake_mirror_result(_context, *, platform: str, post, week_index: int | None, display_name: str | None = None):  # noqa: ANN001
+        mirrored_inputs.append(
+            {
+                "platform": platform,
+                "week_index": week_index,
+                "thumbnail_url": post.thumbnail_url,
+                "media_urls": list(post.media_urls or []),
+            }
+        )
+        return {
+            "hosted_thumbnail_url": "https://cdn.test/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/main.mp4"],
+            "status": "mirrored",
+            "error": None,
+            "retryable_error": False,
+            "mirrored_count": 2,
+            "source_count": 2,
+        }
+
+    monkeypatch.setattr(social_repo, "_mirror_platform_media_to_s3_result", _fake_mirror_result)
+
+    posts, mirrored, metadata = social_repo._run_platform_media_mirror_stage(
+        context=context,
+        platform="tiktok",
+        job_id="job-tt-page-1",
+        config={"post_id": post_id, "_attempt_count": 1, "week_index": 1},
+    )
+
+    assert posts == 1
+    assert mirrored == 2
+    assert resolver_calls and resolver_calls[0]["allow_ytdlp"] is True
+    assert mirrored_inputs and mirrored_inputs[0]["media_urls"] == ["https://video.test/main.mp4"]
+    assert metadata["mirror"]["selected_source"] == "yt_dlp_manifest"
+    assert updates and updates[0]["media_mirror_status"] == "pending"
+
+
+def test_run_platform_media_mirror_stage_tiktok_fails_when_non_page_source_is_unresolved(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    post_id = "00000000-0000-0000-0000-000000000003"
+    updates: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": post_id,
+            "source_id": "7540327205503601933",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://video.test/media-tokenized.bin"],
+            "raw_data": {},
+            "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+            "hosted_thumbnail_url": "https://cdn.test/social/tiktok/x/thumbnail.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/tiktok/x/media-01.html"],
+            "media_mirror_status": "pending",
+            "media_mirror_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_platform_post_media_mirror_fields",
+        lambda **kwargs: updates.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_tiktok_media_for_video_id",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("resolve failed")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_mirror_platform_media_to_s3_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not mirror unresolved non-page URLs")),
+    )
+
+    posts, mirrored, metadata = social_repo._run_platform_media_mirror_stage(
+        context=context,
+        platform="tiktok",
+        job_id="job-tt-page-fail-1",
+        config={"post_id": post_id, "_attempt_count": 1, "week_index": 1},
+    )
+
+    assert posts == 1
+    assert mirrored == 0
+    assert metadata["mirror"]["status"] == "failed"
+    assert metadata["mirror"]["error"] == "tiktok_media_unresolved"
+    assert len(updates) >= 2
+    assert updates[0]["media_mirror_status"] == "pending"
+    assert updates[-1]["media_mirror_status"] == "failed"
+    assert updates[-1]["media_mirror_error"] == "tiktok_media_unresolved"
+
+
+def test_run_platform_media_mirror_stage_tiktok_uses_canonical_page_url_when_resolver_fails(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    post_id = "00000000-0000-0000-0000-000000000004"
+    mirrored_inputs: list[dict[str, object]] = []
+
+    canonical_url = "https://www.tiktok.com/@bravotv/video/7540327205503601933"
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": post_id,
+            "source_id": "7540327205503601933",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": [canonical_url],
+            "raw_data": {"url": canonical_url},
+            "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+            "hosted_thumbnail_url": "",
+            "hosted_media_urls": [],
+            "media_mirror_status": "pending",
+            "media_mirror_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_platform_post_media_mirror_fields",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_tiktok_media_for_video_id",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("resolve failed")),
+    )
+
+    def _fake_mirror_result(_context, *, platform: str, post, week_index: int | None, display_name: str | None = None):  # noqa: ANN001
+        mirrored_inputs.append(
+            {
+                "platform": platform,
+                "week_index": week_index,
+                "thumbnail_url": post.thumbnail_url,
+                "media_urls": list(post.media_urls or []),
+            }
+        )
+        return {
+            "hosted_thumbnail_url": "https://cdn.test/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/main.mp4"],
+            "status": "mirrored",
+            "error": None,
+            "retryable_error": False,
+            "mirrored_count": 2,
+            "source_count": 2,
+        }
+
+    monkeypatch.setattr(social_repo, "_mirror_platform_media_to_s3_result", _fake_mirror_result)
+
+    posts, mirrored, metadata = social_repo._run_platform_media_mirror_stage(
+        context=context,
+        platform="tiktok",
+        job_id="job-tt-page-fallback-1",
+        config={"post_id": post_id, "_attempt_count": 1, "week_index": 1},
+    )
+
+    assert posts == 1
+    assert mirrored == 2
+    assert mirrored_inputs and mirrored_inputs[0]["media_urls"] == [canonical_url]
+    assert metadata["mirror"]["status"] == "mirrored"
 
 
 def test_run_platform_media_mirror_stage_youtube_resolves_source_media(monkeypatch) -> None:
@@ -5358,7 +6102,7 @@ def test_upsert_facebook_post_falls_back_to_scraped_at_when_posted_at_missing(
     post = SimpleNamespace(
         post_id="fb-1",
         username="bravo",
-        caption="hello",
+        caption="hello #RHOSLC @BravoTV",
         post_type="reel",
         media_urls=[],
         thumbnail_url=None,
@@ -5371,6 +6115,11 @@ def test_upsert_facebook_post_falls_back_to_scraped_at_when_posted_at_missing(
     )
 
     monkeypatch.setattr(social_repo, "_now_utc", lambda: fixed_now)
+    monkeypatch.setattr(
+        social_repo,
+        "_platform_posts_has_column",
+        lambda platform, column: platform == "facebook" and column in {"hashtags", "mentions"},
+    )
 
     def _fake_pg_upsert(table: str, payload: dict[str, object], conflict_col: str, conn=None):  # noqa: ANN001
         del conn
@@ -5392,6 +6141,8 @@ def test_upsert_facebook_post_falls_back_to_scraped_at_when_posted_at_missing(
     payload = dict(captured["payload"])  # type: ignore[index]
     assert payload["posted_at"] == fixed_now
     assert payload["scraped_at"] == fixed_now
+    assert payload["hashtags"] == ["RHOSLC"]
+    assert payload["mentions"] == ["@BravoTV"]
     raw_data = dict(payload["raw_data"])  # type: ignore[index]
     assert raw_data["_ingest"]["posted_at_fallback"] == "scraped_at"  # type: ignore[index]
 
@@ -5412,7 +6163,7 @@ def test_upsert_threads_post_falls_back_to_scraped_at_when_posted_at_missing(
     post = SimpleNamespace(
         post_id="th-1",
         username="bravotv",
-        text="hello",
+        text="hello #RHOSLC @BravoTV",
         media_urls=[],
         thumbnail_url=None,
         likes=0,
@@ -5425,6 +6176,11 @@ def test_upsert_threads_post_falls_back_to_scraped_at_when_posted_at_missing(
     )
 
     monkeypatch.setattr(social_repo, "_now_utc", lambda: fixed_now)
+    monkeypatch.setattr(
+        social_repo,
+        "_platform_posts_has_column",
+        lambda platform, column: platform == "threads" and column in {"hashtags", "mentions"},
+    )
 
     def _fake_pg_upsert(table: str, payload: dict[str, object], conflict_col: str, conn=None):  # noqa: ANN001
         del conn
@@ -5446,6 +6202,8 @@ def test_upsert_threads_post_falls_back_to_scraped_at_when_posted_at_missing(
     payload = dict(captured["payload"])  # type: ignore[index]
     assert payload["posted_at"] == fixed_now
     assert payload["scraped_at"] == fixed_now
+    assert payload["hashtags"] == ["RHOSLC"]
+    assert payload["mentions"] == ["@BravoTV"]
     raw_data = dict(payload["raw_data"])  # type: ignore[index]
     assert raw_data["_ingest"]["posted_at_fallback"] == "scraped_at"  # type: ignore[index]
 
@@ -5544,6 +6302,48 @@ def test_load_twikit_credentials_accepts_storage_state_json_env(monkeypatch: pyt
     creds = social_repo._load_twikit_credentials()
 
     assert creds == {"auth_token": "token-inline", "ct0": "ct0-inline"}
+
+
+def test_load_twikit_credentials_derives_from_social_twitter_cookies_json_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {"auth_token": "twitter-token", "ct0": "twitter-ct0", "lang": "en"}
+    monkeypatch.setenv("SOCIAL_TWITTER_COOKIES_JSON", json.dumps(payload))
+    monkeypatch.delenv("TWITTER_COOKIES_JSON", raising=False)
+    monkeypatch.delenv("TWIKIT_COOKIES_JSON", raising=False)
+    monkeypatch.delenv("TWIKIT_COOKIES_FILE", raising=False)
+    monkeypatch.delenv("TWIKIT_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("TWIKIT_CT0", raising=False)
+    monkeypatch.delenv("TWIKIT_USERNAME", raising=False)
+    monkeypatch.delenv("TWIKIT_PASSWORD", raising=False)
+    monkeypatch.delenv("TWIKIT_EMAIL", raising=False)
+    monkeypatch.setattr(social_repo, "_load_twitter_browser_cookies", lambda: {})
+
+    creds = social_repo._load_twikit_credentials()
+
+    assert creds == {"auth_token": "twitter-token", "ct0": "twitter-ct0"}
+
+
+def test_load_twikit_credentials_prefers_twikit_cookie_env_over_preloaded_twitter_cookies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "TWIKIT_COOKIES_JSON",
+        json.dumps({"auth_token": "twikit-token", "ct0": "twikit-ct0"}),
+    )
+    monkeypatch.delenv("TWIKIT_COOKIES_FILE", raising=False)
+    monkeypatch.delenv("TWIKIT_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("TWIKIT_CT0", raising=False)
+    monkeypatch.delenv("TWIKIT_USERNAME", raising=False)
+    monkeypatch.delenv("TWIKIT_PASSWORD", raising=False)
+    monkeypatch.delenv("TWIKIT_EMAIL", raising=False)
+    monkeypatch.setattr(social_repo, "_load_twitter_browser_cookies", lambda: {})
+
+    creds = social_repo._load_twikit_credentials(
+        {"auth_token": "twitter-token", "ct0": "twitter-ct0"},
+    )
+
+    assert creds == {"auth_token": "twikit-token", "ct0": "twikit-ct0"}
 
 
 def test_load_twitter_auth_falls_back_to_browser_cookies(monkeypatch: pytest.MonkeyPatch) -> None:

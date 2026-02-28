@@ -1192,6 +1192,63 @@ def test_get_comments_coverage_endpoint(client: TestClient, monkeypatch: pytest.
     assert mocked.call_args.kwargs["platforms"] == ["instagram", "twitter"]
 
 
+def test_get_analytics_endpoint_accepts_facebook_threads_platform_filters(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    expected = {
+        "window": {"week": None},
+        "totals": {"posts": 0, "comments": 0},
+        "weekly": [],
+        "platforms": {},
+        "rows": [],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics"
+            "?source_scope=bravo&platforms=facebook,threads&timezone=America/New_York",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["platforms"] == ["facebook", "threads"]
+
+
+def test_get_week_detail_endpoint_returns_facebook_threads_platform_maps(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    payload = {
+        "season_id": season_id,
+        "week": {"week_index": 2, "label": "Week 2", "start": "2026-01-10T00:00:00Z", "end": "2026-01-17T00:00:00Z"},
+        "platforms": {
+            "facebook": {"posts": [], "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0}},
+            "threads": {"posts": [], "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0}},
+        },
+        "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/2?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "facebook" in body["platforms"]
+    assert "threads" in body["platforms"]
+
+
 def test_export_csv(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
     token = _make_admin_token("test-secret")
