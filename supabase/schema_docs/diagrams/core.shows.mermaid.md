@@ -48,5 +48,6 @@ erDiagram
         INT4_ARRAY tmdb_production_company_ids
         TEXT_ARRAY alternative_names
         JSONB most_recent_episode
+        TEXT slug
     }
 ```
