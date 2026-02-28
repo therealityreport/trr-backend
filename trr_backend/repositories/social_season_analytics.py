@@ -59,6 +59,9 @@ QUIET_POST_FORCE_RECHECK_AGE = timedelta(days=14)
 SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT = 180
 SOCIAL_WORKER_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 15
 SOCIAL_JOB_STALE_SECONDS_DEFAULT = 300
+SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT = 5
+SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS_DEFAULT = 5
+QUEUE_STATUS_STAGES = ("queued", "pending", "running", "retrying", "failed", "cancelled", "completed")
 SOCIAL_MEDIA_MIRROR_MAX_BYTES_DEFAULT = 50 * 1024 * 1024
 SOCIAL_MEDIA_MIRROR_CHUNK_SIZE_BYTES = 64 * 1024
 SOCIAL_MEDIA_MIRROR_DOWNLOAD_RETRIES_DEFAULT = 3
@@ -422,6 +425,10 @@ def _normalize_worker_status(status: str | None) -> str:
 
 
 _schema_ready_cache: tuple[float, bool] | None = None
+_worker_health_cache: tuple[float, int | None, dict[str, Any]] | None = None
+_worker_health_cache_lock = Lock()
+_queue_status_cache: tuple[float, int, int, dict[str, Any]] | None = None
+_queue_status_cache_lock = Lock()
 
 
 def _worker_heartbeat_schema_ready() -> bool:
@@ -443,6 +450,7 @@ def update_worker_heartbeat(
     current_job_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    global _worker_health_cache
     if not _worker_heartbeat_schema_ready():
         return None
 
@@ -499,6 +507,8 @@ def update_worker_heartbeat(
             json.dumps(metadata or {}),
         ],
     )
+    with _worker_health_cache_lock:
+        _worker_health_cache = None
     return row
 
 
@@ -518,7 +528,7 @@ def mark_worker_stopped(
     )
 
 
-def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, Any]:
+def _query_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, Any]:
     stale_seconds = stale_after_seconds or _resolve_positive_int_env(
         "SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS",
         SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT,
@@ -584,6 +594,29 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
     return payload
 
 
+def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, Any]:
+    global _worker_health_cache
+    cache_ttl_seconds = _resolve_positive_int_env(
+        "SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS",
+        SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS_DEFAULT,
+        minimum=0,
+    )
+    if cache_ttl_seconds <= 0:
+        return _query_worker_health(stale_after_seconds=stale_after_seconds)
+
+    now = time_module.monotonic()
+    with _worker_health_cache_lock:
+        if _worker_health_cache is not None:
+            cached_at, cached_stale_after, cached_payload = _worker_health_cache
+            if cached_stale_after == stale_after_seconds and (now - cached_at) < cache_ttl_seconds:
+                return copy.deepcopy(cached_payload)
+
+    payload = _query_worker_health(stale_after_seconds=stale_after_seconds)
+    with _worker_health_cache_lock:
+        _worker_health_cache = (time_module.monotonic(), stale_after_seconds, payload)
+    return copy.deepcopy(payload)
+
+
 def assert_worker_available_when_queue_enabled() -> dict[str, Any]:
     if not is_queue_enabled():
         return {
@@ -605,6 +638,186 @@ def assert_worker_available_when_queue_enabled() -> dict[str, Any]:
     else:
         message = "No healthy social ingest workers are reporting heartbeats."
     raise SocialWorkerUnavailableError(message, worker_health=health)
+
+
+def _empty_queue_status_counts() -> dict[str, int]:
+    return dict.fromkeys(QUEUE_STATUS_STAGES, 0)
+
+
+def get_queue_status(
+    *,
+    recent_failures_limit: int = 20,
+    statement_timeout_ms: int = 5000,
+) -> dict[str, Any]:
+    global _queue_status_cache
+    safe_recent_failures_limit = max(1, min(int(recent_failures_limit), 100))
+    safe_statement_timeout_ms = max(1000, min(int(statement_timeout_ms), 30000))
+    cache_ttl_seconds = _resolve_positive_int_env(
+        "SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS",
+        SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT,
+        minimum=0,
+    )
+
+    if cache_ttl_seconds > 0:
+        now = time_module.monotonic()
+        with _queue_status_cache_lock:
+            if _queue_status_cache is not None:
+                cached_at, cached_limit, cached_timeout, cached_payload = _queue_status_cache
+                if (
+                    cached_limit == safe_recent_failures_limit
+                    and cached_timeout == safe_statement_timeout_ms
+                    and (now - cached_at) < cache_ttl_seconds
+                ):
+                    return copy.deepcopy(cached_payload)
+
+    def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
+        if cache_ttl_seconds > 0:
+            with _queue_status_cache_lock:
+                _queue_status_cache = (
+                    time_module.monotonic(),
+                    safe_recent_failures_limit,
+                    safe_statement_timeout_ms,
+                    payload,
+                )
+        return copy.deepcopy(payload)
+
+    queue_payload: dict[str, Any] = {
+        "by_status": _empty_queue_status_counts(),
+        "by_platform": {},
+        "by_job_type": {},
+        "recent_failures": [],
+    }
+    errors: list[str] = []
+
+    try:
+        if not _relation_exists("social.scrape_jobs"):
+            queue_payload["error"] = "scrape_jobs_table_missing"
+            return _finalize({
+                "queue_enabled": is_queue_enabled(),
+                "workers": get_worker_health(),
+                "queue": queue_payload,
+            })
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"scrape_jobs_relation_check_failed: {exc}")
+
+    try:
+        with pg.db_connection() as conn:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
+                aggregate_rows = pg.fetch_all_with_cursor(
+                    cur,
+                    """
+                    select
+                      coalesce(platform, 'unknown') as platform,
+                      coalesce(job_type, 'unknown') as job_type,
+                      coalesce(status, 'unknown') as status,
+                      count(*)::bigint as total
+                    from social.scrape_jobs
+                    group by 1, 2, 3
+                    """,
+                )
+        by_status = _empty_queue_status_counts()
+        by_platform: dict[str, dict[str, int]] = {}
+        by_job_type: dict[str, dict[str, int]] = {}
+
+        for row in aggregate_rows:
+            status = str(row.get("status") or "unknown").strip().lower() or "unknown"
+            platform = str(row.get("platform") or "unknown").strip().lower() or "unknown"
+            job_type = str(row.get("job_type") or "unknown").strip().lower() or "unknown"
+            total = int(row.get("total") or 0)
+
+            by_status[status] = by_status.get(status, 0) + total
+            platform_bucket = by_platform.setdefault(platform, {})
+            platform_bucket[status] = int(platform_bucket.get(status) or 0) + total
+            job_type_bucket = by_job_type.setdefault(job_type, {})
+            job_type_bucket[status] = int(job_type_bucket.get(status) or 0) + total
+
+        queue_payload["by_status"] = by_status
+        queue_payload["by_platform"] = by_platform
+        queue_payload["by_job_type"] = by_job_type
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Queue status aggregate query failed: %s", exc)
+        errors.append(f"queue_aggregate_query_failed: {exc}")
+
+    try:
+        features = _scrape_jobs_features()
+        select_last_error_code = (
+            "last_error_code" if features.get("has_queue_fields") else "null::text as last_error_code"
+        )
+        select_last_error_class = (
+            "last_error_class" if features.get("has_queue_fields") else "null::text as last_error_class"
+        )
+
+        with pg.db_connection() as conn:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
+                recent_failures = pg.fetch_all_with_cursor(
+                    cur,
+                    f"""
+                    select
+                      id::text as id,
+                      platform,
+                      job_type,
+                      status,
+                      error_message,
+                      {select_last_error_code},
+                      {select_last_error_class},
+                      created_at,
+                      completed_at
+                    from social.scrape_jobs
+                    where status in ('failed', 'retrying')
+                    order by coalesce(completed_at, created_at) desc
+                    limit %s
+                    """,
+                    [safe_recent_failures_limit],
+                )
+        queue_payload["recent_failures"] = [
+            {
+                "id": str(row.get("id") or ""),
+                "platform": str(row.get("platform") or ""),
+                "job_type": str(row.get("job_type") or ""),
+                "status": str(row.get("status") or ""),
+                "error_message": str(row.get("error_message") or "") or None,
+                "last_error_code": str(row.get("last_error_code") or "") or None,
+                "last_error_class": str(row.get("last_error_class") or "") or None,
+                "created_at": _iso(_coerce_dt(row.get("created_at"))),
+                "completed_at": _iso(_coerce_dt(row.get("completed_at"))),
+            }
+            for row in recent_failures
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Queue status recent-failures query failed: %s", exc)
+        errors.append(f"queue_recent_failures_query_failed: {exc}")
+
+    if errors:
+        queue_payload["error"] = "; ".join(errors)
+
+    workers_payload: dict[str, Any]
+    try:
+        workers_payload = get_worker_health()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Queue status worker-health query failed: %s", exc)
+        errors.append(f"queue_worker_health_failed: {exc}")
+        queue_payload["error"] = "; ".join(errors)
+        workers_payload = {
+            "healthy": False,
+            "healthy_workers": 0,
+            "active_workers": 0,
+            "total_workers": 0,
+            "stale_after_seconds": _resolve_positive_int_env(
+                "SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS",
+                SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT,
+                minimum=30,
+            ),
+            "workers": [],
+            "reason": "health_query_failed",
+        }
+
+    return _finalize({
+        "queue_enabled": is_queue_enabled(),
+        "workers": workers_payload,
+        "queue": queue_payload,
+    })
 
 
 def _resolve_depth_defaults(
@@ -642,6 +855,30 @@ def _normalize_comment_refresh_policy(raw: Any) -> str:
     return normalized
 
 
+def _normalize_platform_name(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return ""
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+    tokens = [token for token in normalized.split() if token]
+    if not tokens:
+        return ""
+
+    token_aliases = {
+        "x": "twitter",
+        "ig": "instagram",
+        "insta": "instagram",
+        "fb": "facebook",
+        "meta": "facebook",
+    }
+    if tokens[0] == "meta" and len(tokens) > 1 and tokens[1] == "threads":
+        canonical = "threads"
+    else:
+        canonical = token_aliases.get(tokens[0], tokens[0])
+    return canonical
+
+
 def _normalize_comment_anchor_source_ids(
     raw: Any,
     *,
@@ -654,7 +891,7 @@ def _normalize_comment_anchor_source_ids(
     normalized: dict[str, set[str]] = {}
     overflow_platforms: list[str] = []
     for key, value in raw.items():
-        platform = str(key or "").strip().lower()
+        platform = _normalize_platform_name(key)
         if platform not in SUPPORTED_PLATFORMS:
             continue
         if allowed_platforms is not None and platform not in allowed_platforms:
@@ -682,7 +919,7 @@ def _serialize_comment_anchor_source_ids(
 
 
 def _target_source_ids_for_platform(opts: IngestOptions, platform: str) -> set[str] | None:
-    normalized_platform = (platform or "").strip().lower()
+    normalized_platform = _normalize_platform_name(platform)
     source_ids = opts.comment_anchor_source_ids or {}
     if normalized_platform not in source_ids:
         return None
@@ -2063,8 +2300,13 @@ def _create_job(
     initiated_by: str | None,
     status: str,
     priority: int = 100,
+    worker_id: str | None = None,
+    preclaim: bool = False,
     conn: Any | None = None,
 ) -> str:
+    effective_status = status
+    if preclaim and worker_id:
+        effective_status = "running"
     with pg.db_cursor(conn=conn) as cur:
         row = pg.fetch_one_with_cursor(
             cur,
@@ -2081,7 +2323,12 @@ def _create_job(
           season_id,
           source_scope,
           initiated_by,
-          metadata
+          metadata,
+          worker_id,
+          started_at,
+          claimed_at,
+          heartbeat_at,
+          attempt_count
         )
         values (
           %s,
@@ -2095,7 +2342,12 @@ def _create_job(
           %s,
           %s,
           %s,
-          %s::jsonb
+          %s::jsonb,
+          %s,
+          case when %s then now() else null end,
+          case when %s then now() else null end,
+          case when %s then now() else null end,
+          case when %s then 1 else 0 end
         )
         returning id::text
         """,
@@ -2104,13 +2356,18 @@ def _create_job(
                 platform,
                 job_type,
                 json.dumps(config),
-                status,
+                effective_status,
                 priority,
                 context.show_id,
                 context.season_id,
                 source_scope,
                 initiated_by,
                 json.dumps({"stage": stage}),
+                worker_id,
+                preclaim,
+                preclaim,
+                preclaim,
+                preclaim,
             ],
         )
     if not row:
@@ -9167,28 +9424,29 @@ def _run_platform_stage(
     job_id: str,
     config: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
+    normalized_platform = (platform or "").strip().lower()
     if stage not in {"posts", "comments", INSTAGRAM_MEDIA_MIRROR_STAGE, COMMENT_MEDIA_MIRROR_STAGE}:
         raise ValueError(f"Unsupported ingest stage: {stage}")
 
     if stage == INSTAGRAM_MEDIA_MIRROR_STAGE:
         return _run_platform_media_mirror_stage(
             context=context,
-            platform=platform,
+            platform=normalized_platform,
             job_id=job_id,
             config=dict(config or {}),
         )
     if stage == COMMENT_MEDIA_MIRROR_STAGE:
-        if platform == "tiktok":
+        if normalized_platform == "tiktok":
             return _run_tiktok_comment_media_mirror_stage(
                 context=context,
                 job_id=job_id,
                 config=dict(config or {}),
             )
-        raise ValueError(f"Unsupported comment media mirror platform: {platform}")
+        raise ValueError(f"Unsupported comment media mirror platform: {normalized_platform}")
 
     if stage == "posts":
         stage_opts = replace(opts, max_comments_per_post=0, fetch_replies=False)
-        if platform == "instagram":
+        if normalized_platform == "instagram":
             return _ingest_instagram(
                 context,
                 run_id=run_id,
@@ -9199,7 +9457,7 @@ def _run_platform_stage(
                 job_id=job_id,
                 stage=stage,
             )
-        if platform == "tiktok":
+        if normalized_platform == "tiktok":
             return _ingest_tiktok(
                 context,
                 run_id=run_id,
@@ -9210,7 +9468,7 @@ def _run_platform_stage(
                 job_id=job_id,
                 stage=stage,
             )
-        if platform == "youtube":
+        if normalized_platform == "youtube":
             return _ingest_youtube(
                 context,
                 run_id=run_id,
@@ -9221,7 +9479,7 @@ def _run_platform_stage(
                 job_id=job_id,
                 stage=stage,
             )
-        if platform == "twitter":
+        if normalized_platform == "twitter":
             return _ingest_twitter(
                 context,
                 run_id=run_id,
@@ -9234,7 +9492,7 @@ def _run_platform_stage(
                 hydrate_audience_replies=False,
                 stage=stage,
             )
-        if platform == "facebook":
+        if normalized_platform == "facebook":
             return _ingest_facebook(
                 context,
                 run_id=run_id,
@@ -9245,7 +9503,7 @@ def _run_platform_stage(
                 job_id=job_id,
                 stage=stage,
             )
-        if platform == "threads":
+        if normalized_platform == "threads":
             return _ingest_threads(
                 context,
                 run_id=run_id,
@@ -9259,7 +9517,7 @@ def _run_platform_stage(
     else:
         if opts.max_comments_per_post <= 0:
             return 0, 0, {}
-        if platform == "instagram":
+        if normalized_platform == "instagram":
             posts, comments, meta = _ingest_instagram(
                 context,
                 run_id=run_id,
@@ -9271,7 +9529,7 @@ def _run_platform_stage(
                 stage=stage,
             )
             return posts, comments, meta
-        if platform == "tiktok":
+        if normalized_platform == "tiktok":
             posts, comments, meta = _ingest_tiktok(
                 context,
                 run_id=run_id,
@@ -9283,7 +9541,7 @@ def _run_platform_stage(
                 stage=stage,
             )
             return posts, comments, meta
-        if platform == "youtube":
+        if normalized_platform == "youtube":
             posts, comments, meta = _ingest_youtube(
                 context,
                 run_id=run_id,
@@ -9295,7 +9553,7 @@ def _run_platform_stage(
                 stage=stage,
             )
             return posts, comments, meta
-        if platform == "twitter":
+        if normalized_platform == "twitter":
             posts, comments, meta = _ingest_twitter(
                 context,
                 run_id=run_id,
@@ -9309,7 +9567,7 @@ def _run_platform_stage(
                 stage=stage,
             )
             return posts, comments, meta
-        if platform == "facebook":
+        if normalized_platform == "facebook":
             posts, comments, meta = _ingest_facebook(
                 context,
                 run_id=run_id,
@@ -9321,7 +9579,7 @@ def _run_platform_stage(
                 stage=stage,
             )
             return posts, comments, meta
-        if platform == "threads":
+        if normalized_platform == "threads":
             posts, comments, meta = _ingest_threads(
                 context,
                 run_id=run_id,
@@ -9334,7 +9592,7 @@ def _run_platform_stage(
             )
             return posts, comments, meta
 
-    raise RuntimeError(f"Platform {platform} ingest is not supported")
+    raise RuntimeError(f"Platform {normalized_platform} ingest is not supported")
 
 
 def _run_platform_stage_via_crawlee(
@@ -9434,7 +9692,7 @@ def _run_platform_stage_via_crawlee(
             auth_preflight=auth_preflight,
             stage_runner=runner,
         )
-    raise RuntimeError(f"Platform {platform} ingest is not supported")
+    raise RuntimeError(f"Platform {normalized_platform} ingest is not supported")
 
 
 def _claim_next_job(
@@ -9458,6 +9716,11 @@ def _claim_next_job(
               or coalesce(config->>'stage', metadata->>'stage', job_type) = %s::text
             )
             and (%s::text is null or platform = %s::text)
+            and (
+              worker_id is null
+              or worker_id = %s::text
+              or (worker_id is not null and %s::text is not null and %s::text like worker_id || '%%')
+            )
           order by priority asc, created_at asc
           for update skip locked
           limit 1
@@ -9485,19 +9748,21 @@ def _claim_next_job(
           j.source_scope,
           j.season_id::text as season_id
         """,
-        [run_id, run_id, stage, stage, platform, platform, worker_id],
+        [run_id, run_id, stage, stage, platform, platform, worker_id, worker_id, worker_id, worker_id],
     )
 
 
 def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
     job_id = str(job.get("id") or "")
     run_id = str(job.get("run_id") or "")
-    platform = str(job.get("platform") or "")
+    platform = _normalize_platform_name(job.get("platform"))
     config = dict(job.get("config") or {})
     config["_attempt_count"] = max(1, int(job.get("attempt_count") or 1))
     config["_max_attempts"] = max(1, int(job.get("max_attempts") or 1))
     stage = str(config.get("stage") or ((job.get("metadata") or {}).get("stage")) or "posts")
     context = get_season_context(str(config.get("season_id") or job.get("season_id") or ""))
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError(f"Unsupported platform in queued job: {platform}")
     sync_strategy = str(config.get("sync_strategy") or "incremental").strip().lower()
     if sync_strategy not in SUPPORTED_SYNC_STRATEGIES:
         sync_strategy = "incremental"
@@ -9844,6 +10109,44 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
     )
 
 
+def _fetch_next_preclaimed_job(
+    *,
+    worker_id: str,
+    run_id: str,
+    stage: str | None = None,
+    platform: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch the next pre-claimed running job owned by this worker (no status change needed)."""
+    return pg.fetch_one(
+        """
+        select
+          id::text,
+          run_id::text as run_id,
+          platform,
+          job_type,
+          status,
+          config,
+          metadata,
+          attempt_count,
+          max_attempts,
+          source_scope,
+          season_id::text as season_id
+        from social.scrape_jobs
+        where status = 'running'
+          and run_id = %s::uuid
+          and worker_id = %s
+          and (
+            %s::text is null
+            or coalesce(config->>'stage', metadata->>'stage', job_type) = %s::text
+          )
+          and (%s::text is null or platform = %s::text)
+        order by priority asc, created_at asc
+        limit 1
+        """,
+        [run_id, worker_id, stage, stage, platform, platform],
+    )
+
+
 def execute_run(
     run_id: str,
     *,
@@ -9851,10 +10154,15 @@ def execute_run(
     stage: str | None = None,
     platform: str | None = None,
 ) -> dict[str, Any]:
+    platform = _normalize_platform_name(platform)
     _set_run_status(run_id, "running")
     while True:
         recover_stale_running_jobs(run_id=run_id, stage=stage, platform=platform, limit=25)
         job = _claim_next_job(worker_id=worker_id, run_id=run_id, stage=stage, platform=platform)
+        if not job and worker_id:
+            job = _fetch_next_preclaimed_job(
+                worker_id=worker_id, run_id=run_id, stage=stage, platform=platform,
+            )
         if not job:
             break
         run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
@@ -9891,6 +10199,7 @@ def execute_run(
 def process_next_queued_job(
     *, worker_id: str, stage: str | None = None, platform: str | None = None
 ) -> dict[str, Any] | None:
+    platform = _normalize_platform_name(platform)
     recover_stale_running_jobs(run_id=None, stage=stage, platform=platform, limit=25)
     job = _claim_next_job(worker_id=worker_id, run_id=None, stage=stage, platform=platform)
     if not job:
@@ -9914,6 +10223,7 @@ def ingest_season(
     comment_refresh_policy: str = DEFAULT_COMMENT_REFRESH_POLICY,
     comment_anchor_source_ids: dict[str, list[str]] | None = None,
     initiated_by: str | None,
+    inline_worker_id: str | None = None,
 ) -> dict[str, Any]:
     _assert_social_queue_schema_ready()
     context = get_season_context(season_id)
@@ -9930,7 +10240,7 @@ def ingest_season(
     if normalized_comment_refresh_policy not in SUPPORTED_COMMENT_REFRESH_POLICIES:
         raise ValueError(f"Unsupported comment refresh policy: {comment_refresh_policy}")
 
-    platform_filter = {p.strip().lower() for p in platforms or [] if isinstance(p, str) and p.strip()}
+    platform_filter = {_normalize_platform_name(p) for p in platforms or [] if isinstance(p, str) and p.strip()}
     if platform_filter:
         unsupported = platform_filter - set(SUPPORTED_PLATFORMS)
         if unsupported:
@@ -9978,12 +10288,22 @@ def ingest_season(
     )
 
     targets_payload = get_targets(season_id, source_scope=source_scope)
-    targets = [
-        target
-        for target in targets_payload.get("targets", [])
-        if target.get("is_active", True)
-        and (not platform_filter or str(target.get("platform") or "").lower() in platform_filter)
-    ]
+    targets: list[dict[str, Any]] = []
+    for target in targets_payload.get("targets", []):
+        if not target.get("is_active", True):
+            continue
+        target_platform = _normalize_platform_name(target.get("platform"))
+        if target_platform not in SUPPORTED_PLATFORMS:
+            logger.warning(
+                "Skipping ingest target with unsupported platform token: %s (season=%s source_scope=%s)",
+                target.get("platform"),
+                context.season_id,
+                source_scope,
+            )
+            continue
+        if platform_filter and target_platform not in platform_filter:
+            continue
+        targets.append(dict(target) | {"platform": target_platform})
 
     if not targets:
         return {
@@ -10028,7 +10348,7 @@ def ingest_season(
     skipped_comment_jobs = 0
 
     for target in targets:
-        platform = str(target.get("platform") or "").lower()
+        platform = str(target.get("platform") or "")
         accounts = [str(item).strip() for item in (target.get("accounts") or []) if str(item).strip()]
         target_hashtags = [
             str(item).strip().lstrip("#") for item in (target.get("hashtags") or []) if str(item).strip()
@@ -10075,6 +10395,8 @@ def ingest_season(
                         initiated_by=initiated_by,
                         status=initial_job_status,
                         priority=100,
+                        worker_id=inline_worker_id,
+                        preclaim=bool(inline_worker_id),
                     )
                 )
             if normalized_mode in {"posts_and_comments", "comments_only"} and opts.max_comments_per_post > 0:
@@ -10098,6 +10420,8 @@ def ingest_season(
                         initiated_by=initiated_by,
                         status=initial_job_status,
                         priority=200,
+                        worker_id=inline_worker_id,
+                        preclaim=bool(inline_worker_id),
                     )
                 )
 
@@ -14134,6 +14458,8 @@ def _week_detail_instagram(
     end_dt: datetime,
     account_handles: set[str],
     max_comments: int,
+    post_limit: int,
+    post_offset: int,
 ) -> dict[str, Any]:
     thumbnail_expr = _instagram_posts_thumbnail_expr("p")
     hosted_media_urls_expr = _instagram_posts_json_array_expr("p", "hosted_media_urls")
@@ -14153,9 +14479,25 @@ def _week_detail_instagram(
         if account_handles_list
         else ""
     )
-    params = [season_id, start_dt, end_dt]
+    query_params = [season_id, start_dt, end_dt]
     if account_handles_list:
-        params.append(account_handles_list)
+        query_params.append(account_handles_list)
+
+    count_rows = pg.fetch_one(
+        f"""
+        select count(*)::int as post_count
+        from social.instagram_posts p
+        where p.season_id = %s
+          and p.posted_at >= %s
+          and p.posted_at <= %s
+          {account_filter}
+        """,
+        query_params,
+    )
+    total_post_count = int((count_rows or {}).get("post_count") or 0)
+
+    effective_post_limit = max(0, post_limit + post_offset)
+    posts_params = query_params
     posts = pg.fetch_all(
         f"""
         select
@@ -14188,9 +14530,10 @@ def _week_detail_instagram(
           and p.posted_at >= %s
           and p.posted_at <= %s
           {account_filter}
-        order by (coalesce(p.likes, 0) + coalesce(p.comments_count, 0) + coalesce(p.views, 0)) desc
+        order by p.posted_at desc
+        {"" if effective_post_limit <= 0 else f"limit {effective_post_limit}"}
         """,
-        params,
+        posts_params,
     )
 
     post_ids = [p["id"] for p in posts]
@@ -14322,6 +14665,7 @@ def _week_detail_instagram(
 
     return {
         "posts": result_posts,
+        "total_posts": total_post_count,
         "totals": {
             "posts": len(result_posts),
             "total_comments": total_comments_count,
@@ -14340,6 +14684,8 @@ def _week_detail_tiktok(
     end_dt: datetime,
     account_handles: set[str],
     max_comments: int,
+    post_limit: int = 20,
+    post_offset: int = 0,
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "tiktok")
     mentions_expr = (
@@ -14356,6 +14702,19 @@ def _week_detail_tiktok(
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
         params.append(account_handles_list)
+    count_rows = pg.fetch_one(
+        f"""
+        select count(*)::int as post_count
+        from social.tiktok_posts p
+        where p.season_id = %s
+          and p.posted_at >= %s
+          and p.posted_at <= %s
+          {account_filter}
+        """,
+        params,
+    )
+    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    effective_post_limit = max(0, post_limit + post_offset)
     posts = pg.fetch_all(
         f"""
         select
@@ -14378,10 +14737,8 @@ def _week_detail_tiktok(
           and p.posted_at >= %s
           and p.posted_at <= %s
           {account_filter}
-        order by (
-          coalesce(p.likes, 0) + coalesce(p.comments_count, 0)
-          + coalesce(p.shares, 0) + coalesce(p.views, 0)
-        ) desc
+        order by p.posted_at desc
+        {"" if effective_post_limit <= 0 else f"limit {effective_post_limit}"}
         """,
         params,
     )
@@ -14490,6 +14847,7 @@ def _week_detail_tiktok(
 
     return {
         "posts": result_posts,
+        "total_posts": total_post_count,
         "totals": {
             "posts": len(result_posts),
             "total_comments": total_comments_count,
@@ -14508,6 +14866,8 @@ def _week_detail_youtube(
     end_dt: datetime,
     account_handles: set[str],
     max_comments: int,
+    post_limit: int = 20,
+    post_offset: int = 0,
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("v", "youtube")
     youtube_is_short_expr = _youtube_is_short_expr("v")
@@ -14530,6 +14890,19 @@ def _week_detail_youtube(
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
         params.append(account_handles_list)
+    count_rows = pg.fetch_one(
+        f"""
+        select count(*)::int as post_count
+        from social.youtube_videos v
+        where v.season_id = %s
+          and v.published_at >= %s
+          and v.published_at <= %s
+          {account_filter}
+        """,
+        params,
+    )
+    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    effective_post_limit = max(0, post_limit + post_offset)
     posts = pg.fetch_all(
         f"""
         select
@@ -14552,7 +14925,8 @@ def _week_detail_youtube(
           and v.published_at >= %s
           and v.published_at <= %s
           {account_filter}
-        order by (coalesce(v.views, 0) + coalesce(v.likes, 0) + coalesce(v.comments_count, 0)) desc
+        order by v.published_at desc
+        {"" if effective_post_limit <= 0 else f"limit {effective_post_limit}"}
         """,
         params,
     )
@@ -14665,6 +15039,7 @@ def _week_detail_youtube(
 
     return {
         "posts": result_posts,
+        "total_posts": total_post_count,
         "totals": {
             "posts": len(result_posts),
             "total_comments": total_comments_count,
@@ -14683,6 +15058,8 @@ def _week_detail_twitter(
     end_dt: datetime,
     account_handles: set[str],
     max_comments: int,
+    post_limit: int = 20,
+    post_offset: int = 0,
 ) -> dict[str, Any]:
     """Twitter week detail with optional recursive reply chains for scoped accounts."""
     thumbnail_expr = _platform_thumbnail_expr("t", "twitter")
@@ -14696,6 +15073,20 @@ def _week_detail_twitter(
     posts_params = [season_id, start_dt, end_dt]
     if account_handles_list:
         posts_params.append(account_handles_list)
+    count_rows = pg.fetch_one(
+        f"""
+        select count(*)::int as post_count
+        from social.twitter_tweets t
+        where t.season_id = %s
+          and t.is_reply = false
+          and t.created_at >= %s
+          and t.created_at <= %s
+          {account_filter}
+        """,
+        posts_params,
+    )
+    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    effective_post_limit = max(0, post_limit + post_offset)
 
     posts = pg.fetch_all(
         f"""
@@ -14723,10 +15114,8 @@ def _week_detail_twitter(
           and t.created_at >= %s
           and t.created_at <= %s
           {account_filter}
-        order by (
-          coalesce(t.likes, 0) + coalesce(t.retweets, 0) + coalesce(t.replies_count, 0)
-          + coalesce(t.quotes, 0) + coalesce(t.views, 0)
-        ) desc
+        order by t.created_at desc
+        {"" if effective_post_limit <= 0 else f"limit {effective_post_limit}"}
         """,
         posts_params,
     )
@@ -14903,6 +15292,7 @@ def _week_detail_twitter(
 
     return {
         "posts": result_posts,
+        "total_posts": total_post_count,
         "totals": {
             "posts": len(result_posts),
             "total_comments": total_comments_count,
@@ -14921,6 +15311,8 @@ def _week_detail_facebook(
     end_dt: datetime,
     account_handles: set[str],
     max_comments: int,
+    post_limit: int = 20,
+    post_offset: int = 0,
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "facebook")
     hashtags_expr = (
@@ -14942,6 +15334,19 @@ def _week_detail_facebook(
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
         params.append(account_handles_list)
+    count_rows = pg.fetch_one(
+        f"""
+        select count(*)::int as post_count
+        from social.facebook_posts p
+        where p.season_id = %s
+          and p.posted_at >= %s
+          and p.posted_at <= %s
+          {account_filter}
+        """,
+        params,
+    )
+    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    effective_post_limit = max(0, post_limit + post_offset)
     posts = pg.fetch_all(
         f"""
         select
@@ -14963,12 +15368,8 @@ def _week_detail_facebook(
           and p.posted_at >= %s
           and p.posted_at <= %s
           {account_filter}
-        order by (
-          coalesce(p.likes, 0)
-          + coalesce(p.comments_count, 0)
-          + coalesce(p.shares, 0)
-          + coalesce(p.views, 0)
-        ) desc
+        order by p.posted_at desc
+        {"" if effective_post_limit <= 0 else f"limit {effective_post_limit}"}
         """,
         params,
     )
@@ -15069,6 +15470,7 @@ def _week_detail_facebook(
 
     return {
         "posts": result_posts,
+        "total_posts": total_post_count,
         "totals": {
             "posts": len(result_posts),
             "total_comments": total_comments_count,
@@ -15087,6 +15489,8 @@ def _week_detail_threads(
     end_dt: datetime,
     account_handles: set[str],
     max_comments: int,
+    post_limit: int = 20,
+    post_offset: int = 0,
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "threads")
     hashtags_expr = (
@@ -15108,6 +15512,19 @@ def _week_detail_threads(
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
         params.append(account_handles_list)
+    count_rows = pg.fetch_one(
+        f"""
+        select count(*)::int as post_count
+        from social.meta_threads_posts p
+        where p.season_id = %s
+          and p.posted_at >= %s
+          and p.posted_at <= %s
+          {account_filter}
+        """,
+        params,
+    )
+    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    effective_post_limit = max(0, post_limit + post_offset)
     posts = pg.fetch_all(
         f"""
         select
@@ -15129,13 +15546,8 @@ def _week_detail_threads(
           and p.posted_at >= %s
           and p.posted_at <= %s
           {account_filter}
-        order by (
-          coalesce(p.likes, 0)
-          + coalesce(p.replies_count, 0)
-          + coalesce(p.reposts, 0)
-          + coalesce(p.quotes, 0)
-          + coalesce(p.views, 0)
-        ) desc
+        order by p.posted_at desc
+        {"" if effective_post_limit <= 0 else f"limit {effective_post_limit}"}
         """,
         params,
     )
@@ -15231,6 +15643,7 @@ def _week_detail_threads(
 
     return {
         "posts": result_posts,
+        "total_posts": total_post_count,
         "totals": {
             "posts": len(result_posts),
             "total_comments": total_comments_count,
@@ -15259,9 +15672,15 @@ def get_week_detail(
     platforms: list[str] | None,
     timezone: str,
     source_scope: str,
-    max_comments_per_post: int = 50,
+    max_comments_per_post: int = 25,
+    post_limit: int = 20,
+    post_offset: int = 0,
 ) -> dict[str, Any]:
     """Return detailed post-level data for a single week of a season."""
+    post_limit = max(0, int(post_limit))
+    if post_offset < 0:
+        post_offset = 0
+
     context = get_season_context(season_id)
     available_platforms = [p for p in (platforms or list(SUPPORTED_PLATFORMS)) if p in SUPPORTED_PLATFORMS]
     if not available_platforms:
@@ -15292,6 +15711,7 @@ def get_week_detail(
     requires_target_accounts = source_scope in {"bravo", "creator"}
 
     platform_results: dict[str, Any] = {}
+    merged_posts: list[tuple[datetime | None, str, dict[str, Any]]] = []
     grand_posts = 0
     grand_comments = 0
     grand_engagement = 0
@@ -15306,6 +15726,7 @@ def get_week_detail(
         if requires_target_accounts and not account_handles:
             result = {
                 "posts": [],
+                "total_posts": 0,
                 "totals": {
                     "posts": 0,
                     "total_comments": 0,
@@ -15320,14 +15741,47 @@ def get_week_detail(
             end_dt=end_dt,
             account_handles=account_handles,
             max_comments=max_comments_per_post,
+            post_limit=post_limit,
+            post_offset=post_offset,
         )
-        platform_results[platform] = result
+        result_total_posts = int(result.get("total_posts", len(result.get("posts") or [])) or 0)
+        platform_results[platform] = {
+            "posts": [],
+            "total_posts": result_total_posts,
+            "totals": result.get("totals", {}),
+        }
+        for post in result.get("posts") or []:
+            merged_posts.append((_coerce_dt(post.get("posted_at")), platform, post))
         totals = result.get("totals", {})
-        grand_posts += totals.get("posts", 0)
+        grand_posts += int(totals.get("posts", 0))
         grand_comments += totals.get("total_comments", 0)
         grand_engagement += totals.get("total_engagement", 0)
         grand_expected_comments += int(totals.get("expected_comments_total") or 0)
         grand_saved_comments += int(totals.get("saved_comments_total") or 0)
+
+    merged_posts.sort(
+        key=lambda item: item[0] or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+    if post_limit <= 0:
+        page_posts = merged_posts
+        page_end = len(merged_posts)
+    else:
+        page_end = post_offset + post_limit
+        page_posts = merged_posts[post_offset:page_end]
+    paged_total_posts = len(merged_posts)
+
+    posts_by_platform: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for _, platform, post in page_posts:
+        posts_by_platform[platform].append(post)
+    for platform in available_platforms:
+        if platform in platform_results:
+            platform_results[platform]["posts"] = posts_by_platform.get(platform, [])
+            if not posts_by_platform.get(platform):
+                platform_results[platform]["posts"] = []
+    grand_posts = 0
+    for platform in available_platforms:
+        grand_posts += int(platform_results.get(platform, {}).get("total_posts", 0) or 0)
 
     week_end_inclusive = window.end_local - timedelta(microseconds=1)
     latest_run = pg.fetch_one(
@@ -15359,6 +15813,13 @@ def get_week_detail(
         },
         "source_scope": source_scope,
         "platforms": platform_results,
+        "pagination": {
+            "limit": post_limit,
+            "offset": post_offset,
+            "returned": len(page_posts),
+            "total": paged_total_posts,
+            "has_more": page_end < paged_total_posts,
+        },
         "totals": {
             "posts": grand_posts,
             "total_comments": grand_comments,
