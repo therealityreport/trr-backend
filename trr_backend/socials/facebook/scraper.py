@@ -339,6 +339,8 @@ class FacebookScraper:
                 name = ""
                 if isinstance(node, dict):
                     name = str(node.get("localized_name") or "").strip()
+                    if not name:
+                        name = str(node.get("name") or "").strip()
                 if not name:
                     name = str(edge.get("localized_name") or "").strip()
                 if not name:
