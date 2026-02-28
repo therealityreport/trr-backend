@@ -484,6 +484,7 @@ class TwitterSearchRequest(BaseModel):
     date_end: datetime = Field(..., description="End date for search")
     include_replies: bool = Field(default=False, description="Include reply tweets in results")
     include_links: bool = Field(default=True, description="Include tweets with links")
+    mirror_to_s3: bool = Field(default=False, description="Mirror discovered media URLs to S3")
     delay_seconds: float = Field(default=2.0, ge=0.5, le=10.0, description="Delay between requests")
     max_pages: int | None = Field(default=None, ge=1, le=100, description="Maximum pages to fetch")
 
@@ -514,6 +515,7 @@ class TweetResponse(BaseModel):
     is_retweet: bool
     is_quote: bool
     media_urls: list[str]
+    hosted_media_urls: list[str] = Field(default_factory=list)
 
 
 class TwitterSearchResponse(BaseModel):
@@ -532,7 +534,63 @@ class TweetRepliesRequest(BaseModel):
     """Request to fetch replies for a tweet."""
 
     tweet_id: str = Field(..., description="Tweet ID to fetch replies for")
+    mirror_to_s3: bool = Field(default=False, description="Mirror discovered media URLs to S3")
     delay_seconds: float = Field(default=2.0, ge=0.5, le=10.0, description="Delay between requests")
+
+
+class TweetRepliesResponse(BaseModel):
+    """Response from tweet replies operation."""
+
+    success: bool
+    tweet_id: str
+    replies_found: int
+    replies: list[TweetResponse]
+    error: str | None = None
+
+
+class TweetQuotesRequest(BaseModel):
+    """Request to fetch quote tweets for a tweet."""
+
+    tweet_id: str = Field(..., description="Tweet ID to fetch quote tweets for")
+    mirror_to_s3: bool = Field(default=False, description="Mirror discovered media URLs to S3")
+    delay_seconds: float = Field(default=2.0, ge=0.5, le=10.0, description="Delay between requests")
+    max_pages: int = Field(default=5, ge=1, le=100, description="Maximum search pages for quote fallbacks")
+
+
+class TweetQuotesResponse(BaseModel):
+    """Response from tweet quotes operation."""
+
+    success: bool
+    tweet_id: str
+    quotes_found: int
+    quotes: list[TweetResponse]
+    source_used: str | None = None
+    failure_reason: str | None = None
+    error: str | None = None
+
+
+def _tweet_to_response(tweet: Any) -> TweetResponse:
+    return TweetResponse(
+        tweet_id=tweet.tweet_id,
+        date_time=tweet.date_time,
+        text=tweet.text,
+        hashtags=tweet.hashtags,
+        mentions=tweet.mentions,
+        likes=tweet.likes,
+        retweets=tweet.retweets,
+        replies=tweet.replies,
+        quotes=tweet.quotes,
+        views=tweet.views,
+        url=tweet.url,
+        username=tweet.username,
+        display_name=tweet.display_name,
+        user_verified=tweet.user_verified,
+        is_reply=tweet.is_reply,
+        is_retweet=tweet.is_retweet,
+        is_quote=tweet.is_quote,
+        media_urls=tweet.media_urls,
+        hosted_media_urls=getattr(tweet, "hosted_media_urls", []) or [],
+    )
 
 
 # Twitter/X Endpoints
@@ -551,7 +609,7 @@ async def search_twitter(
 
     Requires admin access (allowlist only).
     """
-    from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
+    from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper, mirror_tweet_media
 
     logger.info(f"Twitter search requested by {user.get('email')} for query: {request.query}")
 
@@ -572,37 +630,17 @@ async def search_twitter(
         from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
 
         twitter_cookies, twitter_bearer = _load_twitter_auth()
-        twikit_creds = _load_twikit_credentials()
+        twikit_creds = _load_twikit_credentials(twitter_cookies)
         scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
         tweets = scraper.scrape(config)
+        if request.mirror_to_s3:
+            mirror_tweet_media(tweets)
 
         return TwitterSearchResponse(
             success=True,
             query=request.query,
             tweets_found=len(tweets),
-            tweets=[
-                TweetResponse(
-                    tweet_id=t.tweet_id,
-                    date_time=t.date_time,
-                    text=t.text,
-                    hashtags=t.hashtags,
-                    mentions=t.mentions,
-                    likes=t.likes,
-                    retweets=t.retweets,
-                    replies=t.replies,
-                    quotes=t.quotes,
-                    views=t.views,
-                    url=t.url,
-                    username=t.username,
-                    display_name=t.display_name,
-                    user_verified=t.user_verified,
-                    is_reply=t.is_reply,
-                    is_retweet=t.is_retweet,
-                    is_quote=t.is_quote,
-                    media_urls=t.media_urls,
-                )
-                for t in tweets
-            ],
+            tweets=[_tweet_to_response(t) for t in tweets],
             search_query_used=config.build_search_query(),
             filters_applied={
                 "query": request.query,
@@ -625,17 +663,17 @@ async def search_twitter(
         )
 
 
-@router.post("/twitter/replies")
+@router.post("/twitter/replies", response_model=TweetRepliesResponse)
 async def fetch_tweet_replies(
     request: TweetRepliesRequest,
     user: AdminUser,
-) -> dict:
+) -> TweetRepliesResponse:
     """
     Fetch replies/comments for a specific tweet.
 
     Requires admin access (allowlist only).
     """
-    from trr_backend.socials.twitter import TwitterScraper
+    from trr_backend.socials.twitter import TwitterScraper, mirror_tweet_media
 
     logger.info(f"Twitter replies requested by {user.get('email')} for tweet: {request.tweet_id}")
 
@@ -643,35 +681,77 @@ async def fetch_tweet_replies(
         from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
 
         twitter_cookies, twitter_bearer = _load_twitter_auth()
-        twikit_creds = _load_twikit_credentials()
+        twikit_creds = _load_twikit_credentials(twitter_cookies)
         scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
         replies = scraper.fetch_tweet_replies(request.tweet_id, request.delay_seconds)
+        if request.mirror_to_s3:
+            mirror_tweet_media(replies)
 
-        return {
-            "success": True,
-            "tweet_id": request.tweet_id,
-            "replies_found": len(replies),
-            "replies": [
-                {
-                    "tweet_id": r.tweet_id,
-                    "date_time": r.date_time,
-                    "text": r.text,
-                    "username": r.username,
-                    "likes": r.likes,
-                    "url": r.url,
-                }
-                for r in replies
-            ],
-        }
+        return TweetRepliesResponse(
+            success=True,
+            tweet_id=request.tweet_id,
+            replies_found=len(replies),
+            replies=[_tweet_to_response(r) for r in replies],
+        )
     except Exception as e:
         logger.error(f"Twitter replies fetch failed: {e}", exc_info=True)
-        return {
-            "success": False,
-            "tweet_id": request.tweet_id,
-            "replies_found": 0,
-            "replies": [],
-            "error": str(e),
-        }
+        return TweetRepliesResponse(
+            success=False,
+            tweet_id=request.tweet_id,
+            replies_found=0,
+            replies=[],
+            error=str(e),
+        )
+
+
+@router.post("/twitter/quotes", response_model=TweetQuotesResponse)
+async def fetch_tweet_quotes(
+    request: TweetQuotesRequest,
+    user: AdminUser,
+) -> TweetQuotesResponse:
+    """
+    Fetch quote tweets for a specific tweet.
+
+    Requires admin access (allowlist only).
+    """
+    from trr_backend.socials.twitter import TwitterScraper, mirror_tweet_media
+
+    logger.info(f"Twitter quotes requested by {user.get('email')} for tweet: {request.tweet_id}")
+
+    try:
+        from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
+
+        twitter_cookies, twitter_bearer = _load_twitter_auth()
+        twikit_creds = _load_twikit_credentials(twitter_cookies)
+        scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
+        quotes = scraper.fetch_tweet_quotes(
+            request.tweet_id,
+            delay=request.delay_seconds,
+            max_pages=request.max_pages,
+        )
+        if request.mirror_to_s3:
+            mirror_tweet_media(quotes)
+
+        quote_meta = getattr(scraper, "last_quote_fetch_meta", {}) or {}
+        return TweetQuotesResponse(
+            success=True,
+            tweet_id=request.tweet_id,
+            quotes_found=len(quotes),
+            quotes=[_tweet_to_response(q) for q in quotes],
+            source_used=quote_meta.get("source_used"),
+            failure_reason=scraper.last_quote_fetch_reason or quote_meta.get("failure_reason"),
+        )
+    except Exception as e:
+        logger.error(f"Twitter quotes fetch failed: {e}", exc_info=True)
+        return TweetQuotesResponse(
+            success=False,
+            tweet_id=request.tweet_id,
+            quotes_found=0,
+            quotes=[],
+            source_used=None,
+            failure_reason=None,
+            error=str(e),
+        )
 
 
 # YouTube Models

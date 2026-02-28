@@ -98,6 +98,7 @@ class Tweet:
     reply_to_tweet_id: str | None = None
     quoted_tweet_id: str | None = None
     media_urls: list[str] = field(default_factory=list)
+    hosted_media_urls: list[str] = field(default_factory=list)
     link_preview_media_count: int = 0
     user_id: str | None = None
     user_profile_url: str | None = None
@@ -110,6 +111,65 @@ class Tweet:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def mirror_tweet_media(tweets: list[Tweet]) -> dict[str, list[str]]:
+    from trr_backend.media.s3_mirror import get_s3_bucket, get_s3_client, mirror_urls_to_s3
+
+    mirrored_by_tweet_id: dict[str, list[str]] = {}
+    if not tweets:
+        return mirrored_by_tweet_id
+
+    try:
+        s3_client = get_s3_client()
+        bucket = get_s3_bucket()
+    except Exception:
+        logger.warning("Twitter media mirroring unavailable: failed to initialize S3 client", exc_info=True)
+        for tweet in tweets:
+            tweet.hosted_media_urls = []
+            mirrored_by_tweet_id[str(tweet.tweet_id)] = []
+        return mirrored_by_tweet_id
+
+    for tweet in tweets:
+        try:
+            source_urls: list[str] = []
+            seen_source_urls: set[str] = set()
+            for value in tweet.media_urls or []:
+                candidate = str(value or "").strip()
+                if not candidate or candidate in seen_source_urls:
+                    continue
+                seen_source_urls.add(candidate)
+                source_urls.append(candidate)
+
+            if not source_urls:
+                tweet.hosted_media_urls = []
+                mirrored_by_tweet_id[str(tweet.tweet_id)] = []
+                continue
+
+            results = mirror_urls_to_s3(
+                source_urls,
+                s3_client=s3_client,
+                bucket=bucket,
+            )
+            hosted_urls: list[str] = []
+            seen_hosted_urls: set[str] = set()
+            for result in results:
+                hosted_url = str(result.hosted_url or "").strip()
+                if not hosted_url or hosted_url in seen_hosted_urls:
+                    continue
+                if result.status not in {"mirrored", "skipped"}:
+                    continue
+                seen_hosted_urls.add(hosted_url)
+                hosted_urls.append(hosted_url)
+
+            tweet.hosted_media_urls = hosted_urls
+            mirrored_by_tweet_id[str(tweet.tweet_id)] = hosted_urls
+        except Exception:
+            logger.warning("Twitter media mirroring failed for tweet_id=%s", tweet.tweet_id, exc_info=True)
+            tweet.hosted_media_urls = []
+            mirrored_by_tweet_id[str(tweet.tweet_id)] = []
+
+    return mirrored_by_tweet_id
 
 
 class TwitterScraper:
@@ -197,6 +257,8 @@ class TwitterScraper:
         self.last_retrieval_meta: dict[str, Any] = {}
         self.last_reply_fetch_reason: str | None = None
         self.last_quote_fetch_reason: str | None = None
+        self.last_quote_fetch_meta: dict[str, Any] = {}
+        self._quote_search_timeline_unavailable = False
         self.comments_auth_failed = False
 
     @staticmethod
@@ -612,10 +674,14 @@ class TwitterScraper:
                 return 0
 
         media_urls = self._extract_media_urls_from_syndication_result(payload)
+        tweet_text = str(payload.get("text") or "").strip()
         return {
             "tweet_id": normalized_id,
             "username": username,
             "display_name": str(user.get("name") or "").strip() or None,
+            "text": tweet_text or None,
+            "url": f"https://x.com/{username}/status/{normalized_id}" if username else f"https://x.com/i/status/{normalized_id}",
+            "created_at": str(payload.get("created_at") or "").strip() or None,
             "user_id": str(user.get("id_str") or user.get("id") or "").strip() or None,
             "user_profile_url": profile_url,
             "user_avatar_url": avatar_url,
@@ -942,7 +1008,7 @@ class TwitterScraper:
         return replies
 
     def _fetch_tweet_quotes_via_twikit(self, *, tweet_id: str, max_pages: int = 5, delay: float = 0.5) -> list[Tweet]:
-        query = f"conversation_id:{tweet_id} filter:quote"
+        query = f"quoted_tweet_id:{tweet_id}"
         raw_results = self._search_tweets_via_twikit(query=query, max_pages=max_pages, delay=delay)
         if not raw_results:
             return []
@@ -1448,11 +1514,122 @@ class TwitterScraper:
 
         return replies
 
-    def fetch_tweet_quotes(self, tweet_id: str, delay: float = 2.0, max_pages: int = 5) -> list[Tweet]:
-        """Fetch quote tweets for a specific root tweet."""
-        self.last_quote_fetch_reason = None
+    def _fetch_quotes_via_tweet_detail(self, tweet_id: str, delay: float) -> list[Tweet]:
+        """Fetch quote tweets using TweetDetail timeline entries."""
+        import json
+        import urllib.parse
+
         self._ensure_auth()
-        query = f"conversation_id:{tweet_id} filter:quote"
+        self._rate_limit(delay)
+
+        variables = {
+            "focalTweetId": tweet_id,
+            "with_rux_injections": False,
+            "rankingMode": "Relevance",
+            "includePromotedContent": False,
+            "withCommunity": True,
+            "withQuickPromoteEligibilityTweetFields": True,
+            "withBirdwatchNotes": True,
+            "withVoice": True,
+        }
+        features = dict(self.FEATURES)
+        features.update(self.TWEET_DETAIL_FEATURE_OVERRIDES)
+        headers = self._get_headers()
+
+        def _request(detail_features: dict[str, bool]) -> requests.Response:
+            params = {
+                "variables": json.dumps(variables),
+                "features": json.dumps(detail_features),
+            }
+            url = f"{self._tweet_detail_url}?{urllib.parse.urlencode(params)}"
+            return self.session.get(
+                url,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+
+        try:
+            response = _request(features)
+            if response.status_code == 404:
+                self._detail_hash = None
+                self._discover_graphql_hashes()
+                response = _request(features)
+            if response.status_code == 400:
+                missing_flags = self._extract_required_feature_flags(response)
+                if missing_flags:
+                    logger.info("TweetDetail requires %d additional feature flags; retrying", len(missing_flags))
+                    for flag in missing_flags:
+                        features.setdefault(flag, False)
+                    response = _request(features)
+            response.raise_for_status()
+            data = response.json()
+        except requests.exceptions.RequestException as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code is not None:
+                self._set_quote_failure_reason(f"http_{status_code}")
+            else:
+                self._set_quote_failure_reason("request_error")
+            logger.error("Tweet detail quote request failed: %s", exc)
+            return []
+
+        if not isinstance(data, dict):
+            self._set_quote_failure_reason("parse_error")
+            return []
+        if data.get("errors"):
+            self._set_quote_failure_reason("api_errors")
+
+        quotes: list[Tweet] = []
+        seen_ids: set[str] = set()
+        instructions = data.get("data", {}).get("threaded_conversation_with_injections_v2", {}).get("instructions", [])
+        for instruction in instructions:
+            if instruction.get("type") != "TimelineAddEntries":
+                continue
+            for entry in instruction.get("entries", []):
+                entry_id = str(entry.get("entryId") or "")
+                if not entry_id.startswith("tweet-"):
+                    continue
+                tweet_result = (
+                    entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                )
+                if not tweet_result:
+                    continue
+                config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
+                tweet = self._parse_tweet_result(tweet_result, config)
+                if not tweet or tweet.tweet_id == tweet_id:
+                    continue
+                if not tweet.is_quote or not tweet.quoted_tweet_id:
+                    legacy = tweet_result.get("legacy", {}) if isinstance(tweet_result, dict) else {}
+                    legacy_is_quote, legacy_quote_id = self._resolve_quote_markers(
+                        result=tweet_result if isinstance(tweet_result, dict) else {},
+                        tweet=legacy if isinstance(legacy, dict) else {},
+                    )
+                    if not tweet.is_quote and legacy_is_quote:
+                        tweet.is_quote = True
+                    if not tweet.quoted_tweet_id and legacy_quote_id:
+                        tweet.quoted_tweet_id = legacy_quote_id
+                if tweet.quoted_tweet_id and tweet.quoted_tweet_id != tweet_id:
+                    continue
+                if not tweet.is_quote and not tweet.quoted_tweet_id:
+                    continue
+                if not tweet.quoted_tweet_id:
+                    tweet.quoted_tweet_id = tweet_id
+                tweet.is_quote = True
+                if tweet.tweet_id in seen_ids:
+                    continue
+                seen_ids.add(tweet.tweet_id)
+                quotes.append(tweet)
+        if not quotes and not self.last_quote_fetch_reason:
+            self._set_quote_failure_reason("tweet_detail_no_quote_entries")
+        return quotes
+
+    def _fetch_tweet_quotes_via_search(self, *, tweet_id: str, delay: float, max_pages: int = 5) -> list[Tweet]:
+        """Fetch quote tweets using SearchTimeline with quoted_tweet_id operator."""
+        if self._quote_search_timeline_unavailable:
+            self._set_quote_failure_reason("http_404")
+            return []
+        self._ensure_auth()
+        query = f"quoted_tweet_id:{tweet_id}"
         cursor: str | None = None
         page_num = 0
         quotes: list[Tweet] = []
@@ -1471,6 +1648,8 @@ class TwitterScraper:
                     self._discover_graphql_hashes()
                     data = self._fetch_search(query, cursor, delay)
                     if not data:
+                        if self._last_graphql_status_code == 404:
+                            self._quote_search_timeline_unavailable = True
                         self._set_quote_failure_reason(
                             f"http_{int(self._last_graphql_status_code)}"
                             if self._last_graphql_status_code
@@ -1478,6 +1657,8 @@ class TwitterScraper:
                         )
                         break
                 else:
+                    if self._last_graphql_status_code == 404:
+                        self._quote_search_timeline_unavailable = True
                     self._set_quote_failure_reason(
                         f"http_{int(self._last_graphql_status_code)}"
                         if self._last_graphql_status_code
@@ -1529,7 +1710,6 @@ class TwitterScraper:
                             tweet.quoted_tweet_id = legacy_quote_id
                     if tweet.quoted_tweet_id and tweet.quoted_tweet_id != tweet_id:
                         continue
-                    # quote-search results can omit explicit quote markers; trust filter:quote query semantics.
                     if not tweet.is_quote and not tweet.quoted_tweet_id:
                         tweet.is_quote = True
                     if not tweet.quoted_tweet_id:
@@ -1546,18 +1726,80 @@ class TwitterScraper:
             if page_count == 0:
                 break
             cursor = next_cursor
+        return quotes
 
-        if not quotes and self.last_quote_fetch_reason and self._twikit_credentials:
+    def fetch_tweet_quotes(self, tweet_id: str, delay: float = 2.0, max_pages: int = 5) -> list[Tweet]:
+        """Fetch quote tweets for a specific root tweet."""
+        self.last_quote_fetch_reason = None
+        attempts: list[dict[str, Any]] = []
+        self.last_quote_fetch_meta = {
+            "tweet_id": str(tweet_id or "").strip(),
+            "attempts": attempts,
+            "source_used": None,
+            "failure_reason": None,
+        }
+        self._ensure_auth()
+
+        first_failure_reason: str | None = None
+
+        def _record_attempt(source: str, *, count: int, failure_reason: str | None, skipped: bool = False) -> None:
+            attempts.append(
+                {
+                    "source": source,
+                    "count": int(count),
+                    "failure_reason": failure_reason,
+                    "skipped": bool(skipped),
+                }
+            )
+
+        # Primary: SearchTimeline with quoted_tweet_id (has pagination, finds all quote types).
+        self.last_quote_fetch_reason = None
+        search_quotes = self._fetch_tweet_quotes_via_search(tweet_id=tweet_id, delay=delay, max_pages=max_pages)
+        search_reason = None if search_quotes else self.last_quote_fetch_reason
+        _record_attempt("search_timeline", count=len(search_quotes), failure_reason=search_reason)
+        if search_quotes:
+            self.last_quote_fetch_reason = None
+            self.last_quote_fetch_meta["source_used"] = "search_timeline"
+            self.last_quote_fetch_meta["failure_reason"] = None
+            return search_quotes
+        if search_reason:
+            first_failure_reason = search_reason
+
+        # Fallback: TweetDetail conversation thread (no pagination, reply-quotes only).
+        detail_quotes = self._fetch_quotes_via_tweet_detail(tweet_id=tweet_id, delay=delay)
+        detail_reason = None if detail_quotes else self.last_quote_fetch_reason
+        _record_attempt("tweet_detail", count=len(detail_quotes), failure_reason=detail_reason)
+        if detail_quotes:
+            self.last_quote_fetch_reason = None
+            self.last_quote_fetch_meta["source_used"] = "tweet_detail"
+            self.last_quote_fetch_meta["failure_reason"] = None
+            return detail_quotes
+        if detail_reason and not first_failure_reason:
+            first_failure_reason = detail_reason
+
+        # Tertiary: twikit authenticated search.
+        if self._twikit_credentials:
+            self.last_quote_fetch_reason = None
             twikit_quotes = self._fetch_tweet_quotes_via_twikit(
                 tweet_id=tweet_id,
                 max_pages=max_pages,
                 delay=max(delay, 0.2),
             )
+            twikit_reason = None if twikit_quotes else self.last_quote_fetch_reason
+            _record_attempt("twikit", count=len(twikit_quotes), failure_reason=twikit_reason)
             if twikit_quotes:
                 self.last_quote_fetch_reason = None
+                self.last_quote_fetch_meta["source_used"] = "twikit"
+                self.last_quote_fetch_meta["failure_reason"] = None
                 return twikit_quotes
+            if twikit_reason and not first_failure_reason:
+                first_failure_reason = twikit_reason
+        else:
+            _record_attempt("twikit", count=0, failure_reason="no_twikit_credentials", skipped=True)
 
-        return quotes
+        self.last_quote_fetch_reason = first_failure_reason
+        self.last_quote_fetch_meta["failure_reason"] = self.last_quote_fetch_reason
+        return []
 
     def _emit_progress(
         self,

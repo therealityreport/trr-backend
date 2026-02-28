@@ -55,3 +55,31 @@ def test_parse_imdb_title_page_metadata_extracts_episode_parent_series_fields() 
     assert result["series_title"] == "The Real Housewives of Beverly Hills"
     assert result["series_imdb_id"] == "tt1720601"
     assert result["episode_air_date"] == "2025-04-15"
+
+
+def test_parse_imdb_episode_metadata_falls_back_to_html_title_for_series_name() -> None:
+    html = """
+    <html>
+      <head>
+        <title>Milo Ventimiglia &amp; Alan Cumming - Watch What Happens Live with Andy Cohen - IMDb</title>
+        <script type="application/ld+json">
+          {
+            "@context":"https://schema.org",
+            "@type":"TVEpisode",
+            "name":"Milo Ventimiglia &amp; Alan Cumming",
+            "datePublished":"2023-03-15",
+            "episodeNumber":"37",
+            "partOfSeason":{"@type":"TVSeason","name":"Season 20"}
+          }
+        </script>
+      </head>
+      <body></body>
+    </html>
+    """
+
+    result = parse_imdb_title_html(html, imdb_id="tt26755932")
+
+    assert result["title"] == "Milo Ventimiglia & Alan Cumming"
+    assert result["title_type"] == "TVEpisode"
+    assert result["series_title"] == "Watch What Happens Live with Andy Cohen"
+    assert result["series_imdb_id"] is None

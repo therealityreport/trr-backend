@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import html
 import json
 import re
 import urllib.error
@@ -121,6 +122,13 @@ def _clean_title(value: str | None) -> str | None:
     text = value.strip()
     if text.endswith("- IMDb"):
         text = text[: -len("- IMDb")].strip()
+    return text or None
+
+
+def _decode_html_text(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = html.unescape(value).strip()
     return text or None
 
 
@@ -352,10 +360,64 @@ def _extract_season_number(value: Any) -> int | None:
 def _extract_part_of_series(value: Any) -> tuple[str | None, str | None]:
     if isinstance(value, Mapping):
         name = value.get("name")
-        title = name.strip() if isinstance(name, str) and name.strip() else None
+        title = _decode_html_text(name) if isinstance(name, str) else None
         imdb_id = _extract_imdb_title_id(value)
         return title, imdb_id
     return None, _extract_imdb_title_id(value)
+
+
+def _normalize_title_segment(value: str | None) -> str | None:
+    text = _decode_html_text(_clean_title(value))
+    if not text:
+        return None
+    text = re.sub(r"\s+", " ", text).strip(" -:\u2013\u2014")
+    return text or None
+
+
+def _extract_series_title_from_html_title(
+    *,
+    html_title: str | None,
+    episode_title: str | None,
+) -> str | None:
+    raw = _normalize_title_segment(html_title)
+    if not raw:
+        return None
+
+    cleaned = re.sub(r"\s*\((?:TV\s*)?Episode[^)]*\)\s*$", "", raw, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\s*\(\d{4}\)\s*$", "", cleaned).strip()
+
+    episode = _normalize_title_segment(episode_title)
+    if episode:
+        escaped_episode = re.escape(episode)
+        episode_hyphen = re.match(rf"^\s*{escaped_episode}\s*[-:]\s*(.+)$", cleaned, flags=re.IGNORECASE)
+        if episode_hyphen:
+            candidate = _normalize_title_segment(episode_hyphen.group(1))
+            if candidate and candidate.casefold() != episode.casefold():
+                return candidate
+
+        hyphen_episode = re.match(r"^\s*(.+?)\s*[-:]\s*([^-:]+)\s*$", cleaned)
+        if hyphen_episode:
+            left = _normalize_title_segment(hyphen_episode.group(1))
+            right = _normalize_title_segment(hyphen_episode.group(2))
+            if left and right:
+                if right.casefold() == episode.casefold():
+                    return left
+                if left.casefold() == episode.casefold():
+                    return right
+
+    # Common IMDb format: "<episode> - <series>"
+    direct = re.match(r"^\s*([^-:]+)\s*[-:]\s*(.+)$", cleaned)
+    if direct:
+        left = _normalize_title_segment(direct.group(1))
+        right = _normalize_title_segment(direct.group(2))
+        if left and right:
+            if episode and left.casefold() == episode.casefold():
+                return right
+            if episode and right.casefold() == episode.casefold():
+                return left
+            return right
+
+    return None
 
 
 def _extract_trailer(payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -383,9 +445,9 @@ def parse_imdb_title_html(html: str, *, imdb_id: str) -> dict[str, Any]:
     title = None
     name = primary.get("name")
     if isinstance(name, str) and name.strip():
-        title = name.strip()
+        title = _decode_html_text(name)
     if not title:
-        title = _clean_title(soup.title.get_text(" ", strip=True) if soup.title else None)
+        title = _decode_html_text(_clean_title(soup.title.get_text(" ", strip=True) if soup.title else None))
 
     description = None
     desc_value = primary.get("description")
@@ -441,6 +503,12 @@ def parse_imdb_title_html(html: str, *, imdb_id: str) -> dict[str, Any]:
     episode_number = _coerce_int(primary.get("episodeNumber"))
     season_number = _extract_season_number(primary.get("partOfSeason"))
     series_title, series_imdb_id = _extract_part_of_series(primary.get("partOfSeries"))
+    if not series_title and str(title_type_value or "").strip().upper() == "TVEPISODE":
+        series_title = _extract_series_title_from_html_title(
+            html_title=soup.title.get_text(" ", strip=True) if soup.title else None,
+            episode_title=title,
+        )
+    series_title = _decode_html_text(series_title)
 
     result = {
         "imdb_id": imdb_id,

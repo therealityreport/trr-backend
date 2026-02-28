@@ -13,7 +13,7 @@ import requests
 from trr_backend.socials.instagram.scraper import InstagramScraper
 from trr_backend.socials.instagram.scraper import ScrapeConfig as InstagramScrapeConfig
 from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
-from trr_backend.socials.twitter.scraper import Tweet, TwitterScrapeConfig, TwitterScraper
+from trr_backend.socials.twitter.scraper import Tweet, TwitterScrapeConfig, TwitterScraper, mirror_tweet_media
 from trr_backend.socials.youtube.scraper import YouTubeScrapeConfig, YouTubeScraper
 
 
@@ -798,12 +798,13 @@ def test_twitter_fetch_tweet_quotes_keeps_legacy_quote_entries(monkeypatch: pyte
         return payload
 
     monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_quotes_via_tweet_detail", lambda *args, **kwargs: [])
     monkeypatch.setattr(scraper, "_fetch_search", _fake_fetch_search)
 
     quotes = scraper.fetch_tweet_quotes("root-123", delay=0, max_pages=1)
 
     assert len(quotes) == 1
-    assert captured_queries[0] == "conversation_id:root-123 filter:quote"
+    assert captured_queries[0] == "quoted_tweet_id:root-123"
     assert quotes[0].tweet_id == "quote-1"
     assert quotes[0].is_quote is True
     assert quotes[0].quoted_tweet_id == "root-123"
@@ -821,6 +822,7 @@ def test_twitter_fetch_tweet_quotes_sets_failure_reason_on_http_error(monkeypatc
         return None
 
     monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_quotes_via_tweet_detail", lambda *args, **kwargs: [])
     monkeypatch.setattr(scraper, "_discover_graphql_hashes", lambda: None)
     monkeypatch.setattr(scraper, "_fetch_search", _fake_fetch_search)
 
@@ -866,6 +868,7 @@ def test_twitter_fetch_tweet_quotes_falls_back_to_twikit(monkeypatch: pytest.Mon
     )
 
     monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_quotes_via_tweet_detail", lambda *args, **kwargs: [])
     monkeypatch.setattr(scraper, "_discover_graphql_hashes", lambda: None)
     monkeypatch.setattr(scraper, "_fetch_search", _fake_fetch_search)
     monkeypatch.setattr(
@@ -880,6 +883,264 @@ def test_twitter_fetch_tweet_quotes_falls_back_to_twikit(monkeypatch: pytest.Mon
     assert len(quotes) == 1
     assert quotes[0].tweet_id == "quote-77"
     assert scraper.last_quote_fetch_reason is None
+
+
+def test_twitter_fetch_tweet_quotes_prefers_search_before_tweet_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    quote = Tweet(
+        tweet_id="quote-search-1",
+        date_time="",
+        created_at=0,
+        text="quote body",
+        hashtags=[],
+        mentions=[],
+        likes=1,
+        retweets=0,
+        replies=0,
+        quotes=0,
+        views=0,
+        url="https://x.com/viewer/status/quote-search-1",
+        username="viewer",
+        display_name="Viewer",
+        user_verified=False,
+        is_reply=False,
+        is_retweet=False,
+        is_quote=True,
+        reply_to_tweet_id=None,
+        quoted_tweet_id="root-123",
+    )
+
+    detail_called = {"value": False}
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_quotes_via_tweet_detail",
+        lambda *args, **kwargs: detail_called.__setitem__("value", True) or [],
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_tweet_quotes_via_search",
+        lambda **kwargs: [quote],
+    )
+
+    quotes = scraper.fetch_tweet_quotes("root-123", delay=0, max_pages=1)
+
+    assert len(quotes) == 1
+    assert quotes[0].tweet_id == "quote-search-1"
+    assert detail_called["value"] is False
+
+
+def test_twitter_fetch_tweet_quotes_populates_source_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    quote = Tweet(
+        tweet_id="quote-detail-2",
+        date_time="",
+        created_at=0,
+        text="quote body",
+        hashtags=[],
+        mentions=[],
+        likes=1,
+        retweets=0,
+        replies=0,
+        quotes=0,
+        views=0,
+        url="https://x.com/viewer/status/quote-detail-2",
+        username="viewer",
+        display_name="Viewer",
+        user_verified=False,
+        is_reply=False,
+        is_retweet=False,
+        is_quote=True,
+        reply_to_tweet_id=None,
+        quoted_tweet_id="root-123",
+    )
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_tweet_quotes_via_search", lambda **kwargs: [])
+    monkeypatch.setattr(scraper, "_fetch_quotes_via_tweet_detail", lambda *args, **kwargs: [quote])
+
+    quotes = scraper.fetch_tweet_quotes("root-123", delay=0, max_pages=1)
+
+    assert len(quotes) == 1
+    assert scraper.last_quote_fetch_reason is None
+    assert scraper.last_quote_fetch_meta["source_used"] == "tweet_detail"
+    assert scraper.last_quote_fetch_meta["failure_reason"] is None
+    # search_timeline is attempted first (primary), then tweet_detail (fallback)
+    assert scraper.last_quote_fetch_meta["attempts"][0]["source"] == "search_timeline"
+    assert scraper.last_quote_fetch_meta["attempts"][0]["count"] == 0
+    assert scraper.last_quote_fetch_meta["attempts"][1]["source"] == "tweet_detail"
+    assert scraper.last_quote_fetch_meta["attempts"][1]["count"] == 1
+
+
+def test_twitter_fetch_tweet_quotes_caches_search_404_between_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"}, twikit_credentials={"auth_token": "a", "ct0": "b"})
+    search_calls = 0
+
+    quote = Tweet(
+        tweet_id="quote-cache-1",
+        date_time="",
+        created_at=0,
+        text="quote body",
+        hashtags=[],
+        mentions=[],
+        likes=1,
+        retweets=0,
+        replies=0,
+        quotes=0,
+        views=0,
+        url="https://x.com/viewer/status/quote-cache-1",
+        username="viewer",
+        display_name="Viewer",
+        user_verified=False,
+        is_reply=False,
+        is_retweet=False,
+        is_quote=True,
+        reply_to_tweet_id=None,
+        quoted_tweet_id="root-123",
+    )
+
+    def _fake_fetch_search(query: str, cursor: str | None = None, delay: float = 2.0) -> None:
+        del query, cursor, delay
+        nonlocal search_calls
+        search_calls += 1
+        scraper._last_graphql_status_code = 404  # noqa: SLF001
+        return None
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_quotes_via_tweet_detail", lambda *args, **kwargs: [])
+    monkeypatch.setattr(scraper, "_discover_graphql_hashes", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_search", _fake_fetch_search)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_tweet_quotes_via_twikit",
+        lambda *, tweet_id, max_pages, delay: [quote],  # noqa: ARG005
+    )
+
+    first = scraper.fetch_tweet_quotes("root-123", delay=0, max_pages=1)
+    second = scraper.fetch_tweet_quotes("root-123", delay=0, max_pages=1)
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert search_calls == 2
+    search_attempts = [a for a in scraper.last_quote_fetch_meta["attempts"] if a["source"] == "search_timeline"]
+    assert search_attempts
+    assert search_attempts[0]["failure_reason"] == "http_404"
+
+
+def test_twitter_fetch_quotes_via_tweet_detail_parses_tweet_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    scraper._detail_hash = "detail-hash"
+    scraper._search_hash = "search-hash"
+
+    payload = {
+        "data": {
+            "threaded_conversation_with_injections_v2": {
+                "instructions": [
+                    {
+                        "type": "TimelineAddEntries",
+                        "entries": [
+                            {
+                                "entryId": "tweet-root-123",
+                                "content": {
+                                    "itemContent": {
+                                        "tweet_results": {"result": {"legacy": {"id_str": "root-123"}}}
+                                    }
+                                },
+                            },
+                            {
+                                "entryId": "tweet-quote-123",
+                                "content": {
+                                    "itemContent": {
+                                        "tweet_results": {
+                                            "result": {
+                                                "__typename": "Tweet",
+                                                "legacy": {
+                                                    "id_str": "quote-123",
+                                                    "full_text": "quoted text",
+                                                    "favorite_count": 2,
+                                                    "retweet_count": 0,
+                                                    "reply_count": 0,
+                                                    "quote_count": 0,
+                                                    "created_at": "Thu Feb 13 12:34:56 +0000 2026",
+                                                    "is_quote_status": True,
+                                                    "quoted_status_id_str": "root-123",
+                                                },
+                                                "core": {
+                                                    "user_results": {
+                                                        "result": {"core": {"screen_name": "viewer", "name": "Viewer"}}
+                                                    }
+                                                },
+                                                "views": {"count": "3"},
+                                            }
+                                        }
+                                    }
+                                },
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+
+    def _fake_get(url: str, **kwargs: object) -> _FakeResponse:
+        del url, kwargs
+        return _FakeResponse(status_code=200, payload=payload)
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+
+    quotes = scraper._fetch_quotes_via_tweet_detail("root-123", delay=0)  # noqa: SLF001
+
+    assert len(quotes) == 1
+    assert quotes[0].tweet_id == "quote-123"
+    assert quotes[0].quoted_tweet_id == "root-123"
+
+
+def test_mirror_tweet_media_populates_hosted_media_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.media import s3_mirror
+
+    tweet = Tweet(
+        tweet_id="tweet-1",
+        date_time="",
+        created_at=0,
+        text="body",
+        hashtags=[],
+        mentions=[],
+        likes=0,
+        retweets=0,
+        replies=0,
+        quotes=0,
+        views=0,
+        url="https://x.com/a/status/tweet-1",
+        username="a",
+        display_name="A",
+        user_verified=False,
+        is_reply=False,
+        is_retweet=False,
+        is_quote=False,
+        media_urls=["https://video.twimg.com/vid.mp4"],
+    )
+
+    monkeypatch.setattr(s3_mirror, "get_s3_client", lambda: object())
+    monkeypatch.setattr(s3_mirror, "get_s3_bucket", lambda: "bucket")
+
+    class _Result:
+        def __init__(self, hosted_url: str, status: str):
+            self.hosted_url = hosted_url
+            self.status = status
+
+    monkeypatch.setattr(
+        s3_mirror,
+        "mirror_urls_to_s3",
+        lambda urls, **kwargs: [_Result("https://cdn.example.com/media/vid.mp4", "mirrored")],  # noqa: ARG005
+    )
+
+    mirrored = mirror_tweet_media([tweet])
+
+    assert mirrored == {"tweet-1": ["https://cdn.example.com/media/vid.mp4"]}
+    assert tweet.hosted_media_urls == ["https://cdn.example.com/media/vid.mp4"]
 
 
 def test_twitter_fetch_tweet_replies_falls_back_to_twikit(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2,6 +2,161 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-02-28) — Twitter scrape reliability + target verification + quotes API parity
+
+- Implemented auth/source reliability improvements for Twitter scraping:
+  - `_load_twikit_credentials(twitter_cookies=...)` now accepts preloaded Twitter cookies and can derive twikit cookie auth from:
+    - `SOCIAL_TWITTER_COOKIES_JSON` / `TWITTER_COOKIES_JSON`
+    - `SOCIAL_TWITTER_COOKIES_HEADER` / `TWITTER_COOKIES_HEADER`
+    - `SOCIAL_TWITTER_COOKIES_FILE` / `TWITTER_COOKIES_FILE`
+  - Missing `TWIKIT_COOKIES_FILE` now logs at debug level (non-noisy) instead of warning.
+
+- Added quote-fetch diagnostics and SearchTimeline 404 capability caching in Twitter scraper:
+  - `TwitterScraper.last_quote_fetch_meta` now records per-source attempts, chosen source, and failure reason.
+  - Quote fallback order remains `TweetDetail -> SearchTimeline -> twikit`.
+  - Quote search endpoint 404 support is cached per scraper instance to avoid repeated failing search attempts across subsequent quote calls.
+  - `fetch_public_tweet_summary(...)` now includes root `text`, canonical `url`, and `created_at` fields for CLI/API context display.
+
+- Updated Twitter CLI (`scripts/socials/twitter/scrape.py`):
+  - Switched env loading to `load_env()` for deterministic `.env` resolution.
+  - Dedicated `--replies/--quotes` mode now resolves and prints root tweet context before fetching.
+  - Fails fast with clear error when root tweet metadata cannot be resolved.
+  - `--quotes` now forwards `--max-pages` to quote fallback flow.
+  - Empty results now print source diagnostics (`attempts`, `failure_reason`).
+  - Auth loading now passes resolved cookie map into `_load_twikit_credentials(...)`.
+
+- Added admin API quotes endpoint parity:
+  - New `POST /api/v1/admin/socials/twitter/quotes`
+  - New models: `TweetQuotesRequest`, `TweetQuotesResponse`
+  - Response includes full `TweetResponse` payload with `hosted_media_urls`, plus `source_used` and `failure_reason`.
+  - Existing search/replies handlers now pass preloaded cookies into `_load_twikit_credentials(...)`.
+
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/twitter/scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_twitter_admin_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_twitter_scrape_cli.py` (new)
+
+- Validation:
+  - `pytest -q tests/repositories/test_social_season_analytics.py -k twikit` (pass; `6 passed`)
+  - `pytest -q tests/socials/test_comment_scraper_fixes.py -k "quote or mirror_tweet_media"` (pass; `9 passed`)
+  - `pytest -q tests/api/routers/test_socials_twitter_admin_routes.py -k "twitter and quotes"` (pass; `2 passed`)
+  - `pytest -q tests/scripts/test_twitter_scrape_cli.py` (pass; `3 passed`)
+  - `ruff check scripts/socials/twitter/scrape.py api/routers/socials.py trr_backend/socials/twitter/scraper.py tests/scripts/test_twitter_scrape_cli.py tests/api/routers/test_socials_twitter_admin_routes.py tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py` (pass)
+  - Manual:
+    - `.venv/bin/python -m scripts.socials.twitter.scrape --replies --tweet 1956000357282406729 --delay 0.5` (pass; root context shown; `36` replies)
+    - `.venv/bin/python -m scripts.socials.twitter.scrape --quotes --tweet 1956000357282406729 --delay 0.5 --max-pages 5` (pass; root context shown; `5` quotes via fallback)
+
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+
+## Latest Update (2026-02-28) — Twitter CLI auth source fix (.env + _load_twitter_auth)
+
+- Fixed `scripts/socials/twitter/scrape.py` auth loading so the CLI now:
+  - loads `.env` via `load_dotenv()`
+  - prefers `_load_twitter_auth()` (env-backed, including `SOCIAL_TWITTER_COOKIES_JSON`)
+  - falls back to `--cookies` file path (`twitter_cookies.json` default) only when env auth is absent
+  - passes `_load_twikit_credentials()` output into `TwitterScraper(..., twikit_credentials=...)`
+
+- File changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/twitter/scrape.py`
+
+- Validation:
+  - `ruff check scripts/socials/twitter/scrape.py` (pass)
+  - `.venv/bin/python -m scripts.socials.twitter.scrape --replies --tweet 1956000357282406729 --mirror` (pass; env auth loaded, `36` replies, hosted CDN URLs emitted)
+  - `.venv/bin/python -m scripts.socials.twitter.scrape --quotes --tweet 1956000357282406729` (pass; env auth loaded, `0` quotes for this tweet in this runtime)
+  - `curl -I https://d1fmdyqfafwim3.cloudfront.net/media/0d/0d313bff17406d24354094fa2969c149ea9ba67bb6098293de1643cfd8b3410a.mp4` (`HTTP/2 200`)
+
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-02-28) — Twitter ad-hoc media mirroring + TweetDetail-first quote fallback
+
+- Implemented generic ad-hoc media mirroring primitives for URL->S3 in `s3_mirror`:
+  - `infer_media_extension(...)`
+  - `MirrorResult`
+  - `mirror_url_to_s3(...)` (best-effort, content-addressed keying via `media/{sha[:2]}/{sha}{ext}`)
+  - `mirror_urls_to_s3(...)` (batch wrapper with per-URL isolation + in-batch dedupe)
+- Extended Twitter tweet model with hosted media support:
+  - `Tweet.hosted_media_urls`
+  - `mirror_tweet_media(tweets)` helper exported from `trr_backend.socials.twitter`
+- Upgraded quote retrieval flow:
+  - Added `_fetch_quotes_via_tweet_detail(...)`
+  - Added `_fetch_tweet_quotes_via_search(...)` helper
+  - `fetch_tweet_quotes(...)` now uses fallback order:
+    1. TweetDetail
+    2. SearchTimeline
+    3. twikit
+  - Preserves `last_quote_fetch_reason` semantics (cleared on success, retained only when no source yields quotes).
+- CLI enhancements:
+  - Added `--quotes` dedicated mode (mutually exclusive with `--replies`)
+  - Added `--mirror` to mirror media and print hosted URL summary
+- API enhancements for admin Twitter routes:
+  - `TwitterSearchRequest.mirror_to_s3`
+  - `TweetRepliesRequest.mirror_to_s3`
+  - `TweetResponse.hosted_media_urls`
+  - Added `TweetRepliesResponse` with full `TweetResponse` payload list
+  - `/admin/socials/twitter/search` and `/admin/socials/twitter/replies` now optionally mirror media when requested.
+
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/media/s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/__init__.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/twitter/scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/media/test_s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_twitter_admin_routes.py`
+
+- Validation:
+  - `ruff check trr_backend/media/s3_mirror.py trr_backend/socials/twitter/scraper.py trr_backend/socials/twitter/__init__.py scripts/socials/twitter/scrape.py api/routers/socials.py tests/media/test_s3_mirror.py tests/socials/test_comment_scraper_fixes.py tests/api/routers/test_socials_twitter_admin_routes.py` (pass)
+  - `pytest -q tests/media/test_s3_mirror.py` (pass, `47 passed`)
+  - `pytest -q tests/socials/test_comment_scraper_fixes.py -k "quote or mirror_tweet_media"` (pass, `7 passed`)
+  - `pytest -q tests/api/routers/test_socials_twitter_admin_routes.py` (pass, `4 passed`)
+
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+
+## Latest Update (2026-02-28) — Person image refresh show context overwrite + stream diagnostics
+
+- Fixed stale show metadata leakage during person image refresh:
+  - `_apply_show_context_to_photos(...)` now overwrites `metadata.show_id` / `metadata.show_name` whenever show context is supplied, instead of only setting missing values.
+  - This prevents foreign-context IMDb/TMDb/Fandom assets from remaining incorrectly tagged after a context-specific refresh.
+- Added regression coverage for overwrite behavior:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+    - `test_apply_show_context_to_photos_overwrites_existing_metadata`
+
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+
+- Validation:
+  - `./.venv/bin/ruff check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py` (pass)
+  - `./.venv/bin/pytest tests/api/routers/test_admin_person_images.py -k "apply_show_context_to_photos" -q` (pass)
+
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes
+
 ## Latest Update (2026-02-27) — TikTok Post Details now includes `stats.saves`
 
 - Added TikTok post-detail `saves` support in `get_post_comments(...)`:
@@ -5452,3 +5607,366 @@ Continuation (same session, 2026-02-27) — auto-crop/centering stabilization fo
 - validation_evidence:
   - `python3 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_image_counts.py` (pass)
   - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_image_counts_fallback.py` (pass, `7 passed`)
+
+Continuation (same session, 2026-02-28) — Facebook/YouTube hosted media URL repair + CDN guardrails.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/media/s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/repair_social_hosted_urls.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/media/test_s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_social_hosted_urls.py`
+- behavior_summary:
+  - Added CDN-host compliance guard to `_platform_post_needs_media_mirror(...)`: rows with non-empty hosted URLs on non-CDN hosts now correctly return `needs_mirror=True` (when `AWS_CDN_BASE_URL` host is configured).
+  - Hardened `AWS_CDN_BASE_URL` validation to reject direct S3 endpoints (for example `*.s3.amazonaws.com`, `s3.<region>.amazonaws.com`).
+  - Added one-time repair script `scripts/socials/repair_social_hosted_urls.py` with platform filter, optional season filter, dry-run/apply modes, and JSON summary output.
+  - Script includes a local import fallback so it runs via `python scripts/socials/repair_social_hosted_urls.py ...` without requiring manual `PYTHONPATH=.` setup.
+  - Executed controlled repair against Supabase target DB for `facebook,youtube`; rewrote legacy S3-hosted URLs to CloudFront while preserving object key paths.
+- validation_evidence:
+  - Unit tests:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/media/test_s3_mirror.py -k "cdn_base_url_rejects_s3_endpoints or cdn_base_url_rejects_placeholder"` (pass, `5 passed`)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "flags_non_cdn_thumbnail_host or flags_non_cdn_media_host or accepts_matching_cdn_hosts or youtube_requires_hosted_media_urls or tiktok_requires_hosted_media_urls"` (pass, `5 passed`)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/scripts/test_repair_social_hosted_urls.py` (pass, `5 passed`)
+  - Lint:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/media/s3_mirror.py scripts/socials/repair_social_hosted_urls.py tests/media/test_s3_mirror.py tests/scripts/test_repair_social_hosted_urls.py` (pass)
+  - DB repair execution:
+    - Baseline counts before repair:
+      - `facebook_posts media_urls_s3=10 thumb_urls_s3=10`
+      - `youtube_videos media_urls_s3=8 thumb_urls_s3=8`
+    - Dry run:
+      - `PYTHONPATH=. python scripts/socials/repair_social_hosted_urls.py --platforms facebook,youtube --dry-run`
+      - summary: `rows_needing_repair=18` (`facebook=10`, `youtube=8`)
+    - Apply:
+      - `PYTHONPATH=. python scripts/socials/repair_social_hosted_urls.py --platforms facebook,youtube --apply`
+      - summary: `rows_updated=18` (`facebook=10`, `youtube=8`)
+    - Post-check counts:
+      - `facebook_posts media_urls_s3=0 thumb_urls_s3=0`
+      - `youtube_videos media_urls_s3=0 thumb_urls_s3=0`
+    - Sample readability probes after repair:
+      - `facebook_media` => `206 image/jpeg`
+      - `facebook_thumb` => `206 image/jpeg`
+      - `youtube_media` => `206 video/mp4`
+      - `youtube_thumb` => `206 image/webp`
+- residual_risks:
+  - Existing repository-wide `ruff check` on `trr_backend/repositories/social_season_analytics.py` still reports pre-existing E501 lines outside this change scope; targeted tests/lint for modified behaviors pass.
+
+Continuation (same session, 2026-02-28) — social token parity, instagram collaborator preservation, and bravo facebook/threads recovery.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- delegation_map:
+  - role: `Design Context Owner`
+    scope: `root-cause execution for social token/display regressions`
+    deliverable: `implemented contract-safe additive backend responses and persistence updates for tiktok/youtube/facebook/threads`
+    verification_command: `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py`
+    status: `completed`
+  - role: `UI Implementer`
+    scope: `n/a (backend repo)`
+    deliverable: `n/a`
+    verification_command: `n/a`
+    status: `completed`
+  - role: `API Integration Owner`
+    scope: `social season analytics repository payload/persistence`
+    deliverable: `added token persistence/upsert behavior, week/post token parity, metadata coverage fixes, bravo target default merge behavior, migration, and idempotent backfill scripts`
+    verification_command: `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py`
+    status: `completed`
+  - role: `QA Owner`
+    scope: `repository + router regression coverage`
+    deliverable: `added/updated tests for collaborator preservation, token persistence, token payload parity, post metadata coverage counts, and facebook/threads platform maps`
+    verification_command: `pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py`
+    status: `completed`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `validation-only`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0155_social_token_columns_for_cross_platform_posts.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_social_post_tokens.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_bravo_missing_platform_targets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+- behavior_summary:
+  - Instagram permalink enrichment now preserves existing collaborators when metadata lacks collaborator values.
+  - Upsert paths now persist token arrays for missing platforms/columns (tiktok mentions, youtube/facebook/threads hashtags+mentions) with schema guards.
+  - Week detail payloads and `get_post_comments` now return additive hashtags/mentions for tiktok/youtube/facebook/threads with stored-first and text fallback behavior.
+  - `post_metadata` coverage now counts tags/mentions across platforms using token columns and text-regex fallback, including YouTube description-aware logic.
+  - Bravo default targets include facebook/threads and `_target_accounts_by_platform` now merges missing platform defaults without overriding explicit rows.
+  - Added migration `0155` for token columns and two idempotent scripts:
+    - `backfill_social_post_tokens.py` (`--season-id`, `--platforms`, `--batch-size`, `--dry-run`)
+    - `backfill_bravo_missing_platform_targets.py` (`--season-id`, `--updated-by`, `--dry-run`)
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass, `177 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "default_targets_include_rhoslc_aliases or target_accounts_by_platform_uses_direct_targets_query or target_accounts_by_platform_does_not_override_explicit_platform_rows or compute_post_metadata_counts_tags_and_mentions_for_cross_platform_tokens or upsert_tiktok_post_persists_mentions or upsert_youtube_video_persists_hashtags_and_mentions or enrich_instagram_post_preserves_existing_collaborators_when_metadata_missing or week_detail_facebook_includes_token_fallbacks or week_detail_threads_includes_token_fallbacks or week_detail_youtube_uses_effective_saved_comment_count or get_post_comments_tiktok_includes_comment_media_and_metadata or get_post_comments_youtube_includes_thumbnail_url or get_post_comments_facebook_includes_hashtags_and_mentions or get_post_comments_threads_includes_hashtags_and_mentions or upsert_facebook_post_falls_back_to_scraped_at_when_posted_at_missing or upsert_threads_post_falls_back_to_scraped_at_when_posted_at_missing"` (pass, `16 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_season_analytics.py -k "accepts_facebook_threads_platform_filters or returns_facebook_threads_platform_maps"` (pass, `2 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/screenalytics && rg -n "tiktok_posts|youtube_videos|facebook_posts|meta_threads_posts|hashtags|mentions|season_targets" -S` (no direct dependency coupling found)
+  - `cd /Users/thomashulihan/Projects/TRR/screenalytics && pytest -q` (fails in baseline unrelated areas; `1923 passed, 50 skipped, 38 failed`, primarily legacy page shims, celery optional dependency, and device/provider environment-specific tests)
+
+Continuation (same session, 2026-02-28) — TikTok hosted HTML mirror artifact detection + targeted requeue.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumer behavior benefits from remirrored playable assets)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_social_media_mirror_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_backfill_social_media_mirror_jobs.py`
+- behavior_summary:
+  - Added `_hosted_media_urls_need_content_repair(...)` in mirror eligibility logic to treat hosted `.html/.htm` media URLs as invalid mirror outputs requiring remirror.
+  - Updated `_platform_post_needs_media_mirror(...)` to return `True` for hosted HTML media URLs even when mirror status is `mirrored` and CDN host matches.
+  - Extended `scripts/socials/backfill_social_media_mirror_jobs.py` with `--hosted-html-only` filtering so only rows with hosted HTML media artifacts are requeued.
+  - Script JSON output now includes `hosted_html_only` for deterministic auditability.
+- validation_evidence:
+  - Unit tests:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "flags_html_hosted_media_urls or flags_non_cdn_media_host or accepts_matching_cdn_hosts or tiktok_requires_hosted_media_urls"` (pass, `4 passed`)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/scripts/test_backfill_social_media_mirror_jobs.py` (pass, `2 passed`)
+  - Lint/syntax:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check scripts/socials/backfill_social_media_mirror_jobs.py tests/scripts/test_backfill_social_media_mirror_jobs.py tests/repositories/test_social_season_analytics.py` (pass)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile trr_backend/repositories/social_season_analytics.py scripts/socials/backfill_social_media_mirror_jobs.py tests/scripts/test_backfill_social_media_mirror_jobs.py tests/repositories/test_social_season_analytics.py` (pass)
+  - Operational execution (Supabase DB):
+    - Pre-check: hosted HTML TikTok rows
+      - query result: `{'html_rows': 74, 'total_rows': 405}`
+    - Requeue run:
+      - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && PYTHONPATH=. python scripts/socials/backfill_social_media_mirror_jobs.py --platforms tiktok --weeks 104 --limit-per-platform 5000 --source-scope bravo --hosted-html-only`
+      - result: `{"totals": {"scanned": 405, "queued": 74, "skipped": 331, "failed": 0}, "by_platform": {"tiktok": {"scanned": 405, "queued": 74, "skipped": 331, "failed": 0}}}`
+    - Post-check status on targeted rows:
+      - `{'status_counts_for_html_rows': [{'status': 'pending', 'count': 74}]}`
+- residual_risks:
+  - Remirror jobs were queued successfully; hosted HTML URLs remain until workers complete and write fresh mirrored media URLs.
+  - Repository-wide `ruff check trr_backend/repositories/social_season_analytics.py` still reports pre-existing E501 lines outside this change scope.
+
+Continuation (same session, 2026-02-28) — remove mirrored-count fetch short-circuit in person refresh stream.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Removed the stream-stage skip path that treated IMDb/TMDb as fully synced when mirrored count met known-source totals.
+  - Stream refresh now always performs source fetch attempts for IMDb/TMDb/Fandom stages (still reporting known totals/mirrored counts for diagnostics) so new upstream images are discoverable.
+  - `source_skip_details` remains available but no longer records `already_mirrored` fetch bypass entries.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/python -m pytest tests/api/routers/test_admin_person_images.py -q` (pass, `23 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py` (pass)
+  - End-to-end probe through web proxy:
+    - `curl -N http://127.0.0.1:3000/api/admin/trr-api/people/1b76d932-b414-4abd-9699-7e2388abd3f0/refresh-images/stream ...`
+    - observed `sync_imdb: "Syncing IMDb..."` followed by `"Synced IMDb (5 photos)."` (no `Skipping IMDb ... already mirrored` event).
+- residual_risks:
+  - Known-source totals are still heuristic diagnostics and can drift from real upstream source totals; they should not be used for gating fetch behavior (now removed for this stream path).
+
+Continuation (same session, 2026-02-28) — refresh stream heartbeat cadence improvement.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `low`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Reduced source-fetch heartbeat join interval in refresh SSE loop from `10s` to `2s`, increasing progress event frequency during long IMDb/TMDb/Fandom fetches.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/python -m pytest tests/api/routers/test_admin_person_images.py -q` (pass, `23 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py` (pass)
+- residual_risks:
+  - Higher heartbeat frequency increases event volume on long-running syncs; payloads are small and expected impact is minimal in local admin usage.
+
+Continuation (same session, 2026-02-28) — playable social mirror fix (page URL -> MP4), all-platform requeue, and season-6 rerun progress.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (post details playback behavior benefits from corrected hosted media)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added page/media quality guardrails to mirror eligibility:
+    - hosted page/HTML URLs are considered invalid mirror outputs.
+    - tiktok/youtube rows now require hosted video-like media URLs (not just non-empty arrays).
+    - rows with structurally valid hosted outputs are no longer repeatedly re-queued only because status was `failed/partial/pending`.
+  - Updated platform mirror stage re-resolution behavior:
+    - tiktok/youtube re-resolution now treats page/non-video source URLs as repair-needed.
+    - tiktok now enables ytdlp fallback when source media is missing/page-like and preserves canonical watch URL for fallback mirroring.
+    - youtube now falls back to canonical watch URL when resolved URLs are absent/non-video-quality.
+  - Added yt-dlp download fallback inside `_mirror_platform_media_to_s3_result(...)` for tiktok/youtube page URLs, producing mirrored MP4 binaries instead of HTML artifacts.
+  - Fixed yt-dlp output selection bug (zero-byte placeholder path) by switching to template output in a temp directory and selecting non-zero media output.
+  - Added/updated regression tests for host/page quality checks, tiktok allow_ytdlp behavior, canonical fallback path, and non-page unresolved failure path.
+- validation_evidence:
+  - Unit tests:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "platform_post_needs_media_mirror or run_platform_media_mirror_stage_tiktok"` (pass, `13 passed`)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "mirror_instagram_media_to_s3 or mirror_platform_media_to_s3 or platform_post_needs_media_mirror or run_platform_media_mirror_stage_tiktok"` (pass)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/media/test_s3_mirror.py -k "cdn_base_url_rejects_s3_endpoints"` (pass)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/scripts/test_repair_social_hosted_urls.py` (pass)
+  - Syntax:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile trr_backend/repositories/social_season_analytics.py` (pass)
+  - Season execution scope:
+    - season_id: `e9161955-6ee4-4985-865e-3386a0f670fb` (`show_id=7782652f-783a-488b-8860-41b97de32e75`, season 6)
+    - all-platform requeue run (`requeue_media_mirror_jobs`) results:
+      - instagram queued `965`
+      - tiktok queued `149`
+      - youtube queued `131`
+      - twitter queued `456`
+      - threads queued `22`
+      - facebook queued `0`
+    - additional bounded manual processing completed in-session:
+      - threads: `22` completed
+      - tiktok: queue drained (`0` queued_like)
+      - youtube: reduced to `0` queued_like
+      - twitter: `44` completed in bounded pass; `412` queued_like remain
+      - instagram: background queue still large (`911` queued_like)
+  - Representative playable URL probes (HTTP range check `206 video/mp4`):
+    - instagram: `https://d1fmdyqfafwim3.cloudfront.net/social/instagram/7782652f-783a-488b-8860-41b97de32e75/6/week-0/DOqZBCzgBuL/media-01.mp4`
+    - tiktok (fixed week-0 problematic post): `https://d1fmdyqfafwim3.cloudfront.net/social/tiktok/7782652f-783a-488b-8860-41b97de32e75/6/week-0/7540327205503601933/therealhousewivesofsaltlakecitybravotvTikTokPost2.mp4`
+    - youtube (current hosted row for `J9TFhnjgwKQ`): `https://d1fmdyqfafwim3.cloudfront.net/social/youtube/7782652f-783a-488b-8860-41b97de32e75/6/week-2/J9TFhnjgwKQ/therealhousewivesofsaltlakecitybravoYouTubePost3.mp4`
+    - twitter: `https://d1fmdyqfafwim3.cloudfront.net/social/twitter/7782652f-783a-488b-8860-41b97de32e75/6/week-18/2011339494734078234/therealhousewivesofsaltlakecityGyalaxyzeTwitterPost1_S1.mp4`
+    - threads: `https://d1fmdyqfafwim3.cloudfront.net/social/threads/7782652f-783a-488b-8860-41b97de32e75/6/week-0/b42547e4-f80e-4039-bfed-/therealhousewivesofsaltlakecitybravotvThreadsPost1_S1.mp4`
+  - Facebook season snapshot after rerun attempts:
+    - `hosted_mp4=0`, `source_video_hint=0` across `17` rows (no extractable source video URLs in current facebook rows).
+- residual_risks:
+  - Large queues remain for instagram/twitter in this season (`instagram 911`, `twitter 412` queued_like). Additional worker time is required for full completion.
+  - Remaining tiktok/youtube rows still needing mirror are primarily source-restricted (`tiktok_media_unresolved`) or blocked by size (`media[0]:asset_too_large` for larger YouTube assets under current `SOCIAL_MEDIA_MIRROR_MAX_BYTES` default).
+
+Continuation (same session, 2026-02-28) — season-6 social mirror drain completion + final verification.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumer playback now uses mirrored MP4 on repaired rows)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Completed active drain by running dedicated media mirror workers for `instagram` (`--parallel 6`) and `twitter` (`--parallel 4`) until queue depletion.
+  - Stopped temporary drain worker processes after queue reached zero.
+  - Verified requested sample platform URLs are publicly readable/playable (`HTTP 200`, `content-type: video/mp4`) and confirmed DB hosted URL rows for user-specified IDs.
+  - Computed post-rerun residual needs via `_platform_post_needs_media_mirror(...)` for season `e9161955-6ee4-4985-865e-3386a0f670fb`.
+- validation_evidence:
+  - Final queue state (`social.scrape_jobs`, season-scoped, `job_type like '%media_mirror%'`):
+    - `facebook queued_like=0 running=0 completed=11 failed=0`
+    - `instagram queued_like=0 running=0 completed=2256 failed=0`
+    - `threads queued_like=0 running=0 completed=39 failed=0`
+    - `tiktok queued_like=0 running=0 completed=587 failed=0`
+    - `twitter queued_like=0 running=0 completed=1141 failed=5`
+    - `youtube queued_like=0 running=0 completed=473 failed=3`
+  - Platform samples verified:
+    - instagram `DOqZBCzgBuL` -> hosted MP4 present and `HTTP 200 video/mp4`
+    - tiktok `7608346230631976205` + problematic `7540327205503601933` -> hosted MP4 present and `HTTP 200 video/mp4`
+    - youtube `J9TFhnjgwKQ` -> hosted MP4 present and `HTTP 200 video/mp4`
+    - twitter `2011339494734078234` -> hosted MP4 present and `HTTP 200 video/mp4`
+    - threads `DObQ1nbEYSd` -> hosted MP4 present and `HTTP 200 video/mp4`
+    - facebook season snapshot remains no hosted playable video rows (`17 total`, `0` hosted video-like URL rows).
+  - Residual need counts from `_platform_post_needs_media_mirror(...)` (season-scoped):
+    - `instagram: 965`
+    - `tiktok: 148`
+    - `youtube: 88`
+    - `twitter: 3`
+    - `facebook: 0`
+    - `threads: 0`
+  - Top residual errors:
+    - instagram: `http_403_auth_or_expired` variants
+    - tiktok: `tiktok_media_unresolved`
+    - youtube: `media[0]:asset_too_large`, `youtube_media_unresolved`
+    - twitter: `http_404_not_found`
+- residual_risks:
+  - No queue backlog remains, but residual mirror-eligible rows are blocked by upstream/source constraints (expired protected source URLs, unresolved media extraction, or configured mirror size limits).
+  - To reduce residuals meaningfully, source refresh/re-scrape and/or mirror-size policy adjustments are required; repeated reruns without source refresh are likely to reproduce the same failures.
+
+Continuation (same session, 2026-02-28) — refresh-driven person gallery correction (IMDb provenance + self-healing repair).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/imdb/title_page_metadata.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/imdb/test_title_page_metadata.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Hardened IMDb episode title-page parsing: when JSON-LD `partOfSeries` is missing, parser now derives parent series from the HTML `<title>` and decodes HTML entities in title/show text.
+  - Added authoritative show-resolution behavior during IMDb fallback enrichment:
+    - resolves by `shows.imdb_id` first,
+    - then normalized `name` and `alternative_names` aliases,
+    - writes `metadata.show_context_source` as `episode_table`, `imdb_title_fallback`, or `imdb_episode_unresolved`.
+  - For unresolved IMDb episode/title rows, enrichment now explicitly nulls `metadata.show_id/show_name/show_imdb_id/show_short_code` to clear stale merged values.
+  - `_apply_show_context_to_photos(...)` now skips request-context stamping for unresolved IMDb rows with episode/title evidence and marks applied context with `show_context_source=request_context`.
+  - Added self-healing repair stage to both refresh endpoints (`refresh-images` and `refresh-images/stream`): each run reloads existing IMDb cast photos for the person, re-enriches them, and upserts repaired metadata immediately.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_person_images.py tests/integrations/imdb/test_title_page_metadata.py` (pass, `30 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_person_images.py trr_backend/integrations/imdb/title_page_metadata.py tests/api/routers/test_admin_person_images.py tests/integrations/imdb/test_title_page_metadata.py` (pass)
+- residual_risks:
+  - Show lookup map currently builds from `core.shows` per enrichment run for robust alias matching; if show volume grows significantly, this may need targeted caching/indexed lookups.

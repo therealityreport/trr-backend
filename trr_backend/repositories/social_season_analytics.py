@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import glob
 import hashlib
 import io
 import json
@@ -11,11 +12,14 @@ import logging
 import mimetypes
 import os
 import re
+import subprocess
 import tempfile
 import time as time_module
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
+from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
@@ -1298,18 +1302,19 @@ def _load_twitter_browser_cookies() -> dict[str, str]:
     return cookies
 
 
-def _load_twikit_credentials() -> dict[str, str] | None:
+def _load_twikit_credentials(twitter_cookies: Mapping[str, Any] | None = None) -> dict[str, str] | None:
     """
-    Load twikit auth from env vars or cookie file.
+    Load twikit auth from env vars, cookie file, or Twitter cookie sources.
 
     Resolution order (first match wins):
     1) TWIKIT_COOKIES_JSON – inline JSON cookie payload
     2) TWIKIT_COOKIES_FILE – JSON file with auth_token + ct0 keys
     3) TWIKIT_AUTH_TOKEN + TWIKIT_CT0 – inline cookie values
     4) TWIKIT_USERNAME + TWIKIT_PASSWORD (+ TWIKIT_EMAIL) – login creds
+    5) Twitter cookie sources (preloaded cookies/header/JSON/file)
+    6) Browser cookie fallback
     """
 
-    # 1) Cookie file
     def _extract_auth_ct0(payload: Any) -> tuple[str | None, str | None]:
         auth_token: str | None = None
         ct0: str | None = None
@@ -1339,6 +1344,16 @@ def _load_twikit_credentials() -> dict[str, str] | None:
             return auth_token, ct0
         return None, None
 
+    def _from_cookie_map(cookies: Mapping[str, Any] | None) -> dict[str, str] | None:
+        if not cookies:
+            return None
+        auth_token = str(cookies.get("auth_token") or "").strip()
+        ct0 = str(cookies.get("ct0") or "").strip()
+        if auth_token and ct0:
+            return {"auth_token": auth_token, "ct0": ct0}
+        return None
+
+    # 1) TWIKIT_COOKIES_JSON
     raw_cookie_json = (os.getenv("TWIKIT_COOKIES_JSON") or "").strip()
     if raw_cookie_json:
         try:
@@ -1349,6 +1364,7 @@ def _load_twikit_credentials() -> dict[str, str] | None:
         except Exception:
             logger.warning("Invalid TWIKIT_COOKIES_JSON payload; expected JSON cookie object/list")
 
+    # 2) TWIKIT_COOKIES_FILE
     cookie_file = (os.getenv("TWIKIT_COOKIES_FILE") or "").strip()
     if cookie_file:
         p = Path(cookie_file).expanduser()
@@ -1362,32 +1378,73 @@ def _load_twikit_credentials() -> dict[str, str] | None:
             except Exception as exc:
                 logger.warning("Failed to load twikit cookies from %s: %s", p, exc)
         else:
-            logger.warning("TWIKIT_COOKIES_FILE does not exist: %s", p)
+            logger.debug("TWIKIT_COOKIES_FILE does not exist: %s", p)
 
-    # 2) Inline cookie env vars
+    # 3) Inline TWIKIT cookie env vars
     auth_token = (os.getenv("TWIKIT_AUTH_TOKEN") or "").strip()
     ct0 = (os.getenv("TWIKIT_CT0") or "").strip()
     if auth_token and ct0:
         return {"auth_token": auth_token, "ct0": ct0}
 
-    raw_cookie_header = (os.getenv("SOCIAL_TWITTER_COOKIES_HEADER") or "").strip() or (
-        os.getenv("TWITTER_COOKIES_HEADER") or ""
-    ).strip()
-    if raw_cookie_header:
-        parsed = _parse_cookie_header(raw_cookie_header)
-        if parsed.get("auth_token") and parsed.get("ct0"):
-            return {"auth_token": str(parsed["auth_token"]), "ct0": str(parsed["ct0"])}
-
-    # 3) Login credentials
+    # 4) TWIKIT login credentials
     username = (os.getenv("TWIKIT_USERNAME") or "").strip()
     password = (os.getenv("TWIKIT_PASSWORD") or "").strip()
     email = (os.getenv("TWIKIT_EMAIL") or "").strip()
     if username and password:
         return {"username": username, "email": email or username, "password": password}
 
+    # 5a) Preloaded Twitter cookies from caller.
+    from_preloaded = _from_cookie_map(twitter_cookies)
+    if from_preloaded:
+        return from_preloaded
+
+    # 5b) Twitter cookie header env vars.
+    raw_cookie_header = (os.getenv("SOCIAL_TWITTER_COOKIES_HEADER") or "").strip() or (
+        os.getenv("TWITTER_COOKIES_HEADER") or ""
+    ).strip()
+    if raw_cookie_header:
+        parsed = _parse_cookie_header(raw_cookie_header)
+        from_header = _from_cookie_map(parsed)
+        if from_header:
+            return from_header
+
+    # 5c) Twitter JSON cookie env vars.
+    raw_twitter_cookie_json = (os.getenv("SOCIAL_TWITTER_COOKIES_JSON") or "").strip() or (
+        os.getenv("TWITTER_COOKIES_JSON") or ""
+    ).strip()
+    if raw_twitter_cookie_json:
+        try:
+            parsed = json.loads(raw_twitter_cookie_json)
+            from_twitter_json = _from_cookie_map(_coerce_cookie_map(parsed))
+            if from_twitter_json:
+                return from_twitter_json
+        except json.JSONDecodeError:
+            parsed_header = _parse_cookie_header(raw_twitter_cookie_json)
+            from_twitter_header = _from_cookie_map(parsed_header)
+            if from_twitter_header:
+                return from_twitter_header
+
+    # 5d) Twitter cookie file env vars.
+    twitter_cookie_file = (os.getenv("SOCIAL_TWITTER_COOKIES_FILE") or "").strip() or (
+        os.getenv("TWITTER_COOKIES_FILE") or ""
+    ).strip()
+    if twitter_cookie_file:
+        p = Path(twitter_cookie_file).expanduser()
+        if p.is_file():
+            try:
+                with open(p) as f:
+                    parsed = json.load(f)
+                from_twitter_file = _from_cookie_map(_coerce_cookie_map(parsed))
+                if from_twitter_file:
+                    return from_twitter_file
+            except Exception as exc:
+                logger.debug("Failed to derive twikit credentials from Twitter cookie file %s: %s", p, exc)
+
+    # 6) Browser cookie fallback.
     browser_cookies = _load_twitter_browser_cookies()
-    if browser_cookies.get("auth_token") and browser_cookies.get("ct0"):
-        return {"auth_token": str(browser_cookies["auth_token"]), "ct0": str(browser_cookies["ct0"])}
+    from_browser = _from_cookie_map(browser_cookies)
+    if from_browser:
+        return from_browser
 
     return None
 
@@ -1595,6 +1652,26 @@ def _default_targets(context: SeasonContext, *, source_scope: str = "bravo") -> 
             "is_active": True,
             "config": {"include_comments": True},
         },
+        {
+            "platform": "facebook",
+            "source_scope": source_scope,
+            "timezone": "America/New_York",
+            "accounts": ["Bravo"],
+            "hashtags": hashtags,
+            "keywords": keywords,
+            "is_active": True,
+            "config": {"include_comments": True},
+        },
+        {
+            "platform": "threads",
+            "source_scope": source_scope,
+            "timezone": "America/New_York",
+            "accounts": ["bravotv"],
+            "hashtags": hashtags,
+            "keywords": keywords,
+            "is_active": True,
+            "config": {"include_comments": True},
+        },
     ]
     return defaults
 
@@ -1769,7 +1846,22 @@ def _target_accounts_by_platform(
 
     target_rows: list[dict[str, Any]]
     if rows:
-        target_rows = rows
+        target_rows = list(rows)
+        present_platforms = {
+            str(row.get("platform") or "").strip().lower()
+            for row in target_rows
+            if str(row.get("platform") or "").strip()
+        }
+        resolved_context = context
+        if source_scope == "bravo":
+            if resolved_context is None:
+                resolved_context = get_season_context(season_id)
+            for default_target in _default_targets(resolved_context, source_scope=source_scope):
+                platform = str(default_target.get("platform") or "").strip().lower()
+                if not platform or platform in present_platforms:
+                    continue
+                target_rows.append(default_target)
+                present_platforms.add(platform)
     else:
         resolved_context = context or get_season_context(season_id)
         target_rows = _default_targets(resolved_context, source_scope=source_scope)
@@ -2581,7 +2673,7 @@ def _enrich_instagram_post_from_permalink(
     profile_tags = _as_text_list(getattr(post, "profile_tags", []))
     hashtags = _parse_instagram_caption_hashtags(caption)
     mentions = _parse_instagram_caption_mentions(caption)
-    collaborators: list[str] = []
+    collaborators = _as_text_list(getattr(post, "collaborators", []), strip_prefix="@")
     duration_seconds = None
     raw_post_type = str(getattr(post, "post_type", "") or "").strip().lower()
     if raw_post_type in {"reel", "carousel", "post"}:
@@ -2595,7 +2687,7 @@ def _enrich_instagram_post_from_permalink(
         if metadata.taken_at is not None:
             post.taken_at = metadata.taken_at
         profile_tags = metadata.profile_tags or profile_tags
-        collaborators = metadata.collaborators or []
+        collaborators = metadata.collaborators or collaborators
         hashtags = metadata.hashtags or hashtags
         mentions = metadata.mentions or mentions
         duration_seconds = metadata.duration_seconds
@@ -2743,6 +2835,38 @@ def _is_video_like_media_url(url: str) -> bool:
     if "video.twimg.com" in host:
         return True
     return path.endswith((".mp4", ".mov", ".m4v", ".webm"))
+
+
+def _is_page_like_media_url(url: str) -> bool:
+    value = str(url or "").strip()
+    if not value:
+        return False
+    parsed = urlparse(value)
+    host = (parsed.netloc or "").strip().lower()
+    path = (parsed.path or "").strip().lower()
+    if not host:
+        return False
+    if path.endswith((".html", ".htm")):
+        return True
+    if _is_video_like_media_url(value):
+        return False
+    if path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp")):
+        return False
+    if "tiktok.com" in host and "/video/" in path:
+        return True
+    if ("youtube.com" in host and (path == "/watch" or path.startswith("/shorts/") or path.startswith("/embed/"))) or (
+        host == "youtu.be"
+    ):
+        return True
+    if ("twitter.com" in host or host == "x.com" or host.endswith(".x.com")) and "/status/" in path:
+        return True
+    if "instagram.com" in host and (path.startswith("/p/") or path.startswith("/reel/") or path.startswith("/tv/")):
+        return True
+    if "facebook.com" in host and ("/reel/" in path or "/videos/" in path or "/posts/" in path):
+        return True
+    if "threads.net" in host and "/post/" in path:
+        return True
+    return False
 
 
 def _is_twitter_thumb_placeholder_url(url: str) -> bool:
@@ -3051,7 +3175,57 @@ def _mirror_platform_media_to_s3_result(
     uploaded_by_source_url: dict[str, str] = {}
     saw_retryable_error = False
 
-    def _download_and_upload(source_url: str, *, object_name: str) -> str:
+    def _download_with_ytdlp(source_url: str) -> tuple[str, str]:
+        temp_dir = tempfile.mkdtemp(prefix=f"{normalized_platform}-mirror-ytdlp-")
+        output_template = os.path.join(temp_dir, "media.%(ext)s")
+        try:
+            cmd = [
+                os.getenv("SOCIAL_MEDIA_MIRROR_YTDLP_BIN", "yt-dlp"),
+                "--no-playlist",
+                "--merge-output-format",
+                "mp4",
+                "-f",
+                "bv*+ba/b",
+                "-o",
+                output_template,
+                source_url,
+            ]
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=180,
+            )
+            sized_candidates: list[tuple[int, str]] = []
+            for candidate in sorted(glob.glob(os.path.join(temp_dir, "media.*"))):
+                if not os.path.exists(candidate):
+                    continue
+                try:
+                    size = os.path.getsize(candidate)
+                except OSError:
+                    continue
+                if size > 0:
+                    sized_candidates.append((size, candidate))
+            if not sized_candidates:
+                raise RuntimeError("ytdlp_no_output")
+            sized_candidates.sort(reverse=True)
+            candidate = sized_candidates[0][1]
+            return candidate, "video/mp4"
+        except Exception:
+            try:
+                for candidate in glob.glob(os.path.join(temp_dir, "media.*")):
+                    try:
+                        os.remove(candidate)
+                    except OSError:
+                        pass
+                os.rmdir(temp_dir)
+            except OSError:
+                pass
+            raise
+
+    def _download_and_upload(source_url: str, *, object_name: str, is_thumbnail: bool) -> str:
         if source_url in uploaded_by_source_url:
             return uploaded_by_source_url[source_url]
 
@@ -3060,57 +3234,74 @@ def _mirror_platform_media_to_s3_result(
 
         content_type = "application/octet-stream"
         temp_path: str | None = None
-        for attempt in range(download_retries):
+        used_ytdlp = False
+        if not is_thumbnail and normalized_platform in {"tiktok", "youtube"} and _is_page_like_media_url(source_url):
             try:
-                with requests.get(
-                    source_url,
-                    timeout=(10, 60),
-                    headers={
-                        "user-agent": (
-                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                        ),
-                        "accept": "*/*",
-                    },
-                    stream=True,
-                ) as response:
-                    response.raise_for_status()
-                    content_type = response.headers.get("Content-Type") or "application/octet-stream"
-                    total_bytes = 0
-                    with tempfile.NamedTemporaryFile(
-                        prefix=f"{normalized_platform}-mirror-",
-                        suffix=".bin",
-                        delete=False,
-                    ) as temp_file:
-                        temp_path = temp_file.name
-                        for chunk in response.iter_content(chunk_size=SOCIAL_MEDIA_MIRROR_CHUNK_SIZE_BYTES):
-                            if not chunk:
-                                continue
-                            total_bytes += len(chunk)
-                            if total_bytes > max_asset_bytes:
-                                raise RuntimeError("asset_too_large")
-                            temp_file.write(chunk)
-                if total_bytes <= 0 or not temp_path:
-                    raise RuntimeError("empty_response_body")
-                break
+                temp_path, content_type = _download_with_ytdlp(source_url)
+                used_ytdlp = True
             except Exception as exc:  # noqa: BLE001
-                reason, retryable = _classify_mirror_download_exception(exc)
-                if temp_path:
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-                    temp_path = None
-                if retryable and attempt + 1 < download_retries:
-                    if retry_backoff_seconds > 0:
-                        time_module.sleep(retry_backoff_seconds * (2**attempt))
-                    continue
-                raise RuntimeError(f"download_failed:{reason}") from exc
+                raise RuntimeError(f"download_failed:ytdlp_failed:{exc.__class__.__name__}") from exc
+        else:
+            for attempt in range(download_retries):
+                try:
+                    with requests.get(
+                        source_url,
+                        timeout=(10, 60),
+                        headers={
+                            "user-agent": (
+                                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                            ),
+                            "accept": "*/*",
+                        },
+                        stream=True,
+                    ) as response:
+                        response.raise_for_status()
+                        content_type = response.headers.get("Content-Type") or "application/octet-stream"
+                        total_bytes = 0
+                        with tempfile.NamedTemporaryFile(
+                            prefix=f"{normalized_platform}-mirror-",
+                            suffix=".bin",
+                            delete=False,
+                        ) as temp_file:
+                            temp_path = temp_file.name
+                            for chunk in response.iter_content(chunk_size=SOCIAL_MEDIA_MIRROR_CHUNK_SIZE_BYTES):
+                                if not chunk:
+                                    continue
+                                total_bytes += len(chunk)
+                                if total_bytes > max_asset_bytes:
+                                    raise RuntimeError("asset_too_large")
+                                temp_file.write(chunk)
+                    if total_bytes <= 0 or not temp_path:
+                        raise RuntimeError("empty_response_body")
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    reason, retryable = _classify_mirror_download_exception(exc)
+                    if temp_path:
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+                        temp_path = None
+                    if retryable and attempt + 1 < download_retries:
+                        if retry_backoff_seconds > 0:
+                            time_module.sleep(retry_backoff_seconds * (2**attempt))
+                        continue
+                    raise RuntimeError(f"download_failed:{reason}") from exc
 
         if not temp_path:
             raise RuntimeError("empty_response_body")
+        try:
+            if os.path.getsize(temp_path) > max_asset_bytes:
+                raise RuntimeError("asset_too_large")
+        except OSError as exc:
+            raise RuntimeError("empty_response_body") from exc
 
-        ext = _infer_extension_from_media_url(source_url, content_type)
+        ext = (
+            (Path(temp_path).suffix.lower() or _infer_extension_from_media_url(source_url, content_type))
+            if used_ytdlp
+            else _infer_extension_from_media_url(source_url, content_type)
+        )
         key = f"{key_root}/{object_name}{ext}"
         try:
             with open(temp_path, "rb") as fileobj:
@@ -3127,6 +3318,11 @@ def _mirror_platform_media_to_s3_result(
             raise RuntimeError(f"upload_failed:{exc.__class__.__name__}") from exc
         try:
             os.remove(temp_path)
+            if used_ytdlp:
+                try:
+                    os.rmdir(os.path.dirname(temp_path))
+                except OSError:
+                    pass
         except OSError:
             pass
 
@@ -3141,7 +3337,11 @@ def _mirror_platform_media_to_s3_result(
                 if display_name
                 else "thumbnail"
             )
-            hosted_thumbnail_url = _download_and_upload(source_thumbnail_url, object_name=thumb_obj_name)
+            hosted_thumbnail_url = _download_and_upload(
+                source_thumbnail_url,
+                object_name=thumb_obj_name,
+                is_thumbnail=True,
+            )
             mirrored_count += 1
         except Exception as exc:  # noqa: BLE001
             reason = str(exc or "").strip() or "mirror_exception"
@@ -3160,7 +3360,11 @@ def _mirror_platform_media_to_s3_result(
                 )
             else:
                 media_obj_name = f"media-{idx + 1:02d}"
-            hosted_url = _download_and_upload(media_url, object_name=media_obj_name)
+            hosted_url = _download_and_upload(
+                media_url,
+                object_name=media_obj_name,
+                is_thumbnail=False,
+            )
             hosted_media_urls.append(hosted_url)
             mirrored_count += 1
         except Exception as exc:  # noqa: BLE001
@@ -4487,8 +4691,83 @@ def _platform_source_id(platform: str, post_row: dict[str, Any]) -> str:
     return str(post_row.get(source_col) or post_row.get("source_id") or "").strip()
 
 
+@lru_cache(maxsize=1)
+def _expected_cdn_host() -> str | None:
+    raw = str(os.getenv("AWS_CDN_BASE_URL") or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    host = (parsed.netloc or "").strip().lower()
+    if not host:
+        return None
+    return host
+
+
+def _url_host(value: str) -> str:
+    parsed = urlparse(str(value or "").strip())
+    return (parsed.netloc or "").strip().lower()
+
+
+def _hosted_urls_need_cdn_host_repair(*, hosted_thumbnail_url: str, hosted_media_urls: list[str]) -> bool:
+    expected_host = _expected_cdn_host()
+    if not expected_host:
+        return False
+
+    candidates: list[str] = []
+    if hosted_thumbnail_url:
+        candidates.append(hosted_thumbnail_url)
+    candidates.extend([str(url).strip() for url in (hosted_media_urls or []) if str(url).strip()])
+
+    for url in candidates:
+        host = _url_host(url)
+        if not host:
+            # Malformed URL should be remirrored to restore a canonical hosted URL.
+            return True
+        if host != expected_host:
+            return True
+    return False
+
+
+def _hosted_media_urls_need_content_repair(*, hosted_media_urls: list[str]) -> bool:
+    for url in hosted_media_urls or []:
+        if _is_page_like_media_url(url):
+            # HTML/page wrappers are not valid canonical hosted media assets.
+            return True
+    return False
+
+
+def _source_media_urls_need_quality_repair(*, platform: str, source_media_urls: list[str]) -> bool:
+    normalized_platform = (platform or "").strip().lower()
+    urls = [str(url).strip() for url in (source_media_urls or []) if str(url).strip()]
+    if not urls:
+        return False
+    if any(_is_page_like_media_url(url) for url in urls):
+        return True
+    if normalized_platform in {"tiktok", "youtube"} and not any(_is_video_like_media_url(url) for url in urls):
+        return True
+    return False
+
+
+def _source_media_urls_support_ytdlp_mirror(*, platform: str, source_media_urls: list[str]) -> bool:
+    normalized_platform = (platform or "").strip().lower()
+    if normalized_platform not in {"tiktok", "youtube"}:
+        return False
+    urls = [str(url).strip() for url in (source_media_urls or []) if str(url).strip()]
+    return bool(urls) and all(_is_page_like_media_url(url) for url in urls)
+
+
 def _platform_post_needs_media_mirror(platform: str, post_row: dict[str, Any]) -> bool:
     normalized_platform = (platform or "").strip().lower()
+    hosted_thumbnail_url = str(post_row.get("hosted_thumbnail_url") or "").strip()
+    hosted_media_urls = _as_text_list(post_row.get("hosted_media_urls"))
+    if _hosted_urls_need_cdn_host_repair(
+        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_media_urls=hosted_media_urls,
+    ):
+        return True
+    if _hosted_media_urls_need_content_repair(hosted_media_urls=hosted_media_urls):
+        return True
+
     source_thumbnail_url, source_media_urls = _platform_post_source_urls(platform, post_row)
     source_id = _platform_source_id(platform, post_row)
     if normalized_platform == "youtube":
@@ -4497,19 +4776,19 @@ def _platform_post_needs_media_mirror(platform: str, post_row: dict[str, Any]) -
     elif not source_thumbnail_url and not source_media_urls:
         return False
 
-    hosted_thumbnail_url = str(post_row.get("hosted_thumbnail_url") or "").strip()
-    hosted_media_urls = _as_text_list(post_row.get("hosted_media_urls"))
-    mirror_status = str(post_row.get("media_mirror_status") or "").strip().lower()
-
     if normalized_platform in {"tiktok", "youtube"} and not hosted_media_urls:
+        return True
+    if (
+        normalized_platform in {"tiktok", "youtube"}
+        and hosted_media_urls
+        and not any(_is_video_like_media_url(url) for url in hosted_media_urls)
+    ):
         return True
     if source_thumbnail_url and not hosted_thumbnail_url:
         return True
     if source_media_urls and len(hosted_media_urls) < len(source_media_urls):
         return True
-    if mirror_status in {"pending", "partial", "failed"}:
-        return True
-    return mirror_status != "mirrored"
+    return False
 
 
 def _instagram_post_needs_media_mirror(post_row: dict[str, Any]) -> bool:
@@ -5471,6 +5750,22 @@ def _upsert_tiktok_post(
     posted_at = _parse_tiktok_time(getattr(post, "create_time", None))
     media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
     thumbnail_url = str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None)
+    description = str(getattr(post, "description", "") or "")
+    hashtags = _as_text_list(
+        [
+            *_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"),
+            *_parse_hashtags(description),
+        ],
+        strip_prefix="#",
+    )
+    mentions = _as_text_list(
+        [
+            *_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
+            *_parse_mentions(description),
+        ],
+        prefix="@",
+        strip_prefix="@",
+    )
     payload = {
         "video_id": getattr(post, "video_id", ""),
         "aweme_id": getattr(post, "video_id", ""),
@@ -5478,7 +5773,7 @@ def _upsert_tiktok_post(
         "user_id": None,
         "nickname": getattr(post, "author_nickname", None),
         "description": getattr(post, "description", None),
-        "hashtags": getattr(post, "hashtags", []) or [],
+        "hashtags": hashtags,
         "music_info": {
             "title": getattr(post, "music_title", None),
             "author": getattr(post, "music_author", None),
@@ -5499,6 +5794,8 @@ def _upsert_tiktok_post(
     }
     if _platform_posts_has_column("tiktok", "saves"):
         payload["saves"] = int(getattr(post, "saves", 0) or 0)
+    if _platform_posts_has_column("tiktok", "mentions"):
+        payload["mentions"] = mentions
     if _platform_posts_has_column("tiktok", "media_urls"):
         payload["media_urls"] = media_urls
     return _pg_upsert("tiktok_posts", payload, conflict_col="video_id", conn=conn)
@@ -6086,6 +6383,11 @@ def _upsert_youtube_video(
     published_at = _parse_instagram_time(getattr(video, "published_at", None))
     source_surface_raw = str(getattr(video, "source_surface", "") or "").strip().lower()
     source_surface = source_surface_raw if source_surface_raw in {"videos", "shorts", "search"} else None
+    title = str(getattr(video, "title", "") or "")
+    description = str(getattr(video, "description", "") or "")
+    token_text = f"{title}\n{description}".strip()
+    hashtags = _as_text_list(_parse_hashtags(token_text), strip_prefix="#")
+    mentions = _as_text_list(_parse_mentions(token_text), prefix="@", strip_prefix="@")
     payload = {
         "video_id": getattr(video, "video_id", ""),
         "channel_id": getattr(video, "channel_id", None),
@@ -6106,6 +6408,10 @@ def _upsert_youtube_video(
         "job_id": job_id,
         "source_account": account,
     }
+    if _platform_posts_has_column("youtube", "hashtags"):
+        payload["hashtags"] = hashtags
+    if _platform_posts_has_column("youtube", "mentions"):
+        payload["mentions"] = mentions
     if _platform_posts_has_column("youtube", "is_short"):
         payload["is_short"] = bool(getattr(video, "is_short", False))
     if _platform_posts_has_column("youtube", "source_surface"):
@@ -7445,6 +7751,9 @@ def _upsert_facebook_post(
     posted_at = _parse_platform_time(getattr(post, "posted_at", None)) or scraped_at
     media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
     thumbnail_url = str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None)
+    caption = str(getattr(post, "caption", "") or "").strip() or None
+    hashtags = _as_text_list(_parse_hashtags(caption), strip_prefix="#")
+    mentions = _as_text_list(_parse_mentions(caption), prefix="@", strip_prefix="@")
     raw_payload = post.to_dict() if hasattr(post, "to_dict") else {}
     if isinstance(raw_payload, dict) and raw_payload.get("posted_at") is None:
         ingest_meta = dict(raw_payload.get("_ingest") or {})
@@ -7455,7 +7764,7 @@ def _upsert_facebook_post(
         "page_id": None,
         "username": str(getattr(post, "username", account) or "").strip() or account,
         "user_id": None,
-        "caption": str(getattr(post, "caption", "") or "").strip() or None,
+        "caption": caption,
         "post_type": str(getattr(post, "post_type", "feed") or "feed").strip().lower(),
         "media_type": str(getattr(post, "post_type", "feed") or "feed").strip().lower(),
         "media_urls": media_urls,
@@ -7472,6 +7781,10 @@ def _upsert_facebook_post(
         "job_id": job_id,
         "source_account": account,
     }
+    if _platform_posts_has_column("facebook", "hashtags"):
+        payload["hashtags"] = hashtags
+    if _platform_posts_has_column("facebook", "mentions"):
+        payload["mentions"] = mentions
     if media_urls or thumbnail_url:
         payload["media_mirror_status"] = "pending"
         payload["media_mirror_error"] = None
@@ -7728,6 +8041,9 @@ def _upsert_meta_threads_post(
     posted_at = _parse_platform_time(getattr(post, "posted_at", None)) or scraped_at
     media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
     thumbnail_url = str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None)
+    text = str(getattr(post, "text", "") or "").strip() or None
+    hashtags = _as_text_list(_parse_hashtags(text), strip_prefix="#")
+    mentions = _as_text_list(_parse_mentions(text), prefix="@", strip_prefix="@")
     raw_payload = post.to_dict() if hasattr(post, "to_dict") else {}
     if isinstance(raw_payload, dict) and raw_payload.get("posted_at") is None:
         ingest_meta = dict(raw_payload.get("_ingest") or {})
@@ -7738,7 +8054,7 @@ def _upsert_meta_threads_post(
         "thread_item_id": str(getattr(post, "post_id", "") or "").strip(),
         "username": str(getattr(post, "username", account) or "").strip() or account,
         "user_id": None,
-        "text": str(getattr(post, "text", "") or "").strip() or None,
+        "text": text,
         "media_type": "mixed" if len(media_urls) > 1 else ("image" if media_urls else "text"),
         "media_urls": media_urls,
         "thumbnail_url": thumbnail_url,
@@ -7755,6 +8071,10 @@ def _upsert_meta_threads_post(
         "job_id": job_id,
         "source_account": account,
     }
+    if _platform_posts_has_column("threads", "hashtags"):
+        payload["hashtags"] = hashtags
+    if _platform_posts_has_column("threads", "mentions"):
+        payload["mentions"] = mentions
     if media_urls or thumbnail_url:
         payload["media_mirror_status"] = "pending"
         payload["media_mirror_error"] = None
@@ -8189,6 +8509,10 @@ def _run_platform_media_mirror_stage(
     mirror_attempts: list[dict[str, Any]] = []
     mirror_status = str(post_row.get("media_mirror_status") or "").strip().lower()
     raw_data = post_row.get("raw_data") if isinstance(post_row.get("raw_data"), dict) else {}
+    source_media_needs_quality_repair = _source_media_urls_need_quality_repair(
+        platform=normalized_platform,
+        source_media_urls=source_media_urls,
+    )
     if normalized_platform == "instagram":
         media_meta = (raw_data or {}).get("media_retrieval_meta") if isinstance(raw_data, dict) else None
         if isinstance(media_meta, dict):
@@ -8198,7 +8522,7 @@ def _run_platform_media_mirror_stage(
         needs_re_resolve = (not source_thumbnail_url and not source_media_urls) or mirror_status in {
             "failed",
             "partial",
-        }
+        } or source_media_needs_quality_repair
         if needs_re_resolve and source_id:
             try:
                 resolution_payload = _resolve_instagram_media_for_shortcode(shortcode=source_id)
@@ -8235,7 +8559,7 @@ def _run_platform_media_mirror_stage(
         needs_re_resolve = (not source_media_urls) or mirror_status in {
             "failed",
             "partial",
-        }
+        } or source_media_needs_quality_repair
         if needs_re_resolve and source_id:
             try:
                 canonical_url = str(raw_data.get("url") or "").strip() if isinstance(raw_data, dict) else ""
@@ -8243,11 +8567,12 @@ def _run_platform_media_mirror_stage(
                     username = str(raw_data.get("username") or "").strip().lstrip("@")
                     if username:
                         canonical_url = f"https://www.tiktok.com/@{username}/video/{source_id}"
+                allow_ytdlp = bool(source_media_needs_quality_repair or not source_media_urls)
                 resolution_payload = _resolve_tiktok_media_for_video_id(
                     video_id=source_id,
                     canonical_url=canonical_url or None,
-                    allow_ytdlp=False,
-                    validate_download_url=True,
+                    allow_ytdlp=allow_ytdlp,
+                    validate_download_url=False,
                 )
                 resolved_media_urls = _normalize_unique_terms(
                     [str(url).strip() for url in (resolution_payload.get("media_urls") or []) if str(url).strip()]
@@ -8257,8 +8582,13 @@ def _run_platform_media_mirror_stage(
                 mirror_attempts = _normalize_instagram_mirror_attempts(resolution_payload.get("attempts"))
                 if resolved_thumbnail_url:
                     source_thumbnail_url = resolved_thumbnail_url
-                if resolved_media_urls:
+                if allow_ytdlp and canonical_url:
+                    # Prefer canonical page URL so media download can use yt-dlp fallback.
+                    source_media_urls = [canonical_url]
+                elif resolved_media_urls:
                     source_media_urls = resolved_media_urls
+                elif canonical_url:
+                    source_media_urls = [canonical_url]
             except Exception as exc:  # noqa: BLE001
                 if not mirror_attempts:
                     mirror_attempts = [
@@ -8276,7 +8606,7 @@ def _run_platform_media_mirror_stage(
         needs_re_resolve = (not source_media_urls) or mirror_status in {
             "failed",
             "partial",
-        }
+        } or source_media_needs_quality_repair
         if needs_re_resolve and source_id:
             try:
                 resolution_payload = _resolve_youtube_media_for_video_id(video_id=source_id)
@@ -8288,8 +8618,14 @@ def _run_platform_media_mirror_stage(
                 mirror_attempts = _normalize_instagram_mirror_attempts(resolution_payload.get("attempts"))
                 if resolved_thumbnail_url:
                     source_thumbnail_url = resolved_thumbnail_url
-                if resolved_media_urls:
+                canonical_watch_url = f"https://www.youtube.com/watch?v={source_id}" if source_id else ""
+                if resolved_media_urls and not _source_media_urls_need_quality_repair(
+                    platform="youtube",
+                    source_media_urls=resolved_media_urls,
+                ):
                     source_media_urls = resolved_media_urls
+                elif canonical_watch_url:
+                    source_media_urls = [canonical_watch_url]
             except Exception as exc:  # noqa: BLE001
                 if not mirror_attempts:
                     mirror_attempts = [
@@ -8312,6 +8648,7 @@ def _run_platform_media_mirror_stage(
             (not source_media_urls)
             or (mirror_status in {"failed", "partial"})
             or (source_has_only_thumb_placeholders and not source_has_video)
+            or source_media_needs_quality_repair
         )
         if needs_re_resolve and source_id:
             try:
@@ -8368,7 +8705,7 @@ def _run_platform_media_mirror_stage(
                         }
                     ]
     elif normalized_platform == "threads":
-        needs_re_resolve = (not source_media_urls) or (mirror_status in {"failed", "partial"})
+        needs_re_resolve = (not source_media_urls) or (mirror_status in {"failed", "partial"}) or source_media_needs_quality_repair
         if needs_re_resolve and source_id:
             try:
                 from trr_backend.socials.threads import resolve_threads_media
@@ -8419,10 +8756,24 @@ def _run_platform_media_mirror_stage(
         media_mirror_last_job_id=job_id,
     )
 
-    missing_source_media = not source_thumbnail_url and not source_media_urls
-    youtube_media_missing = normalized_platform == "youtube" and not source_media_urls
+    source_media_still_needs_quality_repair = _source_media_urls_need_quality_repair(
+        platform=normalized_platform,
+        source_media_urls=source_media_urls,
+    )
+    source_media_supports_ytdlp = _source_media_urls_support_ytdlp_mirror(
+        platform=normalized_platform,
+        source_media_urls=source_media_urls,
+    )
+    missing_source_media = (not source_thumbnail_url and not source_media_urls) or (
+        source_media_still_needs_quality_repair and not source_media_supports_ytdlp
+    )
+    youtube_media_missing = normalized_platform == "youtube" and (
+        not source_media_urls or (source_media_still_needs_quality_repair and not source_media_supports_ytdlp)
+    )
     if missing_source_media or youtube_media_missing:
-        if normalized_platform == "instagram":
+        if source_media_still_needs_quality_repair:
+            missing_reason = f"{normalized_platform}_media_unresolved"
+        elif normalized_platform == "instagram":
             missing_reason = "instagram_media_not_found"
         elif normalized_platform == "tiktok":
             missing_reason = "tiktok_media_not_found"
@@ -11696,14 +12047,67 @@ def _compute_post_metadata(
     target_accounts_by_platform: dict[str, set[str]],
 ) -> dict[str, Any] | None:
     """Compute post metadata coverage across all platform tables."""
-    _PLATFORM_QUERIES: dict[str, tuple[str, str, str, str | None, str | None, str | None, str | None]] = {
-        # (table, ts_col, text_col, hashtags_col, mentions_col, collaborators_col, media_type_col)
-        "instagram": ("social.instagram_posts", "posted_at", "caption", "hashtags", "mentions", "collaborators", "media_type"),
-        "tiktok": ("social.tiktok_posts", "posted_at", "description", "hashtags", None, None, None),
-        "youtube": ("social.youtube_videos", "published_at", "title", None, None, None, None),
-        "twitter": ("social.twitter_tweets", "created_at", "text", "hashtags", "mentions", None, None),
-        "facebook": ("social.facebook_posts", "posted_at", "caption", None, None, None, "post_type"),
-        "threads": ("social.meta_threads_posts", "posted_at", "text", None, None, None, "media_type"),
+    platform_queries: dict[str, dict[str, str | None]] = {
+        "instagram": {
+            "table": "social.instagram_posts",
+            "ts_col": "posted_at",
+            "text_expr": "p.caption",
+            "token_text_expr": "p.caption",
+            "hashtags_col": "hashtags",
+            "mentions_col": "mentions",
+            "collaborators_col": "collaborators",
+            "media_type_col": "media_type",
+        },
+        "tiktok": {
+            "table": "social.tiktok_posts",
+            "ts_col": "posted_at",
+            "text_expr": "p.description",
+            "token_text_expr": "p.description",
+            "hashtags_col": "hashtags",
+            "mentions_col": "mentions",
+            "collaborators_col": None,
+            "media_type_col": None,
+        },
+        "youtube": {
+            "table": "social.youtube_videos",
+            "ts_col": "published_at",
+            "text_expr": "coalesce(nullif(trim(p.description), ''), nullif(trim(p.title), ''))",
+            "token_text_expr": "coalesce(p.description, p.title, '')",
+            "hashtags_col": "hashtags",
+            "mentions_col": "mentions",
+            "collaborators_col": None,
+            "media_type_col": None,
+        },
+        "twitter": {
+            "table": "social.twitter_tweets",
+            "ts_col": "created_at",
+            "text_expr": "p.text",
+            "token_text_expr": "p.text",
+            "hashtags_col": "hashtags",
+            "mentions_col": "mentions",
+            "collaborators_col": None,
+            "media_type_col": None,
+        },
+        "facebook": {
+            "table": "social.facebook_posts",
+            "ts_col": "posted_at",
+            "text_expr": "p.caption",
+            "token_text_expr": "p.caption",
+            "hashtags_col": "hashtags",
+            "mentions_col": "mentions",
+            "collaborators_col": None,
+            "media_type_col": "post_type",
+        },
+        "threads": {
+            "table": "social.meta_threads_posts",
+            "ts_col": "posted_at",
+            "text_expr": "p.text",
+            "token_text_expr": "p.text",
+            "hashtags_col": "hashtags",
+            "mentions_col": "mentions",
+            "collaborators_col": None,
+            "media_type_col": "media_type",
+        },
     }
 
     total_posts = 0
@@ -11714,10 +12118,38 @@ def _compute_post_metadata(
     content_type_counts: dict[str, int] = {}
 
     for platform in platforms:
-        cfg = _PLATFORM_QUERIES.get(platform)
+        cfg = platform_queries.get((platform or "").strip().lower())
         if not cfg:
             continue
-        table, ts_col, text_col, hashtags_col, mentions_col, collaborators_col, media_type_col = cfg
+        table = str(cfg["table"])
+        ts_col = str(cfg["ts_col"])
+        text_expr = str(cfg["text_expr"])
+        token_text_expr = str(cfg["token_text_expr"])
+        hashtags_col_raw = cfg.get("hashtags_col")
+        mentions_col_raw = cfg.get("mentions_col")
+        collaborators_col_raw = cfg.get("collaborators_col")
+        media_type_col_raw = cfg.get("media_type_col")
+
+        hashtags_col = (
+            str(hashtags_col_raw)
+            if hashtags_col_raw and _platform_posts_has_column(platform, str(hashtags_col_raw))
+            else None
+        )
+        mentions_col = (
+            str(mentions_col_raw)
+            if mentions_col_raw and _platform_posts_has_column(platform, str(mentions_col_raw))
+            else None
+        )
+        collaborators_col = (
+            str(collaborators_col_raw)
+            if collaborators_col_raw and _platform_posts_has_column(platform, str(collaborators_col_raw))
+            else None
+        )
+        media_type_col = (
+            str(media_type_col_raw)
+            if media_type_col_raw and _platform_posts_has_column(platform, str(media_type_col_raw))
+            else None
+        )
 
         account_handles = sorted(target_accounts_by_platform.get(platform, set()))
         if platform == "youtube":
@@ -11733,25 +12165,50 @@ def _compute_post_metadata(
                 else ""
             )
 
+        has_caption_expr = f"nullif(trim({text_expr}), '') is not null"
+        hashtag_regex_expr = f"coalesce({token_text_expr}, '') ~ '(?<![A-Za-z0-9_.])#[A-Za-z0-9_]+'"
+        mention_regex_expr = f"coalesce({token_text_expr}, '') ~ '(?<![A-Za-z0-9_.])@[A-Za-z0-9_.]+'"
+
+        hashtag_json_expr = (
+            f"(p.{hashtags_col} is not null and jsonb_typeof(p.{hashtags_col}) = 'array' and jsonb_array_length(p.{hashtags_col}) > 0)"
+            if hashtags_col
+            else None
+        )
+        mention_json_expr = (
+            f"(p.{mentions_col} is not null and jsonb_typeof(p.{mentions_col}) = 'array' and jsonb_array_length(p.{mentions_col}) > 0)"
+            if mentions_col
+            else None
+        )
+        collaborators_json_expr = (
+            f"(p.{collaborators_col} is not null and jsonb_typeof(p.{collaborators_col}) = 'array' and jsonb_array_length(p.{collaborators_col}) > 0)"
+            if collaborators_col
+            else None
+        )
+
+        has_tags_expr = (
+            f"({hashtag_json_expr} or {hashtag_regex_expr})"
+            if hashtag_json_expr
+            else hashtag_regex_expr
+        )
+        has_mentions_expr = (
+            f"({mention_json_expr} or {mention_regex_expr})"
+            if mention_json_expr
+            else mention_regex_expr
+        )
+
         selects = [
             "count(*) as total",
-            f"count(*) filter (where nullif(trim(p.{text_col}), '') is not null) as has_caption",
+            f"count(*) filter (where {has_caption_expr}) as has_caption",
+            f"count(*) filter (where {has_tags_expr}) as has_tags",
+            f"count(*) filter (where {has_mentions_expr}) as has_mentions",
         ]
-        if hashtags_col:
+        if collaborators_json_expr:
             selects.append(
-                f"count(*) filter (where p.{hashtags_col} is not null and jsonb_array_length(p.{hashtags_col}) > 0) as has_tags"
-            )
-        if mentions_col:
-            selects.append(
-                f"count(*) filter (where p.{mentions_col} is not null and jsonb_array_length(p.{mentions_col}) > 0) as has_mentions"
-            )
-        if collaborators_col:
-            selects.append(
-                f"count(*) filter (where p.{collaborators_col} is not null and jsonb_array_length(p.{collaborators_col}) > 0) as has_collaborators"
+                f"count(*) filter (where {collaborators_json_expr}) as has_collaborators"
             )
         if media_type_col:
-            selects.append(f"p.{media_type_col} as mtype")
-            group_by = f"group by p.{media_type_col}"
+            selects.append(f"coalesce(nullif(trim(p.{media_type_col}), ''), 'other') as mtype")
+            group_by = f"group by coalesce(nullif(trim(p.{media_type_col}), ''), 'other')"
         else:
             group_by = ""
 
@@ -11775,11 +12232,9 @@ def _compute_post_metadata(
                 count = int(row.get("total") or 0)
                 total_posts += count
                 posts_with_caption += int(row.get("has_caption") or 0)
-                if hashtags_col:
-                    posts_with_tags += int(row.get("has_tags") or 0)
-                if mentions_col:
-                    posts_with_mentions += int(row.get("has_mentions") or 0)
-                if collaborators_col:
+                posts_with_tags += int(row.get("has_tags") or 0)
+                posts_with_mentions += int(row.get("has_mentions") or 0)
+                if collaborators_json_expr:
                     posts_with_collaborators += int(row.get("has_collaborators") or 0)
                 mtype = str(row.get("mtype") or "other").lower().strip()
                 if not mtype:
@@ -11790,11 +12245,9 @@ def _compute_post_metadata(
             count = int(row.get("total") or 0)
             total_posts += count
             posts_with_caption += int(row.get("has_caption") or 0)
-            if hashtags_col:
-                posts_with_tags += int(row.get("has_tags") or 0)
-            if mentions_col:
-                posts_with_mentions += int(row.get("has_mentions") or 0)
-            if collaborators_col:
+            posts_with_tags += int(row.get("has_tags") or 0)
+            posts_with_mentions += int(row.get("has_mentions") or 0)
+            if collaborators_json_expr:
                 posts_with_collaborators += int(row.get("has_collaborators") or 0)
             # Assign a generic content type for platforms without media_type column
             generic_type = "video" if platform in ("tiktok", "youtube") else "post"
@@ -11811,7 +12264,7 @@ def _compute_post_metadata(
         }
 
     # Normalize raw media_type codes to canonical labels
-    _MEDIA_TYPE_NORMALIZE: dict[str, str] = {
+    media_type_normalize: dict[str, str] = {
         "1": "photo", "2": "photo", "image": "photo",
         "8": "video", "reel": "video",
         "19": "album", "carousel": "album", "carousel_album": "album",
@@ -11820,7 +12273,7 @@ def _compute_post_metadata(
     }
     normalized_counts: dict[str, int] = {}
     for raw_key, count in content_type_counts.items():
-        key = _MEDIA_TYPE_NORMALIZE.get(raw_key, raw_key)
+        key = media_type_normalize.get(raw_key, raw_key)
         normalized_counts[key] = normalized_counts.get(key, 0) + count
 
     # Build content type buckets
@@ -13889,6 +14342,11 @@ def _week_detail_tiktok(
     max_comments: int,
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "tiktok")
+    mentions_expr = (
+        "coalesce(p.mentions, '[]'::jsonb)"
+        if _platform_posts_has_column("tiktok", "mentions")
+        else "'[]'::jsonb"
+    )
     account_handles_list = sorted(account_handles)
     account_filter = (
         "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
@@ -13910,7 +14368,8 @@ def _week_detail_tiktok(
           coalesce(p.comments_count, 0) as comments_count,
           coalesce(p.shares, 0) as shares,
           coalesce(p.views, 0) as views,
-          p.hashtags,
+          coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+          {mentions_expr} as mentions,
           {thumbnail_expr} as thumbnail_url,
           p.duration_seconds,
           p.posted_at as ts
@@ -13981,17 +14440,16 @@ def _week_detail_tiktok(
         engagement = p["likes"] + p["comments_count"] + p["shares"] + p["views"]
         total_engagement += engagement
         total_comments_count += p["comments_count"]
-        mentions = _parse_mentions(p.get("text"))
         db_comment_count = comment_counts_by_post.get(p["id"], 0)
         saved_comments_count += db_comment_count
         post_comments = comments_by_post.get(p["id"], [])
 
-        hashtags = p.get("hashtags")
-        if isinstance(hashtags, str):
-            try:
-                hashtags = json.loads(hashtags)
-            except (json.JSONDecodeError, TypeError):
-                hashtags = None
+        hashtags = _json_text_list(p.get("hashtags"), strip_prefix="#")
+        if not hashtags:
+            hashtags = _parse_hashtags(p.get("text"))
+        mentions = _json_text_list(p.get("mentions"), prefix="@", strip_prefix="@")
+        if not mentions:
+            mentions = _parse_mentions(p.get("text"))
 
         author = p["author"] or ""
         result_posts.append(
@@ -14006,7 +14464,7 @@ def _week_detail_tiktok(
                 "comments_count": p["comments_count"],
                 "shares": p["shares"],
                 "views": p["views"],
-                "hashtags": hashtags or [],
+                "hashtags": hashtags,
                 "thumbnail_url": p.get("thumbnail_url"),
                 "duration_seconds": p.get("duration_seconds"),
                 "mentions": mentions,
@@ -14053,6 +14511,16 @@ def _week_detail_youtube(
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("v", "youtube")
     youtube_is_short_expr = _youtube_is_short_expr("v")
+    hashtags_expr = (
+        "coalesce(v.hashtags, '[]'::jsonb)"
+        if _platform_posts_has_column("youtube", "hashtags")
+        else "'[]'::jsonb"
+    )
+    mentions_expr = (
+        "coalesce(v.mentions, '[]'::jsonb)"
+        if _platform_posts_has_column("youtube", "mentions")
+        else "'[]'::jsonb"
+    )
     account_handles_list = sorted(account_handles)
     account_filter = (
         "and ltrim(lower(coalesce(nullif(v.channel_title, ''), nullif(v.source_account, ''), '')), '@') = any(%s)"
@@ -14074,6 +14542,8 @@ def _week_detail_youtube(
           coalesce(v.likes, 0) as likes,
           coalesce(v.comments_count, 0) as comments_count,
           {youtube_is_short_expr} as is_short,
+          {hashtags_expr} as hashtags,
+          {mentions_expr} as mentions,
           {thumbnail_expr} as thumbnail_url,
           v.duration_seconds,
           v.published_at as ts
@@ -14147,6 +14617,13 @@ def _week_detail_youtube(
         total_engagement += engagement
         total_comments_count += effective_comments_count
         post_comments = comments_by_post.get(p["id"], [])
+        token_text = f"{p.get('title') or ''}\n{p.get('text') or ''}"
+        hashtags = _json_text_list(p.get("hashtags"), strip_prefix="#")
+        if not hashtags:
+            hashtags = _parse_hashtags(token_text)
+        mentions = _json_text_list(p.get("mentions"), prefix="@", strip_prefix="@")
+        if not mentions:
+            mentions = _parse_mentions(token_text)
 
         result_posts.append(
             {
@@ -14165,6 +14642,8 @@ def _week_detail_youtube(
                 "views": p["views"],
                 "likes": p["likes"],
                 "comments_count": effective_comments_count,
+                "hashtags": hashtags,
+                "mentions": mentions,
                 "thumbnail_url": p.get("thumbnail_url"),
                 "duration_seconds": p.get("duration_seconds"),
                 "engagement": engagement,
@@ -14444,6 +14923,16 @@ def _week_detail_facebook(
     max_comments: int,
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "facebook")
+    hashtags_expr = (
+        "coalesce(p.hashtags, '[]'::jsonb)"
+        if _platform_posts_has_column("facebook", "hashtags")
+        else "'[]'::jsonb"
+    )
+    mentions_expr = (
+        "coalesce(p.mentions, '[]'::jsonb)"
+        if _platform_posts_has_column("facebook", "mentions")
+        else "'[]'::jsonb"
+    )
     account_handles_list = sorted(account_handles)
     account_filter = (
         "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
@@ -14465,6 +14954,8 @@ def _week_detail_facebook(
           coalesce(p.comments_count, 0) as comments_count,
           coalesce(p.shares, 0) as shares,
           coalesce(p.views, 0) as views,
+          {hashtags_expr} as hashtags,
+          {mentions_expr} as mentions,
           {thumbnail_expr} as thumbnail_url,
           p.posted_at as ts
         from social.facebook_posts p
@@ -14533,6 +15024,12 @@ def _week_detail_facebook(
         db_comment_count = int(comment_counts_by_post.get(p["id"], 0) or 0)
         saved_comments_count += db_comment_count
         post_comments = comments_by_post.get(p["id"], [])
+        hashtags = _json_text_list(p.get("hashtags"), strip_prefix="#")
+        if not hashtags:
+            hashtags = _parse_hashtags(p.get("text"))
+        mentions = _json_text_list(p.get("mentions"), prefix="@", strip_prefix="@")
+        if not mentions:
+            mentions = _parse_mentions(p.get("text"))
         url = (
             f"https://www.facebook.com/reel/{p['source_id']}"
             if str(p.get("post_type") or "").lower() == "reel"
@@ -14549,6 +15046,8 @@ def _week_detail_facebook(
                 "comments_count": p["comments_count"],
                 "shares": p["shares"],
                 "views": p["views"],
+                "hashtags": hashtags,
+                "mentions": mentions,
                 "post_type": p.get("post_type") or "feed",
                 "thumbnail_url": p.get("thumbnail_url"),
                 "engagement": engagement,
@@ -14590,6 +15089,16 @@ def _week_detail_threads(
     max_comments: int,
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "threads")
+    hashtags_expr = (
+        "coalesce(p.hashtags, '[]'::jsonb)"
+        if _platform_posts_has_column("threads", "hashtags")
+        else "'[]'::jsonb"
+    )
+    mentions_expr = (
+        "coalesce(p.mentions, '[]'::jsonb)"
+        if _platform_posts_has_column("threads", "mentions")
+        else "'[]'::jsonb"
+    )
     account_handles_list = sorted(account_handles)
     account_filter = (
         "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
@@ -14611,6 +15120,8 @@ def _week_detail_threads(
           coalesce(p.reposts, 0) as reposts,
           coalesce(p.quotes, 0) as quotes,
           coalesce(p.views, 0) as views,
+          {hashtags_expr} as hashtags,
+          {mentions_expr} as mentions,
           {thumbnail_expr} as thumbnail_url,
           p.posted_at as ts
         from social.meta_threads_posts p
@@ -14680,6 +15191,12 @@ def _week_detail_threads(
         db_comment_count = int(comment_counts_by_post.get(p["id"], 0) or 0)
         saved_comments_count += db_comment_count
         post_comments = comments_by_post.get(p["id"], [])
+        hashtags = _json_text_list(p.get("hashtags"), strip_prefix="#")
+        if not hashtags:
+            hashtags = _parse_hashtags(p.get("text"))
+        mentions = _json_text_list(p.get("mentions"), prefix="@", strip_prefix="@")
+        if not mentions:
+            mentions = _parse_mentions(p.get("text"))
         result_posts.append(
             {
                 "source_id": p["source_id"],
@@ -14692,6 +15209,8 @@ def _week_detail_threads(
                 "reposts": p["reposts"],
                 "quotes": p["quotes"],
                 "views": p["views"],
+                "hashtags": hashtags,
+                "mentions": mentions,
                 "thumbnail_url": p.get("thumbnail_url"),
                 "engagement": engagement,
                 "total_comments_available": db_comment_count,
@@ -15057,11 +15576,18 @@ def get_post_comments(
                 "then greatest(((to_jsonb(p) ->> 'saves')::int), 0) else 0 end"
             )
         )
+        mentions_expr = (
+            "coalesce(p.mentions, '[]'::jsonb)"
+            if _platform_posts_has_column("tiktok", "mentions")
+            else "'[]'::jsonb"
+        )
         post = pg.fetch_one(
             f"""
             select p.id, p.video_id as source_id, p.username as author, p.description as text,
                    coalesce(p.likes, 0) as likes, coalesce(p.comments_count, 0) as comments_count,
                    coalesce(p.shares, 0) as shares, {tiktok_saves_expr} as saves, coalesce(p.views, 0) as views,
+                   coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+                   {mentions_expr} as mentions,
                    {thumbnail_expr} as thumbnail_url,
                    coalesce(to_jsonb(p) -> 'media_urls', '[]'::jsonb) as source_media_urls,
                    coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
@@ -15116,11 +15642,19 @@ def get_post_comments(
         media_urls = hosted_media_urls or source_media_urls
         source_thumbnail_url = str(post.get("source_thumbnail_url") or "").strip() or None
         hosted_thumbnail_url = str(post.get("hosted_thumbnail_url") or "").strip() or None
+        hashtags = _json_text_list(post.get("hashtags"), strip_prefix="#")
+        if not hashtags:
+            hashtags = _parse_hashtags(post.get("text"))
+        mentions = _json_text_list(post.get("mentions"), prefix="@", strip_prefix="@")
+        if not mentions:
+            mentions = _parse_mentions(post.get("text"))
         return {
             "platform": "tiktok",
             "source_id": source_id,
             "author": post["author"] or "",
             "text": post.get("text") or "",
+            "hashtags": hashtags,
+            "mentions": mentions,
             "url": f"https://www.tiktok.com/@{post['author'] or ''}/video/{source_id}",
             "posted_at": _iso(post["ts"]),
             "thumbnail_url": post.get("thumbnail_url"),
@@ -15144,12 +15678,24 @@ def get_post_comments(
     if platform == "youtube":
         thumbnail_expr = _platform_thumbnail_expr("v", "youtube")
         youtube_is_short_expr = _youtube_is_short_expr("v")
+        hashtags_expr = (
+            "coalesce(v.hashtags, '[]'::jsonb)"
+            if _platform_posts_has_column("youtube", "hashtags")
+            else "'[]'::jsonb"
+        )
+        mentions_expr = (
+            "coalesce(v.mentions, '[]'::jsonb)"
+            if _platform_posts_has_column("youtube", "mentions")
+            else "'[]'::jsonb"
+        )
         post = pg.fetch_one(
             f"""
             select v.id, v.video_id as source_id, v.channel_title as author,
                    v.title, v.description as text,
                    coalesce(v.views, 0) as views, coalesce(v.likes, 0) as likes,
                    coalesce(v.comments_count, 0) as comments_count,
+                   {hashtags_expr} as hashtags,
+                   {mentions_expr} as mentions,
                    {youtube_is_short_expr} as is_short,
                    {thumbnail_expr} as thumbnail_url,
                    coalesce(to_jsonb(v) -> 'media_urls', '[]'::jsonb) as source_media_urls,
@@ -15190,12 +15736,21 @@ def get_post_comments(
         media_urls = hosted_media_urls or source_media_urls
         source_thumbnail_url = str(post.get("source_thumbnail_url") or "").strip() or None
         hosted_thumbnail_url = str(post.get("hosted_thumbnail_url") or "").strip() or None
+        token_text = f"{post.get('title') or ''}\n{post.get('text') or ''}"
+        hashtags = _json_text_list(post.get("hashtags"), strip_prefix="#")
+        if not hashtags:
+            hashtags = _parse_hashtags(token_text)
+        mentions = _json_text_list(post.get("mentions"), prefix="@", strip_prefix="@")
+        if not mentions:
+            mentions = _parse_mentions(token_text)
         return {
             "platform": "youtube",
             "source_id": source_id,
             "author": post["author"] or "",
             "title": post.get("title") or "",
             "text": post.get("text") or "",
+            "hashtags": hashtags,
+            "mentions": mentions,
             "url": (
                 f"https://www.youtube.com/shorts/{source_id}"
                 if bool(post.get("is_short"))
@@ -15432,6 +15987,16 @@ def get_post_comments(
 
     if platform == "facebook":
         thumbnail_expr = _platform_thumbnail_expr("p", "facebook")
+        hashtags_expr = (
+            "coalesce(p.hashtags, '[]'::jsonb)"
+            if _platform_posts_has_column("facebook", "hashtags")
+            else "'[]'::jsonb"
+        )
+        mentions_expr = (
+            "coalesce(p.mentions, '[]'::jsonb)"
+            if _platform_posts_has_column("facebook", "mentions")
+            else "'[]'::jsonb"
+        )
         post = pg.fetch_one(
             f"""
             select
@@ -15444,6 +16009,8 @@ def get_post_comments(
               coalesce(p.comments_count, 0) as comments_count,
               coalesce(p.shares, 0) as shares,
               coalesce(p.views, 0) as views,
+              {hashtags_expr} as hashtags,
+              {mentions_expr} as mentions,
               {thumbnail_expr} as thumbnail_url,
               coalesce(to_jsonb(p) -> 'media_urls', '[]'::jsonb) as source_media_urls,
               coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
@@ -15486,11 +16053,19 @@ def get_post_comments(
         media_urls = hosted_media_urls or source_media_urls
         source_thumbnail_url = str(post.get("source_thumbnail_url") or "").strip() or None
         hosted_thumbnail_url = str(post.get("hosted_thumbnail_url") or "").strip() or None
+        hashtags = _json_text_list(post.get("hashtags"), strip_prefix="#")
+        if not hashtags:
+            hashtags = _parse_hashtags(post.get("text"))
+        mentions = _json_text_list(post.get("mentions"), prefix="@", strip_prefix="@")
+        if not mentions:
+            mentions = _parse_mentions(post.get("text"))
         return {
             "platform": "facebook",
             "source_id": source_id,
             "author": post["author"] or "",
             "text": post.get("text") or "",
+            "hashtags": hashtags,
+            "mentions": mentions,
             "url": url,
             "posted_at": _iso(post["ts"]),
             "thumbnail_url": post.get("thumbnail_url"),
@@ -15512,6 +16087,16 @@ def get_post_comments(
 
     if platform == "threads":
         thumbnail_expr = _platform_thumbnail_expr("p", "threads")
+        hashtags_expr = (
+            "coalesce(p.hashtags, '[]'::jsonb)"
+            if _platform_posts_has_column("threads", "hashtags")
+            else "'[]'::jsonb"
+        )
+        mentions_expr = (
+            "coalesce(p.mentions, '[]'::jsonb)"
+            if _platform_posts_has_column("threads", "mentions")
+            else "'[]'::jsonb"
+        )
         post = pg.fetch_one(
             f"""
             select
@@ -15524,6 +16109,8 @@ def get_post_comments(
               coalesce(p.reposts, 0) as reposts,
               coalesce(p.quotes, 0) as quotes,
               coalesce(p.views, 0) as views,
+              {hashtags_expr} as hashtags,
+              {mentions_expr} as mentions,
               {thumbnail_expr} as thumbnail_url,
               coalesce(to_jsonb(p) -> 'media_urls', '[]'::jsonb) as source_media_urls,
               coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
@@ -15561,11 +16148,19 @@ def get_post_comments(
         media_urls = hosted_media_urls or source_media_urls
         source_thumbnail_url = str(post.get("source_thumbnail_url") or "").strip() or None
         hosted_thumbnail_url = str(post.get("hosted_thumbnail_url") or "").strip() or None
+        hashtags = _json_text_list(post.get("hashtags"), strip_prefix="#")
+        if not hashtags:
+            hashtags = _parse_hashtags(post.get("text"))
+        mentions = _json_text_list(post.get("mentions"), prefix="@", strip_prefix="@")
+        if not mentions:
+            mentions = _parse_mentions(post.get("text"))
         return {
             "platform": "threads",
             "source_id": source_id,
             "author": post["author"] or "",
             "text": post.get("text") or "",
+            "hashtags": hashtags,
+            "mentions": mentions,
             "url": f"https://www.threads.com/@{post['author'] or ''}/post/{source_id}",
             "posted_at": _iso(post["ts"]),
             "thumbnail_url": post.get("thumbnail_url"),

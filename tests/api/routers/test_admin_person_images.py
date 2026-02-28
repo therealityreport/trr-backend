@@ -114,8 +114,30 @@ def test_enrich_cast_photos_with_episode_metadata_falls_back_to_imdb_title_metad
     )
     monkeypatch.setattr(
         admin_person_images,
-        "_lookup_show_ids_by_name",
-        lambda db, show_names: {"The Real Housewives of Beverly Hills": "show-rhobh-id"},
+        "_build_show_lookup_maps",
+        lambda db: (
+            {
+                "tt1720601": {
+                    "id": "show-rhobh-id",
+                    "name": "The Real Housewives of Beverly Hills",
+                    "imdb_id": "tt1720601",
+                }
+            },
+            {
+                "the real housewives of beverly hills": {
+                    "id": "show-rhobh-id",
+                    "name": "The Real Housewives of Beverly Hills",
+                    "imdb_id": "tt1720601",
+                }
+            },
+            {
+                "show-rhobh-id": {
+                    "id": "show-rhobh-id",
+                    "name": "The Real Housewives of Beverly Hills",
+                    "imdb_id": "tt1720601",
+                }
+            },
+        ),
     )
 
     tagged, failed = admin_person_images._enrich_cast_photos_with_episode_metadata(mock_db, photos)
@@ -135,6 +157,200 @@ def test_enrich_cast_photos_with_episode_metadata_falls_back_to_imdb_title_metad
     assert metadata["show_id"] == "show-rhobh-id"
     assert metadata["show_imdb_id"] == "tt1720601"
     assert metadata["show_short_code"] == "RHOBH"
+    assert metadata["show_context_source"] == "imdb_title_fallback"
+
+
+def test_enrich_cast_photos_with_episode_metadata_marks_unresolved_imdb_episode_show_as_null(monkeypatch) -> None:
+    photos = [
+        {
+            "source": "imdb",
+            "title_imdb_ids": ["tt26755932"],
+            "title_names": ["Milo Ventimiglia & Alan Cumming"],
+            "metadata": {
+                "show_id": "stale-show-id",
+                "show_name": "Stale Show",
+                "show_imdb_id": "tt0000000",
+                "show_short_code": "SS",
+            },
+        }
+    ]
+
+    mock_db = MagicMock()
+    episodes_response = MagicMock()
+    episodes_response.error = None
+    episodes_response.data = []
+    episodes_query = mock_db.schema.return_value.table.return_value.select.return_value.in_.return_value
+    episodes_query.execute.return_value = episodes_response
+
+    monkeypatch.setattr(
+        admin_person_images,
+        "_fetch_imdb_title_fallback_metadata",
+        lambda imdb_ids: {
+            "tt26755932": {
+                "episode_imdb_id": "tt26755932",
+                "episode_title": "Milo Ventimiglia & Alan Cumming",
+                "season_number": 20,
+                "episode_number": 37,
+                "episode_air_date": "2023-03-15",
+                "show_name": "Watch What Happens Live with Andy Cohen",
+                "show_imdb_id": "tt0318220",
+                "show_short_code": None,
+                "imdb_title_type": "TVEpisode",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_build_show_lookup_maps",
+        lambda db: ({}, {}, {}),
+    )
+
+    tagged, failed = admin_person_images._enrich_cast_photos_with_episode_metadata(mock_db, photos)
+
+    assert tagged == 1
+    assert failed == 0
+    metadata = photos[0]["metadata"]
+    assert metadata["show_context_source"] == "imdb_episode_unresolved"
+    assert metadata["show_id"] is None
+    assert metadata["show_name"] is None
+    assert metadata["show_imdb_id"] is None
+    assert metadata["show_short_code"] is None
+
+
+def test_apply_show_context_to_photos_does_not_overwrite_existing_show_metadata() -> None:
+    show_id = uuid4()
+    mock_db = MagicMock()
+    photos = [
+        {"id": "photo-1", "metadata": {"show_id": "legacy-show-id", "show_name": "Legacy Show"}},
+        {"id": "photo-2", "metadata": {"show_name": "Legacy Caption Show"}},
+    ]
+
+    tagged, failed = admin_person_images._apply_show_context_to_photos(
+        mock_db,
+        photos,
+        show_id=show_id,
+        show_name="Current Show",
+    )
+
+    assert tagged == 0
+    assert failed == 0
+    assert photos[0]["metadata"]["show_id"] == "legacy-show-id"
+    assert photos[0]["metadata"]["show_name"] == "Legacy Show"
+    assert photos[1]["metadata"].get("show_id") is None
+    assert photos[1]["metadata"]["show_name"] == "Legacy Caption Show"
+
+
+def test_apply_show_context_to_photos_only_tag_absent_metadata() -> None:
+    show_id = uuid4()
+    mock_db = MagicMock()
+    photos = [
+        {"id": "photo-1", "metadata": {"show_id": "legacy-show-id"}},
+        {"id": "photo-2", "metadata": {}},
+        {"id": "photo-3", "metadata": None},
+        {"id": "photo-4"},
+    ]
+
+    tagged, failed = admin_person_images._apply_show_context_to_photos(
+        mock_db,
+        photos,
+        show_id=show_id,
+        show_name="Current Show",
+    )
+
+    assert tagged == 3
+    assert failed == 0
+    assert photos[0]["metadata"]["show_id"] == "legacy-show-id"
+    assert "show_name" not in photos[0]["metadata"]
+    assert photos[1]["metadata"]["show_id"] == str(show_id)
+    assert photos[1]["metadata"]["show_name"] == "Current Show"
+    assert photos[2]["metadata"]["show_id"] == str(show_id)
+    assert photos[2]["metadata"]["show_name"] == "Current Show"
+    assert photos[3]["metadata"]["show_id"] == str(show_id)
+    assert photos[3]["metadata"]["show_name"] == "Current Show"
+
+
+def test_apply_show_context_to_photos_skips_unresolved_imdb_episode_rows() -> None:
+    show_id = uuid4()
+    mock_db = MagicMock()
+    photos = [
+        {
+            "id": "photo-1",
+            "source": "imdb",
+            "title_imdb_ids": ["tt26755932"],
+            "metadata": {
+                "show_context_source": "imdb_episode_unresolved",
+                "episode_title": "Milo Ventimiglia & Alan Cumming",
+            },
+        },
+        {"id": "photo-2", "source": "tmdb", "metadata": {}},
+    ]
+
+    tagged, failed = admin_person_images._apply_show_context_to_photos(
+        mock_db,
+        photos,
+        show_id=show_id,
+        show_name="The Traitors",
+    )
+
+    assert tagged == 1
+    assert failed == 0
+    assert photos[0]["metadata"].get("show_id") is None
+    assert photos[0]["metadata"].get("show_name") is None
+    assert photos[1]["metadata"]["show_id"] == str(show_id)
+    assert photos[1]["metadata"]["show_name"] == "The Traitors"
+    assert photos[1]["metadata"]["show_context_source"] == "request_context"
+
+
+def test_repair_existing_imdb_cast_photos_rewrites_rows_via_upsert(monkeypatch) -> None:
+    mock_db = MagicMock()
+    existing_rows = [
+        {
+            "id": "photo-1",
+            "source": "imdb",
+            "source_image_id": "rm1103833857",
+            "title_imdb_ids": ["tt26755932"],
+            "title_names": ["Milo Ventimiglia & Alan Cumming"],
+            "metadata": {},
+        }
+    ]
+
+    monkeypatch.setattr(
+        admin_person_images,
+        "_load_existing_imdb_cast_photos_for_person",
+        lambda db, person_id: existing_rows,
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_enrich_cast_photos_with_episode_metadata",
+        lambda db, rows: (1, 0),
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_apply_show_context_to_photos",
+        lambda db, rows, show_id, show_name: (0, 0),
+    )
+
+    upsert_calls: list[list[dict[str, object]]] = []
+
+    def _fake_upsert(db, rows, *, dedupe_on):  # type: ignore[no-untyped-def]
+        upsert_calls.append(list(rows))
+        return [{"id": "photo-1"}]
+
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+        _fake_upsert,
+    )
+
+    repaired, failed = admin_person_images._repair_existing_imdb_cast_photos(
+        mock_db,
+        "person-1",
+        show_id=None,
+        show_name="The Traitors",
+    )
+
+    assert repaired == 1
+    assert failed == 0
+    assert len(upsert_calls) == 1
 
 
 class TestRefreshPersonImages:
@@ -289,6 +505,46 @@ class TestRefreshPersonImages:
 
         assert response.status_code == 200
         mock_mirror.assert_not_called()
+
+    def test_refresh_runs_existing_imdb_repair_stage(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Repair Person",
+            "external_ids": {"imdb": "nm12345678"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("trr_backend.repositories.cast_tmdb.get_cast_tmdb_by_person_id", return_value=None):
+                with patch("trr_backend.ingestion.cast_photo_sources.fetch_all_cast_photos", return_value=[]):
+                    with patch(
+                        "api.routers.admin_person_images._repair_existing_imdb_cast_photos",
+                        return_value=(2, 0),
+                    ) as repair_mock:
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/refresh-images",
+                            json={
+                                "skip_mirror": True,
+                                "skip_auto_count": True,
+                                "skip_word_detection": True,
+                                "skip_centering": True,
+                                "skip_resize": True,
+                            },
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+        assert response.status_code == 200
+        repair_mock.assert_called_once()
 
     def test_bypasses_show_source_policy_when_disabled(self, client, monkeypatch):
         """enforce_show_source_policy=False should preserve requested sources unchanged."""

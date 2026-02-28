@@ -17,6 +17,167 @@ def test_guess_ext_from_content_type() -> None:
     assert s3_mirror.guess_ext_from_content_type("application/octet-stream") == ".bin"
 
 
+def test_infer_media_extension_prefers_url_suffix() -> None:
+    assert s3_mirror.infer_media_extension("https://video.twimg.com/path/file.mp4?tag=1", "image/jpeg") == ".mp4"
+    assert s3_mirror.infer_media_extension("https://pbs.twimg.com/media/file.jpeg", None) == ".jpeg"
+    assert s3_mirror.infer_media_extension("https://example.com/file", "video/webm") == ".webm"
+
+
+def test_mirror_url_to_s3_uploads_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    class _FakeResponse:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            yield b"abc123"
+
+    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "_head_object", lambda *_args, **_kwargs: None)
+    upload_mock = MagicMock(return_value=("etag-1", 6))
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
+
+    result = s3_mirror.mirror_url_to_s3(
+        "https://video.twimg.com/ext_tw_video/12345/pu/vid.mp4",
+        s3_client=MagicMock(),
+        bucket="bucket",
+    )
+
+    assert result.status == "mirrored"
+    assert result.error is None
+    assert result.hosted_url is not None and result.hosted_url.startswith("https://cdn.example.com/media/")
+    assert result.hosted_key is not None and result.hosted_key.endswith(".mp4")
+    upload_mock.assert_called_once()
+
+
+def test_mirror_url_to_s3_skips_upload_when_existing_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    class _FakeResponse:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            yield b"abc123"
+
+    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(
+        s3_mirror,
+        "_head_object",
+        lambda *_args, **_kwargs: {"ContentType": "video/mp4", "ContentLength": 99},
+    )
+    upload_mock = MagicMock()
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
+
+    result = s3_mirror.mirror_url_to_s3(
+        "https://video.twimg.com/ext_tw_video/12345/pu/vid.mp4",
+        s3_client=MagicMock(),
+        bucket="bucket",
+    )
+
+    assert result.status == "skipped"
+    assert result.error is None
+    assert result.size_bytes == 99
+    upload_mock.assert_not_called()
+
+
+def test_mirror_url_to_s3_invalid_url_is_skipped() -> None:
+    result = s3_mirror.mirror_url_to_s3("ftp://example.com/file.mp4")
+    assert result.status == "skipped"
+    assert result.error == "invalid_source_url"
+
+
+def test_mirror_url_to_s3_fails_for_oversized_assets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+
+    class _FakeResponse:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            yield b"12345"
+            yield b"67890"
+
+    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    result = s3_mirror.mirror_url_to_s3(
+        "https://video.twimg.com/ext_tw_video/12345/pu/vid.mp4",
+        s3_client=MagicMock(),
+        bucket="bucket",
+        max_bytes=8,
+    )
+    assert result.status == "failed"
+    assert result.error == "asset_too_large"
+
+
+def test_mirror_urls_to_s3_isolates_failures_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def _fake_mirror(url: str, **kwargs):  # noqa: ANN001
+        del kwargs
+        calls.append(url)
+        if "bad" in url:
+            raise RuntimeError("boom")
+        return s3_mirror.MirrorResult(
+            source_url=url,
+            hosted_url=f"https://cdn.example.com/{url.rsplit('/', 1)[-1]}",
+            hosted_key="media/key",
+            sha256="abc",
+            content_type="video/mp4",
+            size_bytes=10,
+            status="mirrored",
+            error=None,
+        )
+
+    monkeypatch.setattr(s3_mirror, "mirror_url_to_s3", _fake_mirror)
+    results = s3_mirror.mirror_urls_to_s3(
+        [
+            "https://example.com/ok.mp4",
+            "https://example.com/bad.mp4",
+            "https://example.com/ok.mp4",
+        ]
+    )
+
+    assert len(results) == 3
+    assert calls == ["https://example.com/ok.mp4", "https://example.com/bad.mp4"]
+    assert results[0].status == "mirrored"
+    assert results[1].status == "failed"
+    assert results[2].status == "mirrored"
+
+
 def test_build_cast_photo_s3_key_structure() -> None:
     """Test S3 key structure uses stable IDs and includes /photos/ segment."""
     key = s3_mirror.build_cast_photo_s3_key("nm11883948", "fandom", "abc123", ".webp")
@@ -141,6 +302,23 @@ def test_cdn_base_url_rejects_placeholder(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
     monkeypatch.setenv("AWS_CDN_BASE_URL", "https://dxxxx.cloudfront.net")
     with pytest.raises(RuntimeError):
+        s3_mirror.get_cdn_base_url()
+
+
+@pytest.mark.parametrize(
+    "cdn_url",
+    [
+        "https://s3.amazonaws.com",
+        "https://trr-backend.s3.amazonaws.com",
+        "https://s3.us-east-1.amazonaws.com",
+        "https://trr-backend.s3.us-east-1.amazonaws.com",
+    ],
+)
+def test_cdn_base_url_rejects_s3_endpoints(monkeypatch: pytest.MonkeyPatch, cdn_url: str) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", cdn_url)
+    with pytest.raises(RuntimeError, match="must not be a direct S3 endpoint"):
         s3_mirror.get_cdn_base_url()
 
 

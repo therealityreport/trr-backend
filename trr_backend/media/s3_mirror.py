@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import mimetypes
 import os
 import re
 from collections.abc import Mapping
@@ -20,6 +21,13 @@ _DEFAULT_HEADERS = {
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
+
+_MEDIA_MIRROR_HEADERS = {
+    "accept": "*/*",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+}
+_MEDIA_MIRROR_CHUNK_SIZE_BYTES = 64 * 1024
 
 
 def _is_image_content_type(value: str | None) -> bool:
@@ -175,6 +183,16 @@ def _validate_cdn_base_url(value: str) -> str:
         raise RuntimeError("AWS_CDN_BASE_URL must start with https://")
     if "dxxxx" in base.lower():
         raise RuntimeError("AWS_CDN_BASE_URL contains placeholder 'dxxxx'; set the real CDN domain")
+    parsed = urlparse(base)
+    host = (parsed.netloc or "").strip().lower()
+    if not host:
+        raise RuntimeError("AWS_CDN_BASE_URL must include a valid host")
+    if host == "s3.amazonaws.com" or host.endswith(".s3.amazonaws.com"):
+        raise RuntimeError("AWS_CDN_BASE_URL must not be a direct S3 endpoint")
+    if re.match(r"^s3[.-][a-z0-9-]+\.amazonaws\.com$", host):
+        raise RuntimeError("AWS_CDN_BASE_URL must not be a direct S3 endpoint")
+    if re.match(r"^[a-z0-9.-]+\.s3[.-][a-z0-9-]+\.amazonaws\.com$", host):
+        raise RuntimeError("AWS_CDN_BASE_URL must not be a direct S3 endpoint")
     return base.rstrip("/")
 
 
@@ -251,6 +269,21 @@ def guess_ext_from_content_type(content_type: str | None) -> str:
     if ct == "image/png":
         return ".png"
     return ".bin"
+
+
+def infer_media_extension(url: str, content_type: str | None) -> str:
+    parsed = urlparse(str(url or "").strip())
+    suffix = os.path.splitext(unquote(parsed.path or ""))[1].lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".m4v", ".webm"}:
+        return suffix
+
+    normalized_ct = (content_type or "").split(";", 1)[0].strip().lower()
+    guessed = mimetypes.guess_extension(normalized_ct) if normalized_ct else None
+    if guessed in {".jpe"}:
+        return ".jpg"
+    if guessed:
+        return guessed.lower()
+    return guess_ext_from_content_type(content_type)
 
 
 def _sanitize_path_segment(name: str) -> str:
@@ -785,6 +818,268 @@ def upload_bytes_to_s3(
     )
     etag = _sanitize_etag(response.get("ETag"))
     return etag, len(data)
+
+
+@dataclass(frozen=True)
+class MirrorResult:
+    source_url: str
+    hosted_url: str | None
+    hosted_key: str | None
+    sha256: str | None
+    content_type: str | None
+    size_bytes: int | None
+    status: str
+    error: str | None
+
+
+def mirror_url_to_s3(
+    url: str,
+    *,
+    s3_client=None,
+    bucket: str | None = None,
+    max_bytes: int = 50 * 1024 * 1024,
+) -> MirrorResult:
+    source_url = str(url or "").strip()
+    if not _is_http_url(source_url):
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=None,
+            size_bytes=None,
+            status="skipped",
+            error="invalid_source_url",
+        )
+    try:
+        max_bytes_limit = int(max_bytes)
+    except (TypeError, ValueError):
+        max_bytes_limit = 0
+    if max_bytes_limit <= 0:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=None,
+            size_bytes=None,
+            status="failed",
+            error="invalid_max_bytes",
+        )
+
+    try:
+        s3 = s3_client or get_s3_client()
+        target_bucket = str(bucket or "").strip() or get_s3_bucket()
+    except Exception as exc:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=None,
+            size_bytes=None,
+            status="failed",
+            error=f"s3_setup_failed:{exc}",
+        )
+
+    data_parts: list[bytes] = []
+    size_bytes = 0
+    digest = hashlib.sha256()
+    content_type: str | None = None
+    try:
+        with requests.get(
+            source_url,
+            headers=_MEDIA_MIRROR_HEADERS,
+            timeout=(10, 60),
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower() or None
+            for chunk in response.iter_content(chunk_size=_MEDIA_MIRROR_CHUNK_SIZE_BYTES):
+                if not chunk:
+                    continue
+                size_bytes += len(chunk)
+                if size_bytes > max_bytes_limit:
+                    return MirrorResult(
+                        source_url=source_url,
+                        hosted_url=None,
+                        hosted_key=None,
+                        sha256=None,
+                        content_type=content_type,
+                        size_bytes=size_bytes,
+                        status="failed",
+                        error="asset_too_large",
+                    )
+                digest.update(chunk)
+                data_parts.append(chunk)
+    except requests.exceptions.Timeout:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=content_type,
+            size_bytes=size_bytes or None,
+            status="failed",
+            error="request_timeout",
+        )
+    except requests.exceptions.ConnectionError:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=content_type,
+            size_bytes=size_bytes or None,
+            status="failed",
+            error="connection_error",
+        )
+    except requests.exceptions.HTTPError as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        reason = f"http_{int(status_code)}" if status_code is not None else "http_error"
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=content_type,
+            size_bytes=size_bytes or None,
+            status="failed",
+            error=reason,
+        )
+    except requests.exceptions.RequestException:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=content_type,
+            size_bytes=size_bytes or None,
+            status="failed",
+            error="request_error",
+        )
+
+    if size_bytes <= 0 or not data_parts:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=content_type,
+            size_bytes=0,
+            status="failed",
+            error="empty_response_body",
+        )
+
+    data = b"".join(data_parts)
+    sha256 = digest.hexdigest()
+    ext = infer_media_extension(source_url, content_type)
+    key = build_shared_media_s3_key(sha256, ext)
+
+    try:
+        head = _head_object(s3, target_bucket, key)
+    except Exception as exc:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=key,
+            sha256=sha256,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            status="failed",
+            error=f"s3_head_failed:{exc.__class__.__name__}",
+        )
+
+    if head is None:
+        try:
+            _, uploaded_bytes = upload_bytes_to_s3(
+                s3,
+                bucket=target_bucket,
+                key=key,
+                data=data,
+                content_type=content_type or "application/octet-stream",
+            )
+        except Exception as exc:
+            return MirrorResult(
+                source_url=source_url,
+                hosted_url=None,
+                hosted_key=key,
+                sha256=sha256,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                status="failed",
+                error=f"upload_failed:{exc.__class__.__name__}",
+            )
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=build_hosted_url(key),
+            hosted_key=key,
+            sha256=sha256,
+            content_type=content_type or "application/octet-stream",
+            size_bytes=uploaded_bytes,
+            status="mirrored",
+            error=None,
+        )
+
+    return MirrorResult(
+        source_url=source_url,
+        hosted_url=build_hosted_url(key),
+        hosted_key=key,
+        sha256=sha256,
+        content_type=(head.get("ContentType") or content_type or "application/octet-stream"),
+        size_bytes=int(head.get("ContentLength")) if head.get("ContentLength") is not None else size_bytes,
+        status="skipped",
+        error=None,
+    )
+
+
+def mirror_urls_to_s3(
+    urls: list[str],
+    *,
+    s3_client=None,
+    bucket: str | None = None,
+    max_bytes: int = 50 * 1024 * 1024,
+) -> list[MirrorResult]:
+    results: list[MirrorResult] = []
+    cache: dict[str, MirrorResult] = {}
+    for raw_url in urls or []:
+        source_url = str(raw_url or "").strip()
+        if source_url in cache:
+            cached = cache[source_url]
+            results.append(
+                MirrorResult(
+                    source_url=source_url,
+                    hosted_url=cached.hosted_url,
+                    hosted_key=cached.hosted_key,
+                    sha256=cached.sha256,
+                    content_type=cached.content_type,
+                    size_bytes=cached.size_bytes,
+                    status=cached.status,
+                    error=cached.error,
+                )
+            )
+            continue
+        try:
+            result = mirror_url_to_s3(
+                source_url,
+                s3_client=s3_client,
+                bucket=bucket,
+                max_bytes=max_bytes,
+            )
+        except Exception as exc:
+            result = MirrorResult(
+                source_url=source_url,
+                hosted_url=None,
+                hosted_key=None,
+                sha256=None,
+                content_type=None,
+                size_bytes=None,
+                status="failed",
+                error=f"mirror_exception:{exc.__class__.__name__}",
+            )
+        cache[source_url] = result
+        results.append(result)
+    return results
 
 
 def mirror_cast_photo_row(
