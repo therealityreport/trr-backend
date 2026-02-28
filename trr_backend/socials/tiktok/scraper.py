@@ -25,6 +25,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
+URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
 
 @dataclass
@@ -87,6 +88,22 @@ class TikTokComment:
     reply_count: int
     replies: list["TikTokComment"] = field(default_factory=list)
     avatar_thumbnail_url: str | None = None
+    comment_language: str | None = None
+    is_author_liked: bool | None = None
+    aweme_id: str | None = None
+    parent_source_comment_id: str | None = None
+    user_url: str | None = None
+    user_bio: str | None = None
+    user_avatar_url: str | None = None
+    user_region: str | None = None
+    user_language: str | None = None
+    media_urls: list[str] = field(default_factory=list)
+    hosted_media_urls: list[str] = field(default_factory=list)
+    media_mirror_status: str | None = None
+    media_mirror_error: str | None = None
+    media_mirror_attempt_count: int | None = None
+    media_mirror_last_attempt_at: str | None = None
+    media_mirror_last_job_id: str | None = None
 
     # Post reference
     video_id: str = ""
@@ -112,6 +129,7 @@ class TikTokPost:
     likes: int
     comments: int
     shares: int
+    saves: int
     views: int
     url: str
     username: str
@@ -528,6 +546,7 @@ class TikTokScraper:
             likes=data.get("like_count", 0) or 0,
             comments=data.get("comment_count", 0) or 0,
             shares=data.get("repost_count", 0) or 0,
+            saves=data.get("collect_count", 0) or data.get("save_count", 0) or 0,
             views=data.get("view_count", 0) or 0,
             url=f"https://www.tiktok.com/@{username}/video/{video_id}" if video_id else "",
             username=username,
@@ -780,6 +799,7 @@ class TikTokScraper:
 
         # Stats
         stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
+        stats_v2 = item.get("statsV2") if isinstance(item.get("statsV2"), dict) else {}
 
         # Music info
         music = item.get("music") if isinstance(item.get("music"), dict) else {}
@@ -823,13 +843,32 @@ class TikTokScraper:
             shares=int(
                 stats.get("shareCount")
                 or stats.get("share_count")
+                or stats_v2.get("shareCount")
+                or stats_v2.get("share_count")
                 or item.get("shareCount")
                 or item.get("share_count")
+                or 0
+            ),
+            saves=int(
+                stats.get("collectCount")
+                or stats.get("collect_count")
+                or stats.get("favoriteCount")
+                or stats.get("favorite_count")
+                or stats_v2.get("collectCount")
+                or stats_v2.get("collect_count")
+                or stats_v2.get("favoriteCount")
+                or stats_v2.get("favorite_count")
+                or item.get("collectCount")
+                or item.get("collect_count")
+                or item.get("favoriteCount")
+                or item.get("favorite_count")
                 or 0
             ),
             views=int(
                 stats.get("playCount")
                 or stats.get("play_count")
+                or stats_v2.get("playCount")
+                or stats_v2.get("play_count")
                 or item.get("playCount")
                 or item.get("play_count")
                 or 0
@@ -1304,10 +1343,21 @@ class TikTokScraper:
         )
         user = data.get("user") if isinstance(data.get("user"), dict) else {}
         resolved_post_url = str(post_url or data.get("videoWebUrl") or "").strip()
-        resolved_video_id = str(video_id or data.get("aweme_id") or data.get("item_id") or "").strip()
+        resolved_video_id = str(
+            video_id or data.get("aweme_id") or data.get("awemeId") or data.get("item_id") or data.get("itemId") or ""
+        ).strip()
         if not resolved_video_id:
             resolved_video_id = self._extract_video_id_from_url(resolved_post_url)
         comment_id = str(data.get("cid") or data.get("id") or "").strip()
+        parent_source_comment_id = (
+            str(data.get("parentId") or data.get("parent_id") or data.get("parentCid") or parent_id or "").strip()
+            or None
+        )
+        aweme_id = str(data.get("awemeId") or data.get("aweme_id") or resolved_video_id or "").strip() or None
+        comment_language = str(data.get("commentLanguage") or data.get("comment_language") or "").strip() or None
+        is_author_liked_raw = data.get("isAuthorLiked")
+        is_author_liked = bool(is_author_liked_raw) if isinstance(is_author_liked_raw, (bool, int)) else None
+        media_urls = self._extract_comment_media_urls(data, user=user)
 
         parsed_replies: list[TikTokComment] = []
         for row in data.get("replies") or []:
@@ -1339,12 +1389,12 @@ class TikTokScraper:
             username=str(
                 user.get("unique_id")
                 or user.get("uniqueId")
-                or user.get("username")
                 or data.get("uniqueId")
                 or data.get("ownerUsername")
+                or user.get("username")
                 or ""
             ),
-            user_id=str(user.get("uid") or user.get("id") or data.get("uid") or ""),
+            user_id=str(user.get("uid") or data.get("uid") or user.get("id") or ""),
             nickname=str(user.get("nickname") or user.get("nickName") or data.get("nickname") or ""),
             created_at=created_at,
             date_time=(datetime.fromtimestamp(created_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if created_at else ""),
@@ -1364,6 +1414,26 @@ class TikTokScraper:
                 ).strip()
                 or None
             ),
+            comment_language=comment_language,
+            is_author_liked=is_author_liked,
+            aweme_id=aweme_id,
+            parent_source_comment_id=parent_source_comment_id,
+            user_url=(str(user.get("url") or user.get("profileUrl") or "").strip() or None),
+            user_bio=(str(user.get("bio") or user.get("signature") or "").strip() or None),
+            user_avatar_url=(
+                str(
+                    user.get("avatarUrl")
+                    or user.get("avatar")
+                    or user.get("originalAvatarUrl")
+                    or user.get("avatarLarger")
+                    or user.get("avatar_larger")
+                    or ""
+                ).strip()
+                or None
+            ),
+            user_region=(str(user.get("region") or "").strip() or None),
+            user_language=(str(user.get("language") or user.get("lang") or "").strip() or None),
+            media_urls=media_urls,
             video_id=resolved_video_id,
             post_url=resolved_post_url,
         )
@@ -1397,6 +1467,117 @@ class TikTokScraper:
             if normalized and normalized not in deduped:
                 deduped.append(normalized)
         return deduped[:1]
+
+    def _extract_comment_media_urls(self, item: dict[str, Any], *, user: dict[str, Any] | None = None) -> list[str]:
+        if not isinstance(item, dict):
+            return []
+
+        avatar_candidates = {
+            str(value or "").strip()
+            for value in (
+                item.get("avatarThumbnail"),
+                (user or {}).get("avatarThumbnail"),
+                (user or {}).get("avatar_thumb"),
+                (user or {}).get("avatar_thumb_url"),
+                (user or {}).get("avatarUrl"),
+                (user or {}).get("avatar"),
+                (user or {}).get("originalAvatarUrl"),
+                (user or {}).get("avatarLarger"),
+                (user or {}).get("avatar_larger"),
+            )
+            if str(value or "").strip()
+        }
+
+        candidates: list[str] = []
+        media_keys = (
+            "media",
+            "medias",
+            "mediaUrls",
+            "media_urls",
+            "images",
+            "image",
+            "videos",
+            "video",
+            "gif",
+            "gifs",
+            "attachments",
+            "attachment",
+            "stickers",
+            "sticker",
+            "resource",
+            "resources",
+        )
+        for key in media_keys:
+            self._collect_candidate_urls(item.get(key), candidates)
+
+        text = str(item.get("text") or "")
+        for matched in URL_RE.findall(text):
+            cleaned = matched.rstrip(".,!?;:)]}\"'")
+            if cleaned:
+                candidates.append(cleaned)
+
+        deduped: list[str] = []
+        for candidate in candidates:
+            normalized = str(candidate or "").strip()
+            if not normalized or normalized in deduped:
+                continue
+            if normalized in avatar_candidates or self._looks_like_avatar_url(normalized):
+                continue
+            if not self._is_allowed_comment_media_url(normalized):
+                continue
+            deduped.append(normalized)
+        return deduped
+
+    def _collect_candidate_urls(self, value: Any, collector: list[str]) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized.startswith("http://") or normalized.startswith("https://"):
+                collector.append(normalized)
+            return
+        if isinstance(value, list):
+            for item in value:
+                self._collect_candidate_urls(item, collector)
+            return
+        if isinstance(value, dict):
+            for key in (
+                "url",
+                "src",
+                "uri",
+                "image",
+                "imageUrl",
+                "image_url",
+                "gifUrl",
+                "gif_url",
+                "videoUrl",
+                "video_url",
+                "playAddr",
+                "downloadAddr",
+                "play_url",
+                "download_url",
+                "url_list",
+                "UrlList",
+            ):
+                self._collect_candidate_urls(value.get(key), collector)
+            return
+
+    @staticmethod
+    def _is_allowed_comment_media_url(url: str) -> bool:
+        parsed = urlparse(url)
+        host = str(parsed.netloc or "").lower()
+        path = str(parsed.path or "").lower()
+        if "tiktokcdn" not in host:
+            return False
+        if any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".webm")):
+            return True
+        return any(token in path for token in ("image-origin", "image", "gif", "video"))
+
+    @staticmethod
+    def _looks_like_avatar_url(url: str) -> bool:
+        parsed = urlparse(url)
+        path = str(parsed.path or "").lower()
+        return any(token in path for token in ("avt-", "/avatar", "profile_pic", "profile"))
 
     @staticmethod
     def _extract_best_bitrate_video_url(video: dict[str, Any]) -> str | None:

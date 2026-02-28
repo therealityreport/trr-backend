@@ -26,8 +26,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--weeks", type=int, default=8, help="Lookback window in weeks (default: 8)")
     parser.add_argument(
         "--platforms",
-        default="instagram,tiktok,youtube,twitter",
-        help="Comma-separated platforms (default: instagram,tiktok,youtube,twitter)",
+        default="instagram,tiktok,youtube,twitter,facebook,threads",
+        help="Comma-separated platforms (default: instagram,tiktok,youtube,twitter,facebook,threads)",
     )
     parser.add_argument(
         "--source-scope",

@@ -109,7 +109,12 @@ def _extract_page_title(soup: BeautifulSoup) -> str | None:
             if text:
                 return text
     title = soup.title.string if soup.title else None
-    return _normalize_text(title)
+    normalized = _normalize_text(title)
+    if normalized and "|" in normalized:
+        primary = _normalize_text(normalized.split("|", 1)[0])
+        if primary:
+            return primary
+    return normalized
 
 
 def _parse_birthdate(value: str | None) -> date | None:
@@ -474,7 +479,12 @@ def _collect_section_images(
     photos: list[dict[str, Any]] = []
     position = start_position
 
-    for node in section.find_all(["figure", "img"]):
+    nodes = []
+    if section.name in {"figure", "img"}:
+        nodes.append(section)
+    nodes.extend(section.find_all(["figure", "img"]))
+
+    for node in nodes:
         if node.name == "img" and node.find_parent("figure") is not None:
             continue
         entry = _extract_image_entry(
@@ -592,6 +602,12 @@ def _find_heading(article_root: BeautifulSoup, label: str) -> BeautifulSoup | No
 def _extract_season_number(text: str | None) -> int | None:
     if not text:
         return None
+    match = re.search(r"\b(?:season|s)\s*([0-9]{1,2})\b", text, re.IGNORECASE)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
     match = re.search(r"\b(\d{1,2})\b", text)
     if match:
         try:
@@ -599,6 +615,68 @@ def _extract_season_number(text: str | None) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _infer_gallery_context_type(label: str | None) -> str:
+    text = (label or "").strip().casefold()
+    if "reunion" in text:
+        return "reunion_look"
+    if "confessional" in text:
+        return "confessional_look"
+    if "intro" in text or "tagline" in text or "opening" in text:
+        return "intro_card"
+    if "promo" in text or "promotional" in text or "portrait" in text:
+        return "promo"
+    if "episode" in text or "still" in text:
+        return "episode_still"
+    return "gallery"
+
+
+def _parse_gallery_sections(
+    article_root: BeautifulSoup,
+    *,
+    source_page_url: str,
+    seen: set[str],
+) -> list[dict[str, Any]]:
+    photos: list[dict[str, Any]] = []
+    gallery_heading = _find_heading(article_root, "Gallery")
+    if not gallery_heading:
+        return photos
+
+    position = 1
+    current_section = "gallery"
+    current_type = _infer_gallery_context_type(current_section)
+    current_season = _extract_season_number(current_section)
+
+    for sibling in gallery_heading.next_siblings:
+        sibling_name = getattr(sibling, "name", None)
+        if sibling_name == "h2":
+            break
+        if sibling_name in {"h3", "h4"}:
+            heading_text = _normalize_text(sibling.get_text(" ", strip=True))
+            if heading_text:
+                current_section = heading_text
+                current_type = _infer_gallery_context_type(heading_text)
+                current_season = _extract_season_number(heading_text)
+            continue
+        if sibling_name is None:
+            continue
+
+        entries = _collect_section_images(
+            sibling,
+            source_page_url=source_page_url,
+            context_section=current_section,
+            context_type=current_type,
+            season=current_season,
+            start_position=position,
+            seen=seen,
+        )
+        if not entries:
+            continue
+        photos.extend(entries)
+        position += len(entries)
+
+    return photos
 
 
 def _parse_taglines(
@@ -913,6 +991,9 @@ def parse_fandom_person_html(html: str, *, source_url: str) -> tuple[dict[str, A
 
     reunion_seating, reunion_photos = _parse_reunion_seating(article_root, source_page_url=source_url, seen=seen)
     photos.extend(reunion_photos)
+
+    gallery_photos = _parse_gallery_sections(article_root, source_page_url=source_url, seen=seen)
+    photos.extend(gallery_photos)
 
     photos.extend(_collect_article_images(article_root, source_page_url=source_url, seen=seen))
 

@@ -235,3 +235,88 @@ def test_auto_count_cast_photo_returns_face_boxes(monkeypatch) -> None:
     assert len(out.face_boxes) == 2
     assert out.face_boxes[0].x == 0.1
     assert out.face_boxes[0].width == 0.2
+
+
+def test_auto_count_cast_photo_returns_thumbnail_crop(monkeypatch) -> None:
+    photo_id = uuid4()
+    db = _FakeDb(
+        {
+            "cast_photos": {
+                "id": str(photo_id),
+                "hosted_url": "https://example.com/source.jpg",
+                "url": "https://example.com/source.jpg",
+                "metadata": {},
+            }
+        }
+    )
+
+    monkeypatch.setattr(
+        counts,
+        "count_people",
+        lambda image_url, mode="faces_then_yolo": SimpleNamespace(
+            people_count=1,
+            face_count=1,
+            detector="simulated",
+            model=None,
+        ),
+    )
+    monkeypatch.setattr(counts, "get_tags_by_photo_ids", lambda _db, _ids: {})
+    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
+    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        counts,
+        "auto_thumbnail_crop",
+        lambda _result: {"x": 41.2, "y": 35.4, "zoom": 1.17, "mode": "auto", "strategy": "face_torso_v2"},
+    )
+    monkeypatch.setattr(counts, "face_centroid", lambda _result: None)
+
+    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    assert out.thumbnail_crop is not None
+    assert out.thumbnail_crop["x"] == 41.2
+    assert out.thumbnail_crop["y"] == 35.4
+    assert out.thumbnail_crop["zoom"] == 1.17
+    assert out.thumbnail_crop["mode"] == "auto"
+
+
+def test_auto_count_media_asset_returns_existing_context_crop_when_not_regenerated(monkeypatch) -> None:
+    asset_id = uuid4()
+    db = _FakeDb(
+        {
+            "media_assets": {
+                "id": str(asset_id),
+                "hosted_url": "https://example.com/source.jpg",
+                "source_url": "https://example.com/source.jpg",
+                "metadata": {},
+            }
+        }
+    )
+
+    monkeypatch.setattr(
+        counts,
+        "count_people",
+        lambda image_url, mode="faces_then_yolo": SimpleNamespace(
+            people_count=2,
+            face_count=2,
+            detector="simulated",
+            model=None,
+        ),
+    )
+    monkeypatch.setattr(
+        counts,
+        "list_person_links_by_asset_id",
+        lambda _db, _id: [
+            {
+                "id": "link-1",
+                "context": {
+                    "thumbnail_crop": {"x": 52, "y": 33, "zoom": 1.08, "mode": "manual"},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(counts, "has_manual_people_tags", lambda _ctx: False)
+    monkeypatch.setattr(counts, "update_person_links_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(counts, "auto_thumbnail_crop", lambda _result: None)
+    monkeypatch.setattr(counts, "face_centroid", lambda _result: None)
+
+    out = counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
+    assert out.thumbnail_crop == {"x": 52.0, "y": 33.0, "zoom": 1.08, "mode": "manual"}

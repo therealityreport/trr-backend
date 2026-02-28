@@ -97,6 +97,83 @@ def _infer_fandom_section_tag(*values: str | None) -> str | None:
     return "OTHER"
 
 
+_REAL_HOUSEWIVES_SHOW_PATTERN = re.compile(
+    r"(The\s+Real\s+Housewives\s+of\s+[A-Za-z][A-Za-z '&.-]*?)"
+    r"(?=\s+(?:Season|S)\s*[0-9]{1,2}\b|\s+(?:Episode|Ep)\s*[0-9]{1,3}\b|\s+(?:Reunion|Confessional|Promo|Promotional|Tagline|Intro|Opening)\b|$)",
+    re.IGNORECASE,
+)
+
+_REAL_HOUSEWIVES_CODE_BY_LOCATION: dict[str, str] = {
+    "orange county": "RHOC",
+    "new york city": "RHONY",
+    "new jersey": "RHONJ",
+    "atlanta": "RHOA",
+    "beverly hills": "RHOBH",
+    "potomac": "RHOP",
+    "dallas": "RHOD",
+    "miami": "RHOM",
+    "salt lake city": "RHOSLC",
+    "washington d.c.": "RHODC",
+    "washington dc": "RHODC",
+    "dubai": "RHODubai",
+}
+
+_REAL_HOUSEWIVES_CODE_PATTERN = re.compile(r"\bRHO(?:SLC|BH|NY|NJ|OC|DC|A|P|D|M)\b", re.IGNORECASE)
+
+
+def _extract_show_title(*values: str | None) -> str | None:
+    for value in values:
+        if not value:
+            continue
+        normalized = " ".join(value.split())
+        if not normalized:
+            continue
+        match = _REAL_HOUSEWIVES_SHOW_PATTERN.search(normalized)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _extract_show_code_from_text(*values: str | None) -> str | None:
+    for value in values:
+        if not value:
+            continue
+        match = _REAL_HOUSEWIVES_CODE_PATTERN.search(value)
+        if match:
+            return match.group(0).upper()
+    return None
+
+
+def _derive_show_short_code(show_title: str | None, *values: str | None) -> str | None:
+    text_code = _extract_show_code_from_text(*values)
+    if text_code:
+        return text_code
+    if not show_title:
+        return None
+    normalized = " ".join(show_title.split()).strip().lower()
+    prefix = "the real housewives of "
+    if not normalized.startswith(prefix):
+        return None
+    location = normalized[len(prefix) :].strip()
+    if not location:
+        return None
+    return _REAL_HOUSEWIVES_CODE_BY_LOCATION.get(location)
+
+
+def _extract_episode_number(*values: str | None) -> int | None:
+    for value in values:
+        if not value:
+            continue
+        match = re.search(r"\b(?:episode|ep|e)\s*([0-9]{1,3})\b", value, re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            return int(match.group(1))
+        except ValueError:
+            continue
+    return None
+
+
 def _build_fandom_metadata(
     *,
     section_tag: str | None,
@@ -223,6 +300,19 @@ def fetch_imdb_cast_photos(
         if tags:
             metadata = {"tags": tags}
 
+        primary_title: str | None = None
+        if isinstance(title_names, list):
+            for title_name in title_names:
+                if isinstance(title_name, str) and title_name.strip():
+                    primary_title = title_name.strip()
+                    break
+        if primary_title is None and isinstance(caption, str) and caption.strip():
+            caption_match = re.search(r"\bin\s+(.+?)\s*\((\d{4})\)\s*$", caption.strip(), re.IGNORECASE)
+            if caption_match:
+                inferred_title = caption_match.group(1).strip(" \"'.,")
+                if inferred_title:
+                    primary_title = inferred_title
+
         source_page_url = None
         if viewer_id:
             source_page_url = f"https://www.imdb.com/name/{imdb_person_id}/mediaviewer/{viewer_id}/"
@@ -231,10 +321,18 @@ def fetch_imdb_cast_photos(
 
         if metadata is None:
             metadata = {}
+        metadata["source_variant"] = "imdb_person_gallery"
+        metadata["source_logo"] = "IMDb"
         metadata["source_page_url"] = source_page_url
+        metadata["source_file_url"] = url
+        metadata["source_image_url"] = url
         metadata["imdb_person_id"] = imdb_person_id
         if viewer_id:
             metadata["imdb_viewer_id"] = viewer_id
+        if primary_title:
+            metadata["source_page_title"] = primary_title
+            metadata["asset_name"] = primary_title
+            metadata["name"] = primary_title
 
         rows.append(
             {
@@ -400,6 +498,8 @@ def fetch_fandom_person_cast_photos(
     photos = photos[:limit] if limit else photos
     rows: list[dict[str, Any]] = []
     now = datetime.now(UTC).isoformat()
+    page_title = str(result.get("page_title") or "").strip() or None
+    default_show_title = str(result.get("installment") or "").strip() or None
 
     for photo in photos:
         image_url = photo.get("url") or photo.get("image_url")
@@ -407,11 +507,13 @@ def fetch_fandom_person_cast_photos(
             continue
 
         section_label = _normalize_fandom_section_label(photo.get("context_section"))
+        caption_text = str(photo.get("caption") or "").strip() or None
+        alt_text = str(photo.get("alt_text") or "").strip() or None
         section_tag = _infer_fandom_section_tag(
             photo.get("context_type"),
             section_label,
-            photo.get("caption"),
-            photo.get("alt_text"),
+            caption_text,
+            alt_text,
         )
         metadata = _build_fandom_metadata(
             section_tag=section_tag,
@@ -420,13 +522,59 @@ def fetch_fandom_person_cast_photos(
         )
         if metadata is None:
             metadata = {}
+        if section_tag:
+            metadata.setdefault("content_type", section_tag)
+
         season_value = photo.get("season")
-        if isinstance(season_value, int):
-            metadata.setdefault("season_number", season_value)
+        season_number = season_value if isinstance(season_value, int) else _extract_season_number(
+            section_label, caption_text, alt_text
+        )
+        if isinstance(season_number, int):
+            metadata.setdefault("season_number", season_number)
+
+        episode_number = _extract_episode_number(section_label, caption_text, alt_text)
+        if isinstance(episode_number, int):
+            metadata.setdefault("episode_number", episode_number)
+
+        show_title = _extract_show_title(section_label, caption_text, alt_text) or default_show_title
+        if show_title:
+            metadata.setdefault("show_name", show_title)
+            metadata.setdefault("show_title", show_title)
+
+        show_short_code = _derive_show_short_code(show_title, section_label, caption_text, alt_text)
+        if show_short_code:
+            metadata.setdefault("show_short_code", show_short_code)
+
+        if page_title:
+            metadata.setdefault("source_page_title", page_title)
+            metadata.setdefault("fandom_page_title", page_title)
+            metadata.setdefault("person_name", page_title)
+
+        if show_title and isinstance(season_number, int):
+            metadata.setdefault("asset_name", f"{show_title} Season {season_number}")
+            metadata.setdefault("name", f"{show_title} Season {season_number}")
+        elif show_title:
+            metadata.setdefault("asset_name", show_title)
+            metadata.setdefault("name", show_title)
+        elif page_title:
+            metadata.setdefault("asset_name", page_title)
+            metadata.setdefault("name", page_title)
+
+        tags = metadata.get("tags")
+        if not isinstance(tags, dict):
+            tags = {}
+        if page_title:
+            tags.setdefault("people", [{"name": page_title}])
+        if show_title:
+            tags.setdefault("titles", [{"title": show_title}])
+        if tags:
+            metadata["tags"] = tags
 
         # Ensure url and url_path are never null
         url_value = image_url
         url_path = photo.get("url_path") or _url_path_with_query(image_url) or image_url
+        title_names = [show_title] if show_title else None
+        people_names = [page_title] if page_title else None
 
         rows.append(
             {
@@ -442,11 +590,13 @@ def fetch_fandom_person_cast_photos(
                 "image_url_canonical": _canonical_url(image_url),
                 "width": photo.get("width"),
                 "height": photo.get("height"),
-                "caption": photo.get("caption") or photo.get("alt_text"),
+                "caption": caption_text or alt_text,
                 "context_section": photo.get("context_section"),
                 "context_type": photo.get("context_type"),
-                "season": photo.get("season"),
+                "season": season_number,
                 "position": photo.get("position"),
+                "people_names": people_names,
+                "title_names": title_names,
                 "metadata": metadata,
                 "fetched_at": now,
             }

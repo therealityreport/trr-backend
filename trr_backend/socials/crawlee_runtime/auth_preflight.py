@@ -71,11 +71,13 @@ def _fail(*, platform: str, mode: str, missing: tuple[str, ...], reason: str) ->
 def check_platform_auth(
     *,
     platform: str,
-    instagram_cookies: dict[str, str] | None,
-    tiktok_cookies: dict[str, str] | None,
-    twitter_cookies: dict[str, str] | None,
-    twitter_bearer: str | None,
-    twikit_credentials: dict[str, str] | None,
+    instagram_cookies: dict[str, str] | None = None,
+    tiktok_cookies: dict[str, str] | None = None,
+    facebook_cookies: dict[str, str] | None = None,
+    threads_cookies: dict[str, str] | None = None,
+    twitter_cookies: dict[str, str] | None = None,
+    twitter_bearer: str | None = None,
+    twikit_credentials: dict[str, str] | None = None,
 ) -> AuthPreflightResult:
     normalized_platform = (platform or "").strip().lower()
 
@@ -127,6 +129,24 @@ def check_platform_auth(
 
     if normalized_platform == "youtube":
         # YouTube scraping currently supports public mode in the existing scraper.
+        return _ok(platform=normalized_platform, mode="public", source="none")
+
+    if normalized_platform == "facebook":
+        if facebook_cookies:
+            return _ok(
+                platform=normalized_platform,
+                mode="cookies",
+                source="SOCIAL_FACEBOOK_COOKIES_JSON|SOCIAL_FACEBOOK_COOKIES_FILE|FACEBOOK_COOKIES_*",
+            )
+        return _ok(platform=normalized_platform, mode="public", source="none")
+
+    if normalized_platform == "threads":
+        if threads_cookies:
+            return _ok(
+                platform=normalized_platform,
+                mode="cookies",
+                source="SOCIAL_THREADS_COOKIES_JSON|SOCIAL_THREADS_COOKIES_FILE|THREADS_COOKIES_*",
+            )
         return _ok(platform=normalized_platform, mode="public", source="none")
 
     return _fail(

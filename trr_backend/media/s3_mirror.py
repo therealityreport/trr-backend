@@ -269,6 +269,38 @@ def _sanitize_path_segment(name: str) -> str:
     return slug or "unknown"
 
 
+def _sanitize_filename(filename: str) -> str:
+    """Sanitize uploaded filenames for stable S3 keys."""
+    raw = (filename or "").strip()
+    if not raw:
+        return "icon.bin"
+    basename = os.path.basename(raw)
+    stem, ext = os.path.splitext(basename)
+    safe_stem = re.sub(r"[^A-Za-z0-9]+", "-", stem).strip("-").lower() or "icon"
+    safe_ext = re.sub(r"[^A-Za-z0-9.]+", "", ext).lower()
+    if not safe_ext.startswith("."):
+        safe_ext = f".{safe_ext}" if safe_ext else ""
+    if len(safe_ext) > 12:
+        safe_ext = safe_ext[:12]
+    return f"{safe_stem}{safe_ext or '.bin'}"
+
+
+def build_icon_s3_key(show_key: str, filename: str) -> str:
+    """
+    Build S3 key for show icons.
+
+    Path: icons/{show_key}/{sanitized_filename}
+    """
+    safe_show_key = _sanitize_path_segment(show_key)
+    safe_filename = _sanitize_filename(filename)
+    return f"icons/{safe_show_key}/{safe_filename}"
+
+
+def get_show_icon_s3_prefix(show_key: str) -> str:
+    """Build the S3 prefix for a show's icons."""
+    return f"icons/{_sanitize_path_segment(show_key)}/"
+
+
 def build_cast_photo_s3_key(
     person_identifier: str,
     source: str,

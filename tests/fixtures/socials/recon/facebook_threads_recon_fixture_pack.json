@@ -1,0 +1,205 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-02-27T00:00:00Z",
+  "classes": {
+    "facebook_page_feed": {
+      "target_examples": [
+        "https://www.facebook.com/Bravo/"
+      ],
+      "runs": [
+        {
+          "run_id": "facebook_page_feed_run_01",
+          "source_signature": "fb_feed_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after", "x-fb-debug"],
+          "pagination": {"mode": "cursor", "token_fields": ["cursor", "end_cursor"]},
+          "hydration_signals": ["__bbox", "RelayPrefetchedStreamCache"],
+          "failure_signatures": ["checkpoint/challenge", "temporarily_blocked"]
+        },
+        {
+          "run_id": "facebook_page_feed_run_02",
+          "source_signature": "fb_feed_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after", "x-fb-debug"],
+          "pagination": {"mode": "cursor", "token_fields": ["cursor", "end_cursor"]},
+          "hydration_signals": ["__bbox", "RelayPrefetchedStreamCache"],
+          "failure_signatures": ["checkpoint/challenge", "temporarily_blocked"]
+        }
+      ],
+      "strategy": {
+        "primary": "public_network_payload",
+        "secondary": "hydration_payload",
+        "fallback": "semantic_dom",
+        "unsupported_conditions": ["challenge_only_without_user_session"]
+      }
+    },
+    "facebook_reels": {
+      "target_examples": [
+        "https://www.facebook.com/Bravo/reels/",
+        "https://www.facebook.com/reel/2144519066028732"
+      ],
+      "runs": [
+        {
+          "run_id": "facebook_reels_run_01",
+          "source_signature": "fb_reels_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "cursor", "token_fields": ["cursor", "end_cursor"]},
+          "hydration_signals": ["__bbox", "RelayPrefetchedStreamCache"],
+          "failure_signatures": ["checkpoint/challenge", "content_unavailable"]
+        },
+        {
+          "run_id": "facebook_reels_run_02",
+          "source_signature": "fb_reels_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "cursor", "token_fields": ["cursor", "end_cursor"]},
+          "hydration_signals": ["__bbox", "RelayPrefetchedStreamCache"],
+          "failure_signatures": ["checkpoint/challenge", "content_unavailable"]
+        }
+      ],
+      "strategy": {
+        "primary": "public_network_payload",
+        "secondary": "hydration_payload",
+        "fallback": "semantic_dom",
+        "unsupported_conditions": ["challenge_only_without_user_session"]
+      }
+    },
+    "facebook_photos": {
+      "target_examples": [
+        "https://www.facebook.com/Bravo/photos"
+      ],
+      "runs": [
+        {
+          "run_id": "facebook_photos_run_01",
+          "source_signature": "fb_photos_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "cursor", "token_fields": ["cursor", "end_cursor"]},
+          "hydration_signals": ["__bbox", "RelayPrefetchedStreamCache"],
+          "failure_signatures": ["checkpoint/challenge", "content_unavailable"]
+        },
+        {
+          "run_id": "facebook_photos_run_02",
+          "source_signature": "fb_photos_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "cursor", "token_fields": ["cursor", "end_cursor"]},
+          "hydration_signals": ["__bbox", "RelayPrefetchedStreamCache"],
+          "failure_signatures": ["checkpoint/challenge", "content_unavailable"]
+        }
+      ],
+      "strategy": {
+        "primary": "public_network_payload",
+        "secondary": "hydration_payload",
+        "fallback": "semantic_dom",
+        "unsupported_conditions": ["challenge_only_without_user_session"]
+      }
+    },
+    "threads_profile": {
+      "target_examples": [
+        "https://www.threads.com/@bravotv"
+      ],
+      "runs": [
+        {
+          "run_id": "threads_profile_run_01",
+          "source_signature": "threads_profile_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "cursor", "token_fields": ["max_id", "cursor"]},
+          "hydration_signals": ["__NEXT_DATA__", "prefetchedData"],
+          "failure_signatures": ["login_required", "content_unavailable"]
+        },
+        {
+          "run_id": "threads_profile_run_02",
+          "source_signature": "threads_profile_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "cursor", "token_fields": ["max_id", "cursor"]},
+          "hydration_signals": ["__NEXT_DATA__", "prefetchedData"],
+          "failure_signatures": ["login_required", "content_unavailable"]
+        }
+      ],
+      "strategy": {
+        "primary": "public_network_payload",
+        "secondary": "hydration_payload",
+        "fallback": "semantic_dom",
+        "unsupported_conditions": ["login_gate_only_without_user_session"]
+      }
+    },
+    "threads_post": {
+      "target_examples": [
+        "https://www.threads.com/@bravotv/post/DVJmFe6j-fd?xmt=AQF01oS1Nd2t9TMN56fACloLvhSQDdOPbLdyA9CHveI8tA"
+      ],
+      "runs": [
+        {
+          "run_id": "threads_post_run_01",
+          "source_signature": "threads_post_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "cursor", "token_fields": ["cursor"]},
+          "hydration_signals": ["__NEXT_DATA__", "prefetchedData"],
+          "failure_signatures": ["login_required", "content_unavailable"]
+        },
+        {
+          "run_id": "threads_post_run_02",
+          "source_signature": "threads_post_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "cursor", "token_fields": ["cursor"]},
+          "hydration_signals": ["__NEXT_DATA__", "prefetchedData"],
+          "failure_signatures": ["login_required", "content_unavailable"]
+        }
+      ],
+      "strategy": {
+        "primary": "public_network_payload",
+        "secondary": "hydration_payload",
+        "fallback": "semantic_dom",
+        "unsupported_conditions": ["login_gate_only_without_user_session"]
+      }
+    },
+    "threads_media": {
+      "target_examples": [
+        "https://www.threads.com/@bravotv/post/DU6GHVjki7p/media"
+      ],
+      "runs": [
+        {
+          "run_id": "threads_media_run_01",
+          "source_signature": "threads_media_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "none", "token_fields": []},
+          "hydration_signals": ["__NEXT_DATA__", "prefetchedData"],
+          "failure_signatures": ["login_required", "content_unavailable"]
+        },
+        {
+          "run_id": "threads_media_run_02",
+          "source_signature": "threads_media_public_payload_v1",
+          "candidate_data_sources": ["public_network_payload", "hydration_payload"],
+          "auth_requirement": "public",
+          "rate_limit_signals": ["http_429", "retry-after"],
+          "pagination": {"mode": "none", "token_fields": []},
+          "hydration_signals": ["__NEXT_DATA__", "prefetchedData"],
+          "failure_signatures": ["login_required", "content_unavailable"]
+        }
+      ],
+      "strategy": {
+        "primary": "public_network_payload",
+        "secondary": "hydration_payload",
+        "fallback": "semantic_dom",
+        "unsupported_conditions": ["login_gate_only_without_user_session"]
+      }
+    }
+  }
+}

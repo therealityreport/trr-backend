@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Literal
 from uuid import UUID
@@ -25,6 +25,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.auth import AdminUser
+from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +54,14 @@ def _comments_run_workers_cap() -> int:
 
 
 def _normalize_target_platforms(platforms: list[str] | None) -> list[str]:
-    ordered = platforms or ["instagram", "tiktok", "youtube", "twitter"]
+    ordered = platforms or list(SOCIAL_SUPPORTED_PLATFORMS)
     deduped: list[str] = []
     for platform in ordered:
         normalized = str(platform or "").strip().lower()
         if not normalized or normalized in deduped:
             continue
         deduped.append(normalized)
-    return deduped or ["instagram", "tiktok", "youtube", "twitter"]
+    return deduped or list(SOCIAL_SUPPORTED_PLATFORMS)
 
 
 
@@ -131,7 +132,7 @@ class InstagramScrapeResponse(BaseModel):
 class SocialAccountConfig(BaseModel):
     """Configuration for a social account to track."""
 
-    platform: Literal["instagram", "tiktok", "twitter"]
+    platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"]
     username: str
     hashtags: list[str] = Field(default=[])
     entity_type: Literal["show", "season", "person"]
@@ -797,13 +798,295 @@ async def scrape_youtube(
         )
 
 
+# Facebook Models / Endpoints
+
+
+class FacebookScrapeRequest(BaseModel):
+    page_handle: str = Field(..., description="Facebook page handle (without leading /)")
+    hashtags: list[str] = Field(default_factory=list, description="Optional hashtag filter (without #)")
+    keywords: list[str] = Field(default_factory=list, description="Optional keyword filter")
+    date_start: datetime | None = Field(default=None, description="Optional start date for filtering")
+    date_end: datetime | None = Field(default=None, description="Optional end date for filtering")
+    delay_seconds: float = Field(default=1.25, ge=0.25, le=10.0, description="Delay between requests")
+    max_pages: int | None = Field(default=1, ge=1, le=100, description="Maximum discovery pages")
+
+
+class FacebookPostResponse(BaseModel):
+    post_id: str
+    post_type: str
+    username: str
+    caption: str
+    likes: int
+    comments: int
+    shares: int
+    views: int
+    url: str
+    thumbnail_url: str | None = None
+    media_urls: list[str] = Field(default_factory=list)
+    posted_at: str | None = None
+
+
+class FacebookScrapeResponse(BaseModel):
+    success: bool
+    page_handle: str
+    posts_found: int
+    posts: list[FacebookPostResponse]
+    filters_applied: dict
+    retrieval_meta: dict | None = None
+    error: str | None = None
+
+
+@router.post("/facebook/scrape", response_model=FacebookScrapeResponse)
+async def scrape_facebook(
+    request: FacebookScrapeRequest,
+    user: AdminUser,
+) -> FacebookScrapeResponse:
+    from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
+    from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
+
+    logger.info("Facebook scrape requested by %s for %s", user.get("email"), request.page_handle)
+    try:
+        scraper = FacebookScraper(cookies=_load_facebook_cookies())
+        config = FacebookScrapeConfig(
+            page_handle=request.page_handle,
+            date_start=request.date_start,
+            date_end=request.date_end,
+            delay_seconds=request.delay_seconds,
+            max_pages=request.max_pages,
+            include_feed=True,
+            include_reels=True,
+            include_photos=True,
+        )
+        posts = scraper.scrape(config)
+        lowered_hashtags = [str(tag).strip().lower().lstrip("#") for tag in request.hashtags if str(tag).strip()]
+        lowered_keywords = [str(keyword).strip().lower() for keyword in request.keywords if str(keyword).strip()]
+
+        def _matches(post: Any) -> bool:
+            text = str(getattr(post, "caption", "") or "").lower()
+            if lowered_hashtags and not any(f"#{tag}" in text for tag in lowered_hashtags):
+                return False
+            if lowered_keywords and not any(term in text for term in lowered_keywords):
+                return False
+            return True
+
+        filtered = [post for post in posts if _matches(post)]
+        return FacebookScrapeResponse(
+            success=True,
+            page_handle=request.page_handle,
+            posts_found=len(filtered),
+            posts=[
+                FacebookPostResponse(
+                    post_id=str(getattr(post, "post_id", "") or ""),
+                    post_type=str(getattr(post, "post_type", "feed") or "feed"),
+                    username=str(getattr(post, "username", "") or ""),
+                    caption=str(getattr(post, "caption", "") or ""),
+                    likes=int(getattr(post, "likes", 0) or 0),
+                    comments=int(getattr(post, "comments", 0) or 0),
+                    shares=int(getattr(post, "shares", 0) or 0),
+                    views=int(getattr(post, "views", 0) or 0),
+                    url=str(getattr(post, "url", "") or ""),
+                    thumbnail_url=str(getattr(post, "thumbnail_url", "") or "") or None,
+                    media_urls=[str(url) for url in (getattr(post, "media_urls", []) or []) if str(url)],
+                    posted_at=(
+                        datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat()
+                        if post.posted_at is not None
+                        else None
+                    ),
+                )
+                for post in filtered
+            ],
+            filters_applied={
+                "hashtags": request.hashtags,
+                "keywords": request.keywords,
+                "date_start": request.date_start.isoformat() if request.date_start else None,
+                "date_end": request.date_end.isoformat() if request.date_end else None,
+            },
+            retrieval_meta=dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Facebook scrape failed: %s", exc, exc_info=True)
+        return FacebookScrapeResponse(
+            success=False,
+            page_handle=request.page_handle,
+            posts_found=0,
+            posts=[],
+            filters_applied={},
+            error=str(exc),
+        )
+
+
+@router.get("/facebook/preview/{page_handle}")
+async def preview_facebook_page(page_handle: str, user: AdminUser) -> dict:
+    from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
+    from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
+
+    logger.info("Facebook preview requested by %s for %s", user.get("email"), page_handle)
+    try:
+        scraper = FacebookScraper(cookies=_load_facebook_cookies())
+        posts = scraper.scrape(FacebookScrapeConfig(page_handle=page_handle, max_pages=1))
+        latest = posts[0] if posts else None
+        return {
+            "page_handle": page_handle,
+            "posts_discovered": len(posts),
+            "latest_post": {
+                "post_id": getattr(latest, "post_id", None) if latest else None,
+                "post_type": getattr(latest, "post_type", None) if latest else None,
+                "url": getattr(latest, "url", None) if latest else None,
+                "caption": getattr(latest, "caption", None) if latest else None,
+            },
+            "retrieval_meta": dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Facebook preview failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# Threads Models / Endpoints
+
+
+class ThreadsScrapeRequest(BaseModel):
+    username: str = Field(..., description="Threads username (without @)")
+    hashtags: list[str] = Field(default_factory=list, description="Optional hashtag filter (without #)")
+    keywords: list[str] = Field(default_factory=list, description="Optional keyword filter")
+    date_start: datetime | None = Field(default=None, description="Optional start date")
+    date_end: datetime | None = Field(default=None, description="Optional end date")
+    delay_seconds: float = Field(default=1.0, ge=0.25, le=10.0, description="Delay between requests")
+    max_pages: int | None = Field(default=1, ge=1, le=100, description="Maximum profile pages to inspect")
+
+
+class ThreadsPostResponse(BaseModel):
+    post_id: str
+    username: str
+    text: str
+    likes: int
+    replies: int
+    reposts: int
+    quotes: int
+    views: int
+    url: str
+    thumbnail_url: str | None = None
+    media_urls: list[str] = Field(default_factory=list)
+    posted_at: str | None = None
+
+
+class ThreadsScrapeResponse(BaseModel):
+    success: bool
+    username: str
+    posts_found: int
+    posts: list[ThreadsPostResponse]
+    filters_applied: dict
+    retrieval_meta: dict | None = None
+    error: str | None = None
+
+
+@router.post("/threads/scrape", response_model=ThreadsScrapeResponse)
+async def scrape_threads(
+    request: ThreadsScrapeRequest,
+    user: AdminUser,
+) -> ThreadsScrapeResponse:
+    from trr_backend.repositories.social_season_analytics import _load_threads_cookies
+    from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
+
+    logger.info("Threads scrape requested by %s for @%s", user.get("email"), request.username)
+    try:
+        scraper = ThreadsScraper(cookies=_load_threads_cookies())
+        config = ThreadsScrapeConfig(
+            username=request.username,
+            date_start=request.date_start,
+            date_end=request.date_end,
+            delay_seconds=request.delay_seconds,
+            max_pages=request.max_pages,
+        )
+        posts = scraper.scrape(config)
+        lowered_hashtags = [str(tag).strip().lower().lstrip("#") for tag in request.hashtags if str(tag).strip()]
+        lowered_keywords = [str(keyword).strip().lower() for keyword in request.keywords if str(keyword).strip()]
+
+        def _matches(post: Any) -> bool:
+            text = str(getattr(post, "text", "") or "").lower()
+            if lowered_hashtags and not any(f"#{tag}" in text for tag in lowered_hashtags):
+                return False
+            if lowered_keywords and not any(term in text for term in lowered_keywords):
+                return False
+            return True
+
+        filtered = [post for post in posts if _matches(post)]
+        return ThreadsScrapeResponse(
+            success=True,
+            username=request.username,
+            posts_found=len(filtered),
+            posts=[
+                ThreadsPostResponse(
+                    post_id=str(getattr(post, "post_id", "") or ""),
+                    username=str(getattr(post, "username", "") or ""),
+                    text=str(getattr(post, "text", "") or ""),
+                    likes=int(getattr(post, "likes", 0) or 0),
+                    replies=int(getattr(post, "replies", 0) or 0),
+                    reposts=int(getattr(post, "reposts", 0) or 0),
+                    quotes=int(getattr(post, "quotes", 0) or 0),
+                    views=int(getattr(post, "views", 0) or 0),
+                    url=str(getattr(post, "url", "") or ""),
+                    thumbnail_url=str(getattr(post, "thumbnail_url", "") or "") or None,
+                    media_urls=[str(url) for url in (getattr(post, "media_urls", []) or []) if str(url)],
+                    posted_at=(
+                        datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat()
+                        if post.posted_at is not None
+                        else None
+                    ),
+                )
+                for post in filtered
+            ],
+            filters_applied={
+                "hashtags": request.hashtags,
+                "keywords": request.keywords,
+                "date_start": request.date_start.isoformat() if request.date_start else None,
+                "date_end": request.date_end.isoformat() if request.date_end else None,
+            },
+            retrieval_meta=dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Threads scrape failed: %s", exc, exc_info=True)
+        return ThreadsScrapeResponse(
+            success=False,
+            username=request.username,
+            posts_found=0,
+            posts=[],
+            filters_applied={},
+            error=str(exc),
+        )
+
+
+@router.get("/threads/preview/{username}")
+async def preview_threads_profile(username: str, user: AdminUser) -> dict:
+    from trr_backend.repositories.social_season_analytics import _load_threads_cookies
+    from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
+
+    logger.info("Threads preview requested by %s for @%s", user.get("email"), username)
+    try:
+        scraper = ThreadsScraper(cookies=_load_threads_cookies())
+        posts = scraper.scrape(ThreadsScrapeConfig(username=username, max_pages=1))
+        latest = posts[0] if posts else None
+        return {
+            "username": username,
+            "posts_discovered": len(posts),
+            "latest_post": {
+                "post_id": getattr(latest, "post_id", None) if latest else None,
+                "url": getattr(latest, "url", None) if latest else None,
+                "text": getattr(latest, "text", None) if latest else None,
+            },
+            "retrieval_meta": dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Threads preview failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Season social analytics (Bravo-first)
 # ---------------------------------------------------------------------------
 
 
 class SeasonSocialTargetInput(BaseModel):
-    platform: Literal["instagram", "tiktok", "twitter", "youtube", "reddit"]
+    platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads", "reddit"]
     accounts: list[str] = Field(default_factory=list)
     hashtags: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
@@ -819,12 +1102,14 @@ class SeasonSocialTargetsPutRequest(BaseModel):
 
 class SeasonSocialIngestRequest(BaseModel):
     source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
-    platforms: list[Literal["instagram", "tiktok", "twitter", "youtube"]] | None = Field(default=None)
-    sync_strategy: Literal["incremental", "full_refresh"] = Field(default="incremental")
-    comment_refresh_policy: Literal["balanced", "missing_only"] = Field(default="balanced")
-    comment_anchor_source_ids: dict[Literal["instagram", "tiktok", "twitter", "youtube"], list[str]] | None = Field(
+    platforms: list[Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"]] | None = Field(
         default=None
     )
+    sync_strategy: Literal["incremental", "full_refresh"] = Field(default="incremental")
+    comment_refresh_policy: Literal["balanced", "missing_only"] = Field(default="balanced")
+    comment_anchor_source_ids: dict[
+        Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"], list[str]
+    ] | None = Field(default=None)
     max_posts_per_target: int = Field(default=100000, ge=1, le=1000000)
     max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
     max_replies_per_post: int = Field(default=100000, ge=0, le=1000000)
@@ -1057,7 +1342,9 @@ async def get_season_ingest_jobs(
     limit: int = Query(default=50, ge=1, le=250),
     run_id: UUID | None = Query(default=None),
     status: str | None = Query(default=None),
-    platform: Literal["instagram", "tiktok", "twitter", "youtube"] | None = Query(default=None),
+    platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"] | None = Query(
+        default=None
+    ),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_jobs

@@ -1272,6 +1272,122 @@ def _chunked(values: list[str], size: int = 100) -> list[list[str]]:
     return [values[i : i + size] for i in range(0, len(values), size)]
 
 
+_REAL_HOUSEWIVES_SHORT_CODE_BY_LOCATION: dict[str, str] = {
+    "orange county": "RHOC",
+    "new york city": "RHONY",
+    "new jersey": "RHONJ",
+    "atlanta": "RHOA",
+    "beverly hills": "RHOBH",
+    "potomac": "RHOP",
+    "dallas": "RHOD",
+    "miami": "RHOM",
+    "salt lake city": "RHOSLC",
+    "washington d.c.": "RHODC",
+    "washington dc": "RHODC",
+    "dubai": "RHODubai",
+}
+
+
+def _to_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+
+def _derive_real_housewives_short_code(show_name: str | None) -> str | None:
+    if not isinstance(show_name, str):
+        return None
+    normalized = " ".join(show_name.split()).strip().lower()
+    if not normalized:
+        return None
+    prefix = "the real housewives of "
+    if normalized.startswith(prefix):
+        location = normalized[len(prefix) :].strip()
+        return _REAL_HOUSEWIVES_SHORT_CODE_BY_LOCATION.get(location)
+    acronym_match = re.search(r"\bRHO(?:SLC|BH|NY|NJ|OC|DC|A|P|D|M)\b", show_name, re.IGNORECASE)
+    if acronym_match:
+        return acronym_match.group(0).upper()
+    return None
+
+
+def _fetch_imdb_title_fallback_metadata(
+    imdb_title_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not imdb_title_ids:
+        return {}
+    from trr_backend.integrations.imdb.title_page_metadata import fetch_imdb_title_html, parse_imdb_title_html
+
+    out: dict[str, dict[str, Any]] = {}
+    for imdb_title_id in imdb_title_ids:
+        title_id = str(imdb_title_id or "").strip()
+        if not title_id:
+            continue
+        try:
+            html = fetch_imdb_title_html(title_id, timeout_seconds=20.0)
+            parsed = parse_imdb_title_html(html, imdb_id=title_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("IMDb title fallback fetch failed imdb_id=%s error=%s", title_id, exc)
+            continue
+
+        title_type = str(parsed.get("title_type") or "").strip()
+        episode_title = str(parsed.get("title") or "").strip() or None
+        season_number = _to_int(parsed.get("season_number"))
+        episode_number = _to_int(parsed.get("episode_number"))
+        show_name = str(parsed.get("series_title") or "").strip() or None
+        show_imdb_id = str(parsed.get("series_imdb_id") or "").strip() or None
+        episode_air_date = str(parsed.get("episode_air_date") or "").strip() or None
+        if title_type.upper() == "TVEPISODE" or season_number is not None or episode_number is not None or show_name:
+            out[title_id] = {
+                "episode_imdb_id": title_id,
+                "episode_title": episode_title,
+                "season_number": season_number,
+                "episode_number": episode_number,
+                "episode_air_date": episode_air_date,
+                "show_name": show_name,
+                "show_imdb_id": show_imdb_id,
+                "show_short_code": _derive_real_housewives_short_code(show_name),
+                "imdb_title_type": title_type or None,
+            }
+    return out
+
+
+def _lookup_show_ids_by_name(db: SupabaseAdminClient, show_names: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for raw_name in show_names:
+        show_name = str(raw_name or "").strip()
+        if not show_name or show_name in mapping:
+            continue
+        try:
+            response = (
+                db.schema("core")
+                .table("shows")
+                .select("id,name")
+                .ilike("name", show_name)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Show lookup failed show_name=%s error=%s", show_name, exc)
+            continue
+        if hasattr(response, "error") and response.error:
+            logger.debug("Show lookup error show_name=%s error=%s", show_name, response.error)
+            continue
+        data = response.data or []
+        if isinstance(data, list) and data:
+            show_id = data[0].get("id")
+            if isinstance(show_id, str) and show_id.strip():
+                mapping[show_name] = show_id.strip()
+    return mapping
+
+
 def _enrich_cast_photos_with_episode_metadata(
     db: SupabaseAdminClient,
     photos: list[dict[str, Any]],
@@ -1311,7 +1427,18 @@ def _enrich_cast_photos_with_episode_metadata(
             if imdb_episode_id:
                 episodes_by_imdb[str(imdb_episode_id)] = row
 
-    if not episodes_by_imdb:
+    unresolved_ids = [imdb_id for imdb_id in imdb_ids if imdb_id not in episodes_by_imdb]
+    imdb_fallback_by_id = _fetch_imdb_title_fallback_metadata(unresolved_ids)
+    fallback_show_names = sorted(
+        {
+            str(item.get("show_name") or "").strip()
+            for item in imdb_fallback_by_id.values()
+            if isinstance(item, dict) and str(item.get("show_name") or "").strip()
+        }
+    )
+    show_ids_by_name = _lookup_show_ids_by_name(db, fallback_show_names) if fallback_show_names else {}
+
+    if not episodes_by_imdb and not imdb_fallback_by_id:
         return tagged, failed
 
     for row in photos:
@@ -1320,31 +1447,77 @@ def _enrich_cast_photos_with_episode_metadata(
         title_ids = row.get("title_imdb_ids") or []
         if not isinstance(title_ids, list):
             continue
-        episode = None
+        episode: dict[str, Any] | None = None
+        fallback: dict[str, Any] | None = None
         for imdb_id in title_ids:
             if imdb_id in episodes_by_imdb:
                 episode = episodes_by_imdb[imdb_id]
                 break
-        if not episode:
+            if imdb_id in imdb_fallback_by_id:
+                fallback = imdb_fallback_by_id[imdb_id]
+                break
+        if not episode and not fallback:
             continue
 
         metadata = dict(row.get("metadata") or {})
-        metadata.update(
-            {
-                "episode_id": episode.get("id"),
-                "episode_imdb_id": episode.get("imdb_episode_id"),
-                "episode_title": episode.get("title"),
-                "episode_number": episode.get("episode_number"),
-                "season_number": episode.get("season_number"),
-                "episode_air_date": episode.get("air_date"),
-                "show_id": episode.get("show_id"),
-                "show_name": episode.get("show_name"),
-                "source_created_at": episode.get("air_date"),
-            }
-        )
+        if episode:
+            metadata.update(
+                {
+                    "episode_id": episode.get("id"),
+                    "episode_imdb_id": episode.get("imdb_episode_id"),
+                    "episode_title": episode.get("title"),
+                    "episode_number": episode.get("episode_number"),
+                    "season_number": episode.get("season_number"),
+                    "episode_air_date": episode.get("air_date"),
+                    "show_id": episode.get("show_id"),
+                    "show_name": episode.get("show_name"),
+                    "source_created_at": episode.get("air_date"),
+                }
+            )
+            if not metadata.get("show_short_code"):
+                metadata["show_short_code"] = _derive_real_housewives_short_code(
+                    str(episode.get("show_name") or "")
+                )
+        elif fallback:
+            show_name = str(fallback.get("show_name") or "").strip() or None
+            fallback_show_id = show_ids_by_name.get(show_name) if show_name else None
+            metadata.update(
+                {
+                    "episode_imdb_id": fallback.get("episode_imdb_id"),
+                    "episode_title": fallback.get("episode_title"),
+                    "episode_number": fallback.get("episode_number"),
+                    "season_number": fallback.get("season_number"),
+                    "episode_air_date": fallback.get("episode_air_date"),
+                    "show_name": show_name,
+                    "show_imdb_id": fallback.get("show_imdb_id"),
+                    "show_short_code": fallback.get("show_short_code"),
+                    "imdb_title_type": fallback.get("imdb_title_type"),
+                    "source_created_at": fallback.get("episode_air_date"),
+                }
+            )
+            if fallback_show_id:
+                metadata["show_id"] = fallback_show_id
+
+            title_names = row.get("title_names")
+            if isinstance(title_names, list):
+                merged_titles: list[str] = []
+                seen_titles: set[str] = set()
+                for candidate in [*title_names, fallback.get("episode_title"), show_name]:
+                    if not isinstance(candidate, str) or not candidate.strip():
+                        continue
+                    normalized = candidate.strip()
+                    key = normalized.casefold()
+                    if key in seen_titles:
+                        continue
+                    seen_titles.add(key)
+                    merged_titles.append(normalized)
+                if merged_titles:
+                    row["title_names"] = merged_titles
+
         row["metadata"] = metadata
-        if not row.get("season") and episode.get("season_number"):
-            row["season"] = episode.get("season_number")
+        season_number = metadata.get("season_number")
+        if not row.get("season") and season_number is not None:
+            row["season"] = season_number
         tagged += 1
     return tagged, failed
 
