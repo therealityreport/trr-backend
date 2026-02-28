@@ -12145,13 +12145,21 @@ def get_analytics(
         include_post_text=include_rows,
     )
 
-    post_metadata = _compute_post_metadata(
-        season_id,
-        platforms=available_platforms,
-        start_dt=start_dt,
-        end_dt=end_dt,
-        target_accounts_by_platform=target_accounts_by_platform,
-    )
+    try:
+        post_metadata = _compute_post_metadata(
+            season_id,
+            platforms=available_platforms,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            target_accounts_by_platform=target_accounts_by_platform,
+        )
+    except Exception as exc:
+        exc_text = str(exc).lower()
+        if exc_text.startswith("database pool initialization failed") or "invalid input syntax for type uuid" in exc_text:
+            logger.debug("Skipping data quality post metadata due unavailable database URL")
+            post_metadata = None
+        else:
+            raise
 
     posts = [row for row in rows if row["kind"] == "post"]
     comments = [row for row in rows if row["kind"] == "comment"]

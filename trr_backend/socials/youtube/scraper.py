@@ -709,18 +709,7 @@ class YouTubeScraper:
 
         needs_refine = video.published_at <= 0
         if not needs_refine and self._is_low_precision_publish_text(video.published_text):
-            # Low-precision relative dates ("5 months ago") are only worth refining
-            # when the estimate is near the configured window boundary.
-            boundary_buffer_seconds = 45 * 86400
-            estimated_ts = int(video.published_at or 0)
-            near_start = (
-                config.date_start is not None
-                and abs(estimated_ts - int(config.start_timestamp)) <= boundary_buffer_seconds
-            )
-            near_end = (
-                config.date_end is not None and abs(estimated_ts - int(config.end_timestamp)) <= boundary_buffer_seconds
-            )
-            needs_refine = near_start or near_end
+            needs_refine = True
         if not needs_refine:
             return current_in_range
 

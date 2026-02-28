@@ -484,10 +484,6 @@ class TwitterScraper:
                 if mp4_variants:
                     mp4_variants.sort(key=lambda item: item[0], reverse=True)
                     _append_media(mp4_variants[0][1], from_preview=False)
-                    # Also add the cover/thumbnail image for the video
-                    cover_url = media.get("media_url_https") or media.get("media_url")
-                    if isinstance(cover_url, str) and cover_url.strip():
-                        _append_media(cover_url.strip(), from_preview=False)
                     continue
 
             media_url = media.get("media_url_https") or media.get("media_url")
