@@ -198,11 +198,126 @@ def _build_fandom_metadata(
 # ---------------------------------------------------------------------------
 
 
+def _normalize_imdb_id_set(values: set[str] | None) -> set[str]:
+    if not values:
+        return set()
+    normalized: set[str] = set()
+    for value in values:
+        token = str(value or "").strip().lower()
+        if token:
+            normalized.add(token)
+    return normalized
+
+
+def _normalize_keyword_list(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = str(value or "").strip().lower()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
+def _imdb_row_people_count(row: dict[str, Any]) -> int | None:
+    people_ids = row.get("people_imdb_ids")
+    if isinstance(people_ids, list):
+        count = len([item for item in people_ids if isinstance(item, str) and item.strip()])
+        if count > 0:
+            return count
+    people_names = row.get("people_names")
+    if isinstance(people_names, list):
+        count = len([item for item in people_names if isinstance(item, str) and item.strip()])
+        if count > 0:
+            return count
+    return None
+
+
+def _imdb_row_matches_filters(
+    row: dict[str, Any],
+    *,
+    allowed_title_imdb_ids: set[str],
+    allowed_title_keywords: list[str],
+) -> bool:
+    if not allowed_title_imdb_ids and not allowed_title_keywords:
+        return True
+
+    title_ids = row.get("title_imdb_ids")
+    if isinstance(title_ids, list):
+        for raw_id in title_ids:
+            candidate = str(raw_id or "").strip().lower()
+            if candidate and candidate in allowed_title_imdb_ids:
+                return True
+
+    if allowed_title_keywords:
+        title_names = row.get("title_names") if isinstance(row.get("title_names"), list) else []
+        caption = row.get("caption")
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        source_page_title = metadata.get("source_page_title") if isinstance(metadata, dict) else None
+        haystack = " ".join(
+            [
+                *(str(value) for value in title_names if isinstance(value, str)),
+                str(caption) if isinstance(caption, str) else "",
+                str(source_page_title) if isinstance(source_page_title, str) else "",
+            ]
+        ).lower()
+        if haystack:
+            for keyword in allowed_title_keywords:
+                if keyword in haystack:
+                    return True
+
+    return False
+
+
+def _imdb_row_priority(row: dict[str, Any]) -> tuple[int, int]:
+    people_count = _imdb_row_people_count(row)
+    if people_count == 1:
+        return (0, 1)
+    if isinstance(people_count, int) and people_count > 1:
+        return (2, people_count)
+    return (1, 99)
+
+
+def _normalize_person_name(value: str | None) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = re.sub(r"\s+", " ", value).strip().lower()
+    normalized = re.sub(r"[^a-z0-9 ]+", "", normalized)
+    return normalized
+
+
+def _default_imdb_diagnostics() -> dict[str, int]:
+    return {
+        "imdb_pages_scanned": 0,
+        "imdb_candidates_seen": 0,
+        "imdb_kept": 0,
+        "imdb_filtered_type": 0,
+        "imdb_filtered_people": 0,
+        "imdb_filtered_episode": 0,
+        "imdb_filtered_other": 0,
+    }
+
+
 def fetch_imdb_cast_photos(
     imdb_person_id: str,
     person_id: str | UUID,
     *,
     limit: int = 50,
+    allowed_title_imdb_ids: set[str] | None = None,
+    allowed_title_keywords: list[str] | None = None,
+    prioritize_solo_people: bool = False,
+    strict_types: set[str] | None = None,
+    target_person_imdb_id: str | None = None,
+    target_person_name: str | None = None,
+    allowed_cast_imdb_ids: set[str] | None = None,
+    allowed_cast_names: set[str] | None = None,
+    allowed_episode_imdb_ids: set[str] | None = None,
+    strict_mode_enabled: bool = False,
+    imdb_diagnostics: dict[str, int] | None = None,
     session: requests.Session | None = None,
     verbose: bool = False,
 ) -> list[dict[str, Any]]:
@@ -213,6 +328,17 @@ def fetch_imdb_cast_photos(
         imdb_person_id: IMDb person ID (nm...)
         person_id: core.people UUID
         limit: Max photos to fetch
+        allowed_title_imdb_ids: Optional IMDb title ID filter (show/episode IDs)
+        allowed_title_keywords: Optional case-insensitive title/caption keywords
+        prioritize_solo_people: Rank single-person images first before applying limit
+        strict_types: Optional allowed IMDb image types (e.g., {"event", "still_frame"})
+        target_person_imdb_id: IMDb ID of person whose gallery is being refreshed
+        target_person_name: Full name of person whose gallery is being refreshed
+        allowed_cast_imdb_ids: IMDb IDs of allowed cast members for strict filtering
+        allowed_cast_names: Full names of allowed cast members for strict filtering
+        allowed_episode_imdb_ids: Episode IMDb IDs allowed for still-frame fallback
+        strict_mode_enabled: Enable strict Traitors-focused filtering rules
+        imdb_diagnostics: Optional mutable diagnostics dict to populate in-place
         session: Optional requests session for connection reuse
         verbose: Print progress
 
@@ -221,26 +347,97 @@ def fetch_imdb_cast_photos(
     """
     from trr_backend.integrations.imdb.person_gallery import (
         fetch_imdb_person_mediaindex_html,
+        fetch_imdb_person_mediaindex_page,
         fetch_imdb_person_mediaviewer_html,
-        parse_imdb_person_mediaindex_images,
+        parse_imdb_person_mediaindex_payload,
+        parse_imdb_person_mediaindex_state,
         parse_imdb_person_mediaviewer_details,
     )
 
     try:
         media_html = fetch_imdb_person_mediaindex_html(imdb_person_id, session=session)
-        images = parse_imdb_person_mediaindex_images(media_html, imdb_person_id)
+        images, page_info = parse_imdb_person_mediaindex_state(media_html, imdb_person_id)
     except Exception as exc:
         if verbose:
             print(f"  WARN IMDb mediaindex {imdb_person_id}: {exc}")
         return []
 
+    diagnostics = _default_imdb_diagnostics()
+    if isinstance(imdb_diagnostics, dict):
+        diagnostics.update({key: int(imdb_diagnostics.get(key, 0) or 0) for key in diagnostics})
+
     if not images:
+        if isinstance(imdb_diagnostics, dict):
+            imdb_diagnostics.update(diagnostics)
         return []
 
-    images = images[:limit] if limit else images
+    normalized_title_ids = _normalize_imdb_id_set(allowed_title_imdb_ids)
+    normalized_keywords = _normalize_keyword_list(allowed_title_keywords)
+    strict_enabled = bool(strict_mode_enabled)
+    should_expand_scan = bool(normalized_title_ids or normalized_keywords or prioritize_solo_people or strict_enabled)
+    pages_fetched = 1
+    if should_expand_scan:
+        max_pages = 3
+        if limit:
+            max_pages = min(10, max(3, (int(limit) + 49) // 50 + 2))
+        cursor = page_info.get("end_cursor")
+        has_next = bool(page_info.get("has_next_page"))
+        seen_keys = {
+            str(image.get("source_image_id") or image.get("viewer_id") or "").strip().casefold()
+            for image in images
+            if str(image.get("source_image_id") or image.get("viewer_id") or "").strip()
+        }
+
+        while has_next and cursor and pages_fetched < max_pages:
+            try:
+                payload = fetch_imdb_person_mediaindex_page(
+                    imdb_person_id,
+                    after_cursor=cursor,
+                    first=50,
+                    session=session,
+                )
+                next_images, next_page_info = parse_imdb_person_mediaindex_payload(payload, imdb_person_id)
+            except Exception as exc:  # noqa: BLE001
+                if verbose:
+                    print(f"  WARN IMDb mediaindex page {imdb_person_id} after={cursor[:24]}...: {exc}")
+                break
+
+            pages_fetched += 1
+            for image in next_images:
+                key = str(image.get("source_image_id") or image.get("viewer_id") or "").strip().casefold()
+                if not key or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                images.append(image)
+            has_next = bool(next_page_info.get("has_next_page"))
+            next_cursor = next_page_info.get("end_cursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+    diagnostics["imdb_pages_scanned"] = pages_fetched
+
+    if limit and not should_expand_scan:
+        images = images[:limit]
     mediaindex_url_path = f"/name/{imdb_person_id}/mediaindex/"
     rows: list[dict[str, Any]] = []
-
+    strict_types_normalized = {str(v or "").strip().lower() for v in (strict_types or set()) if str(v or "").strip()}
+    target_person_imdb_id_norm = str(target_person_imdb_id or "").strip().lower() or None
+    target_person_name_norm = _normalize_person_name(target_person_name)
+    allowed_cast_imdb_ids_norm = {
+        str(v or "").strip().lower() for v in (allowed_cast_imdb_ids or set()) if str(v or "").strip()
+    }
+    if target_person_imdb_id_norm:
+        allowed_cast_imdb_ids_norm.add(target_person_imdb_id_norm)
+    allowed_cast_names_norm = {
+        _normalize_person_name(str(v or "").strip()) for v in (allowed_cast_names or set()) if str(v or "").strip()
+    }
+    allowed_cast_names_norm = {v for v in allowed_cast_names_norm if v}
+    if target_person_name_norm:
+        allowed_cast_names_norm.add(target_person_name_norm)
+    allowed_episode_imdb_ids_norm = {
+        str(v or "").strip().lower() for v in (allowed_episode_imdb_ids or set()) if str(v or "").strip()
+    }
     for image in images:
         viewer_id = image.get("viewer_id")
         details: dict[str, Any] = {}
@@ -273,6 +470,16 @@ def fetch_imdb_cast_photos(
         if not source_image_id:
             continue
 
+        diagnostics["imdb_candidates_seen"] += 1
+        image_type_raw = image.get("image_type")
+        if not (isinstance(image_type_raw, str) and image_type_raw.strip()):
+            image_type_raw = details.get("image_type")
+        image_type = (
+            str(image_type_raw).strip().lower()
+            if isinstance(image_type_raw, str) and image_type_raw.strip()
+            else None
+        )
+
         tags: dict[str, Any] = {}
         people_ids = details.get("people_imdb_ids") or []
         people_names = details.get("people_names") or []
@@ -293,6 +500,9 @@ def fetch_imdb_cast_photos(
             tags["titles"] = titles
 
         caption = details.get("caption")
+        if not caption:
+            image_caption = image.get("caption")
+            caption = image_caption if isinstance(image_caption, str) and image_caption.strip() else None
         if caption:
             tags["caption_plain"] = caption
 
@@ -327,12 +537,75 @@ def fetch_imdb_cast_photos(
         metadata["source_file_url"] = url
         metadata["source_image_url"] = url
         metadata["imdb_person_id"] = imdb_person_id
+        if image_type:
+            metadata["imdb_image_type"] = image_type
         if viewer_id:
             metadata["imdb_viewer_id"] = viewer_id
         if primary_title:
             metadata["source_page_title"] = primary_title
             metadata["asset_name"] = primary_title
             metadata["name"] = primary_title
+        metadata["imdb_metadata_refreshed_at"] = datetime.now(UTC).isoformat()
+
+        if strict_enabled:
+            type_ok = image_type in strict_types_normalized if strict_types_normalized else True
+            if not type_ok:
+                diagnostics["imdb_filtered_type"] += 1
+                continue
+
+            people_ids_norm = {
+                str(value or "").strip().lower() for value in people_ids if isinstance(value, str) and value.strip()
+            }
+            people_names_norm = {
+                _normalize_person_name(str(value or "").strip())
+                for value in people_names
+                if isinstance(value, str) and str(value or "").strip()
+            }
+            people_names_norm = {value for value in people_names_norm if value}
+            title_ids_norm = {
+                str(value or "").strip().lower() for value in title_ids if isinstance(value, str) and value.strip()
+            }
+
+            solo_self_ok = False
+            if target_person_imdb_id_norm and people_ids_norm:
+                solo_self_ok = len(people_ids_norm) == 1 and target_person_imdb_id_norm in people_ids_norm
+            elif target_person_name_norm and people_names_norm:
+                solo_self_ok = len(people_names_norm) == 1 and target_person_name_norm in people_names_norm
+
+            cast_group_ok = False
+            if target_person_imdb_id_norm and people_ids_norm and allowed_cast_imdb_ids_norm:
+                cast_group_ok = (
+                    len(people_ids_norm) >= 2
+                    and target_person_imdb_id_norm in people_ids_norm
+                    and people_ids_norm.issubset(allowed_cast_imdb_ids_norm)
+                )
+            elif target_person_name_norm and people_names_norm and allowed_cast_names_norm:
+                cast_group_ok = (
+                    len(people_names_norm) >= 2
+                    and target_person_name_norm in people_names_norm
+                    and people_names_norm.issubset(allowed_cast_names_norm)
+                )
+
+            episode_still_ok = bool(
+                image_type == "still_frame"
+                and title_ids_norm
+                and allowed_episode_imdb_ids_norm
+                and bool(title_ids_norm.intersection(allowed_episode_imdb_ids_norm))
+            )
+
+            if solo_self_ok:
+                metadata["imdb_filter_reason"] = "solo_self"
+            elif cast_group_ok:
+                metadata["imdb_filter_reason"] = "traitors_cast_group"
+            elif episode_still_ok:
+                metadata["imdb_filter_reason"] = "episode_still_frame"
+            else:
+                if image_type == "still_frame":
+                    diagnostics["imdb_filtered_episode"] += 1
+                else:
+                    diagnostics["imdb_filtered_people"] += 1
+                continue
+            metadata["imdb_filter_scope"] = "traitors_strict"
 
         rows.append(
             {
@@ -349,7 +622,7 @@ def fetch_imdb_cast_photos(
                 "image_url_canonical": _canonical_url(url),
                 "width": width,
                 "height": height,
-                "caption": details.get("caption"),
+                "caption": caption,
                 "gallery_index": details.get("gallery_index"),
                 "gallery_total": details.get("gallery_total"),
                 "people_imdb_ids": details.get("people_imdb_ids"),
@@ -362,6 +635,39 @@ def fetch_imdb_cast_photos(
             }
         )
 
+    if (normalized_title_ids or normalized_keywords) and not strict_enabled:
+        before_count = len(rows)
+        rows = [
+            row
+            for row in rows
+            if _imdb_row_matches_filters(
+                row,
+                allowed_title_imdb_ids=normalized_title_ids,
+                allowed_title_keywords=normalized_keywords,
+            )
+        ]
+        diagnostics["imdb_filtered_other"] += max(0, before_count - len(rows))
+    if strict_enabled:
+        reason_rank = {"solo_self": 0, "traitors_cast_group": 1, "episode_still_frame": 2}
+
+        def _strict_priority(row: dict[str, Any]) -> tuple[int, int, int]:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            reason = str(metadata.get("imdb_filter_reason") or "").strip().lower()
+            rank = reason_rank.get(reason, 3)
+            people_count = _imdb_row_people_count(row)
+            people_rank = people_count if isinstance(people_count, int) and people_count >= 0 else 99
+            gallery_index = row.get("gallery_index")
+            gallery_rank = gallery_index if isinstance(gallery_index, int) and gallery_index >= 0 else 999999
+            return rank, people_rank, gallery_rank
+
+        rows.sort(key=_strict_priority)
+    elif prioritize_solo_people:
+        rows.sort(key=_imdb_row_priority)
+    if limit:
+        rows = rows[:limit]
+    diagnostics["imdb_kept"] = len(rows)
+    if isinstance(imdb_diagnostics, dict):
+        imdb_diagnostics.update(diagnostics)
     return rows
 
 
@@ -752,6 +1058,17 @@ def fetch_all_cast_photos(
     person_name: str | None = None,
     sources: list[str] | None = None,
     limit_per_source: int = 50,
+    imdb_allowed_title_imdb_ids: set[str] | None = None,
+    imdb_allowed_title_keywords: list[str] | None = None,
+    imdb_prioritize_solo_people: bool = False,
+    imdb_strict_types: set[str] | None = None,
+    imdb_target_person_imdb_id: str | None = None,
+    imdb_target_person_name: str | None = None,
+    imdb_allowed_cast_imdb_ids: set[str] | None = None,
+    imdb_allowed_cast_names: set[str] | None = None,
+    imdb_allowed_episode_imdb_ids: set[str] | None = None,
+    imdb_strict_mode_enabled: bool = False,
+    imdb_diagnostics: dict[str, int] | None = None,
     session: requests.Session | None = None,
     verbose: bool = False,
 ) -> list[dict[str, Any]]:
@@ -765,6 +1082,17 @@ def fetch_all_cast_photos(
         person_name: Person name (required for fandom sources)
         sources: List of sources to fetch from. Default: all available
         limit_per_source: Max photos per source
+        imdb_allowed_title_imdb_ids: Optional IMDb title ID filter for person gallery rows
+        imdb_allowed_title_keywords: Optional text filter for person gallery rows
+        imdb_prioritize_solo_people: Rank single-person IMDb rows first before limit
+        imdb_strict_types: Optional allowed IMDb image types for strict mode
+        imdb_target_person_imdb_id: IMDb ID of person whose gallery is being refreshed
+        imdb_target_person_name: Name of person whose gallery is being refreshed
+        imdb_allowed_cast_imdb_ids: Allowed show-cast IMDb IDs for strict mode
+        imdb_allowed_cast_names: Allowed show-cast names for strict mode
+        imdb_allowed_episode_imdb_ids: Allowed episode IMDb IDs for still-frame fallback
+        imdb_strict_mode_enabled: Enable strict IMDb filtering mode
+        imdb_diagnostics: Optional mutable diagnostics dict populated by IMDb fetcher
         session: Optional requests session
         verbose: Print progress
 
@@ -784,6 +1112,17 @@ def fetch_all_cast_photos(
             imdb_person_id,
             person_id,
             limit=limit_per_source,
+            allowed_title_imdb_ids=imdb_allowed_title_imdb_ids,
+            allowed_title_keywords=imdb_allowed_title_keywords,
+            prioritize_solo_people=imdb_prioritize_solo_people,
+            strict_types=imdb_strict_types,
+            target_person_imdb_id=imdb_target_person_imdb_id,
+            target_person_name=imdb_target_person_name,
+            allowed_cast_imdb_ids=imdb_allowed_cast_imdb_ids,
+            allowed_cast_names=imdb_allowed_cast_names,
+            allowed_episode_imdb_ids=imdb_allowed_episode_imdb_ids,
+            strict_mode_enabled=imdb_strict_mode_enabled,
+            imdb_diagnostics=imdb_diagnostics,
             session=session,
             verbose=verbose,
         )

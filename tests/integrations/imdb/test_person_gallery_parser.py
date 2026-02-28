@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from trr_backend.integrations.imdb.person_gallery import (
+    extract_imdb_person_mediaindex_total,
     parse_imdb_person_mediaindex_images,
+    parse_imdb_person_mediaindex_payload,
+    parse_imdb_person_mediaindex_state,
     parse_imdb_person_mediaviewer_details,
 )
 
@@ -114,3 +117,143 @@ def test_parse_person_mediaviewer_details_extracts_singular_title_section_label(
     assert details["people_imdb_ids"] == ["nm0000001"]
     assert details["title_imdb_ids"] == ["tt35051926"]
     assert details["title_names"] == ["Reunion Part 3"]
+
+
+def test_parse_person_mediaviewer_details_extracts_image_type_from_next_data() -> None:
+    html = """
+    <html>
+      <body>
+        <script id="__NEXT_DATA__" type="application/json">
+          {
+            "props": {
+              "pageProps": {
+                "contentData": {
+                  "data": {
+                    "name": {
+                      "images": {
+                        "edges": [
+                          {
+                            "node": {
+                              "id": "rm987654321",
+                              "type": "still_frame",
+                              "url": "https://m.media-amazon.com/images/M/MV5BTYPE._V1_.jpg"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        </script>
+        <div data-testid="media-viewer">
+          <img
+            data-image-id="rm987654321-curr"
+            src="https://m.media-amazon.com/images/M/MV5BTYPE._V1_.jpg"
+          />
+        </div>
+      </body>
+    </html>
+    """
+
+    details = parse_imdb_person_mediaviewer_details(html, viewer_id="rm987654321")
+    assert details["image_type"] == "still_frame"
+
+
+def test_extract_imdb_person_mediaindex_total_from_next_data() -> None:
+    html = """
+    <html>
+      <body>
+        <script id="__NEXT_DATA__" type="application/json">
+          {"props":{"pageProps":{"contentData":{"data":{"name":{"all_images":{"total":603}}}}}}}
+        </script>
+      </body>
+    </html>
+    """
+    assert extract_imdb_person_mediaindex_total(html) == 603
+
+
+def test_extract_imdb_person_mediaindex_total_from_text_fallback() -> None:
+    html = "<html><body><span>1-50 of 603</span></body></html>"
+    assert extract_imdb_person_mediaindex_total(html) == 603
+
+
+def test_parse_imdb_person_mediaindex_state_reads_next_data_pagination() -> None:
+    html = """
+    <html>
+      <body>
+        <script id="__NEXT_DATA__" type="application/json">
+          {
+            "props": {
+              "pageProps": {
+                "contentData": {
+                  "data": {
+                    "name": {
+                      "all_images": {
+                        "total": 603,
+                        "pageInfo": {"hasNextPage": true, "endCursor": "CURSOR_1"},
+                        "edges": [
+                          {
+                            "position": 1,
+                            "node": {
+                              "id": "rm1234567890",
+                              "url": "https://m.media-amazon.com/images/M/MV5BTEST123._V1_.jpg",
+                              "width": 1920,
+                              "height": 1080,
+                              "imageType": "event",
+                              "caption": {"plainText": "Sample caption"}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        </script>
+      </body>
+    </html>
+    """
+    images, page_info = parse_imdb_person_mediaindex_state(html, "nm1234567")
+    assert len(images) == 1
+    assert images[0]["viewer_id"] == "rm1234567890"
+    assert images[0]["source_image_id"] == "MV5BTEST123"
+    assert images[0]["image_type"] == "event"
+    assert page_info["has_next_page"] is True
+    assert page_info["end_cursor"] == "CURSOR_1"
+    assert page_info["total"] == 603
+
+
+def test_parse_imdb_person_mediaindex_payload_reads_graphql_shape() -> None:
+    payload = {
+        "data": {
+            "name": {
+                "all_images": {
+                    "total": 120,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "edges": [
+                        {
+                            "position": 51,
+                            "node": {
+                                "id": "rm111222333",
+                                "url": "https://m.media-amazon.com/images/M/MV5BPAGED._V1_.jpg",
+                                "width": 1600,
+                                "height": 900,
+                                "imageType": "still_frame",
+                            },
+                        }
+                    ],
+                }
+            }
+        }
+    }
+    images, page_info = parse_imdb_person_mediaindex_payload(payload, "nm7654321")
+    assert len(images) == 1
+    assert images[0]["viewer_id"] == "rm111222333"
+    assert images[0]["image_type"] == "still_frame"
+    assert images[0]["mediaviewer_url_path"] == "/name/nm7654321/mediaviewer/rm111222333/"
+    assert page_info == {"has_next_page": False, "end_cursor": None, "total": 120}

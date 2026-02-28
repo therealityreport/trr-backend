@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -32,6 +33,35 @@ def _get_session() -> requests.Session:
         }
     )
     return session
+
+
+def _normalize_aliases(value: Any) -> list[str]:
+    """Normalize TMDb alias payloads into list[str]."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+        except Exception:  # noqa: BLE001
+            decoded = None
+        if isinstance(decoded, list):
+            value = decoded
+        else:
+            return [text]
+    if isinstance(value, (list, tuple, set)):
+        normalized: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return normalized
+    text = str(value).strip()
+    return [text] if text else []
 
 
 @dataclass
@@ -84,7 +114,7 @@ class TMDbPersonFull:
             "person_id": person_id,
             "tmdb_id": self.details.tmdb_id,
             "name": self.details.name,
-            "also_known_as": self.details.also_known_as or [],
+            "also_known_as": _normalize_aliases(self.details.also_known_as),
             "biography": self.details.biography,
             "birthday": self.details.birthday.isoformat() if self.details.birthday else None,
             "deathday": self.details.deathday.isoformat() if self.details.deathday else None,
@@ -166,7 +196,7 @@ def fetch_tmdb_person_details(
             return TMDbPersonDetails(
                 tmdb_id=data.get("id", tmdb_id),
                 name=data.get("name"),
-                also_known_as=data.get("also_known_as") or [],
+                also_known_as=_normalize_aliases(data.get("also_known_as")),
                 biography=data.get("biography"),
                 birthday=_parse_date(data.get("birthday")),
                 deathday=_parse_date(data.get("deathday")),

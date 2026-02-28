@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from threading import Lock
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
 from psycopg2.extras import RealDictCursor, execute_values
-from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 from trr_backend.db.connection import resolve_database_url_candidates
 
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
 
 DEFAULT_POOL_MINCONN = 2
 DEFAULT_POOL_MAXCONN = 24
+DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
+DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
 
 _pool: ThreadedConnectionPool | None = None
 _active_pool_dsn: str | None = None
@@ -49,6 +52,12 @@ def _sslmode_for_url(url: str) -> str | None:
 
 def _error_message(error: Exception) -> str:
     return str(error).strip().lower()
+
+
+def _is_pool_exhausted_error(error: Exception) -> bool:
+    if isinstance(error, PoolError):
+        return "pool exhausted" in _error_message(error)
+    return "connection pool exhausted" in _error_message(error)
 
 
 def _is_transient_transport_error(error: Exception) -> bool:
@@ -152,15 +161,28 @@ def _run_with_transient_retry(operation: Callable[[], T]) -> T:
 
 
 def _get_connection_with_retry() -> tuple[ThreadedConnectionPool, connection_type]:
+    acquire_attempts = _env_int("TRR_DB_POOL_ACQUIRE_ATTEMPTS", DEFAULT_POOL_ACQUIRE_ATTEMPTS, minimum=1)
+    acquire_sleep_seconds = _env_int("TRR_DB_POOL_ACQUIRE_SLEEP_MS", DEFAULT_POOL_ACQUIRE_SLEEP_MS, minimum=1) / 1000.0
+    last_error: Exception | None = None
+
     for attempt in range(2):
         pool = _get_pool()
-        try:
-            conn = pool.getconn()
-            return pool, conn
-        except Exception as error:
-            if not _should_retry_query(error, attempt=attempt):
+        for acquire_attempt in range(acquire_attempts):
+            try:
+                conn = pool.getconn()
+                return pool, conn
+            except Exception as error:
+                last_error = error
+                if _is_pool_exhausted_error(error) and acquire_attempt < (acquire_attempts - 1):
+                    time.sleep(acquire_sleep_seconds)
+                    continue
+                if _should_retry_query(error, attempt=attempt):
+                    reset_pool()
+                    break
                 raise
-            reset_pool()
+        else:
+            if last_error is not None:
+                raise last_error
     raise RuntimeError("unreachable")
 
 

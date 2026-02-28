@@ -30,6 +30,7 @@ Legacy Google Sheets tooling is preserved in `scripts/legacy/` for reference onl
 - `.env` with at least:
   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
   - `TMDB_API_KEY` (for TMDb calls)
+  - `TVDB_API_KEY` (for TVDB calls where configured)
   - `IMDB_API_KEY` (for IMDb calls)
 - Optional:
   - `SUPABASE_DB_URL` / `TRR_DB_URL` for SQL helpers

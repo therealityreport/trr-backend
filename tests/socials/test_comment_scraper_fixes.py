@@ -1888,7 +1888,7 @@ def test_youtube_scrape_keeps_paging_through_too_recent_no_hit_pages(monkeypatch
     continuation_tokens = ["token-1", "token-2", "token-3", "token-4", "token-5", None]
     page_idx = 0
 
-    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos": {"contents": {}})
+    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None)
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: "token-0")
     monkeypatch.setattr(scraper, "_fetch_continuation", lambda token, delay=0: {"ok": True})
@@ -1943,7 +1943,7 @@ def test_youtube_scrape_stops_when_pre_window_cap_is_reached(monkeypatch: pytest
     continuation_tokens = ["token-1", "token-2", "token-3", "token-4", None]
     page_idx = 0
 
-    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos": {"contents": {}})
+    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None)
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: "token-0")
     monkeypatch.setattr(scraper, "_fetch_continuation", lambda token, delay=0: {"ok": True})

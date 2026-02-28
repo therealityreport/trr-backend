@@ -383,33 +383,48 @@ class ThreadsScraper:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _best_video(versions: list[dict[str, Any]]) -> str | None:
+        """Pick the highest-resolution video URL from versions list."""
+        if not versions:
+            return None
+        best = max(versions, key=lambda v: (v.get("width") or 0) * (v.get("height") or 0))
+        return str(best.get("url") or "").strip() or None
+
+    @staticmethod
+    def _best_image(candidates: list[dict[str, Any]]) -> str | None:
+        """Pick the highest-resolution image URL from candidates list."""
+        if not candidates:
+            return None
+        # Candidates are ordered by quality; first is best
+        url = str(candidates[0].get("url") or "").strip()
+        return url or None
+
+    @staticmethod
     def _extract_media_urls(post_data: dict[str, Any]) -> list[str]:
-        """Extract all media URLs from a GraphQL post object."""
+        """Extract the best-quality media URL per item from a GraphQL post object."""
         urls: list[str] = []
         seen: set[str] = set()
 
-        def _add(url: str) -> None:
+        def _add(url: str | None) -> None:
             if url and url not in seen:
                 seen.add(url)
                 urls.append(url)
 
         media_type = post_data.get("media_type")
 
-        # Video posts (media_type 2)
-        for v in post_data.get("video_versions") or []:
-            _add(str(v.get("url") or ""))
+        # Video posts (media_type 2) — pick best resolution only
+        _add(ThreadsScraper._best_video(post_data.get("video_versions") or []))
 
-        # Image posts (media_type 1) or video thumbnail
-        for c in (post_data.get("image_versions2") or {}).get("candidates") or []:
-            _add(str(c.get("url") or ""))
+        # Image posts (media_type 1) or video thumbnail — pick best only
+        candidates = (post_data.get("image_versions2") or {}).get("candidates") or []
+        _add(ThreadsScraper._best_image(candidates))
 
-        # Carousel posts (media_type 19)
+        # Carousel posts (media_type 19) — one best per carousel item
         if media_type == 19:
             for item in post_data.get("carousel_media") or []:
-                for v in item.get("video_versions") or []:
-                    _add(str(v.get("url") or ""))
-                for c in (item.get("image_versions2") or {}).get("candidates") or []:
-                    _add(str(c.get("url") or ""))
+                _add(ThreadsScraper._best_video(item.get("video_versions") or []))
+                item_candidates = (item.get("image_versions2") or {}).get("candidates") or []
+                _add(ThreadsScraper._best_image(item_candidates))
 
         return urls
 
@@ -448,6 +463,19 @@ class ThreadsScraper:
         post_username = str(post_user.get("username") or username)
 
         tpa = post_data.get("text_post_app_info") or {}
+
+        # Debug: log raw metrics from API
+        logger.info(
+            "[threads] post %s raw metrics: like_count=%r, direct_reply_count=%r, "
+            "repost_count=%r, quote_count=%r, taken_at=%r, post_data_keys=%s",
+            code or pk,
+            post_data.get("like_count"),
+            tpa.get("direct_reply_count"),
+            tpa.get("repost_count"),
+            tpa.get("quote_count"),
+            post_data.get("taken_at"),
+            list(post_data.keys())[:20],
+        )
 
         media_urls = self._extract_media_urls(post_data)
         thumbnail_url = self._extract_thumbnail(post_data)

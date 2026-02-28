@@ -51,7 +51,7 @@ The TRR Backend Data Pipeline is a Supabase-first data processing system that tr
 
 4. **Add credentials**
    - Set Supabase credentials in `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
-   - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `IMDB_API_KEY`, `GEMINI_API_KEY`
+   - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `TVDB_API_KEY`, `IMDB_API_KEY`, `GEMINI_API_KEY`
    - Optional: `AWS_S3_BUCKET`, `AWS_REGION`, `AWS_CDN_BASE_URL` for media mirroring
 
 5. **Verify environment**
@@ -178,6 +178,7 @@ Copy `.env.example` to `.env` (never commit `.env`):
 # API Keys
 TMDB_BEARER_TOKEN=your_tmdb_bearer_token
 TMDB_API_KEY=your_tmdb_api_key
+TVDB_API_KEY=your_tvdb_api_key
 IMDB_API_KEY=your_imdb_api_key  
 GEMINI_API_KEY=your_gemini_api_key
 
