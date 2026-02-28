@@ -48,6 +48,7 @@
 | tmdb_production_company_ids | ARRAY | YES |  | NO | NEVER |
 | alternative_names | ARRAY | NO | '{}'::text[] | NO | NEVER |
 | most_recent_episode | jsonb | NO | '{}'::jsonb | NO | NEVER |
+| slug | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -74,6 +75,7 @@ id
 - core_shows_streaming_providers_gin (non-unique): streaming_providers
 - core_shows_tags_gin (non-unique): tags
 - core_shows_tmdb_id_unique (unique): tmdb_id) WHERE (tmdb_id IS NOT NULL
+- core_shows_slug_unique (unique): slug) WHERE ((slug IS NOT NULL) AND (btrim(slug) <> ''::text)
 - core_shows_tmdb_network_ids_gin (non-unique): tmdb_network_ids
 - core_shows_tmdb_production_company_ids_gin (non-unique): tmdb_production_company_ids
 - shows_pkey (unique): id
@@ -129,6 +131,7 @@ true
   "tmdb_network_ids": [],
   "tmdb_production_company_ids": [],
   "alternative_names": [],
-  "most_recent_episode": {}
+  "most_recent_episode": {},
+  "slug": "example"
 }
 ```
