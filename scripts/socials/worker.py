@@ -21,6 +21,7 @@ from trr_backend.repositories.social_season_analytics import (
     recover_stale_running_jobs,
     update_worker_heartbeat,
 )
+from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.utils.env import load_env
 
 logger = logging.getLogger("socials.worker")
@@ -164,7 +165,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--platform",
-        choices=["instagram", "tiktok", "youtube", "twitter"],
+        choices=list(SOCIAL_SUPPORTED_PLATFORMS),
         default=None,
         help="Optional platform filter when claiming jobs",
     )
@@ -180,6 +181,8 @@ def _requires_media_mirror_s3_preflight(*, stage: str | None, platform: str | No
         "tiktok",
         "youtube",
         "twitter",
+        "facebook",
+        "threads",
     }
 
 

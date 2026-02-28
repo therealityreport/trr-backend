@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-CRAWLEE_SUPPORTED_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube")
+from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+
+CRAWLEE_SUPPORTED_PLATFORMS = SOCIAL_SUPPORTED_PLATFORMS
 
 CREDENTIAL_ACCOUNT_REGISTRY = {
     "instagram": "@codexhuli",
     "threads": "@codexhuli",
+    "facebook": "https://www.facebook.com/Bravo",
     "twitter": "@CodexHuli",
     "youtube": "https://www.youtube.com/@CodexHuli",
     "reddit": "u/SuccotashHorror5266",
@@ -80,6 +83,16 @@ def is_auth_strict_for_platform(platform: str) -> bool:
     normalized_platform = (platform or "").strip().lower()
     if normalized_platform == "instagram":
         return _env_truthy("SOCIAL_CRAWLEE_AUTH_STRICT_INSTAGRAM", default=False)
+    if normalized_platform == "facebook":
+        return _env_truthy(
+            "SOCIAL_CRAWLEE_AUTH_STRICT_FACEBOOK",
+            default=_env_truthy("SOCIAL_CRAWLEE_AUTH_STRICT_INSTAGRAM", default=False),
+        )
+    if normalized_platform == "threads":
+        return _env_truthy(
+            "SOCIAL_CRAWLEE_AUTH_STRICT_THREADS",
+            default=_env_truthy("SOCIAL_CRAWLEE_AUTH_STRICT_INSTAGRAM", default=False),
+        )
     return True
 
 

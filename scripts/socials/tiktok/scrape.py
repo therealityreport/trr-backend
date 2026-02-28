@@ -68,6 +68,7 @@ def save_results(posts: list[TikTokPost], output_prefix: str):
         "likes",
         "comments",
         "shares",
+        "saves",
         "views",
         "duration",
         "video_id",

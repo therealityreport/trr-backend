@@ -380,10 +380,108 @@ def _extract_caption(soup: BeautifulSoup) -> str | None:
     return None
 
 
-def _extract_section_links(soup: BeautifulSoup, label: str, pattern: re.Pattern[str]) -> tuple[list[str], list[str]]:
-    label_lower = label.strip().casefold()
+def _extract_caption_node(soup: BeautifulSoup) -> Any | None:
+    caption_div = soup.find("div", class_=re.compile(r"ipc-html-content-inner-div"))
+    if caption_div:
+        return caption_div
+
+    def _is_mv_desc(tag: Any) -> bool:
+        return bool(tag.find("a", href=re.compile(r"ref_=mv_desc")))
+
+    return soup.find(_is_mv_desc)
+
+
+def _extract_link_entities(node: Any | None, pattern: re.Pattern[str]) -> tuple[list[str], list[str]]:
+    if not node:
+        return [], []
+    links = node.find_all("a", href=pattern)
+    if not links:
+        return [], []
+
+    ids: list[str] = []
+    names: list[str] = []
+    seen: set[str] = set()
+    for link in links:
+        href = link.get("href") or ""
+        match = pattern.search(href)
+        if not match:
+            continue
+        imdb_id = match.group(1)
+        if imdb_id in seen:
+            continue
+        seen.add(imdb_id)
+        label = link.get_text(strip=True)
+        ids.append(imdb_id)
+        names.append(label)
+    return ids, names
+
+
+def _extract_caption_fallback_entities(caption: str | None) -> tuple[list[str], list[str]]:
+    """
+    Fallback extraction for captions like:
+      "A, B, and C in Episode Title (2022)"
+    """
+    if not caption:
+        return [], []
+    normalized = re.sub(r"\s+", " ", caption).strip()
+    if not normalized:
+        return [], []
+
+    title_names: list[str] = []
+    title_match = re.search(r"\bin\s+(.+?)\s*\((\d{4})\)\s*$", normalized, re.IGNORECASE)
+    if title_match:
+        title = title_match.group(1).strip(" \"'.,")
+        if title:
+            title_names.append(title)
+
+    people_names: list[str] = []
+    people_part = normalized
+    if title_match:
+        people_part = normalized[: title_match.start()].strip(" ,")
+    if people_part:
+        chunks = re.split(r"\s*,\s*|\s+and\s+", people_part)
+        seen: set[str] = set()
+        for chunk in chunks:
+            candidate = chunk.strip(" \"'.,")
+            candidate = re.sub(r"^and\s+", "", candidate, flags=re.IGNORECASE).strip(" \"'.,")
+            if not candidate:
+                continue
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            people_names.append(candidate)
+
+    return people_names, title_names
+
+
+def _extract_section_links(
+    soup: BeautifulSoup,
+    labels: str | list[str] | tuple[str, ...],
+    pattern: re.Pattern[str],
+) -> tuple[list[str], list[str]]:
+    if isinstance(labels, str):
+        labels = [labels]
+    normalized_labels = {
+        re.sub(r"\s+", " ", str(label or "").strip()).casefold()
+        for label in labels
+        if str(label or "").strip()
+    }
+    if not normalized_labels:
+        return [], []
+
+    def _looks_like_label(text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text.strip()).casefold()
+        if normalized in normalized_labels:
+            return True
+        # Accept common variants like "Title (1)" or "People:".
+        return any(
+            normalized.startswith(f"{label} ") or normalized.startswith(f"{label}:")
+            for label in normalized_labels
+        )
+
     label_nodes = [
-        node for node in soup.find_all(["span", "div", "h3"]) if node.get_text(strip=True).casefold() == label_lower
+        node for node in soup.find_all(["span", "div", "h3"]) if _looks_like_label(node.get_text(" ", strip=True))
     ]
 
     for node in label_nodes:
@@ -494,8 +592,24 @@ def parse_imdb_person_mediaviewer_details(html: str, *, viewer_id: str | None = 
     if not caption and isinstance(best_alt, str) and best_alt.strip():
         caption = best_alt.strip()
 
-    people_ids, people_names = _extract_section_links(soup, "People", _NAME_ID_RE)
-    title_ids, title_names = _extract_section_links(soup, "Titles", _TITLE_ID_RE)
+    people_ids, people_names = _extract_section_links(soup, ("People", "Person"), _NAME_ID_RE)
+    title_ids, title_names = _extract_section_links(soup, ("Titles", "Title"), _TITLE_ID_RE)
+    caption_node = _extract_caption_node(soup)
+    caption_people_ids, caption_people_names = _extract_link_entities(caption_node, _NAME_ID_RE)
+    caption_title_ids, caption_title_names = _extract_link_entities(caption_node, _TITLE_ID_RE)
+
+    if not people_ids and caption_people_ids:
+        people_ids = caption_people_ids
+        people_names = caption_people_names
+    if not title_ids and caption_title_ids:
+        title_ids = caption_title_ids
+        title_names = caption_title_names
+
+    caption_people_fallback, caption_title_fallback = _extract_caption_fallback_entities(caption)
+    if not people_names and caption_people_fallback:
+        people_names = caption_people_fallback
+    if not title_names and caption_title_fallback:
+        title_names = caption_title_fallback
 
     url_path = urlparse(best_url).path if best_url else None
 

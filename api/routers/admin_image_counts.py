@@ -138,6 +138,35 @@ def _build_face_boxes(result: Any) -> list[dict[str, Any]]:
     return boxes
 
 
+def _normalize_thumbnail_crop_payload(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        x = float(value.get("x"))
+        y = float(value.get("y"))
+        zoom = float(value.get("zoom"))
+    except (TypeError, ValueError):
+        return None
+    x_value = x * 100.0 if 0.0 <= x <= 1.0 else x
+    y_value = y * 100.0 if 0.0 <= y <= 1.0 else y
+
+    mode_raw = str(value.get("mode") or "auto").strip().lower()
+    mode = "manual" if mode_raw == "manual" else "auto"
+    payload: dict[str, Any] = {
+        "x": round(max(0.0, min(100.0, x_value)), 4),
+        "y": round(max(0.0, min(100.0, y_value)), 4),
+        "zoom": round(max(1.0, min(4.0, zoom)), 4),
+        "mode": mode,
+    }
+    strategy = value.get("strategy")
+    if isinstance(strategy, str) and strategy.strip():
+        payload["strategy"] = strategy.strip()
+    generated_at = value.get("generated_at")
+    if isinstance(generated_at, str) and generated_at.strip():
+        payload["generated_at"] = generated_at.strip()
+    return payload
+
+
 class FaceBox(BaseModel):
     index: int
     kind: str = "face"
@@ -155,6 +184,7 @@ class AutoCountResponse(BaseModel):
     model: str | None = None
     people_count_source: str = "auto"
     face_boxes: list[FaceBox] = []
+    thumbnail_crop: dict[str, Any] | None = None
 
 
 class AutoCountShowImagesRequest(BaseModel):
@@ -229,6 +259,7 @@ def auto_count_cast_photo(
     centroid = face_centroid(result)
     metadata = dict(row.get("metadata") or {})
     metadata_changed = False
+    latest_crop_payload: dict[str, Any] | None = None
 
     if face_boxes:
         if metadata.get("face_boxes") != face_boxes:
@@ -247,6 +278,7 @@ def auto_count_cast_photo(
                     **generated_crop,
                     "generated_at": generated_at,
                 }
+                latest_crop_payload = metadata["thumbnail_crop"]
                 metadata_changed = True
             elif centroid is not None:
                 cx, cy = centroid
@@ -258,6 +290,7 @@ def auto_count_cast_photo(
                     "strategy": "face_centroid_v1",
                     "generated_at": generated_at,
                 }
+                latest_crop_payload = metadata["thumbnail_crop"]
                 metadata_changed = True
 
     if metadata_changed:
@@ -267,12 +300,18 @@ def auto_count_cast_photo(
             # Best effort: count should still succeed if metadata write fails.
             pass
 
+    resolved_crop_payload = _normalize_thumbnail_crop_payload(
+        latest_crop_payload
+        or (metadata.get("thumbnail_crop") if isinstance(metadata.get("thumbnail_crop"), dict) else None)
+    )
+
     return AutoCountResponse(
         people_count=result.people_count,
         face_count=result.face_count,
         detector=result.detector,
         model=result.model,
         face_boxes=face_boxes,
+        thumbnail_crop=resolved_crop_payload,
     )
 
 
@@ -380,12 +419,24 @@ def auto_count_media_asset(
             # Best effort: auto-count should still succeed if variant generation fails.
             pass
 
+    resolved_crop_payload = _normalize_thumbnail_crop_payload(latest_crop_payload)
+    if resolved_crop_payload is None:
+        for link in links:
+            context = link.get("context") if isinstance(link.get("context"), dict) else {}
+            resolved_crop_payload = _normalize_thumbnail_crop_payload(context.get("thumbnail_crop"))
+            if resolved_crop_payload is not None:
+                break
+    if resolved_crop_payload is None:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        resolved_crop_payload = _normalize_thumbnail_crop_payload(metadata.get("thumbnail_crop"))
+
     return AutoCountResponse(
         people_count=result.people_count,
         face_count=result.face_count,
         detector=result.detector,
         model=result.model,
         face_boxes=face_boxes,
+        thumbnail_crop=resolved_crop_payload,
     )
 
 

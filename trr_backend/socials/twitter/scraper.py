@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -26,6 +27,7 @@ ADVANCED_QUERY_HINT_RE = re.compile(
     r'(^|\s)(from:|to:|since:|until:|filter:|-filter:)|\bOR\b|\bAND\b|[()"]',
     re.IGNORECASE,
 )
+MEDIA_URL_EXTENSION_RE = re.compile(r"\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|m4v|mov|webm)(?:$|[?#])", re.IGNORECASE)
 
 
 @dataclass
@@ -96,6 +98,10 @@ class Tweet:
     reply_to_tweet_id: str | None = None
     quoted_tweet_id: str | None = None
     media_urls: list[str] = field(default_factory=list)
+    link_preview_media_count: int = 0
+    user_id: str | None = None
+    user_profile_url: str | None = None
+    user_avatar_url: str | None = None
 
     # Optional tracking metadata
     show_id: int | None = None
@@ -190,6 +196,7 @@ class TwitterScraper:
         self._last_graphql_status_code: int | None = None
         self.last_retrieval_meta: dict[str, Any] = {}
         self.last_reply_fetch_reason: str | None = None
+        self.last_quote_fetch_reason: str | None = None
         self.comments_auth_failed = False
 
     @staticmethod
@@ -213,6 +220,14 @@ class TwitterScraper:
         if not normalized:
             return
         self.last_reply_fetch_reason = normalized
+        if self._is_auth_related_failure(normalized):
+            self.comments_auth_failed = True
+
+    def _set_quote_failure_reason(self, reason: str | None) -> None:
+        normalized = str(reason or "").strip()
+        if not normalized:
+            return
+        self.last_quote_fetch_reason = normalized
         if self._is_auth_related_failure(normalized):
             self.comments_auth_failed = True
 
@@ -384,6 +399,7 @@ class TwitterScraper:
 
     # Syndication endpoints (public, no auth required)
     SYNDICATION_TIMELINE_URL = "https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
+    SYNDICATION_TWEET_RESULT_URL = "https://cdn.syndication.twimg.com/tweet-result?id={tweet_id}&lang=en&token={token}"
 
     def _extract_hashtags(self, text: str) -> list[str]:
         """Extract hashtags from text."""
@@ -392,6 +408,244 @@ class TwitterScraper:
     def _extract_mentions(self, text: str) -> list[str]:
         """Extract @mentions from text."""
         return re.findall(r"@(\w+)", text)
+
+    @staticmethod
+    def _looks_like_media_url(url: str) -> bool:
+        candidate = str(url or "").strip()
+        if not candidate.startswith(("http://", "https://")):
+            return False
+        parsed = urlparse(candidate)
+        host = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+        if any(marker in host for marker in ("twimg.com", "pbs.twimg.com", "video.twimg.com", "ytimg.com")):
+            return True
+        if MEDIA_URL_EXTENSION_RE.search(path):
+            return True
+        query = parsed.query.lower()
+        return "format=" in query and "name=" in query
+
+    def _collect_url_like_strings(self, payload: Any, out: set[str], *, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                key_lower = str(key).lower()
+                if isinstance(value, str):
+                    normalized = value.strip()
+                    if normalized.startswith(("http://", "https://")) and (
+                        "url" in key_lower or key_lower.endswith("_uri") or "http" in normalized
+                    ):
+                        out.add(normalized)
+                    continue
+                if isinstance(value, (dict, list)):
+                    self._collect_url_like_strings(value, out, depth=depth + 1)
+            return
+        if isinstance(payload, list):
+            for item in payload:
+                self._collect_url_like_strings(item, out, depth=depth + 1)
+
+    def _extract_media_urls_from_tweet(
+        self,
+        *,
+        tweet_payload: dict[str, Any],
+        result_payload: dict[str, Any] | None,
+    ) -> tuple[list[str], int]:
+        media_urls: list[str] = []
+        seen_urls: set[str] = set()
+        link_preview_count = 0
+
+        def _append_media(url: str, *, from_preview: bool) -> None:
+            nonlocal link_preview_count
+            normalized = str(url or "").strip()
+            if not normalized or normalized in seen_urls:
+                return
+            seen_urls.add(normalized)
+            media_urls.append(normalized)
+            if from_preview:
+                link_preview_count += 1
+
+        entities = tweet_payload.get("extended_entities", {}) or tweet_payload.get("entities", {})
+        for media in entities.get("media", []) if isinstance(entities, dict) else []:
+            media_type = str(media.get("type") or "").strip().lower()
+            if media_type in {"video", "animated_gif"}:
+                variants = (media.get("video_info") or {}).get("variants") or []
+                mp4_variants: list[tuple[int, str]] = []
+                for variant in variants:
+                    if not isinstance(variant, dict):
+                        continue
+                    content_type = str(variant.get("content_type") or "").strip().lower()
+                    if content_type != "video/mp4":
+                        continue
+                    variant_url = str(variant.get("url") or "").strip()
+                    if not variant_url:
+                        continue
+                    bitrate = int(variant.get("bitrate") or 0)
+                    mp4_variants.append((bitrate, variant_url))
+                if mp4_variants:
+                    mp4_variants.sort(key=lambda item: item[0], reverse=True)
+                    _append_media(mp4_variants[0][1], from_preview=False)
+                    continue
+
+            media_url = media.get("media_url_https") or media.get("media_url")
+            if isinstance(media_url, str) and media_url.strip():
+                _append_media(media_url, from_preview=False)
+
+        candidate_urls: set[str] = set()
+        urls_entities = tweet_payload.get("entities", {}).get("urls", [])
+        if isinstance(urls_entities, list):
+            self._collect_url_like_strings(urls_entities, candidate_urls)
+        if isinstance(result_payload, dict):
+            card = result_payload.get("card")
+            if isinstance(card, dict):
+                self._collect_url_like_strings(card, candidate_urls)
+        for candidate in sorted(candidate_urls):
+            if self._looks_like_media_url(candidate):
+                _append_media(candidate, from_preview=True)
+
+        return media_urls, link_preview_count
+
+    def _extract_media_urls_from_syndication_result(self, payload: dict[str, Any]) -> list[str]:
+        media_urls: list[str] = []
+        seen_urls: set[str] = set()
+
+        def _append(url: str) -> None:
+            normalized = str(url or "").strip()
+            if not normalized or normalized in seen_urls:
+                return
+            seen_urls.add(normalized)
+            media_urls.append(normalized)
+
+        def _best_mp4_from_variants(variants: Any) -> str | None:
+            if not isinstance(variants, list):
+                return None
+            best_url: str | None = None
+            best_size = -1
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+                variant_type = str(variant.get("type") or variant.get("content_type") or "").strip().lower()
+                if variant_type != "video/mp4":
+                    continue
+                src = str(variant.get("src") or variant.get("url") or "").strip()
+                if not src:
+                    continue
+                size = int(variant.get("bitrate") or 0)
+                if size <= 0:
+                    match = re.search(r"/(\\d+)x(\\d+)/", src)
+                    if match:
+                        size = int(match.group(1)) * int(match.group(2))
+                if size >= best_size:
+                    best_size = size
+                    best_url = src
+            return best_url
+
+        direct_video = payload.get("video")
+        if isinstance(direct_video, dict):
+            best_video = _best_mp4_from_variants(direct_video.get("variants"))
+            if best_video:
+                _append(best_video)
+
+        media_details = payload.get("mediaDetails")
+        if isinstance(media_details, list):
+            for media in media_details:
+                if not isinstance(media, dict):
+                    continue
+                best_video = _best_mp4_from_variants((media.get("video_info") or {}).get("variants"))
+                if best_video:
+                    _append(best_video)
+                media_url = str(media.get("media_url_https") or media.get("media_url") or "").strip()
+                if media_url:
+                    _append(media_url)
+
+        photos = payload.get("photos")
+        if isinstance(photos, list):
+            for photo in photos:
+                if not isinstance(photo, dict):
+                    continue
+                photo_url = str(photo.get("url") or photo.get("src") or "").strip()
+                if photo_url:
+                    _append(photo_url)
+
+        return media_urls
+
+    def fetch_public_tweet_summary(self, tweet_id: str, delay: float = 0.0) -> dict[str, Any] | None:
+        """Fetch public tweet metadata from syndication endpoint.
+
+        This endpoint is unauthenticated and helps recover core metadata
+        (username/avatar/reply count/media) when GraphQL detail access is blocked.
+        """
+        normalized_id = str(tweet_id or "").strip()
+        if not normalized_id:
+            return None
+        if delay > 0:
+            self._rate_limit(delay)
+        token = str(int(time.time()))
+        url = self.SYNDICATION_TWEET_RESULT_URL.format(tweet_id=normalized_id, token=token)
+        headers = {
+            "accept": "application/json,text/plain,*/*",
+            "origin": "https://x.com",
+            "referer": f"https://x.com/i/status/{normalized_id}",
+            "user-agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/144.0.0.0 Safari/537.36"
+            ),
+        }
+        try:
+            response = self.session.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+        username = str(user.get("screen_name") or "").strip()
+        profile_url = f"https://x.com/{username}" if username else None
+        avatar_url = str(user.get("profile_image_url_https") or user.get("profile_image_url") or "").strip() or None
+
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return 0
+
+        media_urls = self._extract_media_urls_from_syndication_result(payload)
+        return {
+            "tweet_id": normalized_id,
+            "username": username,
+            "display_name": str(user.get("name") or "").strip() or None,
+            "user_id": str(user.get("id_str") or user.get("id") or "").strip() or None,
+            "user_profile_url": profile_url,
+            "user_avatar_url": avatar_url,
+            "likes": _as_int(payload.get("favorite_count")),
+            "replies": _as_int(payload.get("conversation_count") or payload.get("reply_count")),
+            "media_urls": media_urls,
+        }
+
+    @staticmethod
+    def _normalize_optional_tweet_id(value: Any) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    def _resolve_quote_markers(self, *, result: dict[str, Any], tweet: dict[str, Any]) -> tuple[bool, str | None]:
+        quoted_result = result.get("quoted_status_result")
+        quoted_result_id = self._normalize_optional_tweet_id(
+            quoted_result.get("result", {}).get("legacy", {}).get("id_str")
+            if isinstance(quoted_result, dict)
+            else None
+        )
+        legacy_quoted_id = self._normalize_optional_tweet_id(
+            tweet.get("quoted_status_id_str") or tweet.get("quoted_status_id")
+        )
+        is_quote = bool(
+            quoted_result
+            or tweet.get("is_quote_status")
+            or quoted_result_id
+            or legacy_quoted_id
+        )
+        return is_quote, quoted_result_id or legacy_quoted_id
 
     def _parse_tweet_result(self, result: dict, config: TwitterScrapeConfig) -> Tweet | None:
         """Parse a tweet result from GraphQL response."""
@@ -411,6 +665,11 @@ class TwitterScraper:
         username = user.get("screen_name", "") or user_core.get("screen_name", "")
         display_name = user.get("name", "") or user_core.get("name", "")
         user_verified = bool(user_result.get("is_blue_verified") or user.get("verified"))
+        user_id = str(user_result.get("rest_id") or user.get("id_str") or user_core.get("id_str") or "").strip() or None
+        user_avatar_url = (
+            str(user.get("profile_image_url_https") or user.get("profile_image_url") or "").strip() or None
+        )
+        user_profile_url = f"https://x.com/{username}" if username else None
 
         # Parse created_at
         created_at_str = tweet.get("created_at", "")
@@ -422,19 +681,17 @@ class TwitterScraper:
             created_at = 0
             date_time = ""
 
-        # Extract media URLs
-        media_urls = []
-        entities = tweet.get("extended_entities", {}) or tweet.get("entities", {})
-        for media in entities.get("media", []):
-            media_url = media.get("media_url_https") or media.get("media_url")
-            if media_url:
-                media_urls.append(media_url)
+        media_urls, link_preview_media_count = self._extract_media_urls_from_tweet(
+            tweet_payload=tweet,
+            result_payload=result if isinstance(result, dict) else None,
+        )
 
         # Get engagement metrics
         views_data = result.get("views", {})
         views = int(views_data.get("count", 0)) if views_data.get("count") else 0
 
         text = tweet.get("full_text", "") or tweet.get("text", "")
+        is_quote, quoted_tweet_id = self._resolve_quote_markers(result=result, tweet=tweet)
 
         return Tweet(
             tweet_id=tweet_id,
@@ -454,10 +711,14 @@ class TwitterScraper:
             user_verified=user_verified,
             is_reply=bool(tweet.get("in_reply_to_status_id_str")),
             is_retweet=bool(tweet.get("retweeted_status_result")),
-            is_quote=bool(result.get("quoted_status_result")),
+            is_quote=is_quote,
             reply_to_tweet_id=tweet.get("in_reply_to_status_id_str"),
-            quoted_tweet_id=result.get("quoted_status_result", {}).get("result", {}).get("legacy", {}).get("id_str"),
+            quoted_tweet_id=quoted_tweet_id,
             media_urls=media_urls,
+            link_preview_media_count=link_preview_media_count,
+            user_id=user_id,
+            user_profile_url=user_profile_url,
+            user_avatar_url=user_avatar_url,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -480,15 +741,21 @@ class TwitterScraper:
 
         user = tweet_data.get("user", {})
         username = user.get("screen_name", "")
+        user_id = str(user.get("id_str") or user.get("id") or "").strip() or None
+        user_avatar_url = (
+            str(user.get("profile_image_url_https") or user.get("profile_image_url") or "").strip() or None
+        )
+        user_profile_url = f"https://x.com/{username}" if username else None
         text = tweet_data.get("full_text", "") or tweet_data.get("text", "")
 
-        # Extract media
-        media_urls = []
-        entities = tweet_data.get("extended_entities", {}) or tweet_data.get("entities", {})
-        for media in entities.get("media", []) if isinstance(entities, dict) else []:
-            media_url = media.get("media_url_https") or media.get("media_url")
-            if media_url:
-                media_urls.append(media_url)
+        media_urls, link_preview_media_count = self._extract_media_urls_from_tweet(
+            tweet_payload=tweet_data if isinstance(tweet_data, dict) else {},
+            result_payload=tweet_data if isinstance(tweet_data, dict) else None,
+        )
+        quoted_tweet_id = self._normalize_optional_tweet_id(
+            tweet_data.get("quoted_status_id_str") or tweet_data.get("quoted_status_id")
+        )
+        is_quote = bool(tweet_data.get("quoted_status") or tweet_data.get("is_quote_status") or quoted_tweet_id)
 
         return Tweet(
             tweet_id=tweet_id,
@@ -508,14 +775,196 @@ class TwitterScraper:
             user_verified=bool(user.get("verified") or user.get("is_blue_verified")),
             is_reply=bool(tweet_data.get("in_reply_to_status_id_str")),
             is_retweet=bool(tweet_data.get("retweeted_status")),
-            is_quote=bool(tweet_data.get("quoted_status")),
+            is_quote=is_quote,
             reply_to_tweet_id=tweet_data.get("in_reply_to_status_id_str"),
-            quoted_tweet_id=None,
+            quoted_tweet_id=quoted_tweet_id,
             media_urls=media_urls,
+            link_preview_media_count=link_preview_media_count,
+            user_id=user_id,
+            user_profile_url=user_profile_url,
+            user_avatar_url=user_avatar_url,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
         )
+
+    def _parse_twikit_tweet(self, raw_tweet: Any, config: TwitterScrapeConfig) -> Tweet | None:
+        """Normalize a twikit tweet object to the shared Tweet model."""
+        tweet_id = str(getattr(raw_tweet, "id", "") or "").strip()
+        if not tweet_id:
+            return None
+
+        created_at = 0
+        date_time = ""
+        created_at_raw = str(getattr(raw_tweet, "created_at", "") or "").strip()
+        if created_at_raw:
+            try:
+                created_at_dt = datetime.strptime(created_at_raw, "%a %b %d %H:%M:%S %z %Y")
+                created_at = int(created_at_dt.timestamp())
+                date_time = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except (ValueError, TypeError):
+                pass
+
+        user = getattr(raw_tweet, "user", None)
+        username = str(getattr(user, "screen_name", "") or "").strip() if user else ""
+        display_name = str(getattr(user, "name", "") or "").strip() if user else ""
+        text = str(getattr(raw_tweet, "full_text", "") or getattr(raw_tweet, "text", "") or "")
+        in_reply_to = str(getattr(raw_tweet, "in_reply_to", "") or "").strip() or None
+        quoted_obj = getattr(raw_tweet, "quoted_tweet", None)
+        quoted_tweet_id = (
+            str(getattr(quoted_obj, "id", "") or "").strip()
+            or str(getattr(raw_tweet, "quoted_tweet_id", "") or "").strip()
+            or None
+        )
+        is_quote = bool(quoted_obj or quoted_tweet_id)
+
+        return Tweet(
+            tweet_id=tweet_id,
+            date_time=date_time,
+            created_at=created_at,
+            text=text,
+            hashtags=self._extract_hashtags(text),
+            mentions=self._extract_mentions(text),
+            likes=int(getattr(raw_tweet, "favorite_count", 0) or 0),
+            retweets=int(getattr(raw_tweet, "retweet_count", 0) or 0),
+            replies=int(getattr(raw_tweet, "reply_count", 0) or 0),
+            quotes=int(getattr(raw_tweet, "quote_count", 0) or 0),
+            views=int(getattr(raw_tweet, "view_count", 0) or 0),
+            url=f"https://x.com/{username}/status/{tweet_id}" if username else "",
+            username=username,
+            display_name=display_name,
+            user_verified=bool(getattr(user, "is_blue_verified", False)) if user else False,
+            is_reply=bool(in_reply_to),
+            is_retweet=bool(getattr(raw_tweet, "retweeted_tweet", None)),
+            is_quote=is_quote,
+            reply_to_tweet_id=in_reply_to,
+            quoted_tweet_id=quoted_tweet_id,
+            media_urls=[],
+            user_id=str(getattr(user, "id", "") or "").strip() or None if user else None,
+            user_profile_url=f"https://x.com/{username}" if username else None,
+            user_avatar_url=(
+                str(getattr(user, "profile_image_url_https", "") or "").strip()
+                or str(getattr(user, "profile_image_url", "") or "").strip()
+                or None
+            )
+            if user
+            else None,
+            show_id=config.show_id,
+            season_number=config.season_number,
+            person_id=config.person_id,
+        )
+
+    def _search_tweets_via_twikit(self, *, query: str, max_pages: int, delay: float) -> list[Any]:
+        """
+        Best-effort twikit search helper used as fallback when GraphQL quote/reply
+        endpoints fail in compliant mode.
+        """
+        if not self._twikit_credentials:
+            return []
+        try:
+            from twikit import Client as TwikitClient  # noqa: F811
+        except ImportError:
+            logger.warning("twikit not installed; skipping twikit search fallback")
+            return []
+
+        import asyncio
+
+        async def _run_search() -> list[Any]:
+            client = TwikitClient("en-US")
+            auth_token = str(self._twikit_credentials.get("auth_token", "") or "").strip()
+            ct0 = str(self._twikit_credentials.get("ct0", "") or "").strip()
+            if auth_token and ct0:
+                client.set_cookies({"auth_token": auth_token, "ct0": ct0})
+            else:
+                username = str(self._twikit_credentials.get("username", "") or "").strip()
+                email = str(self._twikit_credentials.get("email", "") or "").strip()
+                password = str(self._twikit_credentials.get("password", "") or "").strip()
+                if not username or not password:
+                    return []
+                await client.login(
+                    auth_info_1=email or username,
+                    auth_info_2=username,
+                    password=password,
+                )
+
+            collected: list[Any] = []
+            cursor = None
+            page = 0
+            while True:
+                page += 1
+                if max_pages and page > max_pages:
+                    break
+                if cursor:
+                    results = await cursor.next()
+                else:
+                    results = await client.search_tweet(query, "Latest", count=20)
+                if not results:
+                    break
+                collected.extend(list(results))
+                cursor = results
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            return collected
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import nest_asyncio
+
+                nest_asyncio.apply()
+            return loop.run_until_complete(_run_search())
+        except RuntimeError:
+            return asyncio.run(_run_search())
+        except Exception:
+            logger.exception("twikit fallback search failed for query=%s", query)
+            return []
+
+    def _fetch_tweet_replies_via_twikit(self, *, tweet_id: str, max_pages: int = 5, delay: float = 0.5) -> list[Tweet]:
+        query = f"conversation_id:{tweet_id}"
+        raw_results = self._search_tweets_via_twikit(query=query, max_pages=max_pages, delay=delay)
+        if not raw_results:
+            return []
+        config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
+        replies: list[Tweet] = []
+        seen_ids: set[str] = set()
+        for raw in raw_results:
+            tweet = self._parse_twikit_tweet(raw, config)
+            if not tweet or tweet.tweet_id == tweet_id:
+                continue
+            if tweet.is_quote:
+                continue
+            if not str(tweet.reply_to_tweet_id or "").strip():
+                continue
+            if tweet.tweet_id in seen_ids:
+                continue
+            seen_ids.add(tweet.tweet_id)
+            replies.append(tweet)
+        return replies
+
+    def _fetch_tweet_quotes_via_twikit(self, *, tweet_id: str, max_pages: int = 5, delay: float = 0.5) -> list[Tweet]:
+        query = f"conversation_id:{tweet_id} filter:quote"
+        raw_results = self._search_tweets_via_twikit(query=query, max_pages=max_pages, delay=delay)
+        if not raw_results:
+            return []
+        config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
+        quotes: list[Tweet] = []
+        seen_ids: set[str] = set()
+        for raw in raw_results:
+            tweet = self._parse_twikit_tweet(raw, config)
+            if not tweet or tweet.tweet_id == tweet_id:
+                continue
+            if not tweet.is_quote and not tweet.quoted_tweet_id:
+                tweet.is_quote = True
+            if not tweet.quoted_tweet_id:
+                tweet.quoted_tweet_id = tweet_id
+            if tweet.quoted_tweet_id and tweet.quoted_tweet_id != tweet_id:
+                continue
+            tweet.is_quote = True
+            if tweet.tweet_id in seen_ids:
+                continue
+            seen_ids.add(tweet.tweet_id)
+            quotes.append(tweet)
+        return quotes
 
     def _scrape_syndication(self, username: str, config: TwitterScrapeConfig) -> list[Tweet]:
         """Scrape tweets via the public syndication API (no auth required)."""
@@ -696,10 +1145,27 @@ class TwitterScraper:
                         user_verified=bool(getattr(t.user, "is_blue_verified", False)) if t.user else False,
                         is_reply=bool(t.in_reply_to),
                         is_retweet=bool(getattr(t, "retweeted_tweet", None)),
-                        is_quote=bool(getattr(t, "quoted_tweet", None)),
+                        is_quote=bool(getattr(t, "quoted_tweet", None) or getattr(t, "quoted_tweet_id", None)),
                         reply_to_tweet_id=str(t.in_reply_to) if t.in_reply_to else None,
-                        quoted_tweet_id=None,
+                        quoted_tweet_id=(
+                            str(getattr(getattr(t, "quoted_tweet", None), "id", "") or "").strip()
+                            or str(getattr(t, "quoted_tweet_id", "") or "").strip()
+                            or None
+                        ),
                         media_urls=[],
+                        user_id=str(getattr(t.user, "id", "") or "").strip() or None if t.user else None,
+                        user_profile_url=(
+                            f"https://x.com/{t.user.screen_name}"
+                            if t.user and getattr(t.user, "screen_name", "")
+                            else None
+                        ),
+                        user_avatar_url=(
+                            str(getattr(t.user, "profile_image_url_https", "") or "").strip()
+                            or str(getattr(t.user, "profile_image_url", "") or "").strip()
+                            or None
+                        )
+                        if t.user
+                        else None,
                         show_id=config.show_id,
                         season_number=config.season_number,
                         person_id=config.person_id,
@@ -848,10 +1314,28 @@ class TwitterScraper:
             else:
                 self._set_reply_failure_reason("request_error")
             logger.error(f"Tweet detail request failed: {e}")
-            return []
+            fallback_replies = self._fetch_tweet_replies_via_search(tweet_id=tweet_id, delay=delay, max_pages=8)
+            if not fallback_replies and self._twikit_credentials:
+                fallback_replies = self._fetch_tweet_replies_via_twikit(
+                    tweet_id=tweet_id,
+                    max_pages=5,
+                    delay=max(delay, 0.2),
+                )
+            if fallback_replies:
+                self.last_reply_fetch_reason = None
+            return fallback_replies
         if not isinstance(data, dict):
             self._set_reply_failure_reason("parse_error")
-            return []
+            fallback_replies = self._fetch_tweet_replies_via_search(tweet_id=tweet_id, delay=delay, max_pages=8)
+            if not fallback_replies and self._twikit_credentials:
+                fallback_replies = self._fetch_tweet_replies_via_twikit(
+                    tweet_id=tweet_id,
+                    max_pages=5,
+                    delay=max(delay, 0.2),
+                )
+            if fallback_replies:
+                self.last_reply_fetch_reason = None
+            return fallback_replies
         if data.get("errors"):
             self._set_reply_failure_reason("api_errors")
 
@@ -879,7 +1363,201 @@ class TwitterScraper:
                         if tweet and tweet.tweet_id != tweet_id:
                             replies.append(tweet)
 
+        if not replies and self.last_reply_fetch_reason:
+            fallback_replies = self._fetch_tweet_replies_via_search(tweet_id=tweet_id, delay=delay, max_pages=8)
+            if not fallback_replies and self._twikit_credentials:
+                fallback_replies = self._fetch_tweet_replies_via_twikit(
+                    tweet_id=tweet_id,
+                    max_pages=5,
+                    delay=max(delay, 0.2),
+                )
+            if fallback_replies:
+                self.last_reply_fetch_reason = None
+            return fallback_replies
         return replies
+
+    def _fetch_tweet_replies_via_search(self, *, tweet_id: str, delay: float, max_pages: int = 8) -> list[Tweet]:
+        """Fallback reply fetch using SearchTimeline conversation query."""
+        self._ensure_auth()
+        query = f"conversation_id:{tweet_id}"
+        cursor: str | None = None
+        page_num = 0
+        replies: list[Tweet] = []
+        seen_ids: set[str] = set()
+
+        while True:
+            page_num += 1
+            if max_pages and page_num > max_pages:
+                break
+
+            data = self._fetch_search(query, cursor, delay)
+            if not data:
+                if self._last_graphql_status_code == 404 and page_num <= 1:
+                    self._search_hash = None
+                    self._detail_hash = None
+                    self._discover_graphql_hashes()
+                    data = self._fetch_search(query, cursor, delay)
+                    if not data:
+                        break
+                else:
+                    break
+
+            timeline = (
+                data.get("data", {}).get("search_by_raw_query", {}).get("search_timeline", {}).get("timeline", {})
+            )
+            instructions = timeline.get("instructions", [])
+            page_count = 0
+            next_cursor: str | None = None
+
+            for instruction in instructions:
+                if instruction.get("type") != "TimelineAddEntries":
+                    continue
+                for entry in instruction.get("entries", []):
+                    entry_id = str(entry.get("entryId") or "")
+                    if entry_id.startswith("cursor-bottom-"):
+                        next_cursor = entry.get("content", {}).get("value")
+                        continue
+                    if entry_id.startswith("cursor-top-") or not entry_id.startswith("tweet-"):
+                        continue
+
+                    tweet_result = (
+                        entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                    )
+                    if not tweet_result:
+                        continue
+                    config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
+                    tweet = self._parse_tweet_result(tweet_result, config)
+                    if not tweet or tweet.tweet_id == tweet_id:
+                        continue
+                    if tweet.is_quote:
+                        continue
+                    reply_to_id = str(tweet.reply_to_tweet_id or "").strip()
+                    if not reply_to_id:
+                        continue
+                    if tweet.tweet_id in seen_ids:
+                        continue
+                    seen_ids.add(tweet.tweet_id)
+                    replies.append(tweet)
+                    page_count += 1
+
+            if not next_cursor:
+                break
+            if page_count == 0:
+                break
+            cursor = next_cursor
+
+        return replies
+
+    def fetch_tweet_quotes(self, tweet_id: str, delay: float = 2.0, max_pages: int = 5) -> list[Tweet]:
+        """Fetch quote tweets for a specific root tweet."""
+        self.last_quote_fetch_reason = None
+        self._ensure_auth()
+        query = f"conversation_id:{tweet_id} filter:quote"
+        cursor: str | None = None
+        page_num = 0
+        quotes: list[Tweet] = []
+        seen_ids: set[str] = set()
+
+        while True:
+            page_num += 1
+            if max_pages and page_num > max_pages:
+                break
+
+            data = self._fetch_search(query, cursor, delay)
+            if not data:
+                if self._last_graphql_status_code == 404 and page_num <= 1:
+                    self._search_hash = None
+                    self._detail_hash = None
+                    self._discover_graphql_hashes()
+                    data = self._fetch_search(query, cursor, delay)
+                    if not data:
+                        self._set_quote_failure_reason(
+                            f"http_{int(self._last_graphql_status_code)}"
+                            if self._last_graphql_status_code
+                            else "search_error"
+                        )
+                        break
+                else:
+                    self._set_quote_failure_reason(
+                        f"http_{int(self._last_graphql_status_code)}"
+                        if self._last_graphql_status_code
+                        else "search_error"
+                    )
+                    break
+            if not isinstance(data, dict):
+                self._set_quote_failure_reason("parse_error")
+                break
+            if data.get("errors"):
+                self._set_quote_failure_reason("api_errors")
+
+            timeline = (
+                data.get("data", {}).get("search_by_raw_query", {}).get("search_timeline", {}).get("timeline", {})
+            )
+            instructions = timeline.get("instructions", [])
+            page_count = 0
+            next_cursor: str | None = None
+
+            for instruction in instructions:
+                if instruction.get("type") != "TimelineAddEntries":
+                    continue
+                for entry in instruction.get("entries", []):
+                    entry_id = str(entry.get("entryId") or "")
+                    if entry_id.startswith("cursor-bottom-"):
+                        next_cursor = entry.get("content", {}).get("value")
+                        continue
+                    if entry_id.startswith("cursor-top-") or not entry_id.startswith("tweet-"):
+                        continue
+
+                    tweet_result = (
+                        entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                    )
+                    if not tweet_result:
+                        continue
+                    config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
+                    tweet = self._parse_tweet_result(tweet_result, config)
+                    if not tweet or tweet.tweet_id == tweet_id:
+                        continue
+                    if not tweet.is_quote or not tweet.quoted_tweet_id:
+                        legacy = tweet_result.get("legacy", {}) if isinstance(tweet_result, dict) else {}
+                        legacy_is_quote, legacy_quote_id = self._resolve_quote_markers(
+                            result=tweet_result if isinstance(tweet_result, dict) else {},
+                            tweet=legacy if isinstance(legacy, dict) else {},
+                        )
+                        if not tweet.is_quote and legacy_is_quote:
+                            tweet.is_quote = True
+                        if not tweet.quoted_tweet_id and legacy_quote_id:
+                            tweet.quoted_tweet_id = legacy_quote_id
+                    if tweet.quoted_tweet_id and tweet.quoted_tweet_id != tweet_id:
+                        continue
+                    # quote-search results can omit explicit quote markers; trust filter:quote query semantics.
+                    if not tweet.is_quote and not tweet.quoted_tweet_id:
+                        tweet.is_quote = True
+                    if not tweet.quoted_tweet_id:
+                        tweet.quoted_tweet_id = tweet_id
+                    tweet.is_quote = True
+                    if tweet.tweet_id in seen_ids:
+                        continue
+                    seen_ids.add(tweet.tweet_id)
+                    quotes.append(tweet)
+                    page_count += 1
+
+            if not next_cursor:
+                break
+            if page_count == 0:
+                break
+            cursor = next_cursor
+
+        if not quotes and self.last_quote_fetch_reason and self._twikit_credentials:
+            twikit_quotes = self._fetch_tweet_quotes_via_twikit(
+                tweet_id=tweet_id,
+                max_pages=max_pages,
+                delay=max(delay, 0.2),
+            )
+            if twikit_quotes:
+                self.last_quote_fetch_reason = None
+                return twikit_quotes
+
+        return quotes
 
     def _emit_progress(
         self,

@@ -17,6 +17,7 @@ except Exception:  # noqa: BLE001
 from bs4 import BeautifulSoup
 
 _IMDB_TITLE_ID_RE = re.compile(r"^tt\d+$", re.IGNORECASE)
+_TITLE_URL_ID_RE = re.compile(r"/title/(tt\d+)", re.IGNORECASE)
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml",
@@ -301,6 +302,62 @@ def _coerce_int(value: Any) -> int | None:
     return None
 
 
+def _extract_imdb_title_id(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        for key in ("@id", "url"):
+            extracted = _extract_imdb_title_id(value.get(key))
+            if extracted:
+                return extracted
+        return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if _IMDB_TITLE_ID_RE.match(raw):
+        return raw
+    match = _TITLE_URL_ID_RE.search(raw)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _extract_season_number(value: Any) -> int | None:
+    if isinstance(value, Mapping):
+        direct = _coerce_int(value.get("seasonNumber"))
+        if direct is not None:
+            return direct
+        for key in ("name", "@id", "url"):
+            nested = _extract_season_number(value.get(key))
+            if nested is not None:
+                return nested
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        match = re.search(r"\bseason\s*([0-9]{1,3})\b", raw, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+        match = re.search(r"[?&]season=([0-9]{1,3})\b", raw, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return _coerce_int(value)
+
+
+def _extract_part_of_series(value: Any) -> tuple[str | None, str | None]:
+    if isinstance(value, Mapping):
+        name = value.get("name")
+        title = name.strip() if isinstance(name, str) and name.strip() else None
+        imdb_id = _extract_imdb_title_id(value)
+        return title, imdb_id
+    return None, _extract_imdb_title_id(value)
+
+
 def _extract_trailer(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     trailer = payload.get("trailer")
     if isinstance(trailer, list) and trailer:
@@ -372,10 +429,24 @@ def parse_imdb_title_html(html: str, *, imdb_id: str) -> dict[str, Any]:
             if isinstance(content, str) and content.strip():
                 poster_image_url = content.strip()
 
+    title_type = primary.get("@type")
+    title_type_value: str | None = None
+    if isinstance(title_type, str) and title_type.strip():
+        title_type_value = title_type.strip()
+    elif isinstance(title_type, list):
+        first = next((item for item in title_type if isinstance(item, str) and item.strip()), None)
+        if first:
+            title_type_value = first.strip()
+
+    episode_number = _coerce_int(primary.get("episodeNumber"))
+    season_number = _extract_season_number(primary.get("partOfSeason"))
+    series_title, series_imdb_id = _extract_part_of_series(primary.get("partOfSeries"))
+
     result = {
         "imdb_id": imdb_id,
         "imdb_url": _extract_canonical_url(soup, imdb_id),
         "title": title,
+        "title_type": title_type_value,
         "description": description,
         "tags": tags,
         "tags_raw": interests_raw,
@@ -390,6 +461,11 @@ def parse_imdb_title_html(html: str, *, imdb_id: str) -> dict[str, Any]:
         "trailer": _extract_trailer(primary),
         "total_episodes": _extract_total_episodes(soup),
         "total_seasons": _extract_total_seasons(soup),
+        "series_title": series_title,
+        "series_imdb_id": series_imdb_id,
+        "season_number": season_number,
+        "episode_number": episode_number,
+        "episode_air_date": primary.get("datePublished"),
     }
 
     return result

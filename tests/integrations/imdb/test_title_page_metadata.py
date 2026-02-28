@@ -23,3 +23,35 @@ def test_parse_imdb_title_page_metadata_from_fixture() -> None:
     assert result["content_rating"] == "TV-MA"
     assert result["aggregate_rating_value"] == 5.2
     assert result["aggregate_rating_count"] == 3291
+
+
+def test_parse_imdb_title_page_metadata_extracts_episode_parent_series_fields() -> None:
+    html = """
+    <html>
+      <head>
+        <title>Reunion Part 3 - IMDb</title>
+        <script type="application/ld+json">
+          {
+            "@context":"https://schema.org",
+            "@type":"TVEpisode",
+            "name":"Reunion Part 3",
+            "datePublished":"2025-04-15",
+            "episodeNumber":"20",
+            "partOfSeason":{"@type":"TVSeason","name":"Season 14","url":"https://www.imdb.com/title/tt4789318/episodes/?season=14"},
+            "partOfSeries":{"@type":"TVSeries","name":"The Real Housewives of Beverly Hills","url":"https://www.imdb.com/title/tt1720601/"}
+          }
+        </script>
+      </head>
+      <body></body>
+    </html>
+    """
+
+    result = parse_imdb_title_html(html, imdb_id="tt35051926")
+
+    assert result["title"] == "Reunion Part 3"
+    assert result["title_type"] == "TVEpisode"
+    assert result["episode_number"] == 20
+    assert result["season_number"] == 14
+    assert result["series_title"] == "The Real Housewives of Beverly Hills"
+    assert result["series_imdb_id"] == "tt1720601"
+    assert result["episode_air_date"] == "2025-04-15"

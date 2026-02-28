@@ -11,6 +11,7 @@ Supports:
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -25,6 +26,17 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(1, value)
 
 
 @dataclass
@@ -123,6 +135,8 @@ class YouTubeVideo:
     thumbnail_url: str
     tags: list[str]
     keywords_matched: list[str]
+    is_short: bool = False
+    source_surface: str = "videos"
     published_text: str = ""
 
     # Comments (populated when fetch_comments is called)
@@ -146,6 +160,7 @@ class YouTubeScraper:
     # YouTube endpoints
     CHANNEL_SEARCH_URL = "https://www.youtube.com/results"
     CHANNEL_VIDEOS_URL = "https://www.youtube.com/@{handle}/videos"
+    CHANNEL_SHORTS_URL = "https://www.youtube.com/@{handle}/shorts"
     VIDEO_WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
     COMMENT_API_URL = "https://www.youtube.com/youtubei/v1/next"
     YTINITAL_DATA_PATTERN = re.compile(r"var ytInitialData = ({.*?});", re.DOTALL)
@@ -168,6 +183,8 @@ class YouTubeScraper:
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_TIMEOUT_SECONDS = (10, 45)
+    PRE_WINDOW_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_PRE_WINDOW_PAGE_CAP", 12)
+    YTDLP_SEARCH_TIMEOUT_SECONDS = _env_int("SOCIAL_YOUTUBE_YTDLP_TIMEOUT_SECONDS", 120)
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
@@ -289,22 +306,201 @@ class YouTubeScraper:
                 pass
         return None
 
-    def _parse_video_renderer(self, renderer: dict, config: YouTubeScrapeConfig) -> YouTubeVideo | None:
+    @staticmethod
+    def _normalize_handle(value: str | None) -> str:
+        if not value:
+            return ""
+        normalized = str(value).strip().lower()
+        if not normalized:
+            return ""
+        normalized = normalized.lstrip("@")
+        if "/" in normalized:
+            normalized = normalized.split("/", 1)[0]
+        return normalized
+
+    def _extract_handle_from_url(self, value: str | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        if raw.startswith("/"):
+            raw = f"https://www.youtube.com{raw}"
+        match = re.search(r"/@([a-zA-Z0-9._-]+)", raw)
+        if match:
+            return self._normalize_handle(match.group(1))
+        return ""
+
+    def _renderer_owner_candidates(self, renderer: dict) -> set[str]:
+        candidates: set[str] = set()
+        if not isinstance(renderer, dict):
+            return candidates
+
+        candidate_paths = [
+            renderer.get("ownerText", {}).get("runs", []),
+            renderer.get("shortBylineText", {}).get("runs", []),
+            renderer.get("longBylineText", {}).get("runs", []),
+            renderer.get("headline", {}).get("runs", []),
+            renderer.get("title", {}).get("runs", []),
+        ]
+        for runs in candidate_paths:
+            if not isinstance(runs, list):
+                continue
+            for run in runs:
+                if not isinstance(run, dict):
+                    continue
+                text = str(run.get("text") or "").strip()
+                if text.startswith("@"):
+                    handle = self._normalize_handle(text)
+                    if handle:
+                        candidates.add(handle)
+                endpoint = run.get("navigationEndpoint", {})
+                browse = endpoint.get("browseEndpoint", {}) if isinstance(endpoint, dict) else {}
+                canonical = str(browse.get("canonicalBaseUrl") or "") if isinstance(browse, dict) else ""
+                handle_from_canonical = self._extract_handle_from_url(canonical)
+                if handle_from_canonical:
+                    candidates.add(handle_from_canonical)
+                command_meta = endpoint.get("commandMetadata", {}) if isinstance(endpoint, dict) else {}
+                web_cmd = command_meta.get("webCommandMetadata", {}) if isinstance(command_meta, dict) else {}
+                handle_from_url = self._extract_handle_from_url(web_cmd.get("url"))
+                if handle_from_url:
+                    candidates.add(handle_from_url)
+        return candidates
+
+    def _renderer_matches_owner(self, renderer: dict, target_handle: str) -> bool:
+        normalized_target = self._normalize_handle(target_handle)
+        if not normalized_target:
+            return True
+        candidates = self._renderer_owner_candidates(renderer)
+        if not candidates:
+            return True
+        return normalized_target in candidates
+
+    def _extract_channel_identity_from_data(self, data: dict, fallback_handle: str) -> tuple[str, str]:
+        canonical_handle = self._normalize_handle(fallback_handle)
+        channel_id = ""
+
+        metadata = data.get("metadata", {}).get("channelMetadataRenderer", {}) if isinstance(data, dict) else {}
+        if isinstance(metadata, dict):
+            channel_id = str(metadata.get("externalId") or metadata.get("channelId") or "").strip()
+            vanity_url = str(metadata.get("vanityChannelUrl") or metadata.get("channelUrl") or "").strip()
+            handle_from_meta = self._extract_handle_from_url(vanity_url)
+            if handle_from_meta:
+                canonical_handle = handle_from_meta
+
+        header = data.get("header", {}) if isinstance(data, dict) else {}
+        tabbed_header = header.get("c4TabbedHeaderRenderer", {}) if isinstance(header, dict) else {}
+        if isinstance(tabbed_header, dict):
+            channel_id_from_header = str(tabbed_header.get("channelId") or "").strip()
+            if channel_id_from_header:
+                channel_id = channel_id_from_header
+
+        return canonical_handle, channel_id
+
+    def resolve_channel_identity(self, handle: str, delay: float = 0.5) -> dict[str, str | None]:
+        normalized_handle = self._normalize_handle(handle)
+        data = self.fetch_channel_videos(normalized_handle, delay, surface="videos")
+        if not data:
+            data = self.fetch_channel_videos(normalized_handle, delay, surface="shorts")
+        if not data:
+            return {"canonical_handle": normalized_handle, "channel_id": None}
+        canonical_handle, channel_id = self._extract_channel_identity_from_data(data, normalized_handle)
+        return {
+            "canonical_handle": canonical_handle or normalized_handle,
+            "channel_id": channel_id or None,
+        }
+
+    def _extract_renderer_url(self, renderer: dict) -> str:
+        title_runs = renderer.get("title", {}).get("runs", []) if isinstance(renderer, dict) else []
+        headline_runs = renderer.get("headline", {}).get("runs", []) if isinstance(renderer, dict) else []
+        title_endpoint = (
+            title_runs[0].get("navigationEndpoint") if isinstance(title_runs, list) and title_runs else None
+        )
+        headline_endpoint = (
+            headline_runs[0].get("navigationEndpoint") if isinstance(headline_runs, list) and headline_runs else None
+        )
+
+        def _extract_from_endpoint(endpoint: dict) -> str:
+            if not isinstance(endpoint, dict):
+                return ""
+            command_metadata = endpoint.get("commandMetadata", {})
+            if isinstance(command_metadata, dict):
+                web_command = command_metadata.get("webCommandMetadata", {})
+                if isinstance(web_command, dict):
+                    candidate = str(web_command.get("url") or "").strip()
+                    if candidate:
+                        return candidate
+            watch_endpoint = endpoint.get("watchEndpoint", {})
+            if isinstance(watch_endpoint, dict):
+                video_id = str(watch_endpoint.get("videoId") or "").strip()
+                if video_id:
+                    return f"/watch?v={video_id}"
+            return ""
+
+        endpoint_candidates = [
+            renderer.get("navigationEndpoint"),
+            renderer.get("onTap", {}).get("innertubeCommand"),
+            title_endpoint,
+            headline_endpoint,
+        ]
+        for endpoint in endpoint_candidates:
+            candidate = _extract_from_endpoint(endpoint if isinstance(endpoint, dict) else {})
+            if candidate:
+                return candidate
+        return ""
+
+    def _canonical_video_url(self, *, video_id: str, surface: str, renderer_url: str) -> str:
+        raw = str(renderer_url or "").strip()
+        if raw:
+            if raw.startswith("/"):
+                raw = f"https://www.youtube.com{raw}"
+            if "/shorts/" in raw:
+                return raw
+            if "/watch" in raw or "youtu.be/" in raw:
+                return raw
+        if surface == "shorts":
+            return f"https://www.youtube.com/shorts/{video_id}"
+        return f"https://www.youtube.com/watch?v={video_id}"
+
+    def _parse_video_renderer(
+        self,
+        renderer: dict,
+        config: YouTubeScrapeConfig,
+        *,
+        surface: str = "videos",
+    ) -> YouTubeVideo | None:
         """Parse a video renderer from YouTube data."""
         video_id = renderer.get("videoId", "")
+        if not video_id:
+            navigation_url = self._extract_renderer_url(renderer)
+            short_match = re.search(r"/shorts/([A-Za-z0-9_-]{6,})", navigation_url)
+            watch_match = re.search(r"[?&]v=([A-Za-z0-9_-]{6,})", navigation_url)
+            if short_match:
+                video_id = short_match.group(1)
+            elif watch_match:
+                video_id = watch_match.group(1)
         if not video_id:
             return None
 
         # Extract title
-        title_runs = renderer.get("title", {}).get("runs", [])
+        title_container = renderer.get("title", {}) or renderer.get("headline", {}) or {}
+        title_runs = title_container.get("runs", []) if isinstance(title_container, dict) else []
         title = title_runs[0].get("text", "") if title_runs else ""
+        if not title and isinstance(title_container, dict):
+            title = str(title_container.get("simpleText") or "")
 
         # Extract description
         desc_runs = renderer.get("descriptionSnippet", {}).get("runs", [])
         description = "".join(r.get("text", "") for r in desc_runs)
+        if not description:
+            desc_runs = renderer.get("detailedMetadataSnippets", [{}])[0].get("snippetText", {}).get("runs", [])
+            if isinstance(desc_runs, list):
+                description = "".join(str(r.get("text") or "") for r in desc_runs if isinstance(r, dict))
 
         # Extract view count
         view_text = renderer.get("viewCountText", {}).get("simpleText", "0")
+        if not view_text:
+            runs = renderer.get("viewCountText", {}).get("runs", [])
+            if isinstance(runs, list):
+                view_text = "".join(str(item.get("text", "")) for item in runs if isinstance(item, dict))
         views = self._parse_view_count(view_text)
 
         # Extract published time
@@ -326,7 +522,11 @@ class YouTubeScraper:
 
         # Channel info
         channel_info = renderer.get("ownerText", {}).get("runs", [{}])[0]
-        channel_title = channel_info.get("text", "")
+        channel_title = channel_info.get("text", "") or renderer.get("channelName", "")
+        if not channel_title:
+            short_byline = renderer.get("shortBylineText", {}).get("runs", [])
+            if isinstance(short_byline, list) and short_byline:
+                channel_title = str(short_byline[0].get("text") or "")
 
         # Find matched keywords
         combined_text = f"{title} {description}".lower()
@@ -335,6 +535,10 @@ class YouTubeScraper:
             kw_clean = kw.lower().lstrip("#")
             if kw_clean in combined_text:
                 keywords_matched.append(kw)
+
+        renderer_url = self._extract_renderer_url(renderer)
+        canonical_url = self._canonical_video_url(video_id=video_id, surface=surface, renderer_url=renderer_url)
+        is_short = surface == "shorts" or "/shorts/" in canonical_url
 
         return YouTubeVideo(
             video_id=video_id,
@@ -349,10 +553,12 @@ class YouTubeScraper:
             views=views,
             likes=0,  # Not available in search results
             comments=0,  # Not available in search results
-            url=f"https://www.youtube.com/watch?v={video_id}",
+            url=canonical_url,
             thumbnail_url=thumbnail_url,
             tags=[],  # Not available in search results
             keywords_matched=keywords_matched,
+            is_short=is_short,
+            source_surface=surface,
             published_text=published_text,
             show_id=config.show_id,
             season_number=config.season_number,
@@ -501,7 +707,9 @@ class YouTubeScraper:
         if not video.video_id:
             return current_in_range
 
-        needs_refine = video.published_at <= 0 or self._is_low_precision_publish_text(video.published_text)
+        needs_refine = video.published_at <= 0
+        if not needs_refine and self._is_low_precision_publish_text(video.published_text):
+            needs_refine = True
         if not needs_refine:
             return current_in_range
 
@@ -518,11 +726,22 @@ class YouTubeScraper:
             video.date_time = datetime.fromtimestamp(precise_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
         return config.is_in_date_range(video.published_at)
 
-    def fetch_channel_videos(self, handle: str, delay: float = 2.0) -> dict | None:
-        """Fetch videos from a YouTube channel page."""
+    def _channel_surface_url(self, handle: str, surface: str) -> str:
+        normalized_surface = str(surface or "videos").strip().lower()
+        if normalized_surface == "shorts":
+            return self.CHANNEL_SHORTS_URL.format(handle=handle)
+        return self.CHANNEL_VIDEOS_URL.format(handle=handle)
+
+    def fetch_channel_videos(
+        self,
+        handle: str,
+        delay: float = 2.0,
+        surface: str = "videos",
+    ) -> dict | None:
+        """Fetch videos or shorts from a YouTube channel page."""
         self._rate_limit(delay)
 
-        url = self.CHANNEL_VIDEOS_URL.format(handle=handle)
+        url = self._channel_surface_url(handle, surface)
         headers = self._get_headers()
 
         try:
@@ -530,7 +749,7 @@ class YouTubeScraper:
             response.raise_for_status()
             return self._extract_ytinital_data(response.text)
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to fetch channel videos for @{handle}: {e}")
+            logger.error("Failed to fetch channel %s surface=%s: %s", f"@{handle}", surface, e)
             return None
 
     def _fetch_continuation(self, continuation_token: str, delay: float = 2.0) -> dict | None:
@@ -583,9 +802,13 @@ class YouTubeScraper:
         for action in on_response:
             append_items = action.get("appendContinuationItemsAction", {})
             for item in append_items.get("continuationItems", []):
-                video_renderer = item.get("richItemRenderer", {}).get("content", {}).get("videoRenderer", {})
+                content = item.get("richItemRenderer", {}).get("content", {})
+                video_renderer = content.get("videoRenderer", {})
                 if video_renderer:
                     renderers.append(video_renderer)
+                reel_renderer = content.get("reelItemRenderer", {})
+                if reel_renderer:
+                    renderers.append(reel_renderer)
                 cont = item.get("continuationItemRenderer", {})
                 if cont:
                     endpoint = cont.get("continuationEndpoint", {})
@@ -626,9 +849,13 @@ class YouTubeScraper:
             tab_content = tab.get("tabRenderer", {}).get("content", {})
             rich_grid = tab_content.get("richGridRenderer", {})
             for item in rich_grid.get("contents", []):
-                video_renderer = item.get("richItemRenderer", {}).get("content", {}).get("videoRenderer", {})
+                content = item.get("richItemRenderer", {}).get("content", {})
+                video_renderer = content.get("videoRenderer", {})
                 if video_renderer:
                     yield video_renderer
+                reel_renderer = content.get("reelItemRenderer", {})
+                if reel_renderer:
+                    yield reel_renderer
 
         # Try search results structure
         primary_contents = contents.get("twoColumnSearchResultsRenderer", {}).get("primaryContents", {})
@@ -689,110 +916,150 @@ class YouTubeScraper:
             logger.info(f"Date range: {config.date_start} to {config.date_end}")
 
         videos = []
-        reached_date_limit = False
         continuation_pages = 0
         timestamp_unknown_count = 0
         in_range_hits = 0
         no_hit_pages = 0
         pre_window_pages = 0
+        ownership_filtered = 0
+        scan_capped_reason: str | None = None
+        first_page_counts: dict[str, int] = {"videos": 0, "shorts": 0}
+        canonical_handle = self._normalize_handle(handle)
+        canonical_channel_id = ""
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
 
-        # Fetch initial channel page
-        logger.info(f"Fetching videos from @{handle} channel page...")
-        data = self.fetch_channel_videos(handle, config.delay_seconds)
-        if not data:
-            logger.error(f"Failed to fetch channel page for @{handle}")
-            return []
+        for surface in ("videos", "shorts"):
+            logger.info("Fetching %s from @%s channel page...", surface, handle)
+            ownership_counter = [0]
+            data = self.fetch_channel_videos(handle, config.delay_seconds, surface=surface)
+            if not data:
+                logger.warning("Failed to fetch channel page for @%s (surface=%s)", handle, surface)
+                continue
+            resolved_handle, resolved_channel_id = self._extract_channel_identity_from_data(data, handle)
+            if resolved_handle:
+                canonical_handle = resolved_handle
+            if resolved_channel_id:
+                canonical_channel_id = resolved_channel_id
 
-        # Process initial page
-        initial_page_videos = self._process_video_data(data, config)
-        videos.extend(initial_page_videos)
-        self._emit_progress(
-            progress_cb,
-            phase="scrape_initial_page",
-            pages_scanned=1,
-            posts_checked=len(videos),
-            matched_posts=len(videos),
-        )
-        continuation_token = self._extract_channel_continuation_token(data)
-
-        # Paginate through older videos using continuation tokens
-        page_num = 1
-        while continuation_token and not reached_date_limit:
-            if config.max_pages and continuation_pages >= config.max_pages:
-                logger.info("Reached max continuation pages limit (%s)", config.max_pages)
-                break
-            if config.max_results and len(videos) >= config.max_results:
-                break
-
-            page_num += 1
-            continuation_pages += 1
-            logger.info(f"Fetching channel page {page_num}...")
-            cont_data = self._fetch_continuation(continuation_token, config.delay_seconds)
-            if not cont_data:
-                break
-
-            renderers, continuation_token = self._extract_continuation_videos_and_token(cont_data)
-            if not renderers:
-                logger.info("No more videos in continuation")
-                break
-
-            page_videos = []
-            page_hits = 0
-            page_window_candidates = False
-            for renderer in renderers:
-                video = self._parse_video_renderer(renderer, config)
-                if not video:
-                    continue
-
-                in_range: bool | None = None
-                if video.published_at > 0:
-                    in_range = config.is_in_date_range(video.published_at)
-                in_range = self._refine_video_publish_timestamp_if_needed(video, config, in_range)
-
-                if video.published_at > 0:
-                    if in_range is None:  # Before range - stop paginating
-                        page_window_candidates = True
-                        reached_date_limit = True
-                        break
-                    if in_range is False:  # After range - skip
-                        continue
-                    page_window_candidates = True
-                    in_range_hits += 1
-                elif config.date_start or config.date_end:
-                    # Unknown timestamps are increasingly common for dynamic renderers.
-                    # Still allow keyword matching but track the count.
-                    timestamp_unknown_count += 1
-                    page_window_candidates = True
-
-                combined_text = f"{video.title} {video.description}"
-                if config.matches_keywords(combined_text):
-                    page_videos.append(video)
-                    page_hits += 1
-                    title_short = video.title[:50] + "..." if len(video.title) > 50 else video.title
-                    logger.info(f"Found: {video.video_id} - {title_short} ({video.date_time})")
-
-            videos.extend(page_videos)
+            initial_page_videos = self._process_video_data(
+                data,
+                config,
+                surface=surface,
+                target_handle=canonical_handle or handle,
+                ownership_filtered_counter=ownership_counter,
+            )
+            ownership_filtered += ownership_counter[0]
+            first_page_counts[surface] = len(initial_page_videos)
+            videos.extend(initial_page_videos)
             self._emit_progress(
                 progress_cb,
-                phase="scrape_continuation_page",
-                pages_scanned=page_num,
+                phase="scrape_initial_page" if surface == "videos" else "scrape_initial_page_shorts",
+                pages_scanned=1 if surface == "videos" else 0,
                 posts_checked=len(videos),
                 matched_posts=len(videos),
             )
-            logger.info(f"Page {page_num}: {len(page_videos)} matches, {len(videos)} total")
-            if page_hits == 0:
-                if (config.date_start or config.date_end) and not page_window_candidates:
-                    pre_window_pages += 1
+
+            # For now we deeply paginate only the videos surface.
+            if surface != "videos":
+                continue
+
+            continuation_token = self._extract_channel_continuation_token(data)
+            page_num = 1
+
+            while continuation_token:
+                if config.max_pages and continuation_pages >= config.max_pages:
+                    logger.info("Reached max continuation pages limit (%s)", config.max_pages)
+                    break
+                if config.max_results and len(videos) >= config.max_results:
+                    break
+
+                page_num += 1
+                continuation_pages += 1
+                logger.info(f"Fetching channel page {page_num}...")
+                cont_data = self._fetch_continuation(continuation_token, config.delay_seconds)
+                if not cont_data:
+                    break
+
+                renderers, continuation_token = self._extract_continuation_videos_and_token(cont_data)
+                if not renderers:
+                    logger.info("No more videos in continuation")
+                    break
+
+                page_videos = []
+                page_hits = 0
+                page_window_candidates = False
+                for renderer in renderers:
+                    if not self._renderer_matches_owner(renderer, canonical_handle or handle):
+                        ownership_filtered += 1
+                        continue
+                    video = self._parse_video_renderer(renderer, config, surface="videos")
+                    if not video:
+                        continue
+
+                    in_range: bool | None = None
+                    if video.published_at > 0:
+                        in_range = config.is_in_date_range(video.published_at)
+                    in_range = self._refine_video_publish_timestamp_if_needed(video, config, in_range)
+
+                    if video.published_at > 0:
+                        if in_range is None:  # Before range - keep scanning; channel ordering is not always strict.
+                            page_window_candidates = True
+                            continue
+                        if in_range is False:  # After range - skip
+                            continue
+                        page_window_candidates = True
+                        in_range_hits += 1
+                    elif config.date_start or config.date_end:
+                        # Unknown timestamps are increasingly common for dynamic renderers.
+                        # Still allow keyword matching but track the count.
+                        timestamp_unknown_count += 1
+                        page_window_candidates = True
+
+                    combined_text = f"{video.title} {video.description}"
+                    if config.matches_keywords(combined_text):
+                        page_videos.append(video)
+                        page_hits += 1
+                        title_short = video.title[:50] + "..." if len(video.title) > 50 else video.title
+                        logger.info(f"Found: {video.video_id} - {title_short} ({video.date_time})")
+
+                videos.extend(page_videos)
+                self._emit_progress(
+                    progress_cb,
+                    phase="scrape_continuation_page",
+                    pages_scanned=page_num,
+                    posts_checked=len(videos),
+                    matched_posts=len(videos),
+                )
+                logger.info(f"Page {page_num}: {len(page_videos)} matches, {len(videos)} total")
+                if page_hits == 0:
+                    if (config.date_start or config.date_end) and not page_window_candidates:
+                        pre_window_pages += 1
+                        if pre_window_pages >= self.PRE_WINDOW_PAGE_CAP:
+                            scan_capped_reason = "pre_window_cap"
+                            self._emit_progress(
+                                progress_cb,
+                                phase="scrape_pre_window_cap",
+                                pages_scanned=page_num,
+                                posts_checked=len(videos),
+                                matched_posts=len(videos),
+                            )
+                            logger.info(
+                                "Stopping continuation crawl after pre-window cap (%d pages)",
+                                self.PRE_WINDOW_PAGE_CAP,
+                            )
+                            break
+                    else:
+                        no_hit_pages += 1
+                        # Before/after-window pages can be noisy.
+                        # Give a wider no-hit runway until we get an in-range hit.
+                        no_hit_threshold = 25 if (config.date_start or config.date_end) and in_range_hits == 0 else 5
+                        if no_hit_pages >= no_hit_threshold and (config.date_start or config.date_end):
+                            logger.info("Stopping continuation crawl after %d no-hit pages", no_hit_pages)
+                            break
                 else:
-                    no_hit_pages += 1
-                    if no_hit_pages >= 5 and (config.date_start or config.date_end):
-                        logger.info("Stopping continuation crawl after %d no-hit pages", no_hit_pages)
-                        break
-            else:
-                no_hit_pages = 0
+                    no_hit_pages = 0
 
         # Deduplicate by video_id
         seen = set()
@@ -802,10 +1069,14 @@ class YouTubeScraper:
                 seen.add(video.video_id)
                 unique_videos.append(video)
 
-        # Supplement with yt-dlp search if channel browsing found few results
-        if len(unique_videos) < 10 and config.keywords and shutil.which("yt-dlp"):
+        # Supplement with yt-dlp only when channel browsing found no matches.
+        if len(unique_videos) == 0 and config.keywords and shutil.which("yt-dlp"):
             logger.info(f"Channel browsing found only {len(unique_videos)} videos; supplementing with yt-dlp search...")
-            search_videos = self._search_via_ytdlp(config)
+            search_videos = self._search_via_ytdlp(
+                config,
+                canonical_handle=canonical_handle or handle,
+                canonical_channel_id=canonical_channel_id or None,
+            )
             existing_ids = {v.video_id for v in unique_videos}
             added = 0
             for sv in search_videos:
@@ -840,14 +1111,64 @@ class YouTubeScraper:
             "timestamp_unknown_count": timestamp_unknown_count,
             "in_range_hits": in_range_hits,
             "pre_window_pages": pre_window_pages,
-            "first_page_count": len(initial_page_videos),
+            "pre_window_page_cap": self.PRE_WINDOW_PAGE_CAP,
+            "first_page_count": int(first_page_counts.get("videos", 0)),
+            "first_page_counts": first_page_counts,
+            "ownership_filtered": ownership_filtered,
+            "scan_capped_reason": scan_capped_reason,
             "precise_publish_attempts": self._precise_publish_attempts,
             "precise_publish_successes": self._precise_publish_successes,
             "precise_publish_failures": self._precise_publish_failures,
+            "canonical_handle": canonical_handle or handle,
+            "canonical_channel_id": canonical_channel_id or None,
         }
         return unique_videos
 
-    def _search_via_ytdlp(self, config: YouTubeScrapeConfig) -> list[YouTubeVideo]:
+    def _extract_ytdlp_owner_candidates(self, payload: dict[str, Any]) -> set[str]:
+        candidates: set[str] = set()
+        for key in ("uploader_id", "channel_url", "uploader_url", "webpage_url"):
+            handle = self._extract_handle_from_url(str(payload.get(key) or ""))
+            if handle:
+                candidates.add(handle)
+        for key in ("channel", "uploader"):
+            raw = str(payload.get(key) or "").strip()
+            if not raw:
+                continue
+            normalized = self._normalize_handle(raw)
+            if normalized:
+                candidates.add(normalized)
+        return candidates
+
+    def _ytdlp_entry_matches_owner(
+        self,
+        payload: dict[str, Any],
+        *,
+        target_handle: str,
+        target_channel_id: str | None,
+    ) -> bool:
+        normalized_target_handle = self._normalize_handle(target_handle)
+        normalized_target_channel_id = str(target_channel_id or "").strip()
+        entry_channel_id = str(payload.get("channel_id") or "").strip()
+        if normalized_target_channel_id and entry_channel_id:
+            return entry_channel_id == normalized_target_channel_id
+        if normalized_target_channel_id and not entry_channel_id:
+            return False
+
+        if not normalized_target_handle:
+            return not normalized_target_channel_id
+
+        candidates = self._extract_ytdlp_owner_candidates(payload)
+        if not candidates:
+            return False
+        return normalized_target_handle in candidates
+
+    def _search_via_ytdlp(
+        self,
+        config: YouTubeScrapeConfig,
+        *,
+        canonical_handle: str | None = None,
+        canonical_channel_id: str | None = None,
+    ) -> list[YouTubeVideo]:
         """
         Search YouTube via yt-dlp to find videos by keyword.
 
@@ -856,6 +1177,7 @@ class YouTubeScraper:
         channel's entire video list.
         """
         handle = config.channel_handle.lstrip("@")
+        target_handle = self._normalize_handle(canonical_handle or handle)
         search_terms = [kw for kw in (config.keywords or []) if len(kw) <= 40]
         if not search_terms:
             return []
@@ -887,7 +1209,12 @@ class YouTubeScraper:
             logger.info(f"yt-dlp searching YouTube: '{query}'")
 
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(30, int(self.YTDLP_SEARCH_TIMEOUT_SECONDS)),
+                )
             except subprocess.TimeoutExpired:
                 logger.warning(f"yt-dlp search timed out for '{query}'")
                 continue
@@ -898,9 +1225,11 @@ class YouTubeScraper:
                 except json.JSONDecodeError:
                     continue
 
-                # Filter by channel
-                channel = (data.get("channel") or data.get("uploader") or "").lower()
-                if handle.lower() not in channel:
+                if not self._ytdlp_entry_matches_owner(
+                    data,
+                    target_handle=target_handle,
+                    target_channel_id=canonical_channel_id,
+                ):
                     continue
 
                 vid_id = data.get("id", "")
@@ -918,6 +1247,8 @@ class YouTubeScraper:
 
                 seen_ids.add(vid_id)
                 dt_str = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+                webpage_url = str(data.get("webpage_url") or data.get("url") or "")
+                is_short = "/shorts/" in webpage_url
 
                 video = YouTubeVideo(
                     video_id=vid_id,
@@ -932,24 +1263,42 @@ class YouTubeScraper:
                     views=data.get("view_count", 0) or 0,
                     likes=data.get("like_count", 0) or 0,
                     comments=data.get("comment_count", 0) or 0,
-                    url=f"https://www.youtube.com/watch?v={vid_id}",
+                    url=self._canonical_video_url(
+                        video_id=vid_id,
+                        surface="shorts" if is_short else "videos",
+                        renderer_url=webpage_url,
+                    ),
                     thumbnail_url=(data.get("thumbnails") or [{}])[0].get("url", ""),
                     tags=data.get("tags", []) or [],
                     keywords_matched=[query],
+                    is_short=is_short,
+                    source_surface="search",
                     show_id=config.show_id,
                     season_number=config.season_number,
                 )
                 all_videos.append(video)
                 logger.info(f"yt-dlp found: {vid_id} - {video.title[:50]}... ({dt_str})")
 
-        logger.info(f"yt-dlp search total: {len(all_videos)} videos from Bravo channel")
+        logger.info(f"yt-dlp search total: {len(all_videos)} videos from channel @{target_handle}")
         return all_videos
 
-    def _process_video_data(self, data: dict, config: YouTubeScrapeConfig) -> list[YouTubeVideo]:
+    def _process_video_data(
+        self,
+        data: dict,
+        config: YouTubeScrapeConfig,
+        *,
+        surface: str = "videos",
+        target_handle: str | None = None,
+        ownership_filtered_counter: list[int] | None = None,
+    ) -> list[YouTubeVideo]:
         """Process video data and apply filters."""
         videos = []
         for renderer in self._iter_video_renderers(data):
-            video = self._parse_video_renderer(renderer, config)
+            if target_handle and not self._renderer_matches_owner(renderer, target_handle):
+                if ownership_filtered_counter is not None:
+                    ownership_filtered_counter[0] += 1
+                continue
+            video = self._parse_video_renderer(renderer, config, surface=surface)
             if not video:
                 continue
 

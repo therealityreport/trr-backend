@@ -78,6 +78,65 @@ def test_fandom_profile_match_rejects_mismatched_page_owner() -> None:
     )
 
 
+def test_enrich_cast_photos_with_episode_metadata_falls_back_to_imdb_title_metadata(monkeypatch) -> None:
+    photos = [
+        {
+            "source": "imdb",
+            "title_imdb_ids": ["tt35051926"],
+            "title_names": ["Reunion Part 3"],
+            "metadata": {},
+        }
+    ]
+
+    mock_db = MagicMock()
+    episodes_response = MagicMock()
+    episodes_response.error = None
+    episodes_response.data = []
+    episodes_query = mock_db.schema.return_value.table.return_value.select.return_value.in_.return_value
+    episodes_query.execute.return_value = episodes_response
+
+    monkeypatch.setattr(
+        admin_person_images,
+        "_fetch_imdb_title_fallback_metadata",
+        lambda imdb_ids: {
+            "tt35051926": {
+                "episode_imdb_id": "tt35051926",
+                "episode_title": "Reunion Part 3",
+                "season_number": 14,
+                "episode_number": 20,
+                "episode_air_date": "2025-04-15",
+                "show_name": "The Real Housewives of Beverly Hills",
+                "show_imdb_id": "tt1720601",
+                "show_short_code": "RHOBH",
+                "imdb_title_type": "TVEpisode",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_lookup_show_ids_by_name",
+        lambda db, show_names: {"The Real Housewives of Beverly Hills": "show-rhobh-id"},
+    )
+
+    tagged, failed = admin_person_images._enrich_cast_photos_with_episode_metadata(mock_db, photos)
+
+    assert tagged == 1
+    assert failed == 0
+    enriched = photos[0]
+    assert enriched["season"] == 14
+    assert enriched["title_names"] == ["Reunion Part 3", "The Real Housewives of Beverly Hills"]
+    metadata = enriched["metadata"]
+    assert metadata["episode_imdb_id"] == "tt35051926"
+    assert metadata["episode_title"] == "Reunion Part 3"
+    assert metadata["season_number"] == 14
+    assert metadata["episode_number"] == 20
+    assert metadata["episode_air_date"] == "2025-04-15"
+    assert metadata["show_name"] == "The Real Housewives of Beverly Hills"
+    assert metadata["show_id"] == "show-rhobh-id"
+    assert metadata["show_imdb_id"] == "tt1720601"
+    assert metadata["show_short_code"] == "RHOBH"
+
+
 class TestRefreshPersonImages:
     """Test POST /api/v1/admin/person/{person_id}/refresh-images."""
 

@@ -68,3 +68,32 @@ def test_fandom_person_parsing_live_infobox_family_and_main_seasons_variant() ->
     assert family[1]["name"] == "Henry Barlow"
     assert family[1]["relation"] == "Son"
     assert isinstance(payload.get("bio_card"), dict)
+
+
+def test_fandom_person_parsing_gallery_subheaders_assign_context_and_season() -> None:
+    html = _read_fixture("andy_cohen_gallery_sample.html")
+    payload, photos = parse_fandom_person_html(
+        html,
+        source_url="https://real-housewives.fandom.com/wiki/Andy_Cohen",
+    )
+
+    assert payload["page_title"] == "Andy Cohen"
+    assert len(photos) == 3
+    assert all(photo.get("context_section") != "article" for photo in photos)
+
+    reunion_photos = [
+        photo
+        for photo in photos
+        if photo.get("context_section") == "The Real Housewives of Orange County Season 18 Reunion"
+    ]
+    assert len(reunion_photos) == 2
+    assert all(photo.get("season") == 18 for photo in reunion_photos)
+    assert all(photo.get("context_type") == "reunion_look" for photo in reunion_photos)
+
+    confessional_photo = next(
+        photo
+        for photo in photos
+        if photo.get("context_section") == "The Real Housewives of Salt Lake City Season 5 Confessional"
+    )
+    assert confessional_photo["season"] == 5
+    assert confessional_photo["context_type"] == "confessional_look"

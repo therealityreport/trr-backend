@@ -572,6 +572,44 @@ def test_get_post_comments_endpoint_returns_youtube_effective_stats(
     assert body["total_comments_in_db"] == 420
 
 
+def test_get_post_comments_endpoint_returns_twitter_quotes_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    token = _make_admin_token("test-secret")
+    season_id = str(uuid4())
+
+    payload = {
+        "platform": "twitter",
+        "source_id": "tweet-1",
+        "stats": {"likes": 10, "retweets": 2, "replies_count": 1, "quotes": 5, "views": 100, "engagement": 118},
+        "total_comments_in_db": 1,
+        "total_quotes_in_db": 2,
+        "comments": [],
+        "quotes": [
+            {
+                "comment_id": "quote-1",
+                "author": "viewer",
+                "text": "quote body",
+                "likes": 4,
+                "is_reply": False,
+            }
+        ],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_post_comments", return_value=payload):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/posts/twitter/tweet-1",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_quotes_in_db"] == 2
+    assert body["quotes"][0]["comment_id"] == "quote-1"
+
+
 def test_refresh_post_comments_endpoint_returns_latest_post_detail(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
