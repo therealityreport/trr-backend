@@ -17,6 +17,7 @@ from trr_backend.clients.screenalytics import (
     count_people,
     face_centroid,
 )
+from trr_backend.media.face_crops import generate_and_upload_face_crops
 from trr_backend.media.image_variants import generate_media_asset_variants
 from trr_backend.media.s3_mirror import normalize_fandom_file_url
 from trr_backend.repositories.cast_photo_tags import (
@@ -122,6 +123,38 @@ def _build_face_boxes(result: Any) -> list[dict[str, Any]]:
         confidence = (
             round(max(0.0, min(1.0, float(confidence_raw))), 4) if isinstance(confidence_raw, (int, float)) else None
         )
+        person_id_raw = getattr(det, "person_id", None)
+        person_name_raw = getattr(det, "person_name", None)
+        label_raw = getattr(det, "label", None)
+        match_similarity_raw = getattr(det, "match_similarity", None)
+        match_status_raw = getattr(det, "match_status", None)
+        square_crop_bbox_raw = getattr(det, "square_crop_bbox", None)
+        person_id = str(person_id_raw).strip() if isinstance(person_id_raw, str) and person_id_raw.strip() else None
+        person_name = (
+            str(person_name_raw).strip() if isinstance(person_name_raw, str) and person_name_raw.strip() else None
+        )
+        label = str(label_raw).strip() if isinstance(label_raw, str) and label_raw.strip() else None
+        match_similarity = (
+            round(max(0.0, min(1.0, float(match_similarity_raw))), 4)
+            if isinstance(match_similarity_raw, (int, float))
+            else None
+        )
+        match_status = (
+            str(match_status_raw).strip().lower()
+            if isinstance(match_status_raw, str) and match_status_raw.strip()
+            else None
+        )
+        square_crop_bbox: list[float] | None = None
+        if isinstance(square_crop_bbox_raw, list) and len(square_crop_bbox_raw) >= 4:
+            try:
+                sx1 = _normalize_face_coord(float(square_crop_bbox_raw[0]))
+                sy1 = _normalize_face_coord(float(square_crop_bbox_raw[1]))
+                sx2 = _normalize_face_coord(float(square_crop_bbox_raw[2]))
+                sy2 = _normalize_face_coord(float(square_crop_bbox_raw[3]))
+                if sx2 > sx1 and sy2 > sy1:
+                    square_crop_bbox = [sx1, sy1, sx2, sy2]
+            except (TypeError, ValueError):
+                square_crop_bbox = None
 
         boxes.append(
             {
@@ -132,10 +165,38 @@ def _build_face_boxes(result: Any) -> list[dict[str, Any]]:
                 "width": width,
                 "height": height,
                 "confidence": confidence,
+                **({"person_id": person_id} if person_id else {}),
+                **({"person_name": person_name} if person_name else {}),
+                **({"label": label} if label else {}),
+                **({"match_similarity": match_similarity} if match_similarity is not None else {}),
+                **({"match_status": match_status} if match_status else {}),
+                **({"square_crop_bbox": square_crop_bbox} if square_crop_bbox else {}),
             }
         )
         index += 1
     return boxes
+
+
+def _auto_people_from_face_boxes(face_boxes: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    people_ids: list[str] = []
+    people_names: list[str] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    for box in face_boxes:
+        person_id = box.get("person_id")
+        person_name = box.get("person_name")
+        if isinstance(person_id, str) and person_id.strip():
+            normalized = person_id.strip()
+            if normalized not in seen_ids:
+                seen_ids.add(normalized)
+                people_ids.append(normalized)
+        if isinstance(person_name, str) and person_name.strip():
+            normalized_name = person_name.strip()
+            key = normalized_name.lower()
+            if key not in seen_names:
+                seen_names.add(key)
+                people_names.append(normalized_name)
+    return people_ids, people_names
 
 
 def _normalize_thumbnail_crop_payload(value: Any) -> dict[str, Any] | None:
@@ -175,6 +236,23 @@ class FaceBox(BaseModel):
     width: float
     height: float
     confidence: float | None = None
+    person_id: str | None = None
+    person_name: str | None = None
+    label: str | None = None
+    match_similarity: float | None = None
+    match_status: str | None = None
+    square_crop_bbox: list[float] | None = None
+
+
+class FaceCrop(BaseModel):
+    index: int
+    x: float
+    y: float
+    width: float
+    height: float
+    variant_key: str | None = None
+    variant_url: str | None = None
+    size: int
 
 
 class AutoCountResponse(BaseModel):
@@ -184,6 +262,7 @@ class AutoCountResponse(BaseModel):
     model: str | None = None
     people_count_source: str = "auto"
     face_boxes: list[FaceBox] = []
+    face_crops: list[FaceCrop] = []
     thumbnail_crop: dict[str, Any] | None = None
 
 
@@ -233,10 +312,12 @@ def auto_count_cast_photo(
         raise HTTPException(status_code=409, detail="Manual tags/count exist; use force to overwrite")
 
     result = None
+    selected_image_url: str | None = None
     last_error: ScreenalyticsClientError | None = None
     for image_url in image_urls:
         try:
             result = count_people(image_url)
+            selected_image_url = image_url
             break
         except ScreenalyticsClientError as exc:
             last_error = exc
@@ -245,11 +326,14 @@ def auto_count_cast_photo(
 
     face_boxes = _build_face_boxes(result)
 
+    auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
+    existing_people_names = tag_row.get("people_names") if tag_row else None
+    existing_people_ids = tag_row.get("people_ids") if tag_row else None
     upsert_cast_photo_tags(
         db,
         cast_photo_id=str(photo_id),
-        people_names=tag_row.get("people_names") if tag_row else None,
-        people_ids=tag_row.get("people_ids") if tag_row else None,
+        people_names=existing_people_names if existing_people_names else (auto_people_names or None),
+        people_ids=existing_people_ids if existing_people_ids else (auto_people_ids or None),
         people_count=result.people_count,
         people_count_source="auto",
         detector=result.detector,
@@ -260,6 +344,23 @@ def auto_count_cast_photo(
     metadata = dict(row.get("metadata") or {})
     metadata_changed = False
     latest_crop_payload: dict[str, Any] | None = None
+    face_crops: list[dict[str, Any]] = []
+
+    if selected_image_url and face_boxes:
+        face_crops = generate_and_upload_face_crops(
+            entity_kind="cast_photo",
+            entity_id=str(photo_id),
+            image_url=selected_image_url,
+            face_boxes=face_boxes,
+            size=256,
+        )
+    if face_crops:
+        if metadata.get("face_crops") != face_crops:
+            metadata["face_crops"] = face_crops
+            metadata_changed = True
+    elif "face_crops" in metadata:
+        metadata.pop("face_crops", None)
+        metadata_changed = True
 
     if face_boxes:
         if metadata.get("face_boxes") != face_boxes:
@@ -311,6 +412,7 @@ def auto_count_cast_photo(
         detector=result.detector,
         model=result.model,
         face_boxes=face_boxes,
+        face_crops=face_crops,
         thumbnail_crop=resolved_crop_payload,
     )
 
@@ -350,10 +452,12 @@ def auto_count_media_asset(
         raise HTTPException(status_code=409, detail="Manual tags/count exist; use force to overwrite")
 
     result = None
+    selected_image_url: str | None = None
     last_error: ScreenalyticsClientError | None = None
     for image_url in image_urls:
         try:
             result = count_people(image_url)
+            selected_image_url = image_url
             break
         except ScreenalyticsClientError as exc:
             last_error = exc
@@ -361,11 +465,24 @@ def auto_count_media_asset(
         raise HTTPException(status_code=502, detail=str(last_error or "Failed to auto-count media asset"))
 
     face_boxes = _build_face_boxes(result)
+    auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
+    face_crops: list[dict[str, Any]] = []
+    if selected_image_url and face_boxes:
+        face_crops = generate_and_upload_face_crops(
+            entity_kind="media_asset",
+            entity_id=str(asset_id),
+            image_url=selected_image_url,
+            face_boxes=face_boxes,
+            size=256,
+        )
     context_auto_update = {
         "people_count": result.people_count,
         "people_count_source": "auto",
         "people_count_detector": result.detector,
         "face_boxes": face_boxes,
+        "face_crops": face_crops,
+        **({"people_ids": auto_people_ids} if auto_people_ids else {}),
+        **({"people_names": auto_people_names} if auto_people_names else {}),
     }
     update_person_links_context(
         db,
@@ -436,6 +553,7 @@ def auto_count_media_asset(
         detector=result.detector,
         model=result.model,
         face_boxes=face_boxes,
+        face_crops=face_crops,
         thumbnail_crop=resolved_crop_payload,
     )
 
@@ -579,10 +697,12 @@ def auto_count_show_images(
             continue
 
         result = None
+        selected_image_url: str | None = None
         try:
             for image_url in image_urls:
                 try:
                     result = count_people(image_url)
+                    selected_image_url = image_url
                     break
                 except ScreenalyticsClientError:
                     continue
@@ -594,11 +714,24 @@ def auto_count_show_images(
             continue
 
         face_boxes = _build_face_boxes(result)
+        auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
+        face_crops: list[dict[str, Any]] = []
+        if selected_image_url and face_boxes:
+            face_crops = generate_and_upload_face_crops(
+                entity_kind="media_asset",
+                entity_id=str(asset_id),
+                image_url=selected_image_url,
+                face_boxes=face_boxes,
+                size=256,
+            )
         context_auto_update = {
             "people_count": result.people_count,
             "people_count_source": "auto",
             "people_count_detector": result.detector,
             "face_boxes": face_boxes,
+            "face_crops": face_crops,
+            **({"people_ids": auto_people_ids} if auto_people_ids else {}),
+            **({"people_names": auto_people_names} if auto_people_names else {}),
         }
         update_person_links_context(
             db,

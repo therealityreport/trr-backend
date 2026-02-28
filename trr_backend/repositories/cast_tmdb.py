@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC
 from typing import Any
 from uuid import UUID
@@ -15,10 +16,53 @@ class CastTMDbRepositoryError(RuntimeError):
     pass
 
 
+def _normalize_text_array(value: Any) -> list[str]:
+    """Normalize a value into a Postgres text[]-compatible list[str]."""
+    if value is None:
+        return []
+
+    parsed: Any = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+        except Exception:  # noqa: BLE001
+            decoded = None
+        if isinstance(decoded, list):
+            parsed = decoded
+        else:
+            parsed = [text]
+    elif isinstance(value, (list, tuple, set)):
+        parsed = list(value)
+    else:
+        parsed = [value]
+
+    normalized: list[str] = []
+    for item in parsed:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _preview_value(value: Any, *, max_len: int = 120) -> str:
+    text = str(value).replace("\n", " ").replace("\r", " ").strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
 def _serialize_row(row: dict[str, Any]) -> dict[str, Any]:
     """Serialize a row for Supabase, handling UUIDs."""
     cleaned: dict[str, Any] = {}
     for key, value in row.items():
+        if key == "also_known_as":
+            cleaned[key] = _normalize_text_array(value)
+            continue
         if value is None:
             continue
         if isinstance(value, UUID):
@@ -51,10 +95,18 @@ def upsert_cast_tmdb(
     try:
         response = db.schema("core").table("cast_tmdb").upsert(payload, on_conflict="person_id").execute()
     except Exception as exc:
-        raise CastTMDbRepositoryError(f"Supabase error upserting cast_tmdb: {exc}") from exc
+        raise CastTMDbRepositoryError(
+            "Supabase error upserting cast_tmdb: "
+            f"{exc} [field=also_known_as type={type(payload.get('also_known_as')).__name__} "
+            f"preview={_preview_value(payload.get('also_known_as'))}]"
+        ) from exc
 
     if hasattr(response, "error") and response.error:
-        raise CastTMDbRepositoryError(f"Supabase error upserting cast_tmdb: {response.error}")
+        raise CastTMDbRepositoryError(
+            "Supabase error upserting cast_tmdb: "
+            f"{response.error} [field=also_known_as type={type(payload.get('also_known_as')).__name__} "
+            f"preview={_preview_value(payload.get('also_known_as'))}]"
+        )
 
     data = response.data or []
     if isinstance(data, list) and data:

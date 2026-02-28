@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import random
 import re
 import time
@@ -37,6 +38,9 @@ _VIEWER_ID_RE = re.compile(r"/mediaviewer/(rm\d+)/", re.IGNORECASE)
 _NAME_ID_RE = re.compile(r"/name/(nm\d+)/", re.IGNORECASE)
 _TITLE_ID_RE = re.compile(r"/title/(tt\d+)/", re.IGNORECASE)
 _GALLERY_COUNT_RE = re.compile(r"(\d+)\s+of\s+(\d+)", re.IGNORECASE)
+_IMDB_IMAGE_ID_RE = re.compile(r"^rm\d+$", re.IGNORECASE)
+_NAME_MEDIAINDEX_PAGINATION_OPERATION = "NameMediaIndexPagination"
+_NAME_MEDIAINDEX_PAGINATION_HASH = "6590d686f516dbd5ec06eab4efa37b7f8c8ce40b9aacf9b80889969e90c9e826"
 
 
 def _merge_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
@@ -109,6 +113,310 @@ def _fetch_html_once(
         return exc.code, text, str(exc)
     except urllib.error.URLError as exc:
         return None, None, str(exc)
+
+
+def _extract_payloads(html: str) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    raw_text = (html or "").strip()
+    if raw_text.startswith("{"):
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            payloads.append(payload)
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    next_data = soup.find("script", attrs={"id": "__NEXT_DATA__"})
+    if next_data:
+        raw = next_data.string or next_data.get_text(strip=True)
+        if raw and raw.strip().startswith("{"):
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                payloads.append(payload)
+
+    for node in soup.find_all("script", attrs={"type": "application/json"}):
+        raw = node.string or node.get_text(strip=True)
+        if not raw:
+            continue
+        stripped = raw.strip()
+        if not (stripped.startswith("{") or stripped.startswith("[")):
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+
+    return payloads
+
+
+def _find_all_images(node: Any) -> Mapping[str, Any] | None:
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            all_images = current.get("all_images")
+            if isinstance(all_images, Mapping):
+                edges = all_images.get("edges")
+                page_info = all_images.get("pageInfo")
+                if isinstance(edges, list) and isinstance(page_info, Mapping):
+                    return all_images
+            if {"edges", "pageInfo"} <= set(current.keys()):
+                edges = current.get("edges")
+                page_info = current.get("pageInfo")
+                if isinstance(edges, list) and isinstance(page_info, Mapping):
+                    return current
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return None
+
+
+def _extract_page_info(all_images: Mapping[str, Any]) -> dict[str, Any]:
+    page_info = all_images.get("pageInfo") if isinstance(all_images.get("pageInfo"), Mapping) else {}
+    has_next = page_info.get("hasNextPage")
+    if has_next is None:
+        has_next = page_info.get("has_next_page")
+    end_cursor = page_info.get("endCursor") or page_info.get("end_cursor")
+    total = all_images.get("total")
+    total_val: int | None = total if isinstance(total, int) and total >= 0 else None
+    return {
+        "has_next_page": bool(has_next),
+        "end_cursor": end_cursor if isinstance(end_cursor, str) and end_cursor.strip() else None,
+        "total": total_val,
+    }
+
+
+def _parse_person_all_images_edges(
+    all_images: Mapping[str, Any],
+    imdb_person_id: str,
+) -> list[dict[str, Any]]:
+    edges = all_images.get("edges")
+    if not isinstance(edges, list):
+        return []
+
+    ordered_ids: list[str] = []
+    best_by_id: dict[str, dict[str, Any]] = {}
+
+    for edge in edges:
+        if not isinstance(edge, Mapping):
+            continue
+        node = edge.get("node")
+        if not isinstance(node, Mapping):
+            continue
+        viewer_id = node.get("id")
+        if not isinstance(viewer_id, str) or not _IMDB_IMAGE_ID_RE.match(viewer_id.strip()):
+            continue
+        viewer_id = viewer_id.strip()
+
+        url = node.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        normalized_url = _normalize_image_url(url)
+        if not normalized_url or not normalized_url.startswith(_MEDIA_AMAZON_PREFIX):
+            continue
+
+        width = node.get("width")
+        width_val = int(width) if isinstance(width, int) else _extract_width_from_url(normalized_url)
+        height = node.get("height")
+        height_val = int(height) if isinstance(height, int) else _extract_height_from_url(normalized_url)
+
+        caption = None
+        caption_obj = node.get("caption")
+        if isinstance(caption_obj, Mapping):
+            text = caption_obj.get("plainText")
+            if isinstance(text, str) and text.strip():
+                caption = text.strip()
+        elif isinstance(caption_obj, str) and caption_obj.strip():
+            caption = caption_obj.strip()
+        image_type_raw = node.get("imageType")
+        if not isinstance(image_type_raw, str) or not image_type_raw.strip():
+            image_type_raw = node.get("type")
+        image_type = (
+            image_type_raw.strip().lower()
+            if isinstance(image_type_raw, str) and image_type_raw.strip()
+            else None
+        )
+
+        parsed = urlparse(normalized_url)
+        url_path = parsed.path if parsed.path else None
+        source_image_id = _extract_source_image_id_from_path(url_path) or viewer_id
+        mediaviewer_url_path = f"/name/{imdb_person_id}/mediaviewer/{viewer_id}/"
+
+        row = {
+            "imdb_person_id": imdb_person_id,
+            "source_image_id": source_image_id,
+            "viewer_id": viewer_id,
+            "mediaviewer_url_path": mediaviewer_url_path,
+            "url": normalized_url,
+            "url_path": url_path,
+            "width": width_val,
+            "height": height_val,
+            "caption": caption,
+            "image_type": image_type,
+        }
+
+        existing = best_by_id.get(source_image_id)
+        if existing is None:
+            best_by_id[source_image_id] = row
+            ordered_ids.append(source_image_id)
+            continue
+
+        existing_width = existing.get("width")
+        replace = False
+        if width_val is not None and (existing_width is None or width_val > existing_width):
+            replace = True
+        if replace:
+            best_by_id[source_image_id] = row
+
+    return [best_by_id[source_image_id] for source_image_id in ordered_ids]
+
+
+def parse_imdb_person_mediaindex_payload(
+    payload: Mapping[str, Any],
+    imdb_person_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    imdb_person_id = str(imdb_person_id or "").strip()
+    if not _IMDB_NAME_ID_RE.match(imdb_person_id):
+        raise ValueError(f"Invalid IMDb person id: {imdb_person_id!r}")
+    if not isinstance(payload, Mapping):
+        return [], {"has_next_page": False, "end_cursor": None, "total": None}
+
+    all_images = _find_all_images(payload)
+    if not isinstance(all_images, Mapping):
+        return [], {"has_next_page": False, "end_cursor": None, "total": None}
+
+    images = _parse_person_all_images_edges(all_images, imdb_person_id)
+    page_info = _extract_page_info(all_images)
+    return images, page_info
+
+
+def parse_imdb_person_mediaindex_state(
+    html: str,
+    imdb_person_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    imdb_person_id = str(imdb_person_id or "").strip()
+    if not _IMDB_NAME_ID_RE.match(imdb_person_id):
+        raise ValueError(f"Invalid IMDb person id: {imdb_person_id!r}")
+    if not html:
+        return [], {"has_next_page": False, "end_cursor": None, "total": None}
+
+    payloads = _extract_payloads(html)
+    for payload in payloads:
+        images, page_info = parse_imdb_person_mediaindex_payload(payload, imdb_person_id)
+        if images:
+            return images, page_info
+
+    images = parse_imdb_person_mediaindex_images(html, imdb_person_id)
+    return images, {"has_next_page": False, "end_cursor": None, "total": extract_imdb_person_mediaindex_total(html)}
+
+
+def fetch_imdb_person_mediaindex_page(
+    imdb_person_id: str,
+    *,
+    after_cursor: str,
+    first: int = 50,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    imdb_person_id = str(imdb_person_id or "").strip()
+    cursor = str(after_cursor or "").strip()
+    if not _IMDB_NAME_ID_RE.match(imdb_person_id):
+        raise ValueError(f"Invalid IMDb person id: {imdb_person_id!r}")
+    if not cursor:
+        raise ValueError("after_cursor is required")
+
+    variables: dict[str, Any] = {
+        "const": imdb_person_id,
+        "first": max(1, int(first)),
+        "after": cursor,
+        "filter": {},
+        "locale": "en-US",
+        "originalTitleText": False,
+    }
+    extensions = {
+        "persistedQuery": {
+            "version": 1,
+            "sha256Hash": _NAME_MEDIAINDEX_PAGINATION_HASH,
+        }
+    }
+    payload = {
+        "operationName": _NAME_MEDIAINDEX_PAGINATION_OPERATION,
+        "variables": variables,
+        "extensions": extensions,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    url = "https://caching.graphql.imdb.com/"
+    headers = {
+        "accept": "application/graphql+json, application/json",
+        "content-type": "application/json",
+        "origin": "https://m.imdb.com",
+        "referer": f"https://m.imdb.com/name/{quote(imdb_person_id)}/mediaindex/",
+        "user-agent": _DEFAULT_HEADERS["user-agent"],
+    }
+
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        status: int | None = None
+        body: str | None = None
+        error: str | None = None
+        try:
+            if requests is not None:
+                http_client = session if session is not None else requests
+                response = http_client.post(url, data=payload_json, headers=headers, timeout=20.0)
+                status = int(response.status_code)
+                body = response.text
+            else:
+                req = urllib.request.Request(
+                    url,
+                    data=payload_json.encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=20.0) as response:  # noqa: S310
+                    status = int(response.getcode())
+                    body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            status = int(exc.code)
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                body = None
+            error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            status = None
+            body = None
+            error = str(exc)
+
+        if status == 200 and body:
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError as exc:  # noqa: PERF203
+                raise RuntimeError(f"IMDb mediaindex page JSON decode failed: {exc}") from exc
+            if isinstance(payload, dict):
+                errors = payload.get("errors")
+                if isinstance(errors, list) and errors:
+                    raise RuntimeError(f"IMDb mediaindex page returned errors: {errors}")
+                return payload
+            raise RuntimeError("IMDb mediaindex page returned non-object JSON payload.")
+        if status in (403, 404):
+            raise RuntimeError(f"IMDb mediaindex page unavailable for {imdb_person_id} (HTTP {status}).")
+        if status in _TRANSIENT_STATUSES or status is None:
+            if attempt < max_attempts:
+                _sleep_backoff(attempt)
+                continue
+        if body and status is not None:
+            body_excerpt = body[:256].replace("\n", " ").strip()
+            raise RuntimeError(
+                f"IMDb mediaindex page request failed for {imdb_person_id} (HTTP {status}): {body_excerpt}"
+            )
+        if error:
+            raise RuntimeError(f"IMDb mediaindex page request failed: {error}")
+    raise RuntimeError(f"IMDb mediaindex page request failed for {imdb_person_id}.")
 
 
 def fetch_imdb_person_mediaindex_html(imdb_person_id: str, *, session: requests.Session | None = None) -> str:
@@ -362,6 +670,52 @@ def parse_imdb_person_mediaindex_images(html: str, imdb_person_id: str) -> list[
     return [best_by_id[source_image_id] for source_image_id in ordered_ids]
 
 
+def extract_imdb_person_mediaindex_total(html: str) -> int | None:
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+
+    script = soup.find("script", attrs={"id": "__NEXT_DATA__"})
+    if script:
+        raw = script.string or script.get_text(strip=True)
+        if raw and raw.strip().startswith("{"):
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                candidates: list[Any] = [
+                    payload.get("props", {})
+                    .get("pageProps", {})
+                    .get("contentData", {})
+                    .get("data", {})
+                    .get("name", {})
+                    .get("all_images", {})
+                    .get("total"),
+                    payload.get("props", {})
+                    .get("pageProps", {})
+                    .get("contentData", {})
+                    .get("entityMetadata", {})
+                    .get("images", {})
+                    .get("total"),
+                ]
+                for candidate in candidates:
+                    if isinstance(candidate, int) and candidate >= 0:
+                        return candidate
+                    if isinstance(candidate, str):
+                        parsed = candidate.strip().replace(",", "")
+                        if parsed.isdigit():
+                            return int(parsed)
+
+    page_text = soup.get_text(" ", strip=True)
+    match = re.search(r"\b\d+\s*(?:-|to)\s*\d+\s+of\s+(\d[\d,]*)\b", page_text, re.IGNORECASE)
+    if match:
+        raw_total = match.group(1).replace(",", "")
+        if raw_total.isdigit():
+            return int(raw_total)
+    return None
+
+
 def _extract_caption(soup: BeautifulSoup) -> str | None:
     caption_div = soup.find("div", class_=re.compile(r"ipc-html-content-inner-div"))
     if caption_div:
@@ -538,6 +892,35 @@ def _select_mediaviewer_images(soup: BeautifulSoup, viewer_id: str | None) -> li
     return images
 
 
+def _extract_mediaviewer_image_type(
+    html: str,
+    *,
+    viewer_id: str | None,
+    image_url: str | None,
+) -> str | None:
+    viewer_key = str(viewer_id or "").strip().lower()
+    normalized_image_url = _normalize_image_url(image_url) if isinstance(image_url, str) else None
+    for payload in _extract_payloads(html):
+        stack = [payload]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, Mapping):
+                node_id = str(current.get("id") or "").strip().lower()
+                node_url = _normalize_image_url(current.get("url")) if isinstance(current.get("url"), str) else None
+                node_type = current.get("imageType")
+                if not isinstance(node_type, str) or not node_type.strip():
+                    node_type = current.get("type")
+                if isinstance(node_type, str) and node_type.strip():
+                    matches_viewer = bool(viewer_key and node_id == viewer_key)
+                    matches_url = bool(normalized_image_url and node_url == normalized_image_url)
+                    if matches_viewer or matches_url:
+                        return node_type.strip().lower()
+                stack.extend(current.values())
+            elif isinstance(current, list):
+                stack.extend(current)
+    return None
+
+
 def parse_imdb_person_mediaviewer_details(html: str, *, viewer_id: str | None = None) -> dict[str, Any]:
     if not html:
         return {}
@@ -611,6 +994,11 @@ def parse_imdb_person_mediaviewer_details(html: str, *, viewer_id: str | None = 
     if not title_names and caption_title_fallback:
         title_names = caption_title_fallback
 
+    image_type = _extract_mediaviewer_image_type(
+        html,
+        viewer_id=viewer_id,
+        image_url=best_url,
+    )
     url_path = urlparse(best_url).path if best_url else None
 
     return {
@@ -625,4 +1013,5 @@ def parse_imdb_person_mediaviewer_details(html: str, *, viewer_id: str | None = 
         "people_names": people_names or None,
         "title_imdb_ids": title_ids or None,
         "title_names": title_names or None,
+        "image_type": image_type,
     }

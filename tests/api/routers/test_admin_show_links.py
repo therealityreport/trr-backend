@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import jwt
 import pytest
@@ -13,12 +14,16 @@ import api.routers.admin_show_links as admin_show_links
 from api.main import app
 from api.routers.admin_show_links import (
     _canonicalize_url,
+    _classify_submitted_link_input,
     _cleanup_invalid_person_knowledge_links,
+    _cleanup_invalid_show_knowledge_links,
     _discover_people_links,
     _discover_season_links,
     _discover_show_links,
     _normalize_link_kind,
+    _promote_pending_links_to_approved,
     _source_timeout_seconds,
+    _sync_show_wikipedia_links,
     _validate_person_knowledge_url,
     _validated_person_knowledge_url,
 )
@@ -52,6 +57,7 @@ def test_discover_show_links_uses_default_bravo_snapshot_variant() -> None:
                     "wikidata_id": None,
                     "external_ids": {},
                 },
+                {"url": ""},
                 {
                     "payload": {
                         "normalized": {
@@ -69,15 +75,9 @@ def test_discover_show_links_uses_default_bravo_snapshot_variant() -> None:
 
             links = _discover_show_links(show_id)
 
-    snapshot_call = fetch_one.call_args_list[1]
+    snapshot_call = fetch_one.call_args_list[2]
     assert snapshot_call.args[1] == [show_id, "default"]
     assert any(link.get("link_kind") == "cast_announcement" for link in links)
-    assert any(
-        link.get("entity_type") == "show"
-        and link.get("link_kind") == "fandom"
-        and str(link.get("url") or "").startswith("https://real-housewives.fandom.com/wiki/")
-        for link in links
-    )
 
 
 def test_discover_show_links_prefers_existing_show_level_fandom_links() -> None:
@@ -97,14 +97,972 @@ def test_discover_show_links_prefers_existing_show_level_fandom_links() -> None:
                     "wikidata_id": None,
                     "external_ids": {},
                 },
+                {"url": ""},
                 {"payload": {"normalized": {}}},
             ]
-            links = _discover_show_links(show_id)
+            with patch(
+                "api.routers.admin_show_links._fetch_html_with_status",
+                return_value=(
+                    200,
+                    "<html><body><h1>The Real Housewives of Salt Lake City</h1></body></html>",
+                    "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                    None,
+                ),
+            ):
+                links = _discover_show_links(show_id)
 
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
     assert len(fandom_links) == 1
     assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
     assert fandom_links[0]["source"] == "core.entity_links"
+
+
+def test_discover_show_links_skips_missing_fandom_pages() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch(
+            "api.routers.admin_show_links.pg.fetch_all",
+            return_value=[
+                {"url": "https://real-housewives.fandom.com/wiki/The_Traitors"},
+            ],
+        ):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Traitors",
+                    "networks": ["peacock"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._fetch_html_with_status",
+                return_value=(
+                    200,
+                    "There is currently no text in this page. You can search for this page title in other pages.",
+                    "https://real-housewives.fandom.com/wiki/The_Traitors",
+                    None,
+                ),
+            ):
+                links = _discover_show_links(show_id)
+
+    assert not any(link.get("link_kind") == "fandom" for link in links)
+
+
+def test_discover_show_links_skips_bravotv_show_page_for_non_bravo_network() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Traitors",
+                    "imdb_id": "tt15218000",
+                    "tmdb_id": 204761,
+                    "networks": ["peacock"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            links = _discover_show_links(show_id)
+
+    assert not any(link.get("link_kind") == "official_page" for link in links)
+
+
+def test_discover_show_links_includes_imdb_and_tmdb_show_pages() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Traitors",
+                    "imdb_id": "tt15218000",
+                    "tmdb_id": 204761,
+                    "networks": [],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            links = _discover_show_links(show_id)
+
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "imdb"
+        and link.get("url") == "https://www.imdb.com/title/tt15218000/"
+        for link in links
+    )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "tmdb"
+        and link.get("url") == "https://www.themoviedb.org/tv/204761"
+        for link in links
+    )
+
+
+def test_discover_show_links_derives_external_ids_from_wikidata_when_missing() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Traitors",
+                    "imdb_id": None,
+                    "tmdb_id": None,
+                    "networks": ["peacock"],
+                    "wikidata_id": "Q116449538",
+                    "external_ids": {},
+                },
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._fetch_wikidata_summary",
+                return_value=(
+                    {
+                        "item_id": "Q116449538",
+                        "label": "The Traitors",
+                        "enwiki_title": "The Traitors (American TV series)",
+                        "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                        "imdb_id": "tt15557874",
+                        "tmdb_tv_id": "215943",
+                        "tmdb_person_id": "",
+                        "tvdb_id": "428163",
+                        "tvmaze_show_id": "58177",
+                        "tvmaze_season_id": "",
+                        "ratinggraph_tv_show_id": "the-traitors-ratings-103483",
+                    },
+                    False,
+                ),
+            ):
+                links = _discover_show_links(show_id)
+
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "imdb"
+        and link.get("url") == "https://www.imdb.com/title/tt15557874/"
+        for link in links
+    )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "tmdb"
+        and link.get("url") == "https://www.themoviedb.org/tv/215943"
+        for link in links
+    )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "tvdb"
+        and link.get("url") == "https://www.thetvdb.com/series/428163"
+        for link in links
+    )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "tvmaze"
+        and link.get("url") == "https://www.tvmaze.com/shows/58177"
+        for link in links
+    )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "ratinggraph"
+        and link.get("url") == "https://www.ratingraph.com/tv-shows/the-traitors-ratings-103483"
+        for link in links
+    )
+
+
+def test_discover_show_links_includes_peacock_and_nbc_network_blog_links() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Traitors",
+                    "imdb_id": "tt15218000",
+                    "tmdb_id": 204761,
+                    "networks": ["peacock", "nbc"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=("https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)", None, None),
+            ):
+                with patch(
+                    "api.routers.admin_show_links.load_fandom_community_allowlist",
+                    return_value=("thetraitors.fandom.com", "thetraitorsuk.fandom.com"),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._fetch_html_with_status",
+                        return_value=(
+                            200,
+                            "<html><body><h1>The Traitors (US)</h1></body></html>",
+                            "https://thetraitors.fandom.com/wiki/The_Traitors_(US)",
+                            None,
+                        ),
+                    ):
+                        links = _discover_show_links(show_id)
+
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_group") == "cast_announcements"
+        and link.get("link_kind") == "network_blog"
+        and link.get("url") == "https://www.peacocktv.com/blog/show/the-traitors"
+        for link in links
+    )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_group") == "cast_announcements"
+        and link.get("link_kind") == "network_blog"
+        and link.get("url") == "https://www.nbc.com/nbc-insider/franchise/the-traitors"
+        for link in links
+    )
+
+
+def test_discover_show_links_includes_curated_traitors_fandom_base_urls() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Traitors",
+                    "imdb_id": None,
+                    "tmdb_id": None,
+                    "networks": ["peacock"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch("api.routers.admin_show_links._resolve_wikipedia_url", return_value=(None, None, "missing")):
+                with patch(
+                    "api.routers.admin_show_links.load_fandom_community_allowlist",
+                    return_value=("thetraitors.fandom.com", "thetraitorsuk.fandom.com"),
+                ):
+                    with patch("api.routers.admin_show_links._fetch_html_with_status") as fetch_html:
+                        fetch_html.side_effect = [
+                            (
+                                200,
+                                "<html><body><h1>The Traitors US</h1></body></html>",
+                                "https://thetraitorsuk.fandom.com/wiki/The_Traitors_US",
+                                None,
+                            ),
+                            (
+                                200,
+                                "<html><body><h1>The Traitors (US)</h1></body></html>",
+                                "https://thetraitors.fandom.com/wiki/The_Traitors_(US)",
+                                None,
+                            ),
+                        ]
+                        links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    assert any(
+        link.get("url") == "https://thetraitorsuk.fandom.com/wiki/The_Traitors_US"
+        and link.get("source") == "curated_fandom_base"
+        for link in fandom_links
+    )
+    assert any(
+        link.get("url") == "https://thetraitors.fandom.com/wiki/The_Traitors_(US)"
+        and link.get("source") == "curated_fandom_base"
+        for link in fandom_links
+    )
+
+
+def test_discover_show_links_skips_missing_show_wikipedia_pages() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "A Show That Does Not Exist Anywhere",
+                    "imdb_id": None,
+                    "tmdb_id": None,
+                    "networks": [],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=(None, None, "missing"),
+            ):
+                links = _discover_show_links(show_id)
+
+    assert not any(link.get("entity_type") == "show" and link.get("link_kind") == "wikipedia" for link in links)
+
+
+def test_discover_show_links_skips_show_wikipedia_page_with_mismatched_wikidata() -> None:
+    show_id = str(uuid4())
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Traitors",
+                    "imdb_id": "tt15218000",
+                    "tmdb_id": 204761,
+                    "networks": ["peacock"],
+                    "wikidata_id": "Q147711660",
+                    "external_ids": {},
+                },
+                {"payload": {"normalized": {}}},
+            ]
+            with patch("api.routers.admin_show_links._fetch_wikidata_summary", return_value=(None, False)):
+                with patch(
+                    "api.routers.admin_show_links._resolve_wikipedia_url",
+                    return_value=("https://en.wikipedia.org/wiki/The_Traitors", "The Traitors", None),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._resolve_wikipedia_wikidata_id",
+                        return_value="Q111195888",
+                    ):
+                        links = _discover_show_links(show_id)
+
+    assert not any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "wikipedia"
+        and link.get("url") == "https://en.wikipedia.org/wiki/The_Traitors"
+        for link in links
+    )
+
+
+def test_classify_submitted_link_input_routes_links_by_entity_type() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    person_id = str(uuid4())
+    person = {
+        "id": person_id,
+        "name": "Alan Cumming",
+        "name_norm": "alan cumming",
+        "imdb_id": "nm0001086",
+        "tmdb_id": "9346",
+        "wikidata_id": None,
+        "fandom_name_norm": "alan cumming",
+    }
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "seasons_by_number": {
+            2: {
+                "id": season_id,
+                "season_number": 2,
+                "external_wikidata_id": None,
+            }
+        },
+        "seasons_by_wikidata": {},
+        "people_by_id": {person_id: person},
+        "people_by_name": {"alan cumming": person},
+        "people_by_slug": {"alan cumming": person},
+        "people_by_imdb": {"nm0001086": person},
+        "people_by_tmdb": {"9346": person},
+        "people_by_wikidata": {},
+    }
+
+    season_rows, season_error = _classify_submitted_link_input(
+        "https://www.themoviedb.org/tv/204761/season/2",
+        context,
+    )
+    assert season_error is None
+    assert season_rows[0]["entity_type"] == "season"
+    assert season_rows[0]["entity_id"] == season_id
+    assert season_rows[0]["season_number"] == 2
+    assert season_rows[0]["link_kind"] == "tmdb"
+
+    social_rows, social_error = _classify_submitted_link_input("instagram:@thetraitorsus", context)
+    assert social_error is None
+    assert social_rows[0]["entity_type"] == "show"
+    assert social_rows[0]["link_group"] == "social"
+    assert social_rows[0]["link_kind"] == "instagram"
+    assert social_rows[0]["url"] == "https://www.instagram.com/thetraitorsus"
+
+    person_rows, person_error = _classify_submitted_link_input(
+        "https://thetraitors.fandom.com/wiki/Alan_Cumming",
+        context,
+    )
+    assert person_error is None
+    assert person_rows[0]["entity_type"] == "person"
+    assert person_rows[0]["entity_id"] == person_id
+    assert person_rows[0]["link_kind"] == "fandom"
+
+
+def test_classify_submitted_link_input_recognizes_network_blog_urls() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock", "nbc"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    peacock_rows, peacock_error = _classify_submitted_link_input(
+        "https://www.peacocktv.com/blog/show/the-traitors",
+        context,
+    )
+    assert peacock_error is None
+    assert peacock_rows[0]["entity_type"] == "show"
+    assert peacock_rows[0]["link_group"] == "cast_announcements"
+    assert peacock_rows[0]["link_kind"] == "network_blog"
+
+    nbc_rows, nbc_error = _classify_submitted_link_input(
+        "https://www.nbc.com/nbc-insider/franchise/the-traitors",
+        context,
+    )
+    assert nbc_error is None
+    assert nbc_rows[0]["entity_type"] == "show"
+    assert nbc_rows[0]["link_group"] == "cast_announcements"
+    assert nbc_rows[0]["link_kind"] == "network_blog"
+
+
+def test_classify_submitted_link_input_accepts_traitors_fandom_base_urls() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    rows, error = _classify_submitted_link_input("https://thetraitors.fandom.com/wiki/The_Traitors_(US)", context)
+    assert error is None
+    assert rows[0]["entity_type"] == "show"
+    assert rows[0]["link_kind"] == "fandom"
+
+
+def test_classify_submitted_link_input_rejects_traitors_fandom_url_on_wrong_domain() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors (American TV series)",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    rows, error = _classify_submitted_link_input("https://real-housewives.fandom.com/wiki/The_Traitors", context)
+    assert rows == []
+    assert error == "Fandom link is for a different community."
+
+
+def test_classify_submitted_link_input_recognizes_tvdb_urls() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    rows, error = _classify_submitted_link_input("https://www.thetvdb.com/series/428163", context)
+    assert error is None
+    assert rows[0]["entity_type"] == "show"
+    assert rows[0]["link_group"] == "knowledge"
+    assert rows[0]["link_kind"] == "tvdb"
+
+
+def test_classify_submitted_link_input_recognizes_tvmaze_urls() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    rows, error = _classify_submitted_link_input("https://www.tvmaze.com/shows/58177/the-traitors-us", context)
+    assert error is None
+    assert rows[0]["entity_type"] == "show"
+    assert rows[0]["link_group"] == "knowledge"
+    assert rows[0]["link_kind"] == "tvmaze"
+
+
+def test_classify_submitted_link_input_recognizes_ratinggraph_urls() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    rows, error = _classify_submitted_link_input(
+        "https://www.ratingraph.com/tv-shows/the-traitors-ratings-103483",
+        context,
+    )
+    assert error is None
+    assert rows[0]["entity_type"] == "show"
+    assert rows[0]["link_group"] == "knowledge"
+    assert rows[0]["link_kind"] == "ratinggraph"
+
+
+def test_classify_submitted_link_input_adds_connected_external_ids_from_wikidata_summary() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": None,
+        "show_tmdb_id": None,
+        "show_wikidata_id": "Q116449538",
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    with patch(
+        "api.routers.admin_show_links._fetch_wikidata_summary",
+        return_value=(
+            {
+                "item_id": "Q116449538",
+                "label": "The Traitors",
+                "enwiki_title": "The Traitors (American TV series)",
+                "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                "imdb_id": "tt15557874",
+                "tmdb_tv_id": "215943",
+                "tmdb_person_id": "",
+                "tvdb_id": "428163",
+                "ratinggraph_tv_show_id": "the-traitors-ratings-103483",
+            },
+            False,
+        ),
+    ):
+        rows, error = _classify_submitted_link_input("https://www.wikidata.org/wiki/Q116449538", context)
+
+    assert error is None
+    by_kind = {str(row.get("link_kind") or ""): str(row.get("url") or "") for row in rows}
+    assert by_kind["wikidata"] == "https://www.wikidata.org/wiki/Q116449538"
+    assert by_kind["wikipedia"] == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
+    assert by_kind["imdb"] == "https://www.imdb.com/title/tt15557874"
+    assert by_kind["tmdb"] == "https://www.themoviedb.org/tv/215943"
+    assert by_kind["tvdb"] == "https://www.thetvdb.com/series/428163"
+    assert by_kind["ratinggraph"] == "https://www.ratingraph.com/tv-shows/the-traitors-ratings-103483"
+
+
+def test_fetch_wikidata_summary_includes_presenter_in_cast_item_ids() -> None:
+    qid = "Q99999999"
+    payload = {
+        "entities": {
+            qid: {
+                "labels": {"en": {"value": "Sample item"}},
+                "sitelinks": {},
+                "claims": {
+                    "P161": [
+                        {
+                            "mainsnak": {
+                                "snaktype": "value",
+                                "datavalue": {"value": {"id": "Q123"}},
+                            }
+                        }
+                    ],
+                    "P371": [
+                        {
+                            "mainsnak": {
+                                "snaktype": "value",
+                                "datavalue": {"value": {"id": "Q456"}},
+                            }
+                        }
+                    ],
+                    "P179": [
+                        {
+                            "mainsnak": {
+                                "snaktype": "value",
+                                "datavalue": {"value": {"id": "Q789"}},
+                            }
+                        }
+                    ],
+                    "P12397": [
+                        {
+                            "mainsnak": {
+                                "snaktype": "value",
+                                "datavalue": {"value": "2033944"},
+                            }
+                        }
+                    ],
+                },
+            }
+        }
+    }
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    with patch("api.routers.admin_show_links.urllib.request.urlopen", return_value=_FakeResponse()):
+        admin_show_links._fetch_wikidata_summary.cache_clear()
+        summary, fetch_error = admin_show_links._fetch_wikidata_summary(qid)
+        admin_show_links._fetch_wikidata_summary.cache_clear()
+
+    assert fetch_error is False
+    assert summary is not None
+    assert summary.get("cast_item_ids") == ["Q123", "Q456"]
+    assert summary.get("part_of_series_item_ids") == ["Q789"]
+    assert summary.get("tvdb_season_id") == "2033944"
+
+
+def test_curated_show_fandom_domains_match_traitors_us_name_variants() -> None:
+    domains = admin_show_links._curated_show_fandom_domains("The Traitors (American TV series)")
+    assert "thetraitors.fandom.com" in domains
+    assert "thetraitorsuk.fandom.com" in domains
+
+
+def test_classify_submitted_link_input_rejects_bravotv_links_for_non_bravo_show() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    rows, error = _classify_submitted_link_input("https://www.bravotv.com/the-traitors", context)
+    assert rows == []
+    assert error == "BravoTV links are only allowed for Bravo-network shows."
+
+
+def test_classify_submitted_link_input_rejects_missing_wikipedia_article() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": "Q147711660",
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    with patch(
+        "api.routers.admin_show_links._resolve_wikipedia_url",
+        return_value=(None, None, "missing"),
+    ):
+        rows, error = _classify_submitted_link_input(
+            "https://en.wikipedia.org/wiki/The_Traitors_(US_fake_page)",
+            context,
+        )
+
+    assert rows == []
+    assert error == "Wikipedia does not have an article with this exact name."
+
+
+def test_classify_submitted_link_input_rejects_mismatched_show_wikipedia_variant() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": "Q147711660",
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    with patch(
+        "api.routers.admin_show_links._resolve_wikipedia_url",
+        return_value=("https://en.wikipedia.org/wiki/The_Traitors", "The Traitors", None),
+    ):
+        with patch("api.routers.admin_show_links._resolve_wikipedia_wikidata_id", return_value="Q111195888"):
+            rows, error = _classify_submitted_link_input("https://en.wikipedia.org/wiki/The_Traitors", context)
+
+    assert rows == []
+    assert error == "Wikipedia link points to a different show/version."
+
+
+def test_sync_show_wikipedia_links_updates_auto_derived_season_links() -> None:
+    show_id = str(uuid4())
+    auto_season_link_id = str(uuid4())
+    manual_season_link_id = str(uuid4())
+    season_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+        fetch_all.side_effect = [
+            [
+                {
+                    "id": auto_season_link_id,
+                    "season_number": 2,
+                    "season_id": season_id,
+                    "source": "derived",
+                    "discovered_by": "backend_discovery",
+                },
+                {
+                    "id": manual_season_link_id,
+                    "season_number": 2,
+                    "season_id": season_id,
+                    "source": "manual",
+                    "discovered_by": "manual",
+                },
+            ],
+            [
+                {
+                    "season_id": season_id,
+                    "season_number": 2,
+                    "external_wikidata_id": None,
+                }
+            ],
+        ]
+        with patch("api.routers.admin_show_links.pg.execute_returning") as execute_returning:
+            with patch(
+                "api.routers.admin_show_links._fetch_wikipedia_page_summary",
+                return_value=(
+                    {
+                        "title": "The Traitors (American TV series)",
+                        "url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                    },
+                    False,
+                ),
+            ):
+                with patch("api.routers.admin_show_links._resolve_wikidata_enwiki_url", return_value=None):
+                    _sync_show_wikipedia_links(
+                        show_id=show_id,
+                        show_wikipedia_url="https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                        actor="admin@example.com",
+                        exclude_link_id=None,
+                    )
+
+    assert execute_returning.call_count == 2
+    show_update_params = execute_returning.call_args_list[0].args[1]
+    assert show_update_params[0] == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
+    season_update_params = execute_returning.call_args_list[1].args[1]
+    assert (
+        season_update_params[0]
+        == "https://en.wikipedia.org/wiki/The_Traitors_%28American_TV_series%29_season_2"
+    )
+    assert season_update_params[3] == auto_season_link_id
+    assert season_update_params[4] == show_id
+
+
+def test_patch_show_link_cascades_when_show_wikipedia_is_updated() -> None:
+    show_id = uuid4()
+    link_id = uuid4()
+    db = MagicMock()
+
+    select_chain = MagicMock()
+    select_chain.eq.return_value = select_chain
+    select_chain.limit.return_value = select_chain
+    select_chain.execute.return_value = MagicMock()
+
+    update_chain = MagicMock()
+    update_chain.eq.return_value = update_chain
+    update_chain.execute.return_value = MagicMock()
+
+    table_chain = MagicMock()
+    table_chain.select.return_value = select_chain
+    table_chain.update.return_value = update_chain
+    db.schema.return_value.table.return_value = table_chain
+
+    current_row = {
+        "id": str(link_id),
+        "show_id": str(show_id),
+        "entity_type": "show",
+        "link_kind": "wikipedia",
+        "url": "https://en.wikipedia.org/wiki/The_Traitors",
+    }
+    updated_row = {
+        **current_row,
+        "url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+        "url_key": "https://en.wikipedia.org/wiki/the_traitors_(american_tv_series)",
+    }
+
+    with patch(
+        "api.routers.admin_show_links.get_list_result",
+        side_effect=[[current_row], [updated_row]],
+    ):
+        with patch(
+            "api.routers.admin_show_links._resolve_wikipedia_url",
+            return_value=(
+                "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                "The Traitors (American TV series)",
+                None,
+            ),
+        ):
+            with patch("api.routers.admin_show_links._load_show_wikidata_id", return_value=None):
+                with patch("api.routers.admin_show_links._sync_show_wikipedia_links") as sync_links:
+                    result = admin_show_links.patch_show_link(
+                        show_id=show_id,
+                        link_id=link_id,
+                        payload=admin_show_links.LinkPatchRequest(
+                            url="https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
+                        ),
+                        db=db,
+                        admin={"email": "admin@example.com"},
+                    )
+
+    assert result["url"] == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
+    sync_links.assert_called_once_with(
+        show_id=str(show_id),
+        show_wikipedia_url="https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+        actor="admin@example.com",
+        exclude_link_id=str(link_id),
+    )
+
+
+def test_patch_show_link_rejects_missing_show_wikipedia_article() -> None:
+    show_id = uuid4()
+    link_id = uuid4()
+    db = MagicMock()
+
+    select_chain = MagicMock()
+    select_chain.eq.return_value = select_chain
+    select_chain.limit.return_value = select_chain
+    select_chain.execute.return_value = MagicMock()
+    db.schema.return_value.table.return_value.select.return_value = select_chain
+
+    current_row = {
+        "id": str(link_id),
+        "show_id": str(show_id),
+        "entity_type": "show",
+        "link_kind": "wikipedia",
+        "url": "https://en.wikipedia.org/wiki/The_Traitors",
+    }
+
+    with patch("api.routers.admin_show_links.get_list_result", return_value=[current_row]):
+        with patch(
+            "api.routers.admin_show_links._resolve_wikipedia_url",
+            return_value=(None, None, "missing"),
+        ):
+            with pytest.raises(admin_show_links.HTTPException) as exc:
+                admin_show_links.patch_show_link(
+                    show_id=show_id,
+                    link_id=link_id,
+                    payload=admin_show_links.LinkPatchRequest(
+                        url="https://en.wikipedia.org/wiki/The_Traitors_(US_fake_page)"
+                    ),
+                    db=db,
+                    admin={"email": "admin@example.com"},
+                )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Wikipedia does not have an article with this exact name."
 
 
 def test_canonicalize_url_normalizes_host_scheme_port_fragment_and_trailing_slash() -> None:
@@ -428,6 +1386,104 @@ def test_discover_people_links_fandom_fallback_prefers_highest_scored_candidate(
     assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
 
 
+def test_discover_people_links_discovers_fandom_profiles_across_show_fandom_domains() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    show_fandom_urls = [
+        "https://thetraitorsuk.fandom.com/wiki/The_Traitors_US",
+        "https://thetraitors.fandom.com/wiki/The_Traitors_(US)",
+    ]
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Traitors", "networks": ["peacock"], "wikidata_id": None},
+    ):
+        with patch("api.routers.admin_show_links.load_fandom_community_allowlist") as load_allowlist:
+            load_allowlist.return_value = ("thetraitors.fandom.com", "thetraitorsuk.fandom.com")
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.side_effect = [
+                    [
+                        {
+                            "id": person_id,
+                            "full_name": "Alan Cumming",
+                            "external_ids": {},
+                            "fandom_url": "",
+                            "cast_tmdb_imdb_id": None,
+                            "cast_tmdb_tmdb_id": None,
+                            "cast_tmdb_wikidata_id": None,
+                        }
+                    ],
+                    [],
+                ]
+
+                def _search(name: str, *, community_domain: str, timeout_seconds: float = 20.0) -> str | None:
+                    if community_domain == "thetraitors.fandom.com":
+                        return "https://thetraitors.fandom.com/wiki/Alan_Cumming"
+                    if community_domain == "thetraitorsuk.fandom.com":
+                        return "https://thetraitorsuk.fandom.com/wiki/Alan_Cumming"
+                    return None
+
+                with patch("api.routers.admin_show_links.search_fandom_community_wiki", side_effect=_search):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                            url if kind == "fandom" else None
+                        ),
+                    ):
+                        links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
+
+    fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(fandom_links) == 2
+    assert any(link.get("url") == "https://thetraitors.fandom.com/wiki/Alan_Cumming" for link in fandom_links)
+    assert any(link.get("url") == "https://thetraitorsuk.fandom.com/wiki/Alan_Cumming" for link in fandom_links)
+
+
+def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_search_misses() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    show_fandom_urls = [
+        "https://thetraitorsuk.fandom.com/wiki/The_Traitors_US",
+        "https://thetraitors.fandom.com/wiki/The_Traitors_(US)",
+    ]
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Traitors", "networks": ["peacock"], "wikidata_id": None},
+    ):
+        with patch(
+            "api.routers.admin_show_links.load_fandom_community_allowlist",
+            return_value=("thetraitors.fandom.com", "thetraitorsuk.fandom.com"),
+        ):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.side_effect = [
+                    [
+                        {
+                            "id": person_id,
+                            "full_name": "Alan Cumming",
+                            "external_ids": {},
+                            "fandom_url": "",
+                            "cast_tmdb_imdb_id": None,
+                            "cast_tmdb_tmdb_id": None,
+                            "cast_tmdb_wikidata_id": None,
+                        }
+                    ],
+                    [],
+                ]
+                with patch("api.routers.admin_show_links.search_fandom_community_wiki", return_value=None):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                            url if kind == "fandom" else None
+                        ),
+                    ):
+                        links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
+
+    fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(fandom_links) == 2
+    assert any(link.get("url") == "https://thetraitors.fandom.com/wiki/Alan_Cumming" for link in fandom_links)
+    assert any(link.get("url") == "https://thetraitorsuk.fandom.com/wiki/Alan_Cumming" for link in fandom_links)
+
+
 def test_discover_season_links_prefers_wikidata_enwiki_sitelink() -> None:
     show_id = str(uuid4())
     season_id = str(uuid4())
@@ -453,6 +1509,502 @@ def test_discover_season_links_prefers_wikidata_enwiki_sitelink() -> None:
     assert len(season_wiki_links) == 1
     assert season_wiki_links[0]["url"] == "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City_season_4"
     assert season_wiki_links[0]["source"] == "wikidata_sitelink"
+
+
+def test_discover_season_links_includes_tmdb_season_url_from_show_tmdb_id() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+        fetch_all.return_value = [
+            {
+                "id": season_id,
+                "season_number": 2,
+                "external_wikidata_id": "",
+                "external_ids": {},
+                "tmdb_season_id": "12345",
+            }
+        ]
+        with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+            fetch_one.side_effect = [
+                {"name": "The Traitors", "wikidata_id": None, "tmdb_id": "204761"},
+                {"url": ""},
+                {"url": ""},
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=(None, None, "missing"),
+            ):
+                links = _discover_season_links(show_id)
+
+    tmdb_links = [link for link in links if link.get("link_kind") == "tmdb"]
+    assert len(tmdb_links) == 1
+    assert tmdb_links[0]["url"] == "https://www.themoviedb.org/tv/204761/season/2"
+    assert tmdb_links[0]["source"] == "core.seasons.tmdb_season_id"
+
+
+def test_discover_season_links_prefers_show_wikipedia_seed_variant() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    expected_season_url = "https://en.wikipedia.org/wiki/The_Traitors_%28American_TV_series%29_season_4"
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_all",
+        return_value=[
+            {
+                "id": season_id,
+                "season_number": 4,
+                "external_wikidata_id": "",
+                "external_ids": {},
+            }
+        ],
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+            fetch_one.side_effect = [
+                {"name": "The Traitors", "wikidata_id": None},
+                {"url": ""},
+                {"url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"},
+            ]
+
+            def _resolve(url: str) -> tuple[str | None, str | None, str | None]:
+                if url == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)":
+                    return url, "The Traitors (American TV series)", None
+                if url == expected_season_url:
+                    return url, "The Traitors (American TV series) season 4", None
+                return None, None, "missing"
+
+            with patch("api.routers.admin_show_links._resolve_wikipedia_url", side_effect=_resolve):
+                links = _discover_season_links(show_id)
+
+    season_wiki_links = [link for link in links if link.get("link_kind") == "wikipedia"]
+    assert len(season_wiki_links) == 1
+    assert season_wiki_links[0]["url"] == expected_season_url
+    assert season_wiki_links[0]["source"] == "derived_show_wikipedia"
+
+
+def test_discover_season_links_uses_show_wikidata_season_claims_when_missing_on_season() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    season_wikidata_id = "Q999004"
+    season_wikipedia_url = "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)_season_4"
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_all",
+        return_value=[
+            {
+                "id": season_id,
+                "season_number": 4,
+                "external_wikidata_id": "",
+                "external_ids": {},
+            }
+        ],
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+            fetch_one.side_effect = [
+                {"name": "The Traitors", "wikidata_id": "Q12345"},
+                {"url": ""},
+            ]
+            with patch(
+                "api.routers.admin_show_links._fetch_wikidata_summary",
+                side_effect=[
+                    (
+                        {
+                            "cast_item_ids": [],
+                            "season_item_ids": [season_wikidata_id],
+                            "label": "The Traitors",
+                            "enwiki_title": "The Traitors (American TV series)",
+                            "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                        },
+                        False,
+                    ),
+                    (
+                        {
+                            "cast_item_ids": [],
+                            "season_item_ids": [],
+                            "label": "The Traitors season 4",
+                            "enwiki_title": "The Traitors (American TV series) season 4",
+                            "enwiki_url": season_wikipedia_url,
+                        },
+                        False,
+                    ),
+                    (
+                        {
+                            "cast_item_ids": [],
+                            "season_item_ids": [],
+                            "label": "The Traitors season 4",
+                            "enwiki_title": "The Traitors (American TV series) season 4",
+                            "enwiki_url": season_wikipedia_url,
+                        },
+                        False,
+                    ),
+                ],
+            ):
+                with patch(
+                    "api.routers.admin_show_links._resolve_wikidata_enwiki_url",
+                    return_value=season_wikipedia_url,
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._resolve_wikipedia_url",
+                        side_effect=lambda url: (
+                            (season_wikipedia_url, "The Traitors (American TV series) season 4", None)
+                            if url == season_wikipedia_url
+                            else (None, None, "missing")
+                        ),
+                    ):
+                        links = _discover_season_links(show_id)
+
+    season_wikidata_links = [link for link in links if link.get("link_kind") == "wikidata"]
+    season_wiki_links = [link for link in links if link.get("link_kind") == "wikipedia"]
+    assert len(season_wikidata_links) == 1
+    assert season_wikidata_links[0]["url"] == f"https://www.wikidata.org/wiki/{season_wikidata_id}"
+    assert season_wikidata_links[0]["source"] == "show_wikidata_season_claims"
+    assert len(season_wiki_links) == 1
+    assert season_wiki_links[0]["url"] == season_wikipedia_url
+
+
+def test_discover_season_links_discovers_fandom_pages_per_domain_and_skips_missing_pages() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    show_fandom_urls = [
+        "https://thetraitorsuk.fandom.com/wiki/The_Traitors_US",
+        "https://thetraitors.fandom.com/wiki/The_Traitors_(US)",
+    ]
+
+    with patch("api.routers.admin_show_links.load_fandom_community_allowlist") as load_allowlist:
+        load_allowlist.return_value = ("thetraitors.fandom.com", "thetraitorsuk.fandom.com")
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [
+                    {
+                        "id": season_id,
+                        "season_number": 1,
+                        "external_wikidata_id": "",
+                        "external_ids": {},
+                    }
+                ],
+                [],
+            ]
+            with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+                fetch_one.side_effect = [
+                    {"name": "The Traitors", "wikidata_id": None},
+                    {"url": ""},
+                    {"url": ""},
+                ]
+                with patch(
+                    "api.routers.admin_show_links._resolve_wikipedia_url",
+                    return_value=(None, None, "missing"),
+                ):
+
+                    def _search(query: str, *, community_domain: str, timeout_seconds: float = 20.0) -> str | None:
+                        if "season 1" not in query.lower():
+                            return None
+                        if community_domain == "thetraitors.fandom.com":
+                            return "https://thetraitors.fandom.com/wiki/The_Traitors_(US)_season_1"
+                        if community_domain == "thetraitorsuk.fandom.com":
+                            return "https://thetraitorsuk.fandom.com/wiki/The_Traitors_US_season_1"
+                        return None
+
+                    with patch("api.routers.admin_show_links.search_fandom_community_wiki", side_effect=_search):
+
+                        def _fetch_html(url: str, timeout: float = 20.0):
+                            if "thetraitors.fandom.com" in url:
+                                return (
+                                    200,
+                                    "<html><body><h1>The Traitors (US) Season 1</h1></body></html>",
+                                    "https://thetraitors.fandom.com/wiki/The_Traitors_(US)_season_1",
+                                    None,
+                                )
+                            return (
+                                200,
+                                (
+                                    "There is currently no text in this page. "
+                                    "You can search for this page title in other pages."
+                                ),
+                                "https://thetraitorsuk.fandom.com/wiki/The_Traitors_US_season_1",
+                                None,
+                            )
+
+                        with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
+                            links = _discover_season_links(show_id, show_fandom_seed_urls=show_fandom_urls)
+
+    season_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(season_fandom_links) == 1
+    assert season_fandom_links[0]["url"] == "https://thetraitors.fandom.com/wiki/The_Traitors_(US)_season_1"
+    assert season_fandom_links[0]["source"] == "fandom_domain_seed:thetraitors.fandom.com"
+
+
+def test_discover_season_links_uses_seed_derived_fandom_urls_when_search_misses() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    show_fandom_urls = ["https://thetraitors.fandom.com/wiki/The_Traitors_(US)"]
+
+    with patch(
+        "api.routers.admin_show_links.load_fandom_community_allowlist",
+        return_value=("thetraitors.fandom.com",),
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [
+                    {
+                        "id": season_id,
+                        "season_number": 2,
+                        "external_wikidata_id": "",
+                        "external_ids": {},
+                        "tmdb_season_id": None,
+                    }
+                ],
+                [],
+            ]
+            with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+                fetch_one.side_effect = [
+                    {"name": "The Traitors", "wikidata_id": None, "tmdb_id": "204761"},
+                    {"url": ""},
+                    {"url": ""},
+                ]
+                with patch(
+                    "api.routers.admin_show_links._resolve_wikipedia_url",
+                    return_value=(None, None, "missing"),
+                ):
+                    with patch("api.routers.admin_show_links.search_fandom_community_wiki", return_value=None):
+
+                        def _fetch_html(url: str, timeout: float = 20.0):
+                            if "The_Traitors_(US)_season_2" in url:
+                                return (
+                                    200,
+                                    "<html><body><h1>The Traitors (US) Season 2</h1></body></html>",
+                                    "https://thetraitors.fandom.com/wiki/The_Traitors_(US)_season_2",
+                                    None,
+                                )
+                            return (
+                                200,
+                                "There is currently no text in this page.",
+                                url,
+                                None,
+                            )
+
+                        with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
+                            links = _discover_season_links(show_id, show_fandom_seed_urls=show_fandom_urls)
+
+    season_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(season_fandom_links) == 1
+    assert season_fandom_links[0]["url"] == "https://thetraitors.fandom.com/wiki/The_Traitors_(US)_season_2"
+    assert season_fandom_links[0]["source"] == "fandom_domain_seed:thetraitors.fandom.com"
+
+
+def test_discover_people_links_uses_show_wikidata_cast_claims_when_missing_on_person() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    cast_wikidata_id = "Q345678"
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"networks": ["peacock"], "wikidata_id": "Q12345"},
+    ):
+        with patch("api.routers.admin_show_links.load_fandom_community_allowlist", return_value=[]):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.side_effect = [
+                    [
+                        {
+                            "id": person_id,
+                            "full_name": "Arie Luyendyk Jr.",
+                            "external_ids": {},
+                            "fandom_url": "",
+                            "cast_tmdb_imdb_id": None,
+                            "cast_tmdb_tmdb_id": None,
+                            "cast_tmdb_wikidata_id": None,
+                        }
+                    ],
+                ]
+                with patch(
+                    "api.routers.admin_show_links._fetch_wikidata_summary",
+                    side_effect=[
+                        (
+                            {
+                                "cast_item_ids": [cast_wikidata_id],
+                                "season_item_ids": [],
+                                "label": "The Traitors",
+                                "enwiki_title": "The Traitors (American TV series)",
+                                "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                            },
+                            False,
+                        ),
+                        (
+                            {
+                                "cast_item_ids": [],
+                                "season_item_ids": [],
+                                "label": "Arie Luyendyk Jr.",
+                                "enwiki_title": "Arie Luyendyk Jr.",
+                                "enwiki_url": "https://en.wikipedia.org/wiki/Arie_Luyendyk_Jr.",
+                                "imdb_id": "nm1741766",
+                                "tmdb_person_id": "2543898",
+                            },
+                            False,
+                        ),
+                        (
+                            {
+                                "cast_item_ids": [],
+                                "season_item_ids": [],
+                                "label": "Arie Luyendyk Jr.",
+                                "enwiki_title": "Arie Luyendyk Jr.",
+                                "enwiki_url": "https://en.wikipedia.org/wiki/Arie_Luyendyk_Jr.",
+                                "imdb_id": "nm1741766",
+                                "tmdb_person_id": "2543898",
+                            },
+                            False,
+                        ),
+                    ],
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                            url if kind in {"wikidata", "wikipedia"} else None
+                        ),
+                    ):
+                        links = _discover_people_links(show_id)
+
+    wikidata_links = [link for link in links if link.get("link_kind") == "wikidata"]
+    assert len(wikidata_links) == 1
+    assert wikidata_links[0]["url"] == f"https://www.wikidata.org/wiki/{cast_wikidata_id}"
+    assert wikidata_links[0]["source"] == "show_wikidata_cast_claims"
+
+
+def test_discover_people_links_uses_season_wikidata_cast_claims_when_show_claims_missing() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    season_wikidata_id = "Q990001"
+    cast_wikidata_id = "Q990002"
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Traitors", "networks": ["peacock"], "wikidata_id": "Q12345"},
+    ):
+        with patch("api.routers.admin_show_links.load_fandom_community_allowlist", return_value=[]):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.side_effect = [
+                    [
+                        {
+                            "id": person_id,
+                            "full_name": "Alan Cumming",
+                            "external_ids": {},
+                            "fandom_url": "",
+                            "cast_tmdb_imdb_id": None,
+                            "cast_tmdb_tmdb_id": None,
+                            "cast_tmdb_wikidata_id": None,
+                        }
+                    ],
+                    [],
+                ]
+                with patch(
+                    "api.routers.admin_show_links._fetch_wikidata_summary",
+                    side_effect=[
+                        (
+                            {
+                                "cast_item_ids": [],
+                                "season_item_ids": [season_wikidata_id],
+                                "label": "The Traitors",
+                                "enwiki_title": "The Traitors (American TV series)",
+                                "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                            },
+                            False,
+                        ),
+                        (
+                            {
+                                "cast_item_ids": [cast_wikidata_id],
+                                "season_item_ids": [],
+                                "label": "The Traitors season 2",
+                                "enwiki_title": "The Traitors (American TV series) season 2",
+                                "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)_season_2",
+                            },
+                            False,
+                        ),
+                        (
+                            {
+                                "cast_item_ids": [],
+                                "season_item_ids": [],
+                                "label": "Alan Cumming",
+                                "enwiki_title": "Alan Cumming",
+                                "enwiki_url": "https://en.wikipedia.org/wiki/Alan_Cumming",
+                                "imdb_id": "nm0001086",
+                                "tmdb_person_id": "9346",
+                            },
+                            False,
+                        ),
+                        (
+                            {
+                                "cast_item_ids": [],
+                                "season_item_ids": [],
+                                "label": "Alan Cumming",
+                                "enwiki_title": "Alan Cumming",
+                                "enwiki_url": "https://en.wikipedia.org/wiki/Alan_Cumming",
+                                "imdb_id": "nm0001086",
+                                "tmdb_person_id": "9346",
+                            },
+                            False,
+                        ),
+                    ],
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                            url if kind in {"wikidata", "wikipedia"} else None
+                        ),
+                    ):
+                        links = _discover_people_links(show_id)
+
+    wikidata_links = [link for link in links if link.get("link_kind") == "wikidata"]
+    assert len(wikidata_links) == 1
+    assert wikidata_links[0]["url"] == f"https://www.wikidata.org/wiki/{cast_wikidata_id}"
+    assert wikidata_links[0]["source"] == "season_wikidata_cast_claims"
+
+
+def test_resolve_wikipedia_url_marks_missing_when_summary_fetch_errors_but_html_is_missing_page() -> None:
+    with patch("api.routers.admin_show_links._fetch_wikipedia_page_summary", return_value=(None, True)):
+        with patch(
+            "api.routers.admin_show_links._fetch_html_with_status",
+            return_value=(
+                200,
+                (
+                    "<html><body>"
+                    "<p>Wikipedia does not have an article with this exact name.</p>"
+                    "<p>There is currently no text in this page.</p>"
+                    "</body></html>"
+                ),
+                "https://en.wikipedia.org/wiki/The_Traitors_season_4",
+                None,
+            ),
+        ):
+            resolved, _title, error = admin_show_links._resolve_wikipedia_url(
+                "https://en.wikipedia.org/wiki/The_Traitors_season_4",
+            )
+
+    assert resolved is None
+    assert error == "missing"
+
+
+def test_classify_submitted_link_input_rejects_wikipedia_fetch_error() -> None:
+    context = {
+        "show_id": str(uuid4()),
+        "show_slug": "the-traitors",
+        "show_name": "The Traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock"],
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+        "people": [],
+    }
+    with patch("api.routers.admin_show_links._resolve_wikipedia_url", return_value=(None, None, "fetch_error")):
+        rows, error = _classify_submitted_link_input(
+            "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)_season_4",
+            context,
+        )
+
+    assert rows == []
+    assert error == "Could not verify the Wikipedia page right now. Try again."
 
 
 def test_validated_person_knowledge_url_rejects_mismatched_wikipedia_page() -> None:
@@ -1044,3 +2596,384 @@ def test_cleanup_invalid_person_knowledge_links_deletes_pending_rows_on_fetch_er
     assert result["promoted"] == 0
     assert result["deleted"] == 1
     assert result["validation_failures"] == 1
+
+
+def test_cleanup_invalid_show_knowledge_links_deletes_non_manual_invalid_rows() -> None:
+    show_id = str(uuid4())
+    invalid_link_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "The Traitors", "wikidata_id": None}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": invalid_link_id,
+                    "entity_type": "show",
+                    "link_kind": "fandom",
+                    "status": "pending",
+                    "url": "https://real-housewives.fandom.com/wiki/The_Traitors",
+                    "source": "derived",
+                    "discovered_by": "backend_discovery",
+                }
+            ]
+            with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1):
+                    result = _cleanup_invalid_show_knowledge_links(show_id)
+
+    assert result["scanned"] == 1
+    assert result["invalid"] == 1
+    assert result["deleted"] == 1
+    assert result["manual_skipped"] == 0
+    assert result["validation_failures"] == 0
+
+
+def test_cleanup_invalid_show_knowledge_links_keeps_manual_invalid_rows() -> None:
+    show_id = str(uuid4())
+    invalid_manual_link_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "The Traitors", "wikidata_id": None}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": invalid_manual_link_id,
+                    "entity_type": "show",
+                    "link_kind": "fandom",
+                    "status": "approved",
+                    "url": "https://real-housewives.fandom.com/wiki/The_Traitors",
+                    "source": "manual",
+                    "discovered_by": "manual",
+                }
+            ]
+            with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0) as delete_links:
+                    result = _cleanup_invalid_show_knowledge_links(show_id)
+
+    delete_links.assert_called_once()
+    call_args = delete_links.call_args
+    assert call_args.args[0] == []
+    assert "conn" in call_args.kwargs
+    assert result["scanned"] == 1
+    assert result["invalid"] == 1
+    assert result["deleted"] == 0
+    assert result["manual_skipped"] == 1
+    assert result["validation_failures"] == 0
+
+
+def test_cleanup_invalid_show_knowledge_links_deletes_manual_pending_rows() -> None:
+    show_id = str(uuid4())
+    invalid_manual_link_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "The Traitors", "wikidata_id": None}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": invalid_manual_link_id,
+                    "entity_type": "show",
+                    "link_kind": "fandom",
+                    "status": "pending",
+                    "url": "https://real-housewives.fandom.com/wiki/The_Traitors",
+                    "source": "manual",
+                    "discovered_by": "manual",
+                }
+            ]
+            with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1) as delete_links:
+                    result = _cleanup_invalid_show_knowledge_links(show_id)
+
+    delete_links.assert_called_once()
+    call_args = delete_links.call_args
+    assert call_args.args[0] == [invalid_manual_link_id]
+    assert "conn" in call_args.kwargs
+    assert result["scanned"] == 1
+    assert result["invalid"] == 1
+    assert result["deleted"] == 1
+    assert result["manual_skipped"] == 0
+    assert result["validation_failures"] == 0
+
+
+def test_cleanup_invalid_show_knowledge_links_rejects_season_wikipedia_variant_mismatch() -> None:
+    show_id = str(uuid4())
+    invalid_link_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Traitors", "wikidata_id": "Q116449538"},
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": invalid_link_id,
+                    "entity_type": "season",
+                    "link_kind": "wikipedia",
+                    "status": "approved",
+                    "url": "https://en.wikipedia.org/wiki/The_Traitors_season_4",
+                    "source": "derived",
+                    "discovered_by": "backend_discovery",
+                }
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=("https://en.wikipedia.org/wiki/The_Traitors_season_4", None, None),
+            ):
+                with patch("api.routers.admin_show_links._resolve_wikipedia_wikidata_id", return_value="Q122955840"):
+                    with patch(
+                        "api.routers.admin_show_links._fetch_wikidata_summary",
+                        return_value=(
+                            {
+                                "item_id": "Q122955840",
+                                "part_of_series_item_ids": ["Q111195888"],
+                            },
+                            False,
+                        ),
+                    ):
+                        with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                            with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1):
+                                result = _cleanup_invalid_show_knowledge_links(show_id)
+
+    assert result["scanned"] == 1
+    assert result["invalid"] == 1
+    assert result["deleted"] == 1
+    assert result["manual_skipped"] == 0
+    assert result["validation_failures"] == 0
+
+
+def test_promote_pending_links_to_approved_promotes_knowledge_and_network_blog() -> None:
+    show_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.execute_returning",
+        return_value=[{"id": str(uuid4())}, {"id": str(uuid4())}],
+    ) as execute_returning:
+        promoted = _promote_pending_links_to_approved(show_id, include_people=True)
+
+    assert promoted == 2
+    sql = execute_returning.call_args.args[0]
+    params = execute_returning.call_args.args[1]
+    assert "lower(link_group) = 'knowledge'" in sql
+    assert "lower(link_kind) = 'network_blog'" in sql
+    assert params[0] == show_id
+    assert params[1] == ["show", "season", "person"]
+
+
+def test_resolve_show_wikidata_id_uses_show_link_fallback() -> None:
+    show_id = str(uuid4())
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"url": "https://www.wikidata.org/wiki/Q116449538"},
+    ):
+        resolved = admin_show_links._resolve_show_wikidata_id(show_id, None)
+    assert resolved == "Q116449538"
+
+
+def test_build_connected_knowledge_rows_uses_primary_wikidata_url_when_context_is_missing() -> None:
+    context = {
+        "show_wikidata_id": None,
+        "seasons_by_number": {},
+        "people_by_id": {},
+    }
+    with patch(
+        "api.routers.admin_show_links._fetch_wikidata_summary",
+        return_value=(
+            {
+                "item_id": "Q116449538",
+                "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                "imdb_id": "tt15557874",
+                "tmdb_tv_id": "215943",
+                "tmdb_person_id": "",
+                "tvdb_id": "428163",
+                "tvmaze_show_id": "58177",
+                "tvmaze_season_id": "",
+                "ratinggraph_tv_show_id": "the-traitors-ratings-103483",
+            },
+            False,
+        ),
+    ):
+        rows = admin_show_links._build_connected_knowledge_rows(
+            context,
+            entity_type="show",
+            entity_id=str(uuid4()),
+            season_number=0,
+            primary_kind="wikidata",
+            primary_url="https://www.wikidata.org/wiki/Q116449538",
+        )
+    kinds = {str(row.get("link_kind") or "") for row in rows}
+    assert {"wikipedia", "imdb", "tmdb", "tvdb", "tvmaze", "ratinggraph"}.issubset(kinds)
+    assert "wikidata" not in kinds
+
+
+def test_normalize_legacy_knowledge_link_kinds_maps_rows_by_url_host() -> None:
+    show_id = str(uuid4())
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[{"id": str(uuid4())}], [{"id": str(uuid4())}]]
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_all",
+        return_value=[
+            {
+                "id": str(uuid4()),
+                "url": "https://en.wikipedia.org/wiki/Alan_Cumming",
+                "link_kind": "knowledge_graph",
+            },
+            {
+                "id": str(uuid4()),
+                "url": "https://www.wikidata.org/wiki/Q316629",
+                "link_kind": "kg",
+            },
+        ],
+    ):
+        with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+            with patch("api.routers.admin_show_links.pg.db_cursor", return_value=nullcontext(cursor)):
+                normalized = admin_show_links._normalize_legacy_knowledge_link_kinds(show_id)
+
+    assert normalized == 2
+    assert cursor.execute.call_count == 2
+    first_params = cursor.execute.call_args_list[0].args[1]
+    second_params = cursor.execute.call_args_list[1].args[1]
+    assert first_params[0] == "wikipedia"
+    assert second_params[0] == "wikidata"
+
+
+def test_discover_people_links_derives_imdb_and_tmdb_from_wikidata_summary() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Traitors", "networks": ["peacock"], "wikidata_id": None},
+    ):
+        with patch("api.routers.admin_show_links.load_fandom_community_allowlist", return_value=[]):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.side_effect = [
+                    [
+                        {
+                            "id": person_id,
+                            "full_name": "Alan Cumming",
+                            "external_ids": {"wikidata": "Q316629"},
+                            "fandom_url": "",
+                            "cast_tmdb_imdb_id": None,
+                            "cast_tmdb_tmdb_id": None,
+                            "cast_tmdb_wikidata_id": None,
+                        }
+                    ],
+                    [],
+                ]
+                with patch(
+                    "api.routers.admin_show_links._fetch_wikidata_summary",
+                    return_value=(
+                        {
+                            "item_id": "Q316629",
+                            "imdb_id": "nm0001086",
+                            "tmdb_person_id": "5190",
+                            "label": "Alan Cumming",
+                            "enwiki_title": "Alan Cumming",
+                        },
+                        False,
+                    ),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                        side_effect=lambda person_id, candidate_url, kind, expected_name, fandom_allowlist=None: (
+                            candidate_url
+                        ),
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                url if kind in {"wikidata", "wikipedia"} else None
+                            ),
+                        ):
+                            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                                with patch(
+                                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                    return_value=[],
+                                ):
+                                    links = _discover_people_links(show_id)
+
+    imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
+    tmdb_links = [link for link in links if link.get("link_kind") == "tmdb"]
+    assert len(imdb_links) == 1
+    assert imdb_links[0]["source"] == "wikidata_person_external_ids"
+    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm0001086/"
+    assert len(tmdb_links) == 1
+    assert tmdb_links[0]["source"] == "wikidata_person_external_ids"
+    assert tmdb_links[0]["url"] == "https://www.themoviedb.org/person/5190"
+
+
+def test_discover_show_links_defaults_knowledge_rows_to_approved() -> None:
+    show_id = UUID(str(uuid4()))
+    db = MagicMock()
+
+    discovered_rows = [
+        {
+            "entity_type": "show",
+            "entity_id": str(show_id),
+            "season_number": 0,
+            "link_group": "knowledge",
+            "link_kind": "imdb",
+            "label": "IMDb",
+            "url": "https://www.imdb.com/title/tt15557874/",
+            "source": "core.shows.imdb_id",
+        }
+    ]
+
+    with patch("api.routers.admin_show_links._show_exists", return_value=True):
+        with patch("api.routers.admin_show_links._discover_show_links", return_value=discovered_rows):
+            with patch("api.routers.admin_show_links._discover_season_links", return_value=[]):
+                with patch("api.routers.admin_show_links._discover_people_links", return_value=[]):
+                    with patch("api.routers.admin_show_links._upsert_link") as upsert:
+                        with patch(
+                            "api.routers.admin_show_links._cleanup_invalid_show_knowledge_links",
+                            return_value={
+                                "scanned": 0,
+                                "deleted": 0,
+                                "manual_skipped": 0,
+                                "validation_failures": 0,
+                            },
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._count_discovery_scan_targets",
+                                return_value={"show_scanned": 1, "season_scanned": 0, "people_scanned": 0},
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._normalize_legacy_knowledge_link_kinds",
+                                    return_value=0,
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._promote_pending_links_to_approved",
+                                        return_value=0,
+                                    ):
+                                        result = admin_show_links.discover_show_links(
+                                            show_id=show_id,
+                                            payload=admin_show_links.LinkDiscoverRequest(
+                                                include_seasons=False,
+                                                include_people=False,
+                                            ),
+                                            db=db,
+                                            admin={"email": "admin@example.com"},
+                                        )
+
+    upsert.assert_called_once()
+    assert upsert.call_args.kwargs["status"] == "approved"
+    assert result["discovered"] == 1
+    assert result["pending_links_promoted"] == 0
+    assert result["stage_counts"]["show_scanned"] == 1
+    assert result["stage_counts"]["season_scanned"] == 0
+    assert result["stage_counts"]["people_scanned"] == 0
+
+
+def test_validated_or_carried_person_source_url_falls_back_to_candidate_on_fetch_error() -> None:
+    with patch(
+        "api.routers.admin_show_links._validate_person_knowledge_url",
+        return_value=(None, "fetch_error"),
+    ):
+        with patch(
+            "api.routers.admin_show_links._load_preapproved_person_source_url",
+            return_value=None,
+        ):
+            result = admin_show_links._validated_or_carried_person_source_url(
+                person_id=str(uuid4()),
+                candidate_url="https://www.imdb.com/name/nm0001086/",
+                kind="imdb",
+                expected_name="Alan Cumming",
+                fandom_allowlist=(),
+            )
+
+    assert result == "https://www.imdb.com/name/nm0001086"

@@ -62,7 +62,10 @@ class YouTubeScrapeConfig:
 
     @property
     def end_timestamp(self) -> float:
-        return self.date_end.timestamp() if self.date_end else datetime.now().timestamp()
+        if self.date_end:
+            # Use end of day so the entire date is included
+            return self.date_end.replace(hour=23, minute=59, second=59).timestamp()
+        return datetime.now().timestamp()
 
     def matches_keywords(self, text: str) -> bool:
         """Check if text contains any of the configured keywords."""
@@ -406,6 +409,77 @@ class YouTubeScraper:
         return {
             "canonical_handle": canonical_handle or normalized_handle,
             "channel_id": channel_id or None,
+        }
+
+    @staticmethod
+    def _shorts_lockup_to_renderer(model: dict) -> dict:
+        """Convert a shortsLockupViewModel into a videoRenderer-like dict.
+
+        YouTube replaced ``reelItemRenderer`` with ``shortsLockupViewModel``
+        in 2025.  This shim extracts the available fields so that the existing
+        ``_parse_video_renderer`` path can handle shorts transparently.
+        """
+        reel_ep = (
+            model.get("onTap", {})
+            .get("innertubeCommand", {})
+            .get("reelWatchEndpoint", {})
+        )
+        video_id = reel_ep.get("videoId", "")
+        if not video_id:
+            entity_id = model.get("entityId", "")
+            if entity_id.startswith("shorts-shelf-item-"):
+                video_id = entity_id[len("shorts-shelf-item-"):]
+
+        # Parse title + views from overlay or accessibilityText
+        overlay = model.get("overlayMetadata", {})
+        primary = overlay.get("primaryText", {})
+        title = primary.get("content", "") if isinstance(primary, dict) else ""
+
+        # Fallback to accessibilityText if overlay has no title
+        view_text = ""
+        if not title:
+            a11y = model.get("accessibilityText", "")
+            if a11y:
+                cleaned = re.sub(r"\s*-\s*play Short$", "", a11y, flags=re.IGNORECASE)
+                parts = cleaned.rsplit(",", 1)
+                if len(parts) == 2 and "view" in parts[1].lower():
+                    title = parts[0].strip()
+                    view_text = parts[1].strip()
+                else:
+                    title = cleaned.strip()
+
+        # Overlay metadata has compact view text (e.g. "3.1K views") which
+        # the parser handles better than the a11y "3.1 thousand views" form.
+        secondary = overlay.get("secondaryText", {})
+        overlay_views = secondary.get("content", "") if isinstance(secondary, dict) else ""
+        if overlay_views:
+            view_text = overlay_views
+
+        # Thumbnail
+        thumb_vm = model.get("thumbnailViewModel", {})
+        thumb_url = ""
+        if isinstance(thumb_vm, dict):
+            image = thumb_vm.get("image", {})
+            sources = image.get("sources", []) if isinstance(image, dict) else []
+            if isinstance(sources, list) and sources:
+                thumb_url = str(sources[-1].get("url", ""))
+        if not thumb_url:
+            reel_thumbs = reel_ep.get("thumbnail", {}).get("thumbnails", [])
+            if reel_thumbs:
+                thumb_url = str(reel_thumbs[-1].get("url", ""))
+
+        url = f"/shorts/{video_id}" if video_id else ""
+
+        return {
+            "videoId": video_id,
+            "title": {"simpleText": title},
+            "viewCountText": {"simpleText": view_text},
+            "thumbnail": {"thumbnails": [{"url": thumb_url}]} if thumb_url else {},
+            "navigationEndpoint": {
+                "commandMetadata": {
+                    "webCommandMetadata": {"url": url},
+                },
+            },
         }
 
     def _extract_renderer_url(self, renderer: dict) -> str:
@@ -809,6 +883,9 @@ class YouTubeScraper:
                 reel_renderer = content.get("reelItemRenderer", {})
                 if reel_renderer:
                     renderers.append(reel_renderer)
+                shorts_lockup = content.get("shortsLockupViewModel", {})
+                if shorts_lockup:
+                    renderers.append(self._shorts_lockup_to_renderer(shorts_lockup))
                 cont = item.get("continuationItemRenderer", {})
                 if cont:
                     endpoint = cont.get("continuationEndpoint", {})
@@ -856,6 +933,9 @@ class YouTubeScraper:
                 reel_renderer = content.get("reelItemRenderer", {})
                 if reel_renderer:
                     yield reel_renderer
+                shorts_lockup = content.get("shortsLockupViewModel", {})
+                if shorts_lockup:
+                    yield self._shorts_lockup_to_renderer(shorts_lockup)
 
         # Try search results structure
         primary_contents = contents.get("twoColumnSearchResultsRenderer", {}).get("primaryContents", {})
@@ -932,6 +1012,8 @@ class YouTubeScraper:
 
         for surface in ("videos", "shorts"):
             logger.info("Fetching %s from @%s channel page...", surface, handle)
+            surface_no_hit_pages = 0
+            surface_pre_window_pages = 0
             ownership_counter = [0]
             data = self.fetch_channel_videos(handle, config.delay_seconds, surface=surface)
             if not data:
@@ -961,10 +1043,6 @@ class YouTubeScraper:
                 matched_posts=len(videos),
             )
 
-            # For now we deeply paginate only the videos surface.
-            if surface != "videos":
-                continue
-
             continuation_token = self._extract_channel_continuation_token(data)
             page_num = 1
 
@@ -977,7 +1055,7 @@ class YouTubeScraper:
 
                 page_num += 1
                 continuation_pages += 1
-                logger.info(f"Fetching channel page {page_num}...")
+                logger.info(f"Fetching {surface} page {page_num}...")
                 cont_data = self._fetch_continuation(continuation_token, config.delay_seconds)
                 if not cont_data:
                     break
@@ -994,7 +1072,7 @@ class YouTubeScraper:
                     if not self._renderer_matches_owner(renderer, canonical_handle or handle):
                         ownership_filtered += 1
                         continue
-                    video = self._parse_video_renderer(renderer, config, surface="videos")
+                    video = self._parse_video_renderer(renderer, config, surface=surface)
                     if not video:
                         continue
 
@@ -1035,8 +1113,9 @@ class YouTubeScraper:
                 logger.info(f"Page {page_num}: {len(page_videos)} matches, {len(videos)} total")
                 if page_hits == 0:
                     if (config.date_start or config.date_end) and not page_window_candidates:
+                        surface_pre_window_pages += 1
                         pre_window_pages += 1
-                        if pre_window_pages >= self.PRE_WINDOW_PAGE_CAP:
+                        if surface_pre_window_pages >= self.PRE_WINDOW_PAGE_CAP:
                             scan_capped_reason = "pre_window_cap"
                             self._emit_progress(
                                 progress_cb,
@@ -1046,20 +1125,22 @@ class YouTubeScraper:
                                 matched_posts=len(videos),
                             )
                             logger.info(
-                                "Stopping continuation crawl after pre-window cap (%d pages)",
+                                "Stopping %s continuation crawl after pre-window cap (%d pages)",
+                                surface,
                                 self.PRE_WINDOW_PAGE_CAP,
                             )
                             break
                     else:
+                        surface_no_hit_pages += 1
                         no_hit_pages += 1
                         # Before/after-window pages can be noisy.
                         # Give a wider no-hit runway until we get an in-range hit.
                         no_hit_threshold = 25 if (config.date_start or config.date_end) and in_range_hits == 0 else 5
-                        if no_hit_pages >= no_hit_threshold and (config.date_start or config.date_end):
-                            logger.info("Stopping continuation crawl after %d no-hit pages", no_hit_pages)
+                        if surface_no_hit_pages >= no_hit_threshold and (config.date_start or config.date_end):
+                            logger.info("Stopping %s continuation crawl after %d no-hit pages", surface, surface_no_hit_pages)
                             break
                 else:
-                    no_hit_pages = 0
+                    surface_no_hit_pages = 0
 
         # Deduplicate by video_id
         seen = set()
@@ -1069,8 +1150,12 @@ class YouTubeScraper:
                 seen.add(video.video_id)
                 unique_videos.append(video)
 
-        # Supplement with yt-dlp only when channel browsing found no matches.
-        if len(unique_videos) == 0 and config.keywords and shutil.which("yt-dlp"):
+        # Enrich channel-page results with likes/comments/tags via yt-dlp.
+        self._enrich_videos_via_ytdlp(unique_videos, delay=config.delay_seconds)
+
+        # Supplement with yt-dlp when channel browsing found no matches or was capped.
+        should_supplement = len(unique_videos) == 0 or scan_capped_reason is not None
+        if should_supplement and config.keywords and shutil.which("yt-dlp"):
             logger.info(f"Channel browsing found only {len(unique_videos)} videos; supplementing with yt-dlp search...")
             search_videos = self._search_via_ytdlp(
                 config,
@@ -1123,6 +1208,78 @@ class YouTubeScraper:
             "canonical_channel_id": canonical_channel_id or None,
         }
         return unique_videos
+
+    def _enrich_videos_via_ytdlp(
+        self,
+        videos: list[YouTubeVideo],
+        delay: float = 1.0,
+    ) -> None:
+        """Enrich videos with likes, comments, tags via yt-dlp --dump-single-json.
+
+        Only enriches videos that are missing metrics (likes == 0 and comments == 0).
+        Mutates videos in place.
+        """
+        if not shutil.which("yt-dlp"):
+            logger.debug("yt-dlp not available; skipping enrichment")
+            return
+
+        needs_enrichment = [
+            v for v in videos
+            if isinstance(v, YouTubeVideo) and v.likes == 0 and v.comments == 0
+        ]
+        if not needs_enrichment:
+            return
+
+        logger.info(f"Enriching {len(needs_enrichment)} videos with metrics via yt-dlp...")
+        enriched = 0
+        for i, video in enumerate(needs_enrichment, 1):
+            url = f"https://www.youtube.com/watch?v={video.video_id}"
+            try:
+                proc = subprocess.run(
+                    [
+                        "yt-dlp",
+                        "--dump-single-json",
+                        "--no-playlist",
+                        "--skip-download",
+                        url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.YTDLP_SEARCH_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"yt-dlp enrichment failed for {video.video_id}: {exc}")
+                continue
+
+            if proc.returncode != 0:
+                logger.warning(f"yt-dlp enrichment non-zero exit for {video.video_id}")
+                continue
+
+            try:
+                data = json.loads(proc.stdout or "{}")
+            except json.JSONDecodeError:
+                continue
+
+            video.likes = data.get("like_count", 0) or 0
+            video.comments = data.get("comment_count", 0) or 0
+            video.views = data.get("view_count", video.views) or video.views
+            if not video.channel_id:
+                video.channel_id = data.get("channel_id", "") or ""
+            if not video.tags:
+                video.tags = data.get("tags", []) or []
+            if not video.description:
+                video.description = data.get("description", "") or ""
+            enriched += 1
+            logger.info(
+                f"  [{i}/{len(needs_enrichment)}] {video.video_id}: "
+                f"{video.views:,} views, {video.likes:,} likes, {video.comments:,} comments"
+            )
+
+            if delay and i < len(needs_enrichment):
+                time.sleep(delay)
+
+        logger.info(f"Enrichment complete: {enriched}/{len(needs_enrichment)} videos enriched")
 
     def _extract_ytdlp_owner_candidates(self, payload: dict[str, Any]) -> set[str]:
         candidates: set[str] = set()

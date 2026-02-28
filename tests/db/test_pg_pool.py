@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import pytest
+from psycopg2.pool import PoolError
 
 from trr_backend.db import pg
 
@@ -36,6 +37,19 @@ class _FakePool:
 
     def closeall(self) -> None:
         return None
+
+
+class _FakePoolExhaustThenSuccess(_FakePool):
+    def __init__(self, *, failures_before_success: int) -> None:
+        super().__init__()
+        self._failures_remaining = failures_before_success
+
+    def getconn(self) -> _FakeConnection:
+        self.getconn_calls += 1
+        if self._failures_remaining > 0:
+            self._failures_remaining -= 1
+            raise PoolError("connection pool exhausted")
+        return self.connection
 
 
 @pytest.fixture(autouse=True)
@@ -127,3 +141,21 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
     assert result == {"ok": True}
     assert calls["fetch"] == 2
     assert calls["reset"] == 1
+
+
+def test_db_connection_retries_pool_acquire_on_pool_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakePoolExhaustThenSuccess(failures_before_success=2)
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidates",
+        lambda: ("postgresql://db.example.com/postgres",),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", lambda *args, **kwargs: fake_pool)
+    monkeypatch.setenv("TRR_DB_POOL_ACQUIRE_ATTEMPTS", "3")
+    monkeypatch.setenv("TRR_DB_POOL_ACQUIRE_SLEEP_MS", "1")
+
+    with pg.db_connection():
+        pass
+
+    assert fake_pool.getconn_calls == 3
+    assert fake_pool.putconn_calls == 1

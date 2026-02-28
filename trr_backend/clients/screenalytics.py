@@ -78,6 +78,12 @@ class FaceBbox:
     y2: float
     confidence: float
     kind: str = "face"
+    person_id: str | None = None
+    person_name: str | None = None
+    label: str | None = None
+    match_similarity: float | None = None
+    match_status: str | None = None
+    square_crop_bbox: list[float] | None = None
 
 
 @dataclass
@@ -340,6 +346,12 @@ def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> P
             bbox = det.get("bbox")
             conf = det.get("confidence", 0.0)
             kind = det.get("kind")
+            person_id = det.get("person_id")
+            person_name = det.get("person_name")
+            label = det.get("label")
+            match_similarity = det.get("match_similarity")
+            match_status = det.get("match_status")
+            square_crop_bbox = det.get("square_crop_bbox")
             if isinstance(bbox, list) and len(bbox) >= 4:
                 try:
                     detections.append(
@@ -350,6 +362,37 @@ def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> P
                             y2=float(bbox[3]),
                             confidence=float(conf) if isinstance(conf, (int, float)) else 0.0,
                             kind=str(kind).lower() if isinstance(kind, str) else "face",
+                            person_id=(
+                                str(person_id).strip()
+                                if isinstance(person_id, str) and person_id.strip()
+                                else None
+                            ),
+                            person_name=(
+                                str(person_name).strip()
+                                if isinstance(person_name, str) and person_name.strip()
+                                else None
+                            ),
+                            label=str(label).strip() if isinstance(label, str) and label.strip() else None,
+                            match_similarity=(
+                                float(match_similarity)
+                                if isinstance(match_similarity, (int, float))
+                                else None
+                            ),
+                            match_status=(
+                                str(match_status).strip()
+                                if isinstance(match_status, str) and match_status.strip()
+                                else None
+                            ),
+                            square_crop_bbox=(
+                                [
+                                    float(square_crop_bbox[0]),
+                                    float(square_crop_bbox[1]),
+                                    float(square_crop_bbox[2]),
+                                    float(square_crop_bbox[3]),
+                                ]
+                                if isinstance(square_crop_bbox, list) and len(square_crop_bbox) >= 4
+                                else None
+                            ),
                         )
                     )
                 except (ValueError, TypeError):

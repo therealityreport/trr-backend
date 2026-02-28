@@ -83,3 +83,31 @@ def test_parse_imdb_episode_metadata_falls_back_to_html_title_for_series_name() 
     assert result["title_type"] == "TVEpisode"
     assert result["series_title"] == "Watch What Happens Live with Andy Cohen"
     assert result["series_imdb_id"] is None
+
+
+def test_parse_imdb_episode_metadata_falls_back_to_html_title_with_year_in_episode_segment() -> None:
+    html = """
+    <html>
+      <head>
+        <title>The Power of the Seer (2025) - The Traitors - IMDb</title>
+        <script type="application/ld+json">
+          {
+            "@context":"https://schema.org",
+            "@type":"TVEpisode",
+            "name":"The Power of the Seer",
+            "datePublished":"2025-02-27",
+            "episodeNumber":"10",
+            "partOfSeason":{"@type":"TVSeason","name":"Season 3"}
+          }
+        </script>
+      </head>
+      <body></body>
+    </html>
+    """
+
+    result = parse_imdb_title_html(html, imdb_id="tt35000010")
+
+    assert result["title"] == "The Power of the Seer"
+    assert result["title_type"] == "TVEpisode"
+    assert result["series_title"] == "The Traitors"
+    assert result["series_imdb_id"] is None

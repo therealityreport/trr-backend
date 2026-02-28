@@ -150,6 +150,59 @@ def _serialize_row(row: Mapping[str, Any] | CastPhotoUpsert) -> dict[str, Any]:
     return cleaned
 
 
+def _build_upsert_metadata_key(row: Mapping[str, Any], *, dedupe_on: str) -> tuple[str, str, str] | None:
+    person_id = str(row.get("person_id") or "").strip()
+    source = str(row.get("source") or "").strip().lower() or "imdb"
+    if dedupe_on == "source_image_id":
+        key_value = str(row.get("source_image_id") or "").strip()
+    else:
+        key_value = str(row.get("image_url_canonical") or "").strip().lower()
+    if not person_id or not key_value:
+        return None
+    return (person_id, source, key_value)
+
+
+def _merge_upserted_metadata(
+    db: DbSession,
+    *,
+    payload_rows: list[dict[str, Any]],
+    upserted_rows: list[dict[str, Any]],
+    dedupe_on: str,
+) -> None:
+    metadata_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for payload_row in payload_rows:
+        metadata = payload_row.get("metadata")
+        if not isinstance(metadata, dict) or not metadata:
+            continue
+        key = _build_upsert_metadata_key(payload_row, dedupe_on=dedupe_on)
+        if key is None:
+            continue
+        metadata_by_key[key] = metadata
+
+    if not metadata_by_key:
+        return
+
+    for upserted_row in upserted_rows:
+        if not isinstance(upserted_row, dict):
+            continue
+        row_id = str(upserted_row.get("id") or "").strip()
+        if not row_id:
+            continue
+        key = _build_upsert_metadata_key(upserted_row, dedupe_on=dedupe_on)
+        if key is None:
+            continue
+        incoming_metadata = metadata_by_key.get(key)
+        if not incoming_metadata:
+            continue
+        existing_metadata = upserted_row.get("metadata")
+        existing_metadata_dict = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+        merged_metadata = {**existing_metadata_dict, **incoming_metadata}
+        if merged_metadata == existing_metadata_dict:
+            continue
+        db.schema("core").table("cast_photos").update({"metadata": merged_metadata}).eq("id", row_id).execute()
+        upserted_row["metadata"] = merged_metadata
+
+
 def upsert_cast_photos(
     db: DbSession,
     rows: Iterable[Mapping[str, Any] | CastPhotoUpsert],
@@ -185,7 +238,10 @@ def upsert_cast_photos(
     if hasattr(response, "error") and response.error:
         raise CastPhotoRepositoryError(f"Supabase error upserting cast photos: {response.error}")
     data = response.data or []
-    return data if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    _merge_upserted_metadata(db, payload_rows=payload, upserted_rows=data, dedupe_on=dedupe_on)
+    return data
 
 
 def update_cast_photo_hosted_fields(db: DbSession, photo_id: str, patch: Mapping[str, Any]) -> dict[str, Any]:

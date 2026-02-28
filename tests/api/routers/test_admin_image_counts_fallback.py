@@ -50,6 +50,15 @@ class _FakeDb:
         return _FakeResponse([row] if row else [])
 
 
+@pytest.fixture(autouse=True)
+def _stub_face_crop_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        counts,
+        "generate_and_upload_face_crops",
+        lambda **_kwargs: [],
+    )
+
+
 def test_auto_count_cast_photo_falls_back_to_original_url(monkeypatch) -> None:
     photo_id = uuid4()
     db = _FakeDb(

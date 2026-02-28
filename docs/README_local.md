@@ -29,6 +29,7 @@ Python 3.11+ is required.
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `TMDB_API_KEY`
+   - `TVDB_API_KEY`
    - `IMDB_API_KEY`
 
 3. **Verify environment**

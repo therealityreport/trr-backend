@@ -34,15 +34,42 @@ class _FakeClient:
         self._attempts = 0
         self._response = response or _FakeResponse(data=[{"id": "test-id"}])
         self._rpc_calls: list[tuple[str, dict[str, object]]] = []
+        self._update_calls: list[tuple[str, dict[str, object]]] = []
+        self._mode = "rpc"
+        self._pending_table = ""
+        self._pending_update: dict[str, object] | None = None
+        self._pending_eq: tuple[str, object] | None = None
 
     def schema(self, _name: str):  # noqa: ANN001
         return self
 
     def rpc(self, name: str, params: dict[str, object]):
         self._rpc_calls.append((name, params))
+        self._mode = "rpc"
+        return self
+
+    def table(self, table_name: str):
+        self._pending_table = table_name
+        return self
+
+    def update(self, payload: dict[str, object]):
+        self._pending_update = payload
+        self._mode = "update"
+        return self
+
+    def eq(self, column: str, value: object):
+        self._pending_eq = (column, value)
         return self
 
     def execute(self) -> _FakeResponse:
+        if self._mode == "update":
+            row_id = self._pending_eq[1] if self._pending_eq else None
+            payload = self._pending_update or {}
+            self._update_calls.append((str(row_id), dict(payload)))
+            self._mode = "rpc"
+            self._pending_update = None
+            self._pending_eq = None
+            return _FakeResponse(data=[{"id": row_id, **payload}])
         self._attempts += 1
         if self._attempts <= self._fail_count:
             raise _FakePGRST204Error()
@@ -173,3 +200,37 @@ def test_upsert_cast_photos_serializes_nested_metadata() -> None:
     assert metadata[key]["values"][1]["enum"] == "sample"
     assert metadata["list"][0] == "2024-01-03"
     assert metadata["list"][1] == "2024-01-03T04:05:06"
+
+
+def test_upsert_cast_photos_merges_metadata_for_existing_identity_rows() -> None:
+    client = _FakeClient(
+        response=_FakeResponse(
+            data=[
+                {
+                    "id": "row-1",
+                    "person_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "source": "imdb",
+                    "source_image_id": "MV5BTEST@",
+                    "metadata": {"legacy": "keep"},
+                }
+            ]
+        )
+    )
+    row = CastPhotoUpsert(
+        person_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        imdb_person_id="nm11883948",
+        source="imdb",
+        source_image_id="MV5BTEST@",
+        url="https://m.media-amazon.com/images/M/MV5BTEST@._V1_.jpg",
+        url_path="/images/M/MV5BTEST@._V1_.jpg",
+        width=640,
+        metadata={"source_variant": "imdb_person_gallery"},
+    )
+
+    upserted = upsert_cast_photos(client, [row], dedupe_on="source_image_id")
+
+    assert client._update_calls
+    row_id, payload = client._update_calls[0]
+    assert row_id == "row-1"
+    assert payload["metadata"] == {"legacy": "keep", "source_variant": "imdb_person_gallery"}
+    assert upserted[0]["metadata"] == {"legacy": "keep", "source_variant": "imdb_person_gallery"}

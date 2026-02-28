@@ -4085,10 +4085,13 @@ def _count_stored_quotes(tweet_ids: list[str]) -> dict[str, int]:
 
 
 def _comment_lifecycle_supported(table: str) -> bool:
-    return all(
-        _column_exists("social", table, column)
-        for column in ("is_missing", "missing_at", "first_seen_at", "last_seen_at", "last_seen_run_id")
-    )
+    try:
+        return all(
+            _column_exists("social", table, column)
+            for column in ("is_missing", "missing_at", "first_seen_at", "last_seen_at", "last_seen_run_id")
+        )
+    except Exception:
+        return False
 
 
 def _build_comment_snapshot_map(rows: list[dict[str, Any]]) -> dict[str, CommentLifecycleSnapshot]:
@@ -14458,8 +14461,8 @@ def _week_detail_instagram(
     end_dt: datetime,
     account_handles: set[str],
     max_comments: int,
-    post_limit: int,
-    post_offset: int,
+    post_limit: int = 20,
+    post_offset: int = 0,
 ) -> dict[str, Any]:
     thumbnail_expr = _instagram_posts_thumbnail_expr("p")
     hosted_media_urls_expr = _instagram_posts_json_array_expr("p", "hosted_media_urls")
@@ -14483,18 +14486,18 @@ def _week_detail_instagram(
     if account_handles_list:
         query_params.append(account_handles_list)
 
-    count_rows = pg.fetch_one(
+    count_rows = pg.fetch_all(
         f"""
         select count(*)::int as post_count
         from social.instagram_posts p
         where p.season_id = %s
           and p.posted_at >= %s
           and p.posted_at <= %s
-          {account_filter}
+        {account_filter}
         """,
         query_params,
     )
-    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    total_post_count = int((count_rows[0] if count_rows else {}).get("post_count") or 0)
 
     effective_post_limit = max(0, post_limit + post_offset)
     posts_params = query_params
@@ -14702,18 +14705,18 @@ def _week_detail_tiktok(
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
         params.append(account_handles_list)
-    count_rows = pg.fetch_one(
+    count_rows = pg.fetch_all(
         f"""
         select count(*)::int as post_count
         from social.tiktok_posts p
         where p.season_id = %s
           and p.posted_at >= %s
           and p.posted_at <= %s
-          {account_filter}
+        {account_filter}
         """,
         params,
     )
-    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    total_post_count = int((count_rows[0] if count_rows else {}).get("post_count") or 0)
     effective_post_limit = max(0, post_limit + post_offset)
     posts = pg.fetch_all(
         f"""
@@ -14890,18 +14893,18 @@ def _week_detail_youtube(
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
         params.append(account_handles_list)
-    count_rows = pg.fetch_one(
+    count_rows = pg.fetch_all(
         f"""
         select count(*)::int as post_count
         from social.youtube_videos v
         where v.season_id = %s
           and v.published_at >= %s
           and v.published_at <= %s
-          {account_filter}
+        {account_filter}
         """,
         params,
     )
-    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    total_post_count = int((count_rows[0] if count_rows else {}).get("post_count") or 0)
     effective_post_limit = max(0, post_limit + post_offset)
     posts = pg.fetch_all(
         f"""
@@ -15073,7 +15076,7 @@ def _week_detail_twitter(
     posts_params = [season_id, start_dt, end_dt]
     if account_handles_list:
         posts_params.append(account_handles_list)
-    count_rows = pg.fetch_one(
+    count_rows = pg.fetch_all(
         f"""
         select count(*)::int as post_count
         from social.twitter_tweets t
@@ -15081,11 +15084,11 @@ def _week_detail_twitter(
           and t.is_reply = false
           and t.created_at >= %s
           and t.created_at <= %s
-          {account_filter}
+        {account_filter}
         """,
         posts_params,
     )
-    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    total_post_count = int((count_rows[0] if count_rows else {}).get("post_count") or 0)
     effective_post_limit = max(0, post_limit + post_offset)
 
     posts = pg.fetch_all(
@@ -15334,18 +15337,18 @@ def _week_detail_facebook(
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
         params.append(account_handles_list)
-    count_rows = pg.fetch_one(
+    count_rows = pg.fetch_all(
         f"""
         select count(*)::int as post_count
         from social.facebook_posts p
         where p.season_id = %s
           and p.posted_at >= %s
           and p.posted_at <= %s
-          {account_filter}
+        {account_filter}
         """,
         params,
     )
-    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    total_post_count = int((count_rows[0] if count_rows else {}).get("post_count") or 0)
     effective_post_limit = max(0, post_limit + post_offset)
     posts = pg.fetch_all(
         f"""
@@ -15512,18 +15515,18 @@ def _week_detail_threads(
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
         params.append(account_handles_list)
-    count_rows = pg.fetch_one(
+    count_rows = pg.fetch_all(
         f"""
         select count(*)::int as post_count
         from social.meta_threads_posts p
         where p.season_id = %s
           and p.posted_at >= %s
           and p.posted_at <= %s
-          {account_filter}
+        {account_filter}
         """,
         params,
     )
-    total_post_count = int((count_rows or {}).get("post_count") or 0)
+    total_post_count = int((count_rows[0] if count_rows else {}).get("post_count") or 0)
     effective_post_limit = max(0, post_limit + post_offset)
     posts = pg.fetch_all(
         f"""

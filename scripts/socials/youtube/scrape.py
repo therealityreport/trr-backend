@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-CLI script for scraping YouTube channel videos and comments.
+CLI script for scraping YouTube channel videos, shorts, and comments.
 
 Usage:
-    # Scrape videos
+    # Scrape videos and shorts
     python -m scripts.socials.youtube.scrape --channel bravo --keywords RHOSLC \\
         "Salt Lake City" --start 2025-08-14 --end 2026-02-04
+
+    # Scrape and download at best quality
+    python -m scripts.socials.youtube.scrape --channel bravo --keywords RHOSLC \\
+        --start 2025-08-14 --end 2026-02-04 --download
 
     # Scrape comments from a specific video
     python -m scripts.socials.youtube.scrape --comments --video dQw4w9WgXcQ
@@ -16,6 +20,8 @@ import argparse
 import csv
 import json
 import logging
+import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -156,19 +162,72 @@ def save_comments(comments: list[YouTubeComment], output_prefix: str, video_id: 
     logger.info(f"Saved {len(rows)} comments to {csv_file}")
 
 
+def download_videos(videos: list[YouTubeVideo], output_dir: Path):
+    """Download videos/shorts at best available quality using yt-dlp."""
+    if not shutil.which("yt-dlp"):
+        logger.error("yt-dlp is not installed. Install with: pip install yt-dlp")
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    succeeded = 0
+    failed = 0
+
+    for i, video in enumerate(videos, 1):
+        label = "Short" if video.is_short else "Video"
+        title_preview = video.title[:50] + "..." if len(video.title) > 50 else video.title
+        print(f"\n[{i}/{len(videos)}] Downloading {label}: {title_preview}")
+
+        url = video.url
+        output_template = str(output_dir / "%(id)s.%(ext)s")
+
+        cmd = [
+            "yt-dlp",
+            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+            "--merge-output-format", "mp4",
+            "--output", output_template,
+            "--no-playlist",
+            "--write-thumbnail",
+            "--convert-thumbnails", "jpg",
+            "--no-overwrites",
+            url,
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+            if proc.returncode == 0:
+                succeeded += 1
+                logger.info(f"  Downloaded: {video.video_id}")
+            else:
+                failed += 1
+                error_msg = (proc.stderr or proc.stdout or "").strip()[:200]
+                logger.error(f"  Failed to download {video.video_id}: {error_msg}")
+        except subprocess.TimeoutExpired:
+            failed += 1
+            logger.error(f"  Download timed out for {video.video_id}")
+
+    print(f"\nDownload complete: {succeeded} succeeded, {failed} failed")
+    print(f"Files saved to: {output_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Scrape YouTube channel videos and comments",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Scrape @bravo videos about RHOSLC
+  # Scrape @bravo videos and shorts about RHOSLC
   python -m scripts.socials.youtube.scrape --channel bravo --keywords RHOSLC \\
     --start 2025-08-14 --end 2026-02-04
 
-  # Scrape with multiple keywords
-  python -m scripts.socials.youtube.scrape --channel bravo \\
-    --keywords RHOSLC "Salt Lake City" --start 2025-08-14 --end 2026-02-04
+  # Scrape and download at best quality
+  python -m scripts.socials.youtube.scrape --channel bravo --keywords RHOSLC \\
+    --start 2025-08-14 --end 2026-02-04 --download
 
   # Scrape comments from a specific video
   python -m scripts.socials.youtube.scrape --comments --video dQw4w9WgXcQ
@@ -226,6 +285,11 @@ Examples:
     parser.add_argument("--season", type=int, help="Associated season number for metadata")
     parser.add_argument("--person-id", type=int, help="Associated person ID for metadata")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Download videos/shorts at best quality using yt-dlp",
+    )
 
     args = parser.parse_args()
 
@@ -315,17 +379,30 @@ Examples:
 
     videos = scraper.scrape(config)
 
+    # Report coverage metadata
+    meta = scraper.last_retrieval_meta
+    if meta:
+        print(f"\nCoverage: {meta.get('continuation_pages', 0)} pages scanned, "
+              f"{meta.get('in_range_hits', 0)} in-range hits")
+        if meta.get("scan_capped_reason"):
+            print(f"WARNING: Scan was capped — reason: {meta['scan_capped_reason']}")
+
+    # Separate videos and shorts for summary
+    regular_videos = [v for v in videos if not v.is_short]
+    shorts = [v for v in videos if v.is_short]
+
     # Print summary
     print("\n" + "=" * 60)
-    print(f"SUMMARY: Found {len(videos)} videos")
+    print(f"SUMMARY: Found {len(videos)} total ({len(regular_videos)} videos, {len(shorts)} shorts)")
     print(f"Channel: @{args.channel}")
     print(f"Keywords: {args.keywords}")
     print("=" * 60)
 
     if videos:
-        print("\nPreview (first 5 videos):")
+        print("\nPreview (first 5 results):")
         for i, video in enumerate(sorted(videos, key=lambda v: v.published_at, reverse=True)[:5], 1):
-            print(f"\n{i}. {video.date_time}")
+            label = "[Short]" if video.is_short else "[Video]"
+            print(f"\n{i}. {label} {video.date_time}")
             title_preview = video.title[:60] + "..." if len(video.title) > 60 else video.title
             print(f"   Title: {title_preview}")
             print(f"   Views: {video.views:,} | Duration: {video.duration}")
@@ -337,6 +414,11 @@ Examples:
         output_path = Path(__file__).parent / "output" / output_prefix
         output_path.parent.mkdir(parents=True, exist_ok=True)
         save_results(videos, str(output_path))
+
+        # Download if requested
+        if args.download:
+            download_dir = output_path.parent / f"{config.channel_handle}_downloads"
+            download_videos(videos, download_dir)
 
 
 if __name__ == "__main__":
