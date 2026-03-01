@@ -1,0 +1,76 @@
+{
+  "schema": "core",
+  "table": "external_id_conflicts",
+  "columns": [
+    {
+      "name": "entity_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "entity_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "external_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "conflict_reason",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "detected_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "payload",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [],
+  "foreign_keys": [],
+  "unique_constraints": [],
+  "indexes": [],
+  "rls_enabled": false,
+  "example_row": {
+    "entity_type": "example",
+    "entity_id": "00000000-0000-0000-0000-000000000000",
+    "source_id": "example",
+    "external_id": "example",
+    "conflict_reason": "example",
+    "detected_at": "1970-01-01T00:00:00Z",
+    "payload": {}
+  }
+}

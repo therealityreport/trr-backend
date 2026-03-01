@@ -1,0 +1,49 @@
+# core.networks - Table Structure Diagram
+
+Auto-generated schema diagram showing columns and data types.
+```mermaid
+erDiagram
+    CORE_NETWORKS {
+        INTEGER id
+        TEXT name
+        TEXT origin_country
+        TEXT tmdb_logo_path
+        TEXT hosted_logo_key
+        TEXT hosted_logo_url
+        TEXT hosted_logo_sha256
+        TEXT hosted_logo_content_type
+        BIGINT hosted_logo_bytes
+        TEXT hosted_logo_etag
+        TIMESTAMP_WITH_TIME_ZONE hosted_logo_at
+        TIMESTAMP_WITH_TIME_ZONE created_at
+        TIMESTAMP_WITH_TIME_ZONE updated_at
+        TEXT logo_path
+        JSONB tmdb_meta
+        TIMESTAMP_WITH_TIME_ZONE tmdb_fetched_at
+        JSONB imdb_meta
+        TIMESTAMP_WITH_TIME_ZONE imdb_fetched_at
+        TEXT facebook_id
+        TEXT instagram_id
+        TEXT twitter_id
+        TEXT tiktok_id
+        TEXT wikidata_id
+        TEXT wikipedia_url
+        TEXT wikimedia_logo_file
+        TIMESTAMP_WITH_TIME_ZONE link_enriched_at
+        TEXT link_enrichment_source
+        TEXT hosted_logo_black_key
+        TEXT hosted_logo_black_url
+        TEXT hosted_logo_black_sha256
+        TEXT hosted_logo_black_content_type
+        BIGINT hosted_logo_black_bytes
+        TEXT hosted_logo_black_etag
+        TIMESTAMP_WITH_TIME_ZONE hosted_logo_black_at
+        TEXT hosted_logo_white_key
+        TEXT hosted_logo_white_url
+        TEXT hosted_logo_white_sha256
+        TEXT hosted_logo_white_content_type
+        BIGINT hosted_logo_white_bytes
+        TEXT hosted_logo_white_etag
+        TIMESTAMP_WITH_TIME_ZONE hosted_logo_white_at
+    }
+```

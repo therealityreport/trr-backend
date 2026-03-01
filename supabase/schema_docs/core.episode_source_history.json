@@ -1,0 +1,145 @@
+{
+  "schema": "core",
+  "table": "episode_source_history",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "bigint",
+      "is_nullable": "NO",
+      "default": "nextval('core.episode_source_history_id_seq'::regclass)",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "episode_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "variant",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'default'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetch_method",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'success'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "error",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "payload",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "payload_sha256",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "episode_source_history_episode_id_fkey",
+      "column": "episode_id",
+      "references": "core.episodes.id"
+    },
+    {
+      "constraint": "episode_source_history_source_id_fkey",
+      "column": "source_id",
+      "references": "core.sources.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "episode_source_history_lookup_idx",
+      "columns": [
+        "episode_id",
+        "source_id",
+        "variant",
+        "fetched_at DESC"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX episode_source_history_lookup_idx ON core.episode_source_history USING btree (episode_id, source_id, variant, fetched_at DESC)"
+    },
+    {
+      "name": "episode_source_history_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX episode_source_history_pkey ON core.episode_source_history USING btree (id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": 0,
+    "episode_id": "00000000-0000-0000-0000-000000000000",
+    "source_id": "example",
+    "variant": "example",
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "fetch_method": "example",
+    "status": "example",
+    "error": "example",
+    "payload": {},
+    "payload_sha256": "example",
+    "created_at": "1970-01-01T00:00:00Z"
+  }
+}

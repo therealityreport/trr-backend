@@ -1,0 +1,268 @@
+{
+  "schema": "core",
+  "table": "seasons",
+  "columns": [
+    {
+      "name": "show_name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "season_number",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "title",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "overview",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "air_date",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "premiere_date",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_series_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_series_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_season_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_season_object_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "poster_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "url_original_poster",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "ALWAYS"
+    },
+    {
+      "name": "external_tvdb_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "external_wikidata_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "external_ids",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "language",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'en-US'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "seasons_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "show_id",
+      "season_number"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "core_seasons_show_id_season_number_idx",
+      "columns": [
+        "show_id",
+        "season_number"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_seasons_show_id_season_number_idx ON core.seasons USING btree (show_id, season_number)"
+    },
+    {
+      "name": "core_seasons_tmdb_series_season_unique",
+      "columns": [
+        "tmdb_series_id",
+        "season_number) WHERE (tmdb_series_id IS NOT NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX core_seasons_tmdb_series_season_unique ON core.seasons USING btree (tmdb_series_id, season_number) WHERE (tmdb_series_id IS NOT NULL)"
+    },
+    {
+      "name": "seasons_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX seasons_pkey ON core.seasons USING btree (id)"
+    },
+    {
+      "name": "seasons_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX seasons_show_id_idx ON core.seasons USING btree (show_id)"
+    },
+    {
+      "name": "seasons_show_id_season_number_unique",
+      "columns": [
+        "show_id",
+        "season_number"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX seasons_show_id_season_number_unique ON core.seasons USING btree (show_id, season_number)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "show_name": "example",
+    "name": "example",
+    "season_number": 0,
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "title": "example",
+    "overview": "example",
+    "air_date": "1970-01-01",
+    "premiere_date": "1970-01-01",
+    "tmdb_series_id": 0,
+    "imdb_series_id": "example",
+    "tmdb_season_id": 0,
+    "tmdb_season_object_id": "example",
+    "poster_path": "example",
+    "url_original_poster": "example",
+    "external_tvdb_id": 0,
+    "external_wikidata_id": "example",
+    "external_ids": {},
+    "language": "example",
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "id": "00000000-0000-0000-0000-000000000000",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}
