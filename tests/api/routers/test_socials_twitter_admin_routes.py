@@ -64,8 +64,8 @@ def test_search_twitter_includes_hosted_media_field_without_mirroring(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     tweet = _build_tweet("tweet-1")
 
     from trr_backend.socials.twitter import TwitterScraper
@@ -104,8 +104,8 @@ def test_search_twitter_runs_mirror_when_requested(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     tweet = _build_tweet("tweet-2")
     mirror_calls = {"count": 0}
 
@@ -146,8 +146,8 @@ def test_twitter_replies_returns_full_tweet_schema_and_mirroring(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     reply = _build_tweet("reply-1", is_reply=True)
     mirror_calls = {"count": 0}
 
@@ -194,8 +194,8 @@ def test_twitter_replies_skips_mirroring_when_flag_disabled(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     reply = _build_tweet("reply-2", is_reply=True)
 
     from trr_backend.socials.twitter import TwitterScraper
@@ -229,12 +229,70 @@ def test_twitter_replies_skips_mirroring_when_flag_disabled(
     assert body["replies"][0]["hosted_media_urls"] == []
 
 
+def test_twitter_replies_passes_search_and_twikit_page_budgets(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    reply = _build_tweet("reply-budget", is_reply=True)
+    captured: dict[str, object] = {}
+
+    from trr_backend.socials.twitter import TwitterScraper
+
+    monkeypatch.setattr("trr_backend.repositories.social_season_analytics._load_twitter_auth", lambda: ({}, None))
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics._load_twikit_credentials",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def _fake_fetch_replies(
+        self,
+        tweet_id: str,
+        delay: float,
+        *,
+        search_max_pages: int = 8,
+        twikit_max_pages: int = 5,
+    ) -> list[Tweet]:
+        del self
+        captured["tweet_id"] = tweet_id
+        captured["delay"] = delay
+        captured["search_max_pages"] = search_max_pages
+        captured["twikit_max_pages"] = twikit_max_pages
+        return [reply]
+
+    monkeypatch.setattr(TwitterScraper, "fetch_tweet_replies", _fake_fetch_replies)
+
+    response = client.post(
+        "/api/v1/admin/socials/twitter/replies",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "tweet_id": "root-budget",
+            "delay_seconds": 0.75,
+            "search_max_pages": 19,
+            "twikit_max_pages": 11,
+            "mirror_to_s3": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["replies_found"] == 1
+    assert captured == {
+        "tweet_id": "root-budget",
+        "delay": 0.75,
+        "search_max_pages": 19,
+        "twikit_max_pages": 11,
+    }
+
+
 def test_twitter_quotes_returns_full_tweet_schema_and_diagnostics(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     quote = _build_tweet("quote-1", is_quote=True, quoted_tweet_id="root-123")
     mirror_calls = {"count": 0}
 
@@ -288,8 +346,8 @@ def test_twitter_quotes_skips_mirroring_when_flag_disabled(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     quote = _build_tweet("quote-2", is_quote=True, quoted_tweet_id="root-123")
 
     from trr_backend.socials.twitter import TwitterScraper
@@ -322,3 +380,46 @@ def test_twitter_quotes_skips_mirroring_when_flag_disabled(
     assert body["success"] is True
     assert body["quotes_found"] == 1
     assert body["quotes"][0]["hosted_media_urls"] == []
+
+
+def test_twitter_quotes_default_max_pages_is_60(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    quote = _build_tweet("quote-default", is_quote=True, quoted_tweet_id="root-456")
+    captured: dict[str, object] = {}
+
+    from trr_backend.socials.twitter import TwitterScraper
+
+    monkeypatch.setattr("trr_backend.repositories.social_season_analytics._load_twitter_auth", lambda: ({}, None))
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics._load_twikit_credentials",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def _fake_fetch_quotes(self, tweet_id: str, delay: float, max_pages: int) -> list[Tweet]:
+        del self
+        captured["tweet_id"] = tweet_id
+        captured["delay"] = delay
+        captured["max_pages"] = max_pages
+        return [quote]
+
+    monkeypatch.setattr(TwitterScraper, "fetch_tweet_quotes", _fake_fetch_quotes)
+
+    response = client.post(
+        "/api/v1/admin/socials/twitter/quotes",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "tweet_id": "root-456",
+            "delay_seconds": 0.5,
+            "mirror_to_s3": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["quotes_found"] == 1
+    assert captured["max_pages"] == 60

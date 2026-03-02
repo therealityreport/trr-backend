@@ -7,11 +7,15 @@ which is necessary after schema migrations to avoid PGRST204 errors.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import psycopg2
 
 from trr_backend.db.connection import resolve_database_url
+from trr_backend.observability import inc_suppressed_path_conversion
+
+logger = logging.getLogger(__name__)
 
 
 class PostgrestCacheError(RuntimeError):
@@ -124,8 +128,9 @@ def with_schema_cache_retry(
             # Trigger schema reload and retry
             try:
                 reload_postgrest_schema(database_url)
-            except PostgrestCacheError:
-                pass  # Best effort - continue with retry anyway
+            except PostgrestCacheError as reload_exc:
+                inc_suppressed_path_conversion("postgrest_cache", "schema_reload_retry_failed")
+                logger.warning("PostgREST schema reload failed during retry: %s", reload_exc)
 
             time.sleep(retry_delay)
 

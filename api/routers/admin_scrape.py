@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -33,6 +34,10 @@ from trr_backend.scraping.url_image_scraper import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/scrape", tags=["admin-scrape"])
+
+
+def _brand_logo_routing_v2_enabled() -> bool:
+    return str(os.getenv("BRAND_LOGO_ROUTING_V2", "true")).strip().lower() not in {"0", "false", "off", "no"}
 
 
 # Request/Response Models
@@ -85,6 +90,17 @@ ImageKind = Literal[
     "other",
 ]
 
+LogoTargetType = Literal[
+    "show",
+    "network",
+    "streaming",
+    "production",
+    "franchise",
+    "publication",
+    "social",
+    "other",
+]
+
 
 class ImportImageItem(BaseModel):
     """Single image to import."""
@@ -98,6 +114,10 @@ class ImportImageItem(BaseModel):
     context_section: str | None = None
     context_type: str | None = None
     source_logo: str | None = None
+    logo_target_type: LogoTargetType | None = None
+    logo_target_key: str | None = None
+    logo_target_label: str | None = None
+    logo_set_primary: bool = False
     asset_name: str | None = None
 
 
@@ -194,6 +214,75 @@ def _build_people_tags_context(db: SupabaseAdminClient, person_ids: set[str]) ->
         "people_ids": people_ids,
         "people_names": people_names,
     }
+
+
+def _extract_source_domain(source_url: str) -> str:
+    parsed_source = urlparse(source_url)
+    return parsed_source.netloc.replace("www.", "").strip().lower()
+
+
+def _legacy_logo_target_type(source_logo: str | None) -> LogoTargetType | None:
+    normalized = str(source_logo or "").strip().upper()
+    if normalized == "SHOW":
+        return "show"
+    if normalized == "SOURCE":
+        return "publication"
+    return None
+
+
+def _resolve_logo_target_for_image(
+    *,
+    img: ImportImageItem,
+    request: ImportRequest,
+    source_domain: str,
+) -> tuple[LogoTargetType, str, str, bool]:
+    target_type = img.logo_target_type or _legacy_logo_target_type(img.source_logo)
+    if target_type is None:
+        raise ValueError("logo_target_type is required for logo images")
+
+    target_key = str(img.logo_target_key or "").strip()
+    target_label = str(img.logo_target_label or "").strip()
+
+    if target_type == "show":
+        if not target_key:
+            if request.show_id is not None:
+                target_key = str(request.show_id)
+            elif request.season_id is not None:
+                target_key = str(request.season_id)
+        if not target_label:
+            target_label = "Show"
+    elif target_type == "publication":
+        if not target_key:
+            target_key = source_domain
+        if not target_label:
+            target_label = source_domain
+    else:
+        if not target_label and target_key:
+            target_label = target_key
+
+    if not target_key:
+        raise ValueError("logo_target_key is required for logo images")
+    if not target_label:
+        raise ValueError("logo_target_label is required for logo images")
+
+    return target_type, target_key, target_label, bool(img.logo_set_primary)
+
+
+def _augment_logo_context(
+    context: dict[str, object],
+    *,
+    img: ImportImageItem,
+    logo_target: tuple[LogoTargetType, str, str, bool] | None,
+) -> None:
+    if img.source_logo:
+        context["source_logo"] = img.source_logo
+    if not logo_target:
+        return
+    target_type, target_key, target_label, set_primary = logo_target
+    context["logo_target_type"] = target_type
+    context["logo_target_key"] = target_key
+    context["logo_target_label"] = target_label
+    context["logo_set_primary"] = bool(set_primary)
 
 
 class MediaAssetSummary(BaseModel):
@@ -318,6 +407,291 @@ def _get_show_identifier(db: SupabaseAdminClient, show_id: str) -> dict[str, str
     }
 
 
+def _import_non_show_logo_target(
+    *,
+    db: SupabaseAdminClient,
+    target_type: LogoTargetType,
+    target_key: str,
+    target_label: str,
+    set_primary: bool,
+    image_data: bytes,
+    sha256: str,
+    content_type: str,
+    source_url: str,
+    source_page_url: str,
+    source_domain: str,
+    metadata: dict[str, object],
+) -> tuple[str, str | None, str | None]:
+    """
+    Import logo targets outside the core show/season/person media-links flow.
+
+    Returns: (status, hosted_logo_url, created_asset_id)
+    """
+    from api.routers import admin_show_sync
+    from trr_backend.media.s3_mirror import (
+        build_logo_s3_key,
+        get_s3_bucket,
+        get_s3_client,
+        guess_ext_from_content_type,
+        mirror_logo_monochrome_variants_row,
+        upload_bytes_to_s3,
+    )
+
+    if target_type in {"network", "streaming", "production"}:
+        explicit_id: int | None = None
+        if target_key.isdigit():
+            explicit_id = int(target_key)
+        target_row, config = admin_show_sync._resolve_dimension_target(  # noqa: SLF001
+            db,
+            target_type=target_type,
+            explicit_id=explicit_id,
+            entity_key=target_key,
+        )
+        table = config["table"]
+        id_field = config["id_field"]
+        name_field = config["name_field"]
+        entity_type = config["entity_type"]
+        logo_kind = config["logo_kind"]
+        entity_id = str(target_row.get(id_field) or "")
+        entity_key = str(target_row.get(name_field) or "").casefold()
+        display_name = str(target_row.get(name_field) or target_label or target_key)
+
+        ext = guess_ext_from_content_type(content_type)
+        key = build_logo_s3_key(kind=logo_kind, entity_id=entity_id, sha256=sha256, ext=ext)
+        s3_client = get_s3_client()
+        bucket = get_s3_bucket()
+        etag, file_size = upload_bytes_to_s3(
+            s3_client,
+            bucket=bucket,
+            key=key,
+            data=image_data,
+            content_type=content_type,
+        )
+        hosted_url = admin_show_sync.build_hosted_url(key)  # type: ignore[attr-defined]
+        patch: dict[str, object] = {
+            "hosted_logo_key": key,
+            "hosted_logo_url": hosted_url,
+            "hosted_logo_sha256": sha256,
+            "hosted_logo_content_type": content_type,
+            "hosted_logo_bytes": file_size,
+            "hosted_logo_etag": etag,
+            "hosted_logo_at": datetime.now(tz=UTC).isoformat(),
+        }
+        variant_patch = mirror_logo_monochrome_variants_row(
+            {id_field: target_row.get(id_field), **patch},
+            kind=logo_kind,
+            id_field=id_field,
+            source_url=hosted_url,
+            force=True,
+            s3_client=s3_client,
+            source="override",
+        )
+        if variant_patch and isinstance(variant_patch.patch, dict):
+            patch.update(variant_patch.patch)
+
+        if set_primary:
+            core_update = db.schema("core").table(table).update(patch).eq(id_field, target_row.get(id_field)).execute()
+            if hasattr(core_update, "error") and core_update.error:
+                raise RuntimeError(f"Failed to update {table} row: {core_update.error}")
+
+        admin_show_sync._upsert_dimension_logo_asset_row(  # noqa: SLF001
+            db,
+            entity_type=entity_type,
+            entity_key=entity_key,
+            entity_id=entity_id,
+            display_name=display_name,
+            source_url=source_url,
+            source_rank=0,
+            mirror_status="mirrored",
+            failure_reason=None,
+            patch=patch,
+            is_primary=bool(set_primary),
+        )
+        if set_primary:
+            admin_show_sync._set_dimension_asset_primary_flag(  # noqa: SLF001
+                db,
+                entity_type=entity_type,
+                entity_key=entity_key,
+                source_url=source_url,
+            )
+        admin_show_sync._upsert_logo_import_audit(  # noqa: SLF001
+            db,
+            target_type=target_type,
+            target_id=entity_id or target_key,
+            target_key=entity_key,
+            source_type="url",
+            source_url=source_url,
+            uploaded_filename=None,
+            hosted_logo_url=hosted_url,
+            hosted_logo_sha256=sha256,
+            status="imported",
+            failure_reason=None,
+            created_by="admin-scrape",
+        )
+        return "imported", hosted_url, None
+
+    logo_kind = f"brands-{target_type}"
+    ext = guess_ext_from_content_type(content_type)
+    s3_client = get_s3_client()
+    bucket = get_s3_bucket()
+    key = build_logo_s3_key(kind=logo_kind, entity_id=target_key.casefold(), sha256=sha256, ext=ext)
+    etag, file_size = upload_bytes_to_s3(
+        s3_client,
+        bucket=bucket,
+        key=key,
+        data=image_data,
+        content_type=content_type,
+    )
+    hosted_url = admin_show_sync.build_hosted_url(key)  # type: ignore[attr-defined]
+    patch: dict[str, object] = {
+        "hosted_logo_key": key,
+        "hosted_logo_url": hosted_url,
+        "hosted_logo_sha256": sha256,
+        "hosted_logo_content_type": content_type,
+        "hosted_logo_bytes": file_size,
+        "hosted_logo_etag": etag,
+        "hosted_logo_at": datetime.now(tz=UTC).isoformat(),
+    }
+    variant_patch = mirror_logo_monochrome_variants_row(
+        {"id": target_key.casefold(), **patch},
+        kind=logo_kind,
+        source_url=hosted_url,
+        force=True,
+        s3_client=s3_client,
+        source="override",
+    )
+    if variant_patch and isinstance(variant_patch.patch, dict):
+        patch.update(variant_patch.patch)
+
+    if set_primary:
+        reset_primary = (
+            db.schema("admin")
+            .table("brand_logo_assets")
+            .update({"is_primary": False, "updated_at": datetime.now(tz=UTC).isoformat()})
+            .eq("target_type", target_type)
+            .eq("target_key", target_key.casefold())
+            .execute()
+        )
+        if hasattr(reset_primary, "error") and reset_primary.error:
+            raise RuntimeError(f"Failed to reset brand_logo_assets primary flag: {reset_primary.error}")
+
+    payload = {
+        "target_type": target_type,
+        "target_key": target_key.casefold(),
+        "target_label": target_label,
+        "source_url": source_url,
+        "source_page_url": source_page_url,
+        "source_domain": source_domain,
+        "source_rank": 0,
+        "run_id": f"manual-{datetime.now(tz=UTC).strftime('%Y%m%dT%H%M%SZ')}",
+        "hosted_logo_key": patch.get("hosted_logo_key"),
+        "hosted_logo_url": patch.get("hosted_logo_url"),
+        "hosted_logo_sha256": patch.get("hosted_logo_sha256"),
+        "hosted_logo_content_type": patch.get("hosted_logo_content_type"),
+        "hosted_logo_bytes": patch.get("hosted_logo_bytes"),
+        "hosted_logo_etag": patch.get("hosted_logo_etag"),
+        "hosted_logo_at": patch.get("hosted_logo_at"),
+        "hosted_logo_black_key": patch.get("hosted_logo_black_key"),
+        "hosted_logo_black_url": patch.get("hosted_logo_black_url"),
+        "hosted_logo_black_sha256": patch.get("hosted_logo_black_sha256"),
+        "hosted_logo_black_content_type": patch.get("hosted_logo_black_content_type"),
+        "hosted_logo_black_bytes": patch.get("hosted_logo_black_bytes"),
+        "hosted_logo_black_etag": patch.get("hosted_logo_black_etag"),
+        "hosted_logo_black_at": patch.get("hosted_logo_black_at"),
+        "hosted_logo_white_key": patch.get("hosted_logo_white_key"),
+        "hosted_logo_white_url": patch.get("hosted_logo_white_url"),
+        "hosted_logo_white_sha256": patch.get("hosted_logo_white_sha256"),
+        "hosted_logo_white_content_type": patch.get("hosted_logo_white_content_type"),
+        "hosted_logo_white_bytes": patch.get("hosted_logo_white_bytes"),
+        "hosted_logo_white_etag": patch.get("hosted_logo_white_etag"),
+        "hosted_logo_white_at": patch.get("hosted_logo_white_at"),
+        "base_logo_format": admin_show_sync._detect_base_logo_format(  # noqa: SLF001
+            source_url=source_url,
+            content_type=str(content_type or "").strip() or None,
+        ),
+        "mirror_status": "mirrored",
+        "failure_reason": None,
+        "is_primary": bool(set_primary),
+        "metadata": metadata,
+        "updated_at": datetime.now(tz=UTC).isoformat(),
+    }
+    response = (
+        db.schema("admin")
+        .table("brand_logo_assets")
+        .upsert(payload, on_conflict="target_type,target_key,source_url")
+        .execute()
+    )
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Failed to upsert admin.brand_logo_assets row: {response.error}")
+    rows = response.data or []
+    asset_id = str(rows[0].get("id")) if rows and isinstance(rows[0], dict) and rows[0].get("id") else None
+
+    admin_show_sync._upsert_logo_import_audit(  # noqa: SLF001
+        db,
+        target_type=target_type,
+        target_id=target_key.casefold(),
+        target_key=target_key.casefold(),
+        source_type="url",
+        source_url=source_url,
+        uploaded_filename=None,
+        hosted_logo_url=hosted_url,
+        hosted_logo_sha256=sha256,
+        status="imported",
+        failure_reason=None,
+        created_by="admin-scrape",
+    )
+    return "imported", hosted_url, asset_id
+
+
+def _ensure_show_logo_variants_on_media_asset(
+    *,
+    db: SupabaseAdminClient,
+    asset_id: str,
+    hosted_url: str,
+    show_identifier: str,
+) -> None:
+    from trr_backend.media.s3_mirror import get_s3_client, mirror_logo_monochrome_variants_row
+
+    if not hosted_url or not show_identifier:
+        return
+    row = {
+        "id": show_identifier,
+        "hosted_logo_black_url": None,
+        "hosted_logo_white_url": None,
+    }
+    variant = mirror_logo_monochrome_variants_row(
+        row,
+        kind="shows",
+        source_url=hosted_url,
+        force=True,
+        s3_client=get_s3_client(),
+        source="override",
+    )
+    if not variant or not isinstance(variant.patch, dict):
+        return
+    black_url = variant.patch.get("hosted_logo_black_url")
+    white_url = variant.patch.get("hosted_logo_white_url")
+    if not black_url and not white_url:
+        return
+
+    response = db.schema("core").table("media_assets").select("metadata").eq("id", asset_id).limit(1).execute()
+    if hasattr(response, "error") and response.error:
+        logger.warning("Failed to fetch media_asset %s metadata for logo variants: %s", asset_id, response.error)
+        return
+    rows = response.data or []
+    current = rows[0] if rows else {}
+    metadata = dict(current.get("metadata") or {})
+    if black_url:
+        metadata["logo_black_url"] = black_url
+        metadata["hosted_logo_black_url"] = black_url
+    if white_url:
+        metadata["logo_white_url"] = white_url
+        metadata["hosted_logo_white_url"] = white_url
+    update = db.schema("core").table("media_assets").update({"metadata": metadata}).eq("id", asset_id).execute()
+    if hasattr(update, "error") and update.error:
+        logger.warning("Failed to update media_asset %s logo variant metadata: %s", asset_id, update.error)
+
+
 # Endpoints
 
 
@@ -402,8 +776,7 @@ def import_images(
     )
 
     # Extract domain for source naming
-    parsed_source = urlparse(str(request.source_url))
-    source_domain = parsed_source.netloc.replace("www.", "")
+    source_domain = _extract_source_domain(str(request.source_url))
     source = f"web_scrape:{source_domain}"
 
     # Entity-specific setup
@@ -518,6 +891,8 @@ def import_images(
     text_overlay_asset_ids: set[str] = set()
 
     for idx, img in enumerate(request.images):
+        logo_target: tuple[LogoTargetType, str, str, bool] | None = None
+
         # Cast matching - extract filename and try to match
         matched_person: dict | None = None
         match_confidence: float = 0.0
@@ -529,11 +904,62 @@ def import_images(
                     f"Matched '{filename}' to {matched_person['full_name']} (confidence: {match_confidence:.2f})"
                 )
         try:
+            if img.kind == "logo" and _brand_logo_routing_v2_enabled():
+                logo_target = _resolve_logo_target_for_image(
+                    img=img,
+                    request=request,
+                    source_domain=source_domain,
+                )
             # Download image
             image_data, sha256, content_type = download_and_hash_image(
                 str(img.url),
                 referer=str(request.source_url),
             )
+
+            if (
+                img.kind == "logo"
+                and _brand_logo_routing_v2_enabled()
+                and logo_target
+                and logo_target[0] != "show"
+            ):
+                _, routed_url, routed_asset_id = _import_non_show_logo_target(
+                    db=db,
+                    target_type=logo_target[0],
+                    target_key=logo_target[1],
+                    target_label=logo_target[2],
+                    set_primary=logo_target[3],
+                    image_data=image_data,
+                    sha256=sha256,
+                    content_type=content_type,
+                    source_url=str(img.url),
+                    source_page_url=str(request.source_url),
+                    source_domain=source_domain,
+                    metadata={
+                        "page_url": str(request.source_url),
+                        "source_page_url": str(request.source_url),
+                        "source_page_title": page_title,
+                        "page_title": page_title,
+                        "source_created_at": page_published_at,
+                        "candidate_id": img.candidate_id,
+                        "source_logo": img.source_logo,
+                        "asset_name": img.asset_name,
+                        "logo_target_type": logo_target[0],
+                        "logo_target_key": logo_target[1],
+                        "logo_target_label": logo_target[2],
+                        "logo_set_primary": bool(logo_target[3]),
+                    },
+                )
+                imported_count += 1
+                assets.append(
+                    MediaAssetSummary(
+                        id=routed_asset_id or f"brand-logo-{idx}",
+                        hosted_url=routed_url or "",
+                        width=None,
+                        height=None,
+                        caption=img.caption,
+                    )
+                )
+                continue
 
             # Build S3 key based on entity type (used for mirror updates too)
             ext = guess_ext_from_content_type(content_type)
@@ -614,8 +1040,7 @@ def import_images(
                     season_link_ctx["context_section"] = img.context_section
                 if img.context_type:
                     season_link_ctx["context_type"] = img.context_type
-                if img.source_logo:
-                    season_link_ctx["source_logo"] = img.source_logo
+                _augment_logo_context(season_link_ctx, img=img, logo_target=logo_target)
                 if img.asset_name:
                     season_link_ctx["asset_name"] = img.asset_name
                 create_media_link_for_entity(
@@ -658,8 +1083,7 @@ def import_images(
                         person_link_ctx["context_section"] = img.context_section
                     if img.context_type:
                         person_link_ctx["context_type"] = img.context_type
-                    if img.source_logo:
-                        person_link_ctx["source_logo"] = img.source_logo
+                    _augment_logo_context(person_link_ctx, img=img, logo_target=logo_target)
                     if img.asset_name:
                         person_link_ctx["asset_name"] = img.asset_name
                     create_media_link_for_entity(
@@ -691,8 +1115,7 @@ def import_images(
                             person_link_ctx["context_section"] = img.context_section
                         if img.context_type:
                             person_link_ctx["context_type"] = img.context_type
-                        if img.source_logo:
-                            person_link_ctx["source_logo"] = img.source_logo
+                        _augment_logo_context(person_link_ctx, img=img, logo_target=logo_target)
                         if img.asset_name:
                             person_link_ctx["asset_name"] = img.asset_name
                         create_media_link_for_entity(
@@ -724,6 +1147,19 @@ def import_images(
                         existing.get("id"),
                         exc,
                     )
+                if (
+                    img.kind == "logo"
+                    and _brand_logo_routing_v2_enabled()
+                    and logo_target
+                    and logo_target[0] == "show"
+                    and request.entity_type in {"season", "show"}
+                ):
+                    _ensure_show_logo_variants_on_media_asset(
+                        db=db,
+                        asset_id=str(existing["id"]),
+                        hosted_url=str(existing.get("hosted_url") or ""),
+                        show_identifier=str(path_identifier or ""),
+                    )
 
                 assets.append(
                     MediaAssetSummary(
@@ -750,6 +1186,17 @@ def import_images(
             hosted_url = build_hosted_url(s3_key)
 
             # Create media asset record
+            asset_metadata: dict[str, object] = {
+                "page_url": str(request.source_url),
+                "source_page_url": str(request.source_url),
+                "source_page_title": page_title,
+                "page_title": page_title,
+                "source_created_at": page_published_at,
+                "candidate_id": img.candidate_id,
+                "source_logo": img.source_logo,
+                "asset_name": img.asset_name,
+            }
+            _augment_logo_context(asset_metadata, img=img, logo_target=logo_target)
             asset = create_media_asset_from_scrape(
                 db,
                 source=source,
@@ -764,16 +1211,7 @@ def import_images(
                 width=None,  # Could extract with PIL if needed
                 height=None,
                 caption=img.caption,
-                metadata={
-                    "page_url": str(request.source_url),
-                    "source_page_url": str(request.source_url),
-                    "source_page_title": page_title,
-                    "page_title": page_title,
-                    "source_created_at": page_published_at,
-                    "candidate_id": img.candidate_id,
-                    "source_logo": img.source_logo,
-                    "asset_name": img.asset_name,
-                },
+                metadata=asset_metadata,
             )
 
             # Create media link to entity
@@ -792,8 +1230,7 @@ def import_images(
                 season_link_ctx["context_section"] = img.context_section
             if img.context_type:
                 season_link_ctx["context_type"] = img.context_type
-            if img.source_logo:
-                season_link_ctx["source_logo"] = img.source_logo
+            _augment_logo_context(season_link_ctx, img=img, logo_target=logo_target)
             if img.asset_name:
                 season_link_ctx["asset_name"] = img.asset_name
             create_media_link_for_entity(
@@ -836,8 +1273,7 @@ def import_images(
                     person_link_ctx["context_section"] = img.context_section
                 if img.context_type:
                     person_link_ctx["context_type"] = img.context_type
-                if img.source_logo:
-                    person_link_ctx["source_logo"] = img.source_logo
+                _augment_logo_context(person_link_ctx, img=img, logo_target=logo_target)
                 if img.asset_name:
                     person_link_ctx["asset_name"] = img.asset_name
                 create_media_link_for_entity(
@@ -869,8 +1305,7 @@ def import_images(
                         person_link_ctx["context_section"] = img.context_section
                     if img.context_type:
                         person_link_ctx["context_type"] = img.context_type
-                    if img.source_logo:
-                        person_link_ctx["source_logo"] = img.source_logo
+                    _augment_logo_context(person_link_ctx, img=img, logo_target=logo_target)
                     if img.asset_name:
                         person_link_ctx["asset_name"] = img.asset_name
                     create_media_link_for_entity(
@@ -902,6 +1337,19 @@ def import_images(
                     "Variant generation failed for media_asset %s: %s",
                     asset.get("id"),
                     exc,
+                )
+            if (
+                img.kind == "logo"
+                and _brand_logo_routing_v2_enabled()
+                and logo_target
+                and logo_target[0] == "show"
+                and request.entity_type in {"season", "show"}
+            ):
+                _ensure_show_logo_variants_on_media_asset(
+                    db=db,
+                    asset_id=str(asset["id"]),
+                    hosted_url=hosted_url,
+                    show_identifier=str(path_identifier or ""),
                 )
 
             imported_count += 1
@@ -1036,8 +1484,7 @@ async def import_images_stream(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Extract domain for source naming
-        parsed_source = urlparse(str(request.source_url))
-        source_domain = parsed_source.netloc.replace("www.", "")
+        source_domain = _extract_source_domain(str(request.source_url))
         source = f"web_scrape:{source_domain}"
 
         # Entity-specific setup
@@ -1150,6 +1597,7 @@ async def import_images_stream(
         for idx, img in enumerate(request.images):
             current = idx + 1
             img_url = str(img.url)
+            logo_target: tuple[LogoTargetType, str, str, bool] | None = None
 
             # Cast matching - extract filename and try to match
             matched_person: dict | None = None
@@ -1168,11 +1616,74 @@ async def import_images_stream(
             yield f"event: progress\ndata: {json.dumps(progress_data)}\n\n"
 
             try:
+                if img.kind == "logo" and _brand_logo_routing_v2_enabled():
+                    logo_target = _resolve_logo_target_for_image(
+                        img=img,
+                        request=request,
+                        source_domain=source_domain,
+                    )
                 # Download image
                 image_data, sha256, content_type = download_and_hash_image(
                     img_url,
                     referer=str(request.source_url),
                 )
+
+                if (
+                    img.kind == "logo"
+                    and _brand_logo_routing_v2_enabled()
+                    and logo_target
+                    and logo_target[0] != "show"
+                ):
+                    _, routed_url, routed_asset_id = _import_non_show_logo_target(
+                        db=db,
+                        target_type=logo_target[0],
+                        target_key=logo_target[1],
+                        target_label=logo_target[2],
+                        set_primary=logo_target[3],
+                        image_data=image_data,
+                        sha256=sha256,
+                        content_type=content_type,
+                        source_url=img_url,
+                        source_page_url=str(request.source_url),
+                        source_domain=source_domain,
+                        metadata={
+                            "page_url": str(request.source_url),
+                            "source_page_url": str(request.source_url),
+                            "source_page_title": page_title,
+                            "page_title": page_title,
+                            "source_created_at": page_published_at,
+                            "candidate_id": img.candidate_id,
+                            "source_logo": img.source_logo,
+                            "asset_name": img.asset_name,
+                            "logo_target_type": logo_target[0],
+                            "logo_target_key": logo_target[1],
+                            "logo_target_label": logo_target[2],
+                            "logo_set_primary": bool(logo_target[3]),
+                        },
+                    )
+                    imported_count += 1
+                    assets.append(
+                        {
+                            "id": routed_asset_id or f"brand-logo-{idx}",
+                            "hosted_url": routed_url or "",
+                            "width": None,
+                            "height": None,
+                            "caption": img.caption,
+                            "matched_person_id": None,
+                            "matched_person_name": None,
+                            "match_confidence": None,
+                        }
+                    )
+                    imported_data = {
+                        "current": current,
+                        "total": total,
+                        "url": img_url,
+                        "asset_id": routed_asset_id,
+                        "status": "success",
+                        "matched_person_id": None,
+                    }
+                    yield f"event: imported\ndata: {json.dumps(imported_data)}\n\n"
+                    continue
 
                 # Build S3 key based on entity type (used for mirror updates too)
                 ext = guess_ext_from_content_type(content_type)
@@ -1256,8 +1767,7 @@ async def import_images_stream(
                         season_link_ctx["context_section"] = img.context_section
                     if img.context_type:
                         season_link_ctx["context_type"] = img.context_type
-                    if img.source_logo:
-                        season_link_ctx["source_logo"] = img.source_logo
+                    _augment_logo_context(season_link_ctx, img=img, logo_target=logo_target)
                     if img.asset_name:
                         season_link_ctx["asset_name"] = img.asset_name
                     create_media_link_for_entity(
@@ -1300,8 +1810,7 @@ async def import_images_stream(
                             person_link_ctx["context_section"] = img.context_section
                         if img.context_type:
                             person_link_ctx["context_type"] = img.context_type
-                        if img.source_logo:
-                            person_link_ctx["source_logo"] = img.source_logo
+                        _augment_logo_context(person_link_ctx, img=img, logo_target=logo_target)
                         if img.asset_name:
                             person_link_ctx["asset_name"] = img.asset_name
                         create_media_link_for_entity(
@@ -1333,8 +1842,7 @@ async def import_images_stream(
                                 person_link_ctx["context_section"] = img.context_section
                             if img.context_type:
                                 person_link_ctx["context_type"] = img.context_type
-                            if img.source_logo:
-                                person_link_ctx["source_logo"] = img.source_logo
+                            _augment_logo_context(person_link_ctx, img=img, logo_target=logo_target)
                             if img.asset_name:
                                 person_link_ctx["asset_name"] = img.asset_name
                             create_media_link_for_entity(
@@ -1379,6 +1887,19 @@ async def import_images_stream(
                             existing.get("id"),
                             exc,
                         )
+                    if (
+                        img.kind == "logo"
+                        and _brand_logo_routing_v2_enabled()
+                        and logo_target
+                        and logo_target[0] == "show"
+                        and request.entity_type in {"season", "show"}
+                    ):
+                        _ensure_show_logo_variants_on_media_asset(
+                            db=db,
+                            asset_id=str(existing["id"]),
+                            hosted_url=str(existing.get("hosted_url") or ""),
+                            show_identifier=str(path_identifier or ""),
+                        )
 
                     skipped_data = {
                         "current": current,
@@ -1402,6 +1923,17 @@ async def import_images_stream(
                 hosted_url = build_hosted_url(s3_key)
 
                 # Create media asset record
+                asset_metadata: dict[str, object] = {
+                    "page_url": str(request.source_url),
+                    "source_page_url": str(request.source_url),
+                    "source_page_title": page_title,
+                    "page_title": page_title,
+                    "source_created_at": page_published_at,
+                    "candidate_id": img.candidate_id,
+                    "source_logo": img.source_logo,
+                    "asset_name": img.asset_name,
+                }
+                _augment_logo_context(asset_metadata, img=img, logo_target=logo_target)
                 asset = create_media_asset_from_scrape(
                     db,
                     source=source,
@@ -1416,16 +1948,7 @@ async def import_images_stream(
                     width=None,
                     height=None,
                     caption=img.caption,
-                    metadata={
-                        "page_url": str(request.source_url),
-                        "source_page_url": str(request.source_url),
-                        "source_page_title": page_title,
-                        "page_title": page_title,
-                        "source_created_at": page_published_at,
-                        "candidate_id": img.candidate_id,
-                        "source_logo": img.source_logo,
-                        "asset_name": img.asset_name,
-                    },
+                    metadata=asset_metadata,
                 )
 
                 # Create media link to entity
@@ -1444,8 +1967,7 @@ async def import_images_stream(
                     season_link_ctx["context_section"] = img.context_section
                 if img.context_type:
                     season_link_ctx["context_type"] = img.context_type
-                if img.source_logo:
-                    season_link_ctx["source_logo"] = img.source_logo
+                _augment_logo_context(season_link_ctx, img=img, logo_target=logo_target)
                 if img.asset_name:
                     season_link_ctx["asset_name"] = img.asset_name
                 create_media_link_for_entity(
@@ -1488,8 +2010,7 @@ async def import_images_stream(
                         person_link_ctx["context_section"] = img.context_section
                     if img.context_type:
                         person_link_ctx["context_type"] = img.context_type
-                    if img.source_logo:
-                        person_link_ctx["source_logo"] = img.source_logo
+                    _augment_logo_context(person_link_ctx, img=img, logo_target=logo_target)
                     if img.asset_name:
                         person_link_ctx["asset_name"] = img.asset_name
                     create_media_link_for_entity(
@@ -1521,8 +2042,7 @@ async def import_images_stream(
                             person_link_ctx["context_section"] = img.context_section
                         if img.context_type:
                             person_link_ctx["context_type"] = img.context_type
-                        if img.source_logo:
-                            person_link_ctx["source_logo"] = img.source_logo
+                        _augment_logo_context(person_link_ctx, img=img, logo_target=logo_target)
                         if img.asset_name:
                             person_link_ctx["asset_name"] = img.asset_name
                         create_media_link_for_entity(
@@ -1554,6 +2074,19 @@ async def import_images_stream(
                         "Variant generation failed for media_asset %s: %s",
                         asset.get("id"),
                         exc,
+                    )
+                if (
+                    img.kind == "logo"
+                    and _brand_logo_routing_v2_enabled()
+                    and logo_target
+                    and logo_target[0] == "show"
+                    and request.entity_type in {"season", "show"}
+                ):
+                    _ensure_show_logo_variants_on_media_asset(
+                        db=db,
+                        asset_id=str(asset["id"]),
+                        hosted_url=hosted_url,
+                        show_identifier=str(path_identifier or ""),
                     )
 
                 imported_count += 1

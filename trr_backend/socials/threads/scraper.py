@@ -20,6 +20,11 @@ from urllib3.util.retry import Retry
 logger = logging.getLogger(__name__)
 
 _POST_URL_RE = re.compile(r"https://(?:www\.)?threads\.com/@([A-Za-z0-9._]+)/post/([A-Za-z0-9_-]+)", re.IGNORECASE)
+_POST_CODE_IN_URL_RE = re.compile(
+    r"(?:https?://(?:www\.)?threads\.com)?(?:/@[A-Za-z0-9._]+)?/post/([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
+_THREADS_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{4,80}$")
 _OG_URL_RE = re.compile(r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)
 _OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)
 _OG_DESC_RE = re.compile(
@@ -35,11 +40,16 @@ _LIKES_RE = re.compile(r'"like_count"\s*:\s*([0-9]+)')
 _REPLIES_RE = re.compile(r'"reply_count"\s*:\s*([0-9]+)')
 _REPOSTS_RE = re.compile(r'"repost_count"\s*:\s*([0-9]+)')
 _QUOTES_RE = re.compile(r'"quote_count"\s*:\s*([0-9]+)')
+_PROFILE_PIC_URL_RE = re.compile(r'"(?:profile_pic_url|profilePicUrl|profile_image_url)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_HD_PROFILE_PIC_URL_RE = re.compile(
+    r'"hd_profile_pic_url_info"\s*:\s*\{[^{}]*?"url"\s*:\s*"((?:[^"\\]|\\.)*)"',
+)
 
 # Threads GraphQL API constants
 _THREADS_GRAPHQL_URL = "https://www.threads.com/graphql/query"
 _THREADS_IG_APP_ID = "238260118697367"
 _THREADS_PROFILE_POSTS_DOC_ID = "25806288305730982"
+_THREADS_POST_VIEW_COUNT_DOC_ID = "25038761902481747"
 _THREADS_DEFAULT_PAGE_SIZE = 12
 
 # Relay internal provider flags required by the GraphQL query
@@ -76,7 +86,10 @@ _RELAY_PROVIDER_DEFAULTS: dict[str, bool] = {
 # Regex patterns for extracting tokens from Threads page HTML
 _DTSG_RE = re.compile(r'"DTSGInitialData"[^}]*?"token"\s*:\s*"([^"]+)"')
 _LSD_RE = re.compile(r'"LSD"[^}]*?"token"\s*:\s*"([^"]+)"')
-_USER_ID_RE = re.compile(r'BarcelonaProfileThreadsTabDirectQueryRelayPreloader[^"]*","queryID":"(\d+)","variables":\{"[^"]*"[^}]*"userID"\s*:\s*"(\d+)"')
+_USER_ID_RE = re.compile(
+    r'BarcelonaProfileThreadsTabDirectQueryRelayPreloader[^"]*",'
+    r'"queryID":"(\d+)","variables":\{"[^"]*"[^}]*"userID"\s*:\s*"(\d+)"'
+)
 _USER_ID_SIMPLE_RE = re.compile(r'"userID"\s*:\s*"(\d+)"')
 _JAZOEST_RE = re.compile(r"jazoest[=:](\d+)")
 
@@ -117,7 +130,9 @@ class ThreadsComment:
     is_reply: bool = True
     reply_count: int = 0
     parent_source_comment_id: str | None = None
+    interaction_type: str = "reply"
     media_urls: list[str] = field(default_factory=list)
+    raw_data: dict[str, Any] = field(default_factory=dict)
     replies: list[ThreadsComment] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -133,6 +148,7 @@ class ThreadsPost:
     text: str
     media_urls: list[str]
     thumbnail_url: str | None
+    user_avatar_url: str | None = None
     likes: int = 0
     replies: int = 0
     reposts: int = 0
@@ -164,6 +180,7 @@ class ThreadsScraper:
         self.session = self._create_session()
         self.last_retrieval_meta: dict[str, Any] = {}
         self.last_comment_fetch_reason: str | None = None
+        self.last_comment_fetch_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self._request_count = 0
         self._page_tokens: _PageTokens | None = None
@@ -200,7 +217,10 @@ class ThreadsScraper:
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
             "sec-ch-ua-platform-version": '"26.4.0"',
-            "sec-ch-ua-full-version-list": '"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.117", "Chromium";v="145.0.7632.117"',
+            "sec-ch-ua-full-version-list": (
+                '"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.117", '
+                '"Chromium";v="145.0.7632.117"'
+            ),
             "sec-ch-ua-model": '""',
             "sec-ch-prefers-color-scheme": "light",
         }
@@ -229,7 +249,11 @@ class ThreadsScraper:
                 "content-type": "application/x-www-form-urlencoded",
                 "x-ig-app-id": _THREADS_IG_APP_ID,
                 "x-fb-lsd": tokens.lsd,
-                "x-csrftoken": tokens.fb_dtsg.split(":")[0] if ":" in tokens.fb_dtsg else self.cookies.get("csrftoken", ""),
+                "x-csrftoken": (
+                    tokens.fb_dtsg.split(":")[0]
+                    if ":" in tokens.fb_dtsg
+                    else self.cookies.get("csrftoken", "")
+                ),
                 "x-fb-friendly-name": "BarcelonaProfileThreadsTabDirectQuery",
             }
         )
@@ -242,6 +266,13 @@ class ThreadsScraper:
         if self._request_count > 0 and delay_seconds > 0:
             time.sleep(delay_seconds)
         self._request_count += 1
+
+    @staticmethod
+    def _normalize_post_limit(max_pages: int | None) -> int | None:
+        if max_pages is None:
+            return None
+        normalized = int(max_pages)
+        return None if normalized <= 0 else normalized
 
     def _fetch_html(
         self,
@@ -378,6 +409,50 @@ class ThreadsScraper:
 
         return edges, next_cursor, has_next
 
+    @staticmethod
+    def _normalize_count(value: Any) -> int:
+        """Normalize count payloads from GraphQL to non-negative integers."""
+        if value is None or isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return max(0, value)
+        raw = str(value).strip().replace(",", "")
+        if not raw:
+            return 0
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+
+    def _fetch_post_view_count(
+        self,
+        *,
+        tokens: _PageTokens,
+        post_pk: str,
+        referer: str | None = None,
+        delay_seconds: float = 1.0,
+    ) -> int | None:
+        """Fetch post views (impression_count) from Threads post-activity GraphQL query."""
+        if not post_pk:
+            return None
+        try:
+            result = self._graphql_query(
+                tokens=tokens,
+                doc_id=_THREADS_POST_VIEW_COUNT_DOC_ID,
+                variables={"postID": str(post_pk)},
+                friendly_name="BarcelonaPostViewCountQuery",
+                referer=referer,
+                delay_seconds=delay_seconds,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("[threads] failed to fetch post view count for pk=%s", post_pk, exc_info=True)
+            return None
+
+        media = ((result.get("data") or {}).get("media") or {}) if isinstance(result, dict) else {}
+        text_post_app_info = media.get("text_post_app_info") or {}
+        impression_count = self._normalize_count(text_post_app_info.get("impression_count"))
+        return impression_count
+
     # ------------------------------------------------------------------
     # Post parsing (GraphQL response → ThreadsPost)
     # ------------------------------------------------------------------
@@ -461,8 +536,22 @@ class ThreadsScraper:
         code = str(post_data.get("code") or "")
         post_user = post_data.get("user") or {}
         post_username = str(post_user.get("username") or username)
+        user_avatar_url = (
+            str(
+                post_user.get("profile_pic_url")
+                or post_user.get("profilePicUrl")
+                or (post_user.get("hd_profile_pic_url_info") or {}).get("url")
+                or post_user.get("profile_image_url")
+                or ""
+            ).strip()
+            or None
+        )
 
         tpa = post_data.get("text_post_app_info") or {}
+        tag_header = (tpa.get("tag_header") or {}) if isinstance(tpa, dict) else {}
+        topic_display = str(tag_header.get("display_name") or "").strip()
+        topic_cluster = str(tag_header.get("tag_cluster_name") or "").strip()
+        impression_count = self._normalize_count(tpa.get("impression_count"))
 
         # Debug: log raw metrics from API
         logger.info(
@@ -494,11 +583,12 @@ class ThreadsScraper:
             text=text,
             media_urls=media_urls,
             thumbnail_url=thumbnail_url,
+            user_avatar_url=user_avatar_url,
             likes=int(post_data.get("like_count") or 0),
             replies=int(tpa.get("direct_reply_count") or 0),
             reposts=int(tpa.get("repost_count") or 0),
             quotes=int(tpa.get("quote_count") or 0),
-            views=0,
+            views=impression_count,
             posted_at=posted_at,
             url=post_url,
             raw_data={
@@ -507,9 +597,21 @@ class ThreadsScraper:
                 "media_type": post_data.get("media_type"),
                 "is_verified": post_user.get("is_verified"),
                 "full_name": post_user.get("full_name"),
+                "user_avatar_url": user_avatar_url,
                 "reshare_count": int(tpa.get("reshare_count") or 0),
                 "is_reply": tpa.get("is_reply", False),
                 "reply_control": tpa.get("reply_control"),
+                "topic": topic_display or None,
+                "topic_cluster_name": topic_cluster or None,
+                "tag_header": tag_header if tag_header else None,
+                "text_post_app_info": (
+                    {
+                        "tag_header": tag_header if tag_header else None,
+                        "impression_count": impression_count if impression_count > 0 else None,
+                    }
+                    if tag_header or impression_count > 0
+                    else None
+                ),
                 "source": "threads_graphql_api",
             },
         )
@@ -558,6 +660,17 @@ class ThreadsScraper:
             seen.add(url)
             urls.append(url)
         return urls
+
+    @staticmethod
+    def _extract_post_pk_from_html(html_text: str) -> str | None:
+        """Extract numeric post pk from a post page payload."""
+        pk_match = re.search(r'"post_id"\s*:\s*"(\d+)"', html_text)
+        if pk_match:
+            return pk_match.group(1)
+        pk_match2 = re.search(r'"pk"\s*:\s*"(\d{15,})"', html_text)
+        if pk_match2:
+            return pk_match2.group(1)
+        return None
 
     @staticmethod
     def _playwright_discovery_enabled() -> bool:
@@ -659,12 +772,28 @@ class ThreadsScraper:
         reposts = self._to_int(self._first_group(_REPOSTS_RE, html_text))
         quotes = self._to_int(self._first_group(_QUOTES_RE, html_text))
         media_urls = [image_url] if image_url else []
+        user_avatar_url = None
+        for pattern in (_HD_PROFILE_PIC_URL_RE, _PROFILE_PIC_URL_RE):
+            match = pattern.search(html_text)
+            if not match:
+                continue
+            raw_value = str(match.group(1) or "").strip()
+            if not raw_value:
+                continue
+            try:
+                candidate = str(json.loads(f'"{raw_value}"') or "").strip()
+            except Exception:  # noqa: BLE001
+                candidate = raw_value.replace("\\/", "/").strip()
+            if candidate.startswith(("http://", "https://")):
+                user_avatar_url = candidate
+                break
         return ThreadsPost(
             post_id=post_id,
             username=username,
             text=text,
             media_urls=media_urls,
             thumbnail_url=image_url or None,
+            user_avatar_url=user_avatar_url,
             likes=likes,
             replies=replies_count,
             reposts=reposts,
@@ -677,8 +806,72 @@ class ThreadsScraper:
                 "og_description": desc,
                 "published_time": published_iso or None,
                 "source": "public_meta_fallback",
+                "user_avatar_url": user_avatar_url,
             },
         )
+
+    def scrape_post(
+        self,
+        post_url: str,
+        *,
+        delay_seconds: float = 1.0,
+        fetch_comment_list: bool = False,
+        max_comments: int = 100,
+    ) -> tuple[ThreadsPost | None, list[ThreadsComment]]:
+        """Scrape a single Threads post URL for metadata and optional comments."""
+        normalized_url = str(post_url or "").strip()
+        if not normalized_url:
+            return None, []
+
+        try:
+            html_text = self._fetch_html(normalized_url, delay_seconds=delay_seconds, document=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[threads] scrape_post failed for %s: %s", normalized_url, exc)
+            return None, []
+
+        match = _POST_URL_RE.search(normalized_url)
+        username = match.group(1) if match else ""
+        if not username:
+            og_url = self._first_group(_OG_URL_RE, html_text) or normalized_url
+            og_match = _POST_URL_RE.search(og_url)
+            if og_match:
+                username = og_match.group(1)
+            elif "/@" in og_url:
+                parsed = urlparse(og_url)
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) >= 2 and parts[0].startswith("@"):
+                    username = parts[0].lstrip("@")
+
+        post = self._build_post_from_html(url=normalized_url, html_text=html_text, username=username or "unknown")
+        if post and post.views <= 0:
+            tokens = self._extract_page_tokens(html_text)
+            post_pk = self._extract_post_pk_from_html(html_text)
+            if tokens and post_pk:
+                view_count = self._fetch_post_view_count(
+                    tokens=tokens,
+                    post_pk=post_pk,
+                    referer=normalized_url,
+                    delay_seconds=delay_seconds,
+                )
+                if view_count is not None:
+                    post.views = view_count
+                    text_post_app_info = post.raw_data.get("text_post_app_info")
+                    if isinstance(text_post_app_info, dict):
+                        text_post_app_info["impression_count"] = view_count
+                    else:
+                        post.raw_data["text_post_app_info"] = {"impression_count": view_count}
+        comments: list[ThreadsComment] = []
+        if fetch_comment_list:
+            try:
+                comments = self.fetch_comments(
+                    normalized_url,
+                    max_comments=max_comments,
+                    fetch_replies=True,
+                    delay_seconds=delay_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[threads] scrape_post comments failed for %s: %s", normalized_url, exc)
+        return post, comments
 
     # ------------------------------------------------------------------
     # Main scrape entry point
@@ -705,7 +898,7 @@ class ThreadsScraper:
 
         self._page_tokens = tokens
         username = config.normalized_username
-        max_post_limit = max(1, int(config.max_pages or 1)) * 100
+        max_post_limit = self._normalize_post_limit(config.max_pages)
 
         posts: list[ThreadsPost] = []
         seen_ids: set[str] = set()
@@ -754,6 +947,24 @@ class ThreadsScraper:
                 if not config.in_date_window(posted_dt):
                     continue
 
+                # Threads view counts are exposed in the post-activity query,
+                # separate from profile feed payloads.
+                post_pk = str((post.raw_data or {}).get("pk") or "")
+                if post.views <= 0 and post_pk:
+                    view_count = self._fetch_post_view_count(
+                        tokens=tokens,
+                        post_pk=post_pk,
+                        referer=post.url or profile_url,
+                        delay_seconds=config.delay_seconds,
+                    )
+                    if view_count is not None:
+                        post.views = view_count
+                        text_post_app_info = post.raw_data.get("text_post_app_info")
+                        if isinstance(text_post_app_info, dict):
+                            text_post_app_info["impression_count"] = view_count
+                        else:
+                            post.raw_data["text_post_app_info"] = {"impression_count": view_count}
+
                 seen_ids.add(post.post_id)
                 matched_posts += 1
                 posts.append(post)
@@ -768,7 +979,7 @@ class ThreadsScraper:
                         }
                     )
 
-                if matched_posts >= max_post_limit:
+                if max_post_limit is not None and matched_posts >= max_post_limit:
                     stop_pagination = True
                     break
 
@@ -852,8 +1063,10 @@ class ThreadsScraper:
                         "matched_posts": matched_posts,
                     }
                 )
-            if config.max_pages is not None and matched_posts >= max(1, int(config.max_pages)) * 100:
-                break
+            max_post_limit = self._normalize_post_limit(config.max_pages)
+            if max_post_limit is not None:
+                if matched_posts >= max_post_limit:
+                    break
 
         self.last_retrieval_meta = {
             "source": source,
@@ -917,6 +1130,7 @@ class ThreadsScraper:
         *,
         max_comments: int = 0,
         fetch_replies: bool = True,
+        fetch_quotes: bool = True,
         delay_seconds: float = 1.0,
     ) -> list[ThreadsComment]:
         """Fetch comments/replies for a Threads post via the Instagram REST API.
@@ -928,6 +1142,7 @@ class ThreadsScraper:
         the numeric pk first.
         """
         self.last_comment_fetch_reason = None
+        self.last_comment_fetch_meta = {}
         self.comments_auth_failed = not bool(self.cookies)
 
         if max_comments == 0:
@@ -963,6 +1178,8 @@ class ThreadsScraper:
                 self.last_comment_fetch_reason = "threads_replies_page_error"
                 break
 
+            if not fetch_replies:
+                batch = [item for item in batch if not str(item.parent_source_comment_id or "").strip()]
             comments.extend(batch)
             logger.debug(
                 "[threads] replies page %d: %d new (%d total) for pk=%s",
@@ -972,11 +1189,55 @@ class ThreadsScraper:
             if not has_more or not paging_token:
                 break
 
+        quote_count = 0
+        quote_pages = 0
+        quote_reason: str | None = None
+        if fetch_quotes and len(comments) < max_comments:
+            quote_token: str | None = None
+            has_more_quotes = True
+            while len(comments) < max_comments and quote_pages < max_pages and has_more_quotes:
+                quote_pages += 1
+                self._rate_limit(delay_seconds)
+                try:
+                    batch, quote_token, has_more_quotes = self._fetch_quotes_page(post_pk, paging_token=quote_token)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "[threads] quotes page %d unavailable for pk=%s: %s",
+                        quote_pages,
+                        post_pk,
+                        exc,
+                    )
+                    quote_reason = "threads_quotes_fetch_unavailable"
+                    break
+                comments.extend(batch)
+                quote_count += len(batch)
+                if not has_more_quotes or not quote_token:
+                    break
+
         # Trim to max_comments
         if len(comments) > max_comments:
             comments = comments[:max_comments]
 
-        self.last_comment_fetch_reason = "threads_replies_ok" if comments else "threads_no_replies"
+        reply_count = len([comment for comment in comments if comment.interaction_type != "quote"])
+        quote_count = len([comment for comment in comments if comment.interaction_type == "quote"])
+        self.last_comment_fetch_meta = {
+            "post_pk": post_pk,
+            "max_comments": max_comments,
+            "fetch_replies": bool(fetch_replies),
+            "fetch_quotes": bool(fetch_quotes),
+            "reply_count": reply_count,
+            "quote_count": quote_count,
+            "quote_fetch_reason": quote_reason,
+        }
+        if comments:
+            if quote_count > 0:
+                self.last_comment_fetch_reason = "threads_replies_quotes_ok"
+            else:
+                self.last_comment_fetch_reason = "threads_replies_ok"
+        elif quote_reason:
+            self.last_comment_fetch_reason = quote_reason
+        else:
+            self.last_comment_fetch_reason = "threads_no_replies"
         return comments
 
     def _resolve_post_pk(self, post_url_or_id: str, *, delay_seconds: float) -> str | None:
@@ -989,30 +1250,67 @@ class ThreadsScraper:
         if raw.isdigit() and len(raw) >= 10:
             return raw
 
-        # URL — fetch the post page and extract pk from preloader data
-        if raw.startswith("http"):
-            target_url = raw
-        else:
-            # Assume shortcode
-            target_url = f"{self.BASE_URL}/post/{raw}"
+        candidate_urls: list[str] = []
+        seen_urls: set[str] = set()
 
-        try:
-            self._rate_limit(delay_seconds)
-            html_text = self._fetch_html(target_url, delay_seconds=0, document=True)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[threads] failed to fetch post page %s: %s", target_url, exc)
+        def _add_url(value: str) -> None:
+            normalized = str(value or "").strip()
+            if not normalized:
+                return
+            if normalized.startswith("http://"):
+                normalized = f"https://{normalized[len('http://'):]}"
+            if normalized.startswith("/"):
+                normalized = f"{self.BASE_URL}{normalized}"
+            if normalized in seen_urls:
+                return
+            seen_urls.add(normalized)
+            candidate_urls.append(normalized)
+
+        code = self._extract_post_code(raw)
+        if raw.startswith("http"):
+            _add_url(raw)
+        if code:
+            _add_url(f"{self.BASE_URL}/post/{code}")
+
+        if not candidate_urls:
+            logger.warning("[threads] could not resolve candidate URLs for pk from %s", raw)
             return None
 
-        pk_match = re.search(r'"post_id"\s*:\s*"(\d+)"', html_text)
-        if pk_match:
-            return pk_match.group(1)
+        for target_url in candidate_urls:
+            try:
+                self._rate_limit(delay_seconds)
+                html_text = self._fetch_html(target_url, delay_seconds=0, document=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[threads] failed to fetch post page %s: %s", target_url, exc)
+                continue
 
-        # Fallback: look for pk in preloader
-        pk_match2 = re.search(r'"pk"\s*:\s*"(\d{15,})"', html_text)
-        if pk_match2:
-            return pk_match2.group(1)
+            post_pk = self._extract_post_pk_from_html(html_text)
+            if post_pk:
+                return post_pk
 
-        logger.warning("[threads] could not resolve pk from %s", target_url)
+        logger.warning("[threads] could not resolve pk from %s", raw)
+        return None
+
+    @staticmethod
+    def _extract_post_code(post_url_or_id: str) -> str | None:
+        raw = str(post_url_or_id or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("http"):
+            match = _POST_CODE_IN_URL_RE.search(raw)
+            if match:
+                return str(match.group(1) or "").strip() or None
+            return None
+        if "threads.com" in raw and "/post/" in raw:
+            match = _POST_CODE_IN_URL_RE.search(raw)
+            if match:
+                return str(match.group(1) or "").strip() or None
+        if raw.startswith("@") and "/post/" in raw:
+            match = re.search(r"/post/([A-Za-z0-9_-]+)", raw)
+            if match:
+                return str(match.group(1) or "").strip() or None
+        if _THREADS_CODE_RE.fullmatch(raw):
+            return raw
         return None
 
     def _fetch_replies_page(
@@ -1055,8 +1353,58 @@ class ThreadsScraper:
         has_more = bool(data.get("downwards_thread_will_continue", False))
         return comments, next_token, has_more
 
+    def _fetch_quotes_page(
+        self,
+        post_pk: str,
+        *,
+        paging_token: str | None = None,
+    ) -> tuple[list[ThreadsComment], str | None, bool]:
+        """Best-effort quote interaction fetch; falls back gracefully when unavailable."""
+        headers = {
+            "user-agent": self._MOBILE_USER_AGENT,
+            "x-ig-app-id": _THREADS_IG_APP_ID,
+            "x-csrftoken": self.cookies.get("csrftoken", ""),
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+        }
+        base_urls = [
+            f"https://i.instagram.com/api/v1/text_feed/{post_pk}/quoted_posts/",
+            f"https://i.instagram.com/api/v1/text_feed/{post_pk}/quotes/",
+        ]
+
+        last_exc: Exception | None = None
+        for base_url in base_urls:
+            url = f"{base_url}?paging_token={paging_token}" if paging_token else base_url
+            try:
+                resp = self.session.get(url, headers=headers, cookies=self.cookies, timeout=(10, 45))
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                continue
+            if data.get("status") != "ok":
+                last_exc = RuntimeError(f"quote feed API error: {data.get('status')}")
+                continue
+            comments: list[ThreadsComment] = []
+            for thread in data.get("reply_threads", []):
+                for item in thread.get("thread_items", []):
+                    comment = self._parse_reply_item(item, force_interaction_type="quote")
+                    if comment:
+                        comments.append(comment)
+            next_token = (data.get("paging_tokens") or {}).get("downwards")
+            has_more = bool(data.get("downwards_thread_will_continue", False))
+            return comments, next_token, has_more
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("quote_feed_unavailable")
+
     @staticmethod
-    def _parse_reply_item(item: dict[str, Any]) -> ThreadsComment | None:
+    def _parse_reply_item(
+        item: dict[str, Any],
+        *,
+        force_interaction_type: str | None = None,
+    ) -> ThreadsComment | None:
         """Parse a single thread_item from the text_feed replies response."""
         post = item.get("post")
         if not post:
@@ -1070,6 +1418,7 @@ class ThreadsScraper:
         caption = post.get("caption") or {}
         tpai = post.get("text_post_app_info") or {}
         reply_to = item.get("reply_to_author") or {}
+        interaction_type = force_interaction_type or ThreadsScraper._classify_interaction_type(item=item, post=post)
 
         # Extract media URLs from image_versions2/video_versions
         media_urls: list[str] = []
@@ -1091,8 +1440,46 @@ class ThreadsScraper:
             text=caption.get("text", ""),
             likes=int(post.get("like_count", 0)),
             created_at=post.get("taken_at"),
-            is_reply=True,
+            is_reply=interaction_type != "quote",
             reply_count=int(tpai.get("direct_reply_count", 0)),
-            parent_source_comment_id=reply_to.get("username"),
+            parent_source_comment_id=(
+                str(reply_to.get("pk") or reply_to.get("id") or reply_to.get("username") or "").strip() or None
+            ),
+            interaction_type=interaction_type,
             media_urls=media_urls,
+            raw_data={
+                "interaction_type": interaction_type,
+                "is_quote": interaction_type == "quote",
+                "is_reply": interaction_type != "quote",
+                "reply_to_author": reply_to if isinstance(reply_to, dict) else None,
+            },
         )
+
+    @staticmethod
+    def _classify_interaction_type(*, item: dict[str, Any], post: dict[str, Any]) -> str:
+        tpai = post.get("text_post_app_info") if isinstance(post.get("text_post_app_info"), dict) else {}
+        candidates = [
+            item.get("interaction_type"),
+            item.get("type"),
+            tpai.get("interaction_type"),
+            post.get("interaction_type"),
+        ]
+        for raw_value in candidates:
+            normalized = str(raw_value or "").strip().lower()
+            if normalized in {"quote", "quoted", "quoted_post", "reshare_quote"}:
+                return "quote"
+            if normalized in {"reply", "comment"}:
+                return "reply"
+        quote_markers = [
+            item.get("is_quote"),
+            item.get("is_quote_post"),
+            tpai.get("is_quote"),
+            tpai.get("is_quote_post"),
+            post.get("is_quote"),
+            post.get("is_quote_post"),
+            bool(item.get("quote_post")),
+            bool(item.get("quoted_post")),
+        ]
+        if any(bool(marker) for marker in quote_markers):
+            return "quote"
+        return "reply"

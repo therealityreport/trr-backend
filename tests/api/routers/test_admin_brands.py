@@ -32,8 +32,23 @@ def test_admin_brands_endpoints_require_authentication(client: TestClient) -> No
     endpoints = [
         ("GET", "/api/v1/admin/brands/shows-franchises"),
         ("GET", "/api/v1/admin/brands/franchise-rules"),
+        ("GET", "/api/v1/admin/brands/families"),
+        ("GET", "/api/v1/admin/brands/families/suggestions"),
+        ("GET", "/api/v1/admin/brands/families/by-entity?entity_type=network&entity_key=bravo"),
+        ("GET", "/api/v1/admin/brands/families/f1/links"),
+        ("GET", "/api/v1/admin/brands/families/f1/wikipedia-show-urls"),
+        ("GET", "/api/v1/admin/brands/logos?target_type=publication"),
+        ("GET", "/api/v1/admin/brands/logo-targets?target_type=network"),
         ("PUT", "/api/v1/admin/brands/franchise-rules/real-housewives"),
         ("POST", "/api/v1/admin/brands/franchise-rules/real-housewives/apply"),
+        ("POST", "/api/v1/admin/brands/families"),
+        ("PATCH", "/api/v1/admin/brands/families/f1"),
+        ("POST", "/api/v1/admin/brands/families/f1/members"),
+        ("DELETE", "/api/v1/admin/brands/families/f1/members/m1"),
+        ("POST", "/api/v1/admin/brands/families/f1/links"),
+        ("PATCH", "/api/v1/admin/brands/families/f1/links/r1"),
+        ("POST", "/api/v1/admin/brands/families/f1/links/apply"),
+        ("POST", "/api/v1/admin/brands/families/f1/wikipedia-import"),
     ]
 
     for method, path in endpoints:
@@ -42,8 +57,8 @@ def test_admin_brands_endpoints_require_authentication(client: TestClient) -> No
 
 
 def test_get_shows_franchises_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {
         "rows": [{"show_name": "The Traitors", "franchise_key": "traitors"}],
         "count": 1,
@@ -62,8 +77,8 @@ def test_get_shows_franchises_success(client: TestClient, monkeypatch: pytest.Mo
 
 
 def test_get_franchise_rules_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {
         "rules": [{"key": "real-housewives", "name": "Real Housewives"}],
         "suggested_franchises": ["real-housewives"],
@@ -80,8 +95,8 @@ def test_get_franchise_rules_success(client: TestClient, monkeypatch: pytest.Mon
 
 
 def test_put_franchise_rule_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     payload = {
         "name": "Real Housewives",
         "primary_url": "https://real-housewives.fandom.com/wiki/Real_Housewives_Wiki",
@@ -104,8 +119,8 @@ def test_put_franchise_rule_success(client: TestClient, monkeypatch: pytest.Monk
 
 
 def test_post_apply_franchise_rule_uses_safe_defaults(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {"franchise_key": "real-housewives", "dry_run": True, "missing_only": True}
 
     with patch("trr_backend.repositories.brands_franchises.apply_franchise_rule", return_value=expected) as mocked:
@@ -124,8 +139,8 @@ def test_post_apply_franchise_rule_uses_safe_defaults(client: TestClient, monkey
 
 
 def test_put_franchise_rule_maps_keyerror_to_404(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
         "trr_backend.repositories.brands_franchises.update_franchise_rule",
@@ -142,8 +157,8 @@ def test_put_franchise_rule_maps_keyerror_to_404(client: TestClient, monkeypatch
 
 
 def test_put_franchise_rule_maps_valueerror_to_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
         "trr_backend.repositories.brands_franchises.update_franchise_rule",
@@ -163,8 +178,8 @@ def test_get_franchise_rules_maps_readiness_runtimeerror_to_503(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
         "trr_backend.repositories.brands_franchises.list_franchise_rules",
@@ -180,8 +195,8 @@ def test_get_franchise_rules_maps_readiness_runtimeerror_to_503(
 
 
 def test_get_shows_franchises_maps_unhandled_error_to_500(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch("trr_backend.repositories.brands_franchises.list_shows_franchises", side_effect=RuntimeError("boom")):
         response = client.get(
@@ -191,3 +206,102 @@ def test_get_shows_franchises_maps_unhandled_error_to_500(client: TestClient, mo
 
     assert response.status_code == 500
     assert response.json()["detail"] == "boom"
+
+
+def test_get_brand_logos_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "rows": [
+            {
+                "id": "logo-1",
+                "target_type": "publication",
+                "target_key": "deadline.com",
+                "target_label": "deadline.com",
+            }
+        ],
+        "count": 1,
+    }
+
+    with patch("api.routers.admin_brands._list_brand_logos", return_value=expected) as mocked:
+        response = client.get(
+            "/api/v1/admin/brands/logos?target_type=publication&q=deadline&limit=5&offset=0",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs == {
+        "target_type": "publication",
+        "q": "deadline",
+        "limit": 5,
+        "offset": 0,
+    }
+
+
+def test_get_brand_logo_targets_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "rows": [{"target_type": "network", "target_key": "1", "target_label": "Bravo"}],
+        "count": 1,
+    }
+
+    with patch("api.routers.admin_brands._list_logo_targets", return_value=expected) as mocked:
+        response = client.get(
+            "/api/v1/admin/brands/logo-targets?target_type=network&q=bra&limit=10",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs == {
+        "target_type": "network",
+        "q": "bra",
+        "limit": 10,
+    }
+
+
+def test_brand_family_endpoints_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.brand_families.list_families", return_value={"rows": [], "count": 0}):
+        response = client.get(
+            "/api/v1/admin/brands/families",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"rows": [], "count": 0}
+
+    with patch(
+        "trr_backend.repositories.brand_families.create_family",
+        return_value={"id": "f1", "family_key": "nbcu", "display_name": "NBCU Family"},
+    ):
+        response = client.post(
+            "/api/v1/admin/brands/families",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"display_name": "NBCU Family"},
+        )
+    assert response.status_code == 200
+    assert response.json()["id"] == "f1"
+
+    with patch(
+        "trr_backend.repositories.brand_families.get_family_by_entity",
+        return_value={"id": "f1", "display_name": "NBCU Family"},
+    ), patch(
+        "trr_backend.repositories.brand_families.list_family_suggestions",
+        return_value={"rows": []},
+    ), patch(
+        "trr_backend.repositories.brand_families.list_family_links",
+        return_value={"rows": []},
+    ), patch(
+        "trr_backend.repositories.brand_families.list_family_wikipedia_show_links",
+        return_value={"rows": []},
+    ):
+        response = client.get(
+            "/api/v1/admin/brands/families/by-entity?entity_type=network&entity_key=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["family"]["id"] == "f1"

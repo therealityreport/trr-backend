@@ -53,7 +53,12 @@ async def get_current_user(request: Request) -> dict | None:
         logger.debug(f"JWT verification failed: {e}")
         return None
     except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("JWT verification runtime failure")
+        raise HTTPException(
+            status_code=500,
+            detail="Authentication service unavailable",
+            headers={"x-error-code": "AUTH_SERVICE_UNAVAILABLE"},
+        ) from exc
 
     role = payload.get("role")
 

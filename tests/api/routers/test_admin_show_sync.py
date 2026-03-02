@@ -38,10 +38,10 @@ class TestSyncFromLists:
         assert response.status_code == 401
 
     def test_returns_400_when_no_list_sources(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.delenv("IMDB_LIST_URL", raising=False)
         monkeypatch.delenv("TMDB_LIST_ID", raising=False)
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -55,9 +55,9 @@ class TestSyncFromLists:
         assert "No list sources" in response.json().get("detail", "")
 
     def test_returns_200_with_counts_when_patched(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("TMDB_API_KEY", "tmdb-key")
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         mock_candidates = [MagicMock(), MagicMock()]
@@ -88,6 +88,62 @@ class TestSyncFromLists:
         assert data["tmdb_lists_used"]
         assert isinstance(data["duration_ms"], int)
 
+    def test_returns_500_json_detail_when_upsert_raises(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        monkeypatch.setenv("TMDB_API_KEY", "tmdb-key")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync.collect_candidates_from_lists", return_value=[MagicMock()]):
+                with patch(
+                    "api.routers.admin_show_sync.upsert_candidates_into_supabase",
+                    side_effect=RuntimeError("column facebook_id does not exist"),
+                ):
+                    response = client.post(
+                        "/api/v1/admin/shows/sync-from-lists",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"tmdb_lists": ["8301263"]},
+                    )
+
+        assert response.status_code == 500
+        payload = response.json()
+        assert "Sync failed" in payload.get("detail", "")
+        assert "facebook_id" in payload.get("detail", "")
+
+    def test_explicit_empty_imdb_lists_does_not_fallback_to_env(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        monkeypatch.setenv("TMDB_API_KEY", "tmdb-key")
+        monkeypatch.setenv("IMDB_LIST_URL", "https://www.imdb.com/list/ls4106677119/")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        mock_candidates = [MagicMock()]
+        mock_result = MagicMock(created=0, updated=1, skipped=0)
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_show_sync.collect_candidates_from_lists",
+                return_value=mock_candidates,
+            ) as mock_collect:
+                with patch(
+                    "api.routers.admin_show_sync.upsert_candidates_into_supabase",
+                    return_value=mock_result,
+                ):
+                    response = client.post(
+                        "/api/v1/admin/shows/sync-from-lists",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"imdb_lists": [], "tmdb_lists": ["8301274"]},
+                    )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["imdb_lists_used"] == []
+        assert payload["tmdb_lists_used"] == ["8301274"]
+        assert payload["candidates_collected"] == 1
+        collect_kwargs = mock_collect.call_args.kwargs
+        assert collect_kwargs["imdb_list_urls"] == []
+        assert collect_kwargs["tmdb_lists"] == ["8301274"]
+
 
 class TestSyncNetworksStreaming:
     @pytest.fixture(autouse=True)
@@ -101,8 +157,8 @@ class TestSyncNetworksStreaming:
         assert response.status_code == 401
 
     def test_returns_missing_columns_and_skips_sync_when_schema_incomplete(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         with patch(
             "api.routers.admin_show_sync._schema_preflight_missing_columns",
@@ -121,8 +177,8 @@ class TestSyncNetworksStreaming:
         assert payload["steps"] == {}
 
     def test_runs_three_steps_and_aggregates_metrics(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
         received = {"entities": None, "providers": None, "links": None, "show_logos": None}
 
         def fake_entities(argv):
@@ -269,8 +325,8 @@ class TestSyncNetworksStreaming:
         assert (received["links"] or []).count("--entity-key") == 2
 
     def test_truncates_unresolved_logo_list_to_cap(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         from api.routers.admin_show_sync import SyncNetworksStreamingStepResult
 
@@ -370,8 +426,8 @@ class TestSyncNetworksStreaming:
         assert payload["completion_gate_passed"] is False
 
     def test_marks_step_failed_when_script_returns_non_zero(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         def bad_entities(argv):
             print("failures=4")
@@ -422,8 +478,8 @@ class TestSyncNetworksStreaming:
 
 class TestNetworksStreamingOverrides:
     def test_create_override_upserts_row(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         upsert_query = mock_db.schema.return_value.table.return_value.upsert.return_value
@@ -472,8 +528,8 @@ class TestNetworksStreamingOverrides:
         assert payload["is_active"] is True
 
     def test_delete_override_returns_404_for_missing_row(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
         override_id = str(uuid4())
 
         mock_db = MagicMock()
@@ -494,8 +550,8 @@ class TestNetworksStreamingOverrides:
 
 class TestRefreshShow:
     def test_returns_404_for_unknown_show(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         # Mock DB to return no show row
         mock_db = MagicMock()
@@ -516,8 +572,8 @@ class TestRefreshShow:
         assert response.status_code == 404
 
     def test_returns_409_when_cast_refresh_missing_show_imdb_id(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         show_id = str(uuid4())
         mock_db = MagicMock()
@@ -540,8 +596,8 @@ class TestRefreshShow:
         p_show_cast.assert_not_called()
 
     def test_refresh_stream_returns_409_when_cast_refresh_missing_show_imdb_id(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         show_id = str(uuid4())
         mock_db = MagicMock()
@@ -564,8 +620,8 @@ class TestRefreshShow:
         p_show_cast.assert_not_called()
 
     def test_calls_script_mains_for_targets(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         # Mock DB show exists
         mock_db = MagicMock()
@@ -616,8 +672,8 @@ class TestRefreshShow:
         p_occurrences.assert_called()
 
     def test_refresh_stream_emits_complete_event(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         # Mock DB show exists
         mock_db = MagicMock()
@@ -649,8 +705,8 @@ class TestRefreshShow:
         assert "event: complete" in text
 
     def test_refresh_stream_runs_episodes_before_seasons(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         show_resp = MagicMock()
@@ -680,8 +736,8 @@ class TestRefreshShow:
         assert called_step_keys == ["seasons_episodes_episodes", "seasons_episodes_seasons"]
 
     def test_refresh_stream_emits_structured_topic_and_provider(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         show_resp = MagicMock()
@@ -714,8 +770,8 @@ class TestRefreshShow:
         assert '"provider": "mixed"' in text
 
     def test_refresh_stream_emits_heartbeat_and_request_id(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         show_resp = MagicMock()
@@ -762,8 +818,8 @@ class TestRefreshShowPhotosStream:
         assert response.status_code == 401
 
     def test_returns_404_for_unknown_show(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         show_resp = MagicMock()
@@ -783,8 +839,8 @@ class TestRefreshShowPhotosStream:
         assert response.status_code == 404
 
     def test_season_scoped_refresh_uses_episode_appearances_only_for_cast_discovery(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
         show_id = str(uuid4())
 
         mock_db = MagicMock()
@@ -833,8 +889,8 @@ class TestRefreshShowPhotosStream:
         assert '"live_counts"' in response.text
 
     def test_refresh_photos_stream_echoes_request_id(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-        token = _make_admin_token("test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
         show_id = str(uuid4())
 
         mock_db = MagicMock()

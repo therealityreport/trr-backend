@@ -13,14 +13,44 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.realtime.broker import init_broker, shutdown_broker
+from trr_backend.observability import (
+    CONTENT_TYPE_LATEST,
+    bind_trace_id,
+    metrics_available,
+    record_http_request,
+    render_metrics,
+    reset_trace_id,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_startup_config() -> None:
+    """Validate high-impact service env configuration with actionable logs."""
+    screenalytics_api_url = (os.getenv("SCREENALYTICS_API_URL") or "").strip()
+    admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
+    service_token = (os.getenv("SCREENALYTICS_SERVICE_TOKEN") or "").strip()
+
+    if screenalytics_api_url:
+        parsed = urlparse(screenalytics_api_url)
+        if not parsed.scheme or not parsed.netloc:
+            logger.warning("[startup-config] SCREENALYTICS_API_URL looks malformed: %s", screenalytics_api_url)
+    else:
+        logger.info("[startup-config] SCREENALYTICS_API_URL not set; screenalytics integrations will be unavailable")
+
+    if not admin_shared_secret:
+        logger.warning("[startup-config] TRR_INTERNAL_ADMIN_SHARED_SECRET missing; admin proxy auth may fail")
+    if not service_token:
+        logger.warning("[startup-config] SCREENALYTICS_SERVICE_TOKEN missing; /api/v1/screenalytics auth may fail")
 
 
 def get_cors_origins() -> list[str]:
@@ -40,6 +70,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
     # Startup
     logger.info("Starting up TRR Backend API...")
+    _validate_startup_config()
     await init_broker()
     yield
     # Shutdown
@@ -67,6 +98,33 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    incoming_trace = (
+        str(request.headers.get("x-trace-id") or "").strip()
+        or str(request.headers.get("x-request-id") or "").strip()
+    )
+    trace_id = incoming_trace or uuid.uuid4().hex
+    trace_token = bind_trace_id(trace_id)
+    request.state.trace_id = trace_id
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed = time.perf_counter() - start
+        route = getattr(request.scope.get("route"), "path", request.url.path)
+        record_http_request(request.method, route, 500, elapsed)
+        reset_trace_id(trace_token)
+        raise
+    elapsed = time.perf_counter() - start
+    route = getattr(request.scope.get("route"), "path", request.url.path)
+    record_http_request(request.method, route, response.status_code, elapsed)
+    response.headers.setdefault("x-trace-id", trace_id)
+    response.headers.setdefault("x-request-id", trace_id)
+    reset_trace_id(trace_token)
+    return response
 
 # Include routers
 from api.routers import (  # noqa: E402
@@ -133,3 +191,11 @@ def root():
 def health():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    """Prometheus metrics endpoint."""
+    if not metrics_available():
+        return Response(status_code=404, content="metrics_unavailable\n", media_type="text/plain")
+    return Response(content=render_metrics(), media_type=CONTENT_TYPE_LATEST)

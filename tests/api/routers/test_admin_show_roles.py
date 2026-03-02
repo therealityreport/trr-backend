@@ -40,8 +40,8 @@ def test_cast_matrix_sync_route_returns_service_payload(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()

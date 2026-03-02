@@ -32,6 +32,7 @@ from api.realtime.events import (
     typing_event,
 )
 from trr_backend.db import pg
+from trr_backend.observability import inc_suppressed_path_conversion
 from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 
 logger = logging.getLogger(__name__)
@@ -148,8 +149,9 @@ async def discussion_websocket(
     async def on_event(event: dict) -> None:
         try:
             await websocket.send_json(event)
-        except Exception:
-            pass  # Connection may be closed
+        except Exception as exc:
+            inc_suppressed_path_conversion("websocket", "send_json_failure")
+            logger.debug("websocket send_json failed; likely disconnected: %s", exc)
 
     # Subscribe to discussion room
     sub_id = await broker.subscribe(room, on_event)

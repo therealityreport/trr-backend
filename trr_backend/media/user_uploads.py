@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,9 @@ from trr_backend.media.s3_mirror import (
     get_s3_client,
     guess_ext_from_content_type,
 )
+from trr_backend.observability import inc_suppressed_path_conversion
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from trr_backend.db.session import DbSession
@@ -325,11 +329,12 @@ def _copy_object(
 
 
 def _delete_object(s3_client: Any, bucket: str, key: str) -> None:
-    """Delete an object (best-effort, ignores errors)."""
+    """Delete an object (best-effort, logs failures for later cleanup)."""
     try:
         s3_client.delete_object(Bucket=bucket, Key=key)
-    except Exception:
-        pass  # Best-effort cleanup
+    except Exception as exc:
+        inc_suppressed_path_conversion("user_uploads", "delete_object_failed")
+        logger.warning("user_uploads delete_object failed bucket=%s key=%s error=%s", bucket, key, exc)
 
 
 def _sanitize_etag(value: str | None) -> str | None:

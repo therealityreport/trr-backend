@@ -28,8 +28,8 @@ def client() -> TestClient:
 
 
 def test_upload_show_icon_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     mock_db = MagicMock()
 
     inserted = {
@@ -71,8 +71,8 @@ def test_upload_show_icon_success(client: TestClient, monkeypatch: pytest.Monkey
 
 
 def test_list_show_icons_returns_array(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     mock_db = MagicMock()
 
     with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -87,8 +87,8 @@ def test_list_show_icons_returns_array(client: TestClient, monkeypatch: pytest.M
 
 
 def test_delete_show_icon_removes_s3_and_record(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     mock_db = MagicMock()
     icon_id = str(uuid4())
     mock_s3 = MagicMock()

@@ -246,6 +246,145 @@ def test_auto_count_cast_photo_returns_face_boxes(monkeypatch) -> None:
     assert out.face_boxes[0].width == 0.2
 
 
+def test_auto_count_cast_photo_uses_person_fallback_boxes_when_faces_missing(monkeypatch) -> None:
+    photo_id = uuid4()
+    db = _FakeDb(
+        {
+            "cast_photos": {
+                "id": str(photo_id),
+                "hosted_url": "https://example.com/source.jpg",
+                "url": "https://example.com/source.jpg",
+                "metadata": {},
+            }
+        }
+    )
+
+    monkeypatch.setattr(
+        counts,
+        "count_people",
+        lambda image_url, mode="faces_then_yolo": SimpleNamespace(
+            people_count=2,
+            face_count=0,
+            detector="yolo",
+            model=None,
+            detections=[
+                SimpleNamespace(
+                    x1=0.1,
+                    y1=0.15,
+                    x2=0.4,
+                    y2=0.7,
+                    confidence=0.9,
+                    kind="person",
+                ),
+                SimpleNamespace(
+                    x1=0.5,
+                    y1=0.12,
+                    x2=0.86,
+                    y2=0.74,
+                    confidence=0.88,
+                    kind="person",
+                ),
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        counts,
+        "get_tags_by_photo_ids",
+        lambda _db, _ids: {str(photo_id): {"people_names": ["Alan Cumming"]}},
+    )
+    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
+    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
+    monkeypatch.setattr(counts, "auto_thumbnail_crop", lambda _result: None)
+    monkeypatch.setattr(counts, "face_centroid", lambda _result: None)
+
+    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    assert out.people_count == 2
+    assert len(out.face_boxes) == 2
+    assert out.face_boxes[0].source_kind == "person_fallback"
+    assert out.face_boxes[0].fallback_reason == "no_faces_detected"
+
+
+def test_build_detection_boxes_omits_identity_when_not_trr_eligible() -> None:
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.92,
+                kind="face",
+                person_id=str(uuid4()),
+                person_name="Alan Cumming",
+                label="Alan Cumming",
+                match_similarity=0.95,
+                match_status="matched",
+            )
+        ]
+    )
+    boxes = counts._build_detection_boxes(result, allow_identity_assignment=False)
+    assert len(boxes) == 1
+    assert boxes[0]["label_source"] == "generic"
+    assert "person_id" not in boxes[0]
+    assert "person_name" not in boxes[0]
+    assert "match_similarity" not in boxes[0]
+
+
+def test_build_detection_boxes_person_fallback_skips_deterministic_mapping_when_not_eligible() -> None:
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.15,
+                x2=0.4,
+                y2=0.7,
+                confidence=0.9,
+                kind="person",
+            )
+        ]
+    )
+    boxes = counts._build_detection_boxes(
+        result,
+        tagged_people_names=["Alan Cumming"],
+        allow_identity_assignment=False,
+    )
+    assert len(boxes) == 1
+    assert boxes[0]["label_source"] == "generic"
+    assert "person_name" not in boxes[0]
+
+
+def test_build_detection_boxes_applies_best_effort_tag_assignment_when_tags_fewer_than_boxes() -> None:
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.92,
+                kind="face",
+            ),
+            SimpleNamespace(
+                x1=0.6,
+                y1=0.2,
+                x2=0.8,
+                y2=0.5,
+                confidence=0.91,
+                kind="face",
+            ),
+        ]
+    )
+    boxes = counts._build_detection_boxes(
+        result,
+        tagged_people_names=["Alan Cumming"],
+        allow_identity_assignment=True,
+    )
+    assert len(boxes) == 2
+    assert boxes[0]["person_name"] == "Alan Cumming"
+    assert boxes[0]["label_source"] == "best_effort_tag_map"
+    assert "person_name" not in boxes[1]
+
+
 def test_auto_count_cast_photo_returns_thumbnail_crop(monkeypatch) -> None:
     photo_id = uuid4()
     db = _FakeDb(

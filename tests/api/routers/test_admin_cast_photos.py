@@ -31,9 +31,9 @@ def client():
 
 
 def test_generate_cast_photo_variants_success(client, monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     photo_id = str(uuid4())
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     mock_db = MagicMock()
 
@@ -79,9 +79,9 @@ def test_generate_cast_photo_variants_success(client, monkeypatch):
 
 
 def test_generate_cast_photo_variants_runtime_error_returns_409(client, monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     photo_id = str(uuid4())
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     mock_db = MagicMock()
 

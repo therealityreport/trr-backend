@@ -2,6 +2,462 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
+## Latest Update (2026-03-01) — Backend startup mode visibility for workspace stream stability
+
+- scope_statement: `Expose backend reload/non-reload launch mode in startup logs so workspace status and stream-timeout triage are explicit.`
+- surface: `single-repo-low-risk`
+- risk_classification: `low`
+- impacted_repos:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes (consumes mode visibility in workspace ops flow)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/start-api.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - `start-api.sh` now logs startup mode (`reload` vs `non-reload`) based on `TRR_BACKEND_RELOAD`.
+  - Runtime behavior is unchanged beyond explicit mode logging.
+- validations_run:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && bash -n start-api.sh` (pass)
+- blocked_checks:
+  - none
+- residual_risks:
+  - none identified (diagnostic-only change)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-02) — Fix `refresh_post` FK-safe detail sync for YouTube/manual refresh paths
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (refresh detail-write semantics only; no API/schema changes)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Changed post upsert helpers to accept optional `job_id` for manual refresh paths (`_upsert_instagram_post`, `_upsert_tiktok_post`, `_upsert_youtube_video`, `_upsert_facebook_post`, `_upsert_meta_threads_post`).
+  - Updated these helpers to include `job_id` in payload only when truthy, preventing accidental FK violations and preserving existing DB `job_id` on conflict updates.
+  - Refactored refresh detail sync flow to use `detail_job_id` (set to `None` in `refresh_post`) and decoupled media mirror trace id (`refresh_trace_id`) from DB FK fields.
+  - Added regression tests covering: YouTube detail sync forwarding `job_id=None`, payload omission of `job_id`, and refresh orchestration using null detail job id plus non-empty media trace id.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "refresh_post or youtube_post_detail_sync"` (pass; `11 passed`)
+  - Live verification against season `e9161955-6ee4-4985-865e-3386a0f670fb`, source `J9TFhnjgwKQ`:
+    - `refresh_post(... platform='youtube', max_comments_per_post=0, fetch_replies=False)` returned:
+      - `detail_status='success'`
+      - `detail_error=None`
+      - `warnings=None`
+      - `youtube_comment_count_synced=1`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-02) — Live Instagram+TikTok ingest smoke with filter params + DB reconciliation
+
+- scope_statement: `Execute live ingest smoke for Instagram/TikTok using explicit account/date/hashtag/keyword/sound filters and validate persisted metrics/lifecycle in Supabase`
+- surface: `single-repo-high-risk`
+- risk_classification: `high` (live ingest queue execution + runtime data mutation)
+- impacted_repos:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+- run_evidence:
+  - completed reference run:
+    - `run_id=145e99bb-3560-4006-8668-59e1a72f6a48`
+    - `status=completed`
+    - `summary.total_jobs=4`
+    - `summary.completed_jobs=4`
+    - `summary.failed_jobs=0`
+    - `summary.items_found_total=5`
+  - run config (from persisted `scrape_runs.config`):
+    - `platforms=["instagram","tiktok"]`
+    - `accounts_override=["bravotv"]`
+    - `hashtags_override=["rhoslc"]`
+    - `keywords_override=["lisa"]`
+    - `sound_ids=["7540327234013301517"]`
+    - `ingest_mode="posts_and_comments"`
+    - `source_scope="bravo"`
+    - `date_start="2026-02-16T01:05:16.888400+00:00"`
+    - `date_end="2026-03-02T01:05:16.888400+00:00"`
+    - `max_posts_per_target=1`
+    - `max_comments_per_post=2`
+    - `max_replies_per_post=0`
+- validation_evidence:
+  - job counters (`list_jobs` + `metadata.persist_counters`) for run `145e99bb-3560-4006-8668-59e1a72f6a48`:
+    - `instagram:comments` -> `items_found=2`, `posts_upserted=2`, `comments_upserted=0`
+    - `instagram:posts` -> `items_found=0`, `posts_upserted=0`, `comments_upserted=0`
+    - `tiktok:comments` -> `items_found=3`, `posts_upserted=1`, `comments_upserted=2`
+    - `tiktok:posts` -> `items_found=0`, `posts_upserted=0`, `comments_upserted=0`
+  - DB reconciliation for same run:
+    - `social.tiktok_comments` by `job_id`: `2`
+    - `social.tiktok_comments` by `last_seen_run_id`: `2`
+    - `social.instagram_comments` by `job_id`: `0`
+    - `social.instagram_comments` by `last_seen_run_id`: `0`
+    - post-table `job_id` counts: `0` for this bounded run window
+  - endpoint behavior check:
+    - `get_tiktok_sounds(search='lisa')` returned structured payload with `sounds_count=0`
+    - `get_tiktok_sound_posts(sound_id='7540327234013301517')` returned structured payload with `posts_count=0`
+- operational_cleanup:
+  - cancelled non-terminal troubleshooting runs created during smoke execution:
+    - `cb15b788-96bf-443b-a116-fd45444a6069`
+    - `ea011442-9831-4af1-901e-7ffa3da457aa`
+    - `5adffdb6-f3a4-4520-8c72-dd8afdf601d0`
+    - `a6b04d76-0baf-4e11-87cd-21476cbb8adc`
+- blocked_checks:
+  - observed manual-drain caveat: `execute_run(..., platform=None)` path normalizes platform to empty token in this flow; explicit platform values were required for deterministic claim behavior during troubleshooting.
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-02) — Cross-repo social avatar persistence + X text cleanup + week-detail contract enrichment (backend phase)
+
+- scope_statement: `Backend-first implementation for avatar persistence fields, serializer enrichment, and Twitter media URL text sanitation`
+- surface: `cross-repo`
+- risk_classification: `medium-high`
+- impacted_repos:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no code changes required (impact check only)
+  - `TRR-APP`: yes (consumer updates completed in same session)
+- contract_surfaces:
+  - additive DB columns on social post tables for author avatars (`tiktok/youtube/facebook/threads`)
+  - additive week-detail payload user/avatar fields across non-Twitter platforms
+  - additive Instagram week-detail exposure for owner/collab avatar fields
+  - non-breaking tweet text normalization (media URL token removal only)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0163_social_post_author_avatar_columns.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/facebook/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Added nullable `user_avatar_url` persistence for TikTok, YouTube, Facebook, Threads posts (migration `0163` + guarded upsert writes).
+  - Scrapers now extract post-author avatars for those platforms and include them in post model/raw payload.
+  - Week-detail serializers now return `post.user.avatar_url` for Instagram/TikTok/YouTube/Facebook/Threads.
+  - Instagram week-detail posts now expose `owner_profile_pic_url`, `hosted_owner_profile_pic_url`, `hosted_tagged_profile_pics`, and `collaborators_detail`.
+  - Added raw-data avatar fallback resolution for week-detail rows when direct avatar columns are missing.
+  - Twitter scraper now strips media URL tokens (including media `t.co` URLs) from text across parse + summary paths while preserving non-media links.
+- validations_run:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile trr_backend/socials/twitter/scraper.py trr_backend/repositories/social_season_analytics.py trr_backend/socials/tiktok/scraper.py trr_backend/socials/youtube/scraper.py trr_backend/socials/facebook/scraper.py trr_backend/socials/threads/scraper.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/socials/test_comment_scraper_fixes.py` (pass; `70 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "week_detail or upsert_tiktok_post or upsert_youtube_video or upsert_facebook_post or upsert_meta_threads_post"` (pass; `14 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_season_analytics.py -k "week_detail"` (pass; `12 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/screenalytics && rg -n "tiktok_posts|youtube_videos|facebook_posts|meta_threads_posts|user_avatar_url|owner_profile_pic_url|hosted_owner_profile_pic_url|hosted_tagged_profile_pics|collaborators_detail|social_season_analytics" .` (no matches)
+- blocked_checks:
+  - `ruff check` repo-wide cleanliness is currently blocked by extensive pre-existing violations in touched backend files (not introduced in this session).
+- residual_risks:
+  - Migration `0163` must be applied in target environments before non-Twitter avatar columns persist in DB.
+- rollback_notes:
+  - Revert migration `0163` and corresponding upsert/serializer/scraper changes together to avoid schema/runtime drift.
+- handoff_dependencies:
+  - none
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-01) — Current backend DB migrated from 0153 to 0162 (TikTok analytics tables fixed)
+
+- Applied pending migrations `0154` through `0162` to the DB configured by `TRR-Backend/.env` `SUPABASE_DB_URL`.
+- Migration apply path:
+  - Applied SQL files sequentially with `psql` (`0154`..`0162`).
+  - Repaired migration history with `supabase migration repair --status applied` using `:5432` fallback URL for versions blocked by `:6543` pooler prepared-statement conflicts.
+- Migration state verification:
+  - `supabase_migrations.schema_migrations` now contains `0150, 0151, 0152, 0153, 0154, 0155, 0156, 0157, 0158, 0159, 0160, 0161, 0162`.
+  - Follow-up completed: `0150_add_show_icons_table.sql` applied idempotently and migration history repaired to `applied`.
+- Schema verification (post-apply):
+  - Confirmed tables exist:
+    - `social.tiktok_sounds`
+    - `social.tiktok_sound_posts`
+    - `social.tiktok_post_cast_members`
+    - `social.tiktok_post_tokens`
+    - `social.tiktok_post_quality`
+    - `social.tiktok_post_velocity`
+    - `social.tiktok_post_comment_enrichment`
+    - `social.social_ingest_checkpoints`
+    - `social.tiktok_anomaly_events`
+  - Confirmed `social.tiktok_posts` columns:
+    - `sound_id`, `sound_title`, `sound_author`, `sound_usage_count`
+    - `quality_score`, `quality_flags`
+    - `velocity_1h`, `velocity_24h`, `velocity_7d`
+    - `cast_member_mentions`
+  - Confirmed key indexes/views/policies from `0161_tiktok_analytics_expansion.sql`.
+- Functional smoke (no media download scope):
+  - Performed bounded insert/upsert/read/delete smoke on:
+    - `social.tiktok_sounds`
+    - `social.tiktok_sound_posts`
+  - Persistence succeeded and synthetic rows were cleaned up.
+  - Verified backend read paths against live DB with temporary seeded rows:
+    - `get_tiktok_sounds(season_id, search='codex', limit=20)` returned seeded sound (`creator_post_count=1`, `related_post_count=1`).
+    - `get_tiktok_sound_posts(season_id, sound_id=<numeric_tiktok_sound_id>, limit=20)` returned seeded related sound post.
+  - Cleanup executed after verification (temporary `tiktok_posts`, `tiktok_sounds`, `tiktok_sound_posts` rows removed).
+  - Confirmed backend sound snapshot path remains metadata-only (HTML-derived fields); no sound media file download/mirroring introduced.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/repositories/test_social_season_analytics.py -k "resolve_depth_defaults or text_contains_any_term or upsert or comment_tree or ingest_tiktok or ingest_instagram"` (pass; `31 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/api/routers/test_socials_season_analytics.py -k "ingest or worker or runs or jobs"` (pass; `24 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/repositories/test_social_season_analytics.py -k "sound"` (pass; `1 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/api/routers/test_socials_season_analytics.py -k "sound"` (pass; `2 passed`)
+- Artifacts:
+  - Pre-migrations snapshot: `/tmp/trr_pre_migrations_20260301_201522.txt`
+  - Pre-schema snapshot: `/tmp/trr_pre_tiktok_schema_20260301_201531.json`
+  - Migration apply log: `/tmp/trr_apply_0154_0162_20260301_201554.log`
+  - Migration apply log (`0150`): `/tmp/trr_apply_0150_20260301_202306.log`
+  - Post-schema verification: `/tmp/trr_post_schema_20260301_201733.json`
+  - Persistence smoke output: `/tmp/trr_tiktok_sound_persist_smoke_20260301_201838.json`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: compatibility check only; no parser/consumer changes required
+  - `TRR-APP`: consumer validation run only; no code changes required in this migration session
+- residual_risks:
+  - `supabase migration list` now aligns remote through `0162`; local-only `0163` remains pending by design (out of this scope).
+
+## Latest Update (2026-03-02) — TikTok analytics expansion (backend phase)
+
+- Extended TikTok analytics backend for single-creator + cast workflows and sound-reuse analysis.
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0161_tiktok_analytics_expansion.sql` (existing migration used by this surface)
+- Behavior summary:
+  - `get_tiktok_overview(...)` now returns KPI + WoW deltas + `time_series.hourly|daily|weekly` from filtered post data.
+  - Added `get_tiktok_sounds(...)` for sound list/search with creator metrics and related-post counts.
+  - Added `get_tiktok_content_health(...)` to flag underperforming TikTok posts (`low_saves`, `low_comments`, `low_velocity_24h`, missing thumbnail/caption, low quality score).
+  - Added backend admin routes:
+    - `GET /api/v1/admin/socials/seasons/{season_id}/tiktok/sounds`
+    - `GET /api/v1/admin/socials/seasons/{season_id}/tiktok/content-health`
+  - Kept ingest route contract additive (existing `sound_ids` passthrough remains intact).
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "resolve_depth_defaults or text_contains_any_term or ingest_tiktok or ingest_instagram or get_tiktok_overview or get_tiktok_sounds or get_tiktok_content_health or upsert_comment_tree"` (pass; `12 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_season_analytics.py -k "ingest or worker or runs or jobs or tiktok_overview_endpoint or tiktok_sound_posts_endpoint or tiktok_sounds_endpoint or tiktok_content_health_endpoint"` (pass; `28 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile trr_backend/repositories/social_season_analytics.py api/routers/socials.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: compatibility check required only; no consumer contract update needed
+  - `TRR-APP`: yes
+
+## Latest Update (2026-03-02) — TRR social ingest reliability hardening (backend tranche)
+
+- Implemented backend ingest reliability fixes for Instagram/TikTok filtering, queue/job defaults, and lifecycle persistence safety.
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- Behavior summary:
+  - `_resolve_depth_defaults(max_posts_per_target=None)` now resolves to `0` (unbounded), removing implicit cap-to-1 behavior in queued-job paths.
+  - Instagram and TikTok scrape configs now receive target hashtags (`hashtags=...`) instead of empty arrays.
+  - Instagram/TikTok post filtering now composes text + structured token fields (hashtags/mentions; plus collaborators/profile tags for Instagram), reducing false negatives when captions are sparse.
+  - TikTok comments-stage matched-post counters now increment only after successful fetch/persist paths.
+  - `last_seen_run_id` is now guarded (`run_id is not None`) for:
+    - `tiktok_comments`
+    - `youtube_comments`
+    - `twitter_tweets`
+    - `facebook_comments`
+    - `meta_threads_comments`
+- Validation:
+  - `pytest -q tests/repositories/test_social_season_analytics.py -k "resolve_depth_defaults or text_contains_any_term or (upsert and comment_tree) or ingest_tiktok or ingest_instagram"` (pass; `16 passed`)
+  - `pytest -q tests/api/routers/test_socials_season_analytics.py -k "ingest or worker or runs or jobs"` (pass; `20 passed`)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no contract changes required
+  - `TRR-APP`: yes
+
+## Latest Update (2026-03-01) — YouTube videos+shorts ingest reliability pass (12-fix plan)
+
+- Implemented backend YouTube reliability fixes across scraper, ingestion, refresh, and analytics query paths.
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/youtube/test_scraper.py` (new)
+- Behavior summary:
+  - YouTube scrape traversal now uses per-surface page budgets and no longer starves shorts behind videos.
+  - Final scrape limiting now guarantees one `videos` + one `shorts` item when both surfaces are present (cap override to 2 when needed).
+  - Scraper retrieval metadata now includes per-surface page diagnostics (`videos_pages_scanned`, `shorts_pages_scanned`, `surface_cap_override_applied`).
+  - `_ingest_youtube` now treats `post_limit` as soft until both surfaces are persisted when both are present in candidates.
+  - Strict show-term matching now includes YouTube `tags` as additional strict-match inputs.
+  - YouTube hashtag persistence now merges tag-derived hashtags with title/description hashtags.
+  - YouTube comments bootstrap now falls back from `watch?v=` to `/shorts/{id}` when needed.
+  - Comment response parsing now supports both `onResponseReceivedEndpoints` and `onResponseReceivedActions`.
+  - Reply parsing now supports nested `commentViewModel.commentViewModel`.
+  - YouTube comment sync + week/detail comment reads now exclude lifecycle-missing rows (`is_missing=true`) when lifecycle columns are available.
+  - YouTube refresh duration fallback now derives `duration_seconds` from ISO `duration` when numeric duration is zero.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check trr_backend/socials/youtube/scraper.py trr_backend/repositories/social_season_analytics.py tests/socials/youtube/test_scraper.py tests/repositories/test_social_season_analytics.py --select F,E9` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/socials/youtube/test_scraper.py tests/repositories/test_social_season_analytics.py -k "youtube_video_matches_show_terms or upsert_youtube_video_persists_hashtags_and_mentions or sync_youtube_video_comment_counts or week_detail_youtube_uses_effective_saved_comment_count or week_detail_youtube_excludes_missing_comments_when_lifecycle_supported or get_post_comments_youtube_uses_effective_saved_comment_count or get_post_comments_youtube_excludes_missing_when_lifecycle_supported or ingest_youtube_progress_uses_matched_posts_for_scrape_counter or ingest_youtube_post_limit_soft_cap_persists_video_and_short or refresh_youtube_post_detail_sync_derives_duration_from_iso_when_numeric_missing"` (pass; `13 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/repositories/test_social_season_analytics.py -k "ingest_youtube"` (pass; `4 passed`)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes
+- residual_risks:
+  - Season-scoped operational backfill/re-run for `season_id=e9161955-6ee4-4985-865e-3386a0f670fb` was not executed in this code pass and still needs admin run verification in live data.
+
+## Latest Update (2026-03-01) — `Refresh Details` now includes metadata repair
+
+- Updated `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py` reprocess stream flow:
+  - `ReprocessImagesRequest` now supports:
+    - `run_metadata` (default `false`)
+    - `show_id`
+    - `show_name`
+  - `reprocess-images/stream` now has a `metadata_repair` stage (when `run_metadata=true`) that runs:
+    - `_load_person_wwhl_episode_imdb_ids_from_credits(...)`
+    - `_resolve_imdb_traitors_strict_context(...)`
+    - `_repair_existing_imdb_cast_photos(...)`
+  - reprocess auto-count now passes request show context to TRR-show eligibility gating:
+    - `request_show_id`
+    - `request_show_name`
+  - complete payload now includes:
+    - `metadata_repair_attempted`
+    - `existing_imdb_rows_repaired`
+    - `metadata_enrichment_failed`
+- Added backend regression test:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+    - `test_reprocess_stream_runs_metadata_repair_when_enabled`
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py -k 'reprocess_stream'` (pass; `1 passed`)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes
+
+## Latest Update (2026-03-01) — IMDb stale request-context show repair + global cleanup script
+
+- Implemented stale IMDb request-context detection and repair in:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+- Behavior changes:
+  - `_needs_imdb_metadata_refresh(...)` now also flags stale request-context rows through a new show-aware path.
+  - added request-context staleness evaluator for sources:
+    - `request_context`
+    - `request_context_inferred`
+    - `show_context_request`
+  - stale rows are now reconciled after repair enrichment:
+    - `show_id/show_name/show_imdb_id/show_short_code` cleared,
+    - `show_context_source` set to `request_context_rejected`,
+    - `show_context_repair_reason` set (`missing_corroboration` or `stale_request_context_mismatch`).
+- Added one-time/idempotent cleanup script:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/backfill/repair_imdb_show_context.py`
+  - supports:
+    - `--person-id` (repeatable)
+    - `--limit`
+    - `--apply` (defaults to dry-run if omitted)
+    - `--scan-batch-size`
+  - summary counters:
+    - `scanned`, `repaired`, `rejected`, `unchanged`, `failed`
+- Added backend tests:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+    - stale inferred rows are refresh-eligible,
+    - stale mismatched request-context rows are rewritten to `request_context_rejected`,
+    - authoritative `episode_table` rows are not downgraded.
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py scripts/backfill/repair_imdb_show_context.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py -k 'imdb_metadata_refresh or repair_existing_imdb_cast_photos or apply_show_context_to_photos'` (pass; `12 passed`)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes
+
+## Latest Update (2026-02-28) — Reprocess auto-count failure guard + owner-face crop preference
+
+- Follow-up fix for person gallery reprocess runs that reported `counted 0 / failed N`:
+  - `_auto_count_cast_photos(...)` and `_auto_count_media_links(...)` now fail-fast on `ScreenalyticsUnavailableError` instead of repeatedly failing every remaining row.
+  - added early unavailable-state check (`get_screenalytics_unavailable_state`) to avoid long failure cascades.
+- Improved face-label assignment for detected face boxes:
+  - when identity is allowed and tagged people are present, unassigned face boxes now receive deterministic tagged-person mapping in safe/equal-cardinality cases (left-to-right).
+- Improved thumbnail crop focus:
+  - added `_owner_face_crop_payload(...)` and now prefer owner-face crop for gallery thumbnails when owner can be matched in `face_boxes`, with fallback to existing auto-crop logic.
+  - applied in cast photo/media-link auto-count paths and stream inline auto-count path.
+- Files changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py -k "detection_boxes or auto_count"` (pass)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: yes
+
+## Latest Update (2026-02-28) — TRR-show-gated face identity assignment for auto-count paths
+
+- Implemented TRR-owned-show eligibility gating for identity assignment during people auto-counting:
+  - identity enrichment (face `person_id`/`person_name`/match fields and deterministic tag mapping) now runs only when row metadata/context resolves to a show in `core.shows`.
+  - non-eligible rows still keep people counts, face boxes, and face crops, but identity fields are suppressed.
+- Updated `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`:
+  - added `_is_trr_show_eligible(...)` helper with request show-context + fallback show-name resolution.
+  - added `allow_identity_assignment` gate to `_build_detection_boxes(...)`.
+  - wired gating through:
+    - `_auto_count_cast_photos(...)`
+    - `_auto_count_media_links(...)`
+    - `refresh_person_images_stream(...)` inline auto-count loop
+  - added additive diagnostic counter:
+    - `auto_identity_skipped_non_trr_show`
+  - surfaced new counter in sync response and stream progress/complete payloads.
+- Updated `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_image_counts.py`:
+  - added local `_is_trr_show_eligible(...)` helper for manual recount endpoints.
+  - added `allow_identity_assignment` gate to `_build_detection_boxes(...)`.
+  - applied gating to:
+    - `auto_count_cast_photo`
+    - `auto_count_media_asset`
+    - `auto_count_show_images`
+- Added regression tests:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+    - identity suppression when assignment is not allowed
+    - fallback show-name mapping eligibility
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_image_counts_fallback.py`
+    - identity/match fields omitted when non-eligible
+    - deterministic person fallback mapping suppressed when non-eligible
+- Validation:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py api/routers/admin_image_counts.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_image_counts_fallback.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_image_counts_fallback.py tests/api/routers/test_admin_person_images.py -k "detection_boxes or trr_show_eligible or auto_count"` (pass; `12 passed`)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: ``
+- downstream_repos_impacted:
+  - `TRR-Backend`: yes
+  - `screenalytics`: no
+  - `TRR-APP`: no
+
 ## Latest Update (2026-02-28) — Facebook scraper reduced-count and object-count fallbacks
 
 - Completed robustness pass for Facebook SSR engagement parsing in `trr_backend/socials/facebook/scraper.py`:
@@ -4813,6 +5269,88 @@ Continuation (same session, 2026-02-25) — RHOSLC social analytics revision: po
 - default_skill_chain_applied: `true`
 - default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
 - default_skill_chain_exception_reason: `n/a`
+
+Continuation (same session, 2026-02-28) — Admin `sync-from-lists` fix for `core.shows.facebook_id` crash + structured error payloads.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/ingestion/show_importer.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/shows.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_import_shows_from_lists_upsert.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_shows_array_payloads.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- root_cause:
+  - `POST /api/v1/admin/shows/sync-from-lists` failed with `ShowRepositoryError` because list sync attempted to write removed `core.shows` social columns (`facebook_id`, `instagram_id`, `twitter_id`).
+  - After removing that failure, live validation exposed a second insert-time bug: array payloads for `core.shows` inserts were sent as JSON-style lists (e.g., `["imdb"]`) instead of PostgreSQL array literals, causing `malformed array literal` errors.
+- behavior_summary:
+  - `show_importer` now only writes typed external IDs (`tvdb_id`, `tvrage_id`, `wikidata_id`) to top-level `core.shows` columns.
+  - Social handles from TMDb TV details are preserved in `core.shows.external_ids` instead of removed typed columns.
+  - `insert_show` now normalizes array columns with `_prepare_payload_arrays(...)` before insert (parity with update path), preventing `malformed array literal` on `listed_on`/other array fields.
+  - `sync_from_lists` endpoint now catches unexpected ingestion errors and returns structured `HTTPException(500)` with `detail="Sync failed: ..."` (JSON error payload) instead of an opaque internal error response.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/ingestion/show_importer.py trr_backend/repositories/shows.py api/routers/admin_show_sync.py tests/scripts/test_import_shows_from_lists_upsert.py tests/api/routers/test_admin_show_sync.py tests/repositories/test_shows_array_payloads.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/scripts/test_import_shows_from_lists_upsert.py tests/api/routers/test_admin_show_sync.py tests/repositories/test_shows_array_payloads.py` (pass, `27 passed`)
+  - Live app proxy check (admin-bypass token):
+    - pre-check `GET /api/admin/covered-shows` => count `11`
+    - sync request before array fix returned JSON error with `detail` containing `Sync failed: ... malformed array literal ...`
+    - sync request after fixes progressed through bulk updates/creates in backend logs (no `facebook_id` missing-column crash), then client request ended with `curl: (52) Empty reply from server` during long-running dev session; follow-up `GET /api/admin/covered-shows` remained `11` (manual added-shows list unchanged).
+- residual_risks:
+  - Full UI-level success notice verification for the very long-running default full-list sync remains incomplete in this session due unstable dev-server connection (`curl 52`) while backend was actively processing; functional regressions are covered by the added router + ingestion + repository tests.
+
+## Latest Update (2026-03-01) — YouTube Shorts week-view ingestion fix + season rerun verification
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed YouTube continuation traversal so date-window crawling distinguishes `after-range` vs `before-range`; pre-window cap now applies only to true before-range progression.
+  - Added `YouTubeScrapeConfig.enforce_keyword_filter` (default `true`) and disabled it for season analytics ingestion so backend strict show-term matching is the single authority.
+  - Corrected YouTube scrape progress semantics:
+    - `posts_checked` now tracks checked renderer count,
+    - `matched_posts` tracks matched candidates,
+    - ingest-side scrape counters now derive from `matched_posts` (not `posts_checked`).
+  - Fixed week-detail YouTube payload mapping to include `is_short` boolean in post rows (enables Shorts badge/render in consumer UI).
+  - Executed season rerun for affected scope (`season_id=e9161955-6ee4-4985-865e-3386a0f670fb`, `source_scope=bravo`, `platform=youtube`, posts-only windowed rerun):
+    - run id: `5a30456c-4573-4a2d-a963-db7f0f8b8c25`
+    - completed with `items_found_total=9`
+    - season Shorts count moved from `0` to `7`
+    - week detail now returns Shorts with `/shorts/...` URLs and `is_short=true`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && .venv/bin/pytest -q tests/socials/test_comment_scraper_fixes.py -k "youtube_scrape_emits_progress_callback or youtube_scrape_keeps_paging_through_too_recent_no_hit_pages or youtube_scrape_stops_when_pre_window_cap_is_reached"` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && .venv/bin/pytest -q tests/repositories/test_social_season_analytics.py -k "week_detail_youtube_uses_effective_saved_comment_count or ingest_youtube_posts_stage_reports_filter_diagnostics or ingest_youtube_progress_uses_matched_posts_for_scrape_counter"` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && set -a && source .env && set +a && scripts/db/run_sql.sh -c "select count(*) as season_total, sum(case when coalesce(is_short,false) then 1 else 0 end) as season_shorts from social.youtube_videos where season_id='e9161955-6ee4-4985-865e-3386a0f670fb';"` (`season_total=148`, `season_shorts=7`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && set -a && source .env && set +a && .venv/bin/python ... get_week_detail(...)` (`week_index=0`: `posts=8`, `shorts=7`, sample URL `https://www.youtube.com/shorts/bd9yiwU4bR0`)
+- residual_risks:
+  - This rerun was executed in `posts_only` mode to validate Shorts post ingestion quickly; comments-only parity for newly recovered Shorts can be scheduled in a follow-up run if needed.
 - downstream_repos_impacted:
   - `TRR-Backend`: yes
   - `screenalytics`: no
@@ -7245,3 +7783,1891 @@ Continuation (same session, 2026-02-28) — TMDb cast profile alias serializatio
   - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/repositories/test_cast_tmdb.py tests/integrations/tmdb/test_tmdb_person.py tests/api/routers/test_admin_person_images.py -k "tmdb or cast_tmdb or refresh"` (pass, `22 passed`)
 - residual_risks:
   - Live Supabase schema introspection was not available in this environment; plan assumes deployed schema still matches migration `0044` (`also_known_as TEXT[]`).
+
+Continuation (same session, 2026-02-28) — Reddit refresh `flair_mode` migration-lag guard + live progress telemetry.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added cached schema guard `_column_exists(...)` in Reddit refresh repository.
+  - `_replace_period_matches(...)` now conditionally writes `flair_mode` only when the column exists.
+  - `get_cached_period_payload(...)` now conditionally selects `flair_mode`; returns `flair_mode: null` when migration has not landed.
+  - Added live run diagnostics progress object under `diagnostics.progress` with stage/counters:
+    - `stage`
+    - `listing_pages_fetched`
+    - `search_pages_fetched`
+    - `rows_discovered_raw`
+    - `rows_matched`
+    - `comments_targets_total`
+    - `comments_targets_done`
+    - `comments_rows_upserted`
+    - `updated_at`
+  - `execute_refresh_run(...)` now emits incremental `_update_run(... status='running')` updates across stages:
+    - `discovering_posts`
+    - `persisting_posts`
+    - `persisting_period_matches`
+    - `fetching_comments`
+    - `finalizing`
+  - Added progress callback plumbing through discovery/backfill loops so UI polling receives active counters before completion.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass, `20 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/reddit_refresh.py tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass)
+- residual_risks:
+  - Progress updates are throttled (~0.8s) to reduce DB write churn; extremely fast runs may skip some intermediate counts.
+  - Migration `0158_reddit_period_match_flair_mode.sql` should still be applied in cloud to enable full `flair_mode` persistence path.
+
+Continuation (same session, 2026-02-28) — Links refresh expansion (Wikidata/TMDb IDs + socials), fandom multi-candidate reliability, auto-approval counters.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/fandom.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Expanded Wikidata extraction + connected row generation:
+    - person identifiers: `P646` (Freebase), `P11194` (Famous Birthdays), `P2671` (Google KG)
+    - person socials: `P2002/P2003/P2013/P2397/P7085/P4265`
+    - show IDs: `P8013` (Trakt), `P8672` (X topic)
+  - Added connected link generation/classification for `freebase`, `famous_birthdays`, `google_kg`, `trakt`, and `x_topic`; all remain auto-approved knowledge links.
+  - Refresh people discovery now:
+    - uses token-aware Wikidata cast matching,
+    - derives missing IMDb/TMDb IDs from person Wikidata summary,
+    - emits Wikidata-derived identifier/social links,
+    - emits TMDb social links from existing `core.cast_tmdb` fields,
+    - fetches TMDb external IDs when missing, persists them best-effort to `core.cast_tmdb`, and emits linked socials/IDs.
+  - Fandom reliability:
+    - `search_fandom_community_wiki_candidates(...)` now returns ranked multi-candidates.
+    - season discovery evaluates multiple candidates per domain/query and validates each page before accepting.
+    - person fandom discovery now queries multiple candidates per domain instead of only first-hit.
+  - Discover endpoint additive response counters:
+    - `wikidata_identifier_links_added`
+    - `wikidata_social_links_added`
+    - `tmdb_social_links_added`
+    - `fandom_candidates_tested`
+  - TMDb profile refresh hook (`admin_person_images`) now upserts person social links into `core.entity_links` for all shows the person belongs to when TMDb profile sync succeeds.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py` (pass, `90 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py api/routers/admin_person_images.py tests/api/routers/test_admin_show_links.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check .` (fails due unrelated pre-existing lint errors in other modules/files outside this scope)
+- residual_risks:
+  - Full-repo lint is currently not green because of unrelated existing violations; scoped files for this change pass.
+  - TMDb external-ID persistence is best-effort by design (non-fatal on write failure) to avoid blocking link discovery.
+
+Continuation (same session, 2026-02-28) — Fandom refresh expansion for seed scraping/all-pages candidates + page-title metadata.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/fandom.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Expanded `search_fandom_community_wiki_candidates(...)` to combine REST search, MediaWiki search, Special:Search HTML extraction, and all-pages prefix queries (`api.php list=allpages`) for stronger candidate coverage.
+  - Added seeded fandom crawl helper paths during refresh:
+    - fetches show fandom seed pages,
+    - extracts internal `/wiki/*` links,
+    - probes each domain `Special:AllPages`,
+    - reuses discovered URLs as candidate pool for season and cast-member link discovery.
+  - Season discovery now scores/validates seeded candidate URLs before falling back to derived/search URLs, improving hit rate when one domain format differs.
+  - Person discovery now consumes seeded per-domain candidate URLs in addition to direct-name and search candidates.
+  - Fandom rows now persist page-title/favicon metadata (`fandom_title`, `page_title`, `favicon_url`) and use page-title labels instead of generic `Fandom` when resolvable.
+  - Submitted fandom URL classification now records title/favicon metadata and uses page title as label by default.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py -q` (pass, `90 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py trr_backend/integrations/fandom.py tests/api/routers/test_admin_show_links.py` (pass)
+- residual_risks:
+  - Seed/all-pages scraping adds extra outbound calls per fandom domain; behavior remains bounded by existing timeout controls but can increase refresh latency on very large wikis.
+
+Continuation (same session, 2026-02-28) — Reddit refresh durability + stable-key contract support for cache-first APP flow.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added stale queued-run recovery in `create_or_reuse_refresh_run(...)` to mark expired queued runs failed before new/reuse resolution for same `(community_id, season_id, period_key)`.
+  - Added atomic run claim path `_claim_refresh_run_for_execution(...)` so execution only transitions `queued -> running` once; includes stale-running recovery safety.
+  - `execute_refresh_run(...)` now starts from claim path and keeps monotonic, throttled `diagnostics.progress` stage/counter updates while run is active.
+  - Social admin run-start model now accepts additive `period_stable_key` and forwards it in serialized payload.
+  - Fixed lint issues in `api/routers/socials.py` (import ordering + line wrapping + unused loop variable rename).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass, `23 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/reddit_refresh.py api/routers/socials.py tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass)
+- residual_risks:
+  - Stale-run thresholds (`REDDIT_REFRESH_STALE_QUEUED_SECONDS`, `REDDIT_REFRESH_STALE_RUNNING_SECONDS`) are env-driven; aggressive values may fail long runs prematurely.
+  - Existing non-Reddit dirty changes in backend repo were left untouched and may still affect unrelated validation paths.
+
+Continuation (same session, 2026-02-28) — Social week detail server-backed sorting + cache-keyed gallery pagination.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added additive week-detail query params on `/api/v1/admin/socials/seasons/{season_id}/analytics/week/{week_index}`:
+    - `sort_field`: `engagement|likes|views|comments_count|shares|retweets|posted_at`
+    - `sort_dir`: `asc|desc`
+  - Preserved endpoint compatibility defaults (`sort_field=posted_at`, `sort_dir=desc`) for non-TRR-APP consumers.
+  - Included sort signature in week-detail cache key to avoid cross-sort cache collisions.
+  - Updated repository week-detail pipeline to accept sort settings, apply safe platform-specific SQL `ORDER BY` expressions, and preserve global top-N correctness by fetching up to `post_limit + post_offset` per platform before merge/paginate.
+  - Route-level merged paging now sorts by selected metric/date before slicing and annotates each returned post with additive `sort_rank` for stable client rendering.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py` (pass, `45 passed`)
+- residual_risks:
+  - None identified within backend scope; defaults remain backward-compatible and sort parameters are validated via typed literals.
+
+Continuation (same session, 2026-02-28) — Refresh auto-count backfill + person-fallback crops + IMDb WWHL series resolution.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_image_counts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/imdb/title_page_metadata.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images_auto_count_enrichment.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_image_counts_fallback.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/imdb/test_title_page_metadata.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Auto-count now backfills legacy counted rows when `face_boxes`/`face_crops` are missing instead of skipping purely on existing `people_count`.
+  - Added fallback detection path: when no `face` detections exist, `person` boxes are converted into crop candidates with additive markers:
+    - `source_kind: person_fallback`
+    - `label_source: deterministic_tag_map|generic`
+    - `fallback_reason: no_faces_detected`
+  - Applied conservative fallback labeling rules:
+    - deterministic mapping only for single-tag or equal-count tag/box cases;
+    - otherwise generic `Person N` labels.
+  - Persisted `face_boxes` and `face_crops` as explicit arrays (including empty arrays), preventing repeated reprocessing loops caused by key removal.
+  - Added additive auto-count diagnostics to refresh/reprocess stream completion and refresh JSON response:
+    - `auto_faces_detected`
+    - `auto_face_crops_generated`
+    - `auto_person_fallback_crops_generated`
+    - `auto_no_face_rows`
+  - Improved IMDb title fallback parser for episode pages:
+    - parses parent-show anchors (`ref_=tt_ov_srs`) for `series_title` + `series_imdb_id`;
+    - handles quoted IMDb title format (`"Series" Episode (TV Episode ...)`) used by WWHL pages.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py api/routers/admin_image_counts.py trr_backend/integrations/imdb/title_page_metadata.py tests/api/routers/test_admin_person_images_auto_count_enrichment.py tests/api/routers/test_admin_image_counts_fallback.py tests/integrations/imdb/test_title_page_metadata.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images_auto_count_enrichment.py tests/api/routers/test_admin_image_counts_fallback.py tests/integrations/imdb/test_title_page_metadata.py tests/api/routers/test_admin_person_images.py -k "auto_count or face_crops or imdb or wwhl"` (pass, `33 passed, 29 deselected`)
+- residual_risks:
+  - Deterministic fallback labeling intentionally avoids aggressive identity assumptions; multi-person ambiguous rows may still show generic labels.
+  - Existing production rows still require running refresh/reprocess to materialize new fallback crops and WWHL fallback show metadata.
+
+Continuation (same session, 2026-02-28) — WWHL pill follow-up: repair eligibility for episode-like IMDb rows missing fallback show data.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Expanded `_needs_imdb_metadata_refresh(...)` so episode-like IMDb rows are re-repaired when fallback show fields are missing, even when otherwise “complete”.
+  - Added guardrails to avoid broad refresh churn by requiring episode-like evidence (`TVEpisode`, episode fields, episode context, or still-frame episode image types).
+  - Added regression test proving request-context episode rows missing fallback show metadata now re-enter repair path.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py -k "needs_imdb_metadata_refresh or repair_existing_imdb_cast_photos or wwhl or imdb"` (pass, `17 passed`)
+- residual_risks:
+  - Existing gallery rows require another refresh run to materialize repaired fallback show metadata used by WWHL bucketing.
+
+Continuation (same session, 2026-02-28) — WWHL credit-episode ID sync path for IMDb metadata enrichment.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added `_load_person_wwhl_episode_imdb_ids_from_credits(...)` to read WWHL episode title IDs for a person from `core.v_episode_appearances_from_credits` (filtered by WWHL show names in `core.shows`).
+  - Extended `_enrich_cast_photos_with_episode_metadata(...)` with `person_wwhl_episode_imdb_ids` so rows whose `title_imdb_ids` match WWHL credit episode IDs are explicitly tagged with WWHL fallback metadata even when title-page fallback data is missing.
+  - Wired this credits-derived ID set into both refresh paths:
+    - `refresh_person_images(...)`
+    - `refresh_person_images_stream(...)`
+  - Wired the same set into `_repair_existing_imdb_cast_photos(...)` so existing-row repair can classify by WWHL credit IDs.
+  - Added regression coverage for the new fallback path using `person_wwhl_episode_imdb_ids={"tt26755932"}`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py -k "enrich_cast_photos_with_episode_metadata or repair_existing_imdb_cast_photos or refresh_response_includes_imdb_diagnostics or stream_honors_skip_flags"` (pass, `7 passed`)
+- residual_risks:
+  - This path depends on WWHL show rows + episode appearances existing in credits views; if those credits are not present in DB yet, title-page fallback/repair remains the active classification mechanism.
+
+Continuation (same session, 2026-02-28) — Alan WWHL appearance backfill verification (3-row repair).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `none`
+- risk_class: `low`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- operational_actions:
+  - Identified Alan’s IMDb episode-title rows containing paired guest-title patterns:
+    - `tt39695338` (`Susan Lucci & Alan Cumming`)
+    - `tt31149488` (`Alan Cumming & Darren Criss`)
+    - `tt26755932` (`Milo Ventimiglia & Alan Cumming`)
+  - Re-ran episode metadata enrichment + `upsert_cast_photos(..., dedupe_on="source_image_id")` for those 3 rows.
+  - Verified all 3 now have:
+    - `metadata.imdb_fallback_show_name = "Watch What Happens Live with Andy Cohen"`
+    - `metadata.show_context_source = "imdb_episode_unresolved"`
+- validation_evidence:
+  - ad-hoc verification query output after backfill showed `wwhl-like rows = 3` for Alan in `core.cast_photos`.
+- residual_risks:
+  - Additional WWHL appearances not present in current gallery rows still depend on IMDb ingestion/fetch coverage in future refresh runs.
+
+Continuation (same session, 2026-02-28) — Twitter/X video thumbnail blank fix (backend source/mirror logic + metadata repair script).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/repair_twitter_video_thumbnails.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_repair_twitter_video_thumbnails.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed twitter thumbnail source selection to prefer non-video media URLs via `_select_thumbnail_candidate(...)` so `.mp4` entries no longer become image thumbnails when image candidates exist.
+  - Updated `_platform_post_needs_media_mirror(...)` to treat twitter rows with video-like hosted thumbnails as repair-needed when a non-video candidate exists in hosted/source media arrays.
+  - Added maintenance script `scripts/socials/repair_twitter_video_thumbnails.py` to repair root tweet `hosted_thumbnail_url` values in-place without re-mirroring/download:
+    - default dry-run,
+    - `--apply` for mutation,
+    - `--season-id` and `--limit` filters,
+    - JSON summary output with scanned/eligible/updated/skipped/unresolved counts.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "twitter and mirror"` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/scripts/test_repair_twitter_video_thumbnails.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python scripts/socials/repair_twitter_video_thumbnails.py --dry-run` (pass, stats: `scanned=26`, `eligible=26`, `skipped=26`, `unresolved=0`)
+- residual_risks:
+  - `--apply` was not executed in this implementation pass to avoid unreviewed DB mutation; operational runbook should execute apply + post-verify query in target environment.
+
+Continuation (same session, 2026-02-28) — Reddit period adaptive-deep coverage + pass diagnostics + hint-token cleanup.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added additive Reddit run-start contract fields: `coverage_mode`, `max_backfill_queries`, `max_backfill_pages_per_query`, and `period_label`.
+  - Implemented coverage modes in refresh execution:
+    - `standard`: existing single-pass behavior,
+    - `adaptive_deep`: auto second deep pass when pass 1 remains incomplete,
+    - `max_coverage`: deep limits from pass 1.
+  - Added pass merge/dedupe by `reddit_post_id` so multi-pass results are persisted once with highest coverage.
+  - Added additive diagnostics for coverage behavior: `coverage_mode`, `passes_run`, `passes[]`, and `final_completeness`.
+  - Cleaned suggested hint-token generation by filtering short tokens, stopwords/domain-noise terms, and numeric-only tokens.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass, `26 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/reddit_refresh.py api/routers/socials.py tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass)
+- residual_risks:
+  - Deep pass limits increase runtime and Reddit API pressure; final completeness can still be partial when Reddit indexing/limits block full historical recovery.
+
+Continuation (same session, 2026-02-28) — Links refresh stabilization (canonical wiki/fandom URLs, multi-fandom person coverage, deterministic invalid cleanup).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/shows/normalize_entity_links_url_keys.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed `_canonicalize_url(...)` wiki/fandom path normalization to preserve decoded parentheses (`(...)`) while still collapsing encoded/decoded forms into one canonical key.
+  - Removed single-result cap in person fandom discovery loop so validated fandom pages across multiple domains are retained per person (deduped by canonical URL key).
+  - Enforced deterministic invalid cleanup behavior for show/season knowledge links by deleting invalid rows regardless of manual source for known-invalid outcomes.
+  - Kept `manual_skipped` response field backward-compatible (now always `0` for deterministic-invalid paths).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py -q` (pass, `91 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py tests/api/routers/test_admin_show_links.py scripts/shows/normalize_entity_links_url_keys.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check .` (fails on unrelated pre-existing repo-wide lint violations outside links scope)
+- residual_risks:
+  - Full repo lint remains non-green due pre-existing unrelated files; links-specific files are lint-clean and links router tests are green.
+
+Continuation (same session, 2026-02-28) — Admin social multi-tab stability backend hardening (health-dot + bulk cache lookup + queue-status fallback).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `verification-only`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added lightweight ingest health endpoint `GET /api/v1/admin/socials/ingest/health-dot` with reduced payload (queue-enabled, worker health summary, queue by-status subset, updated-at).
+  - Added bulk cache endpoint `POST /api/v1/admin/socials/reddit/cache/bulk` to replace repeated app-side multi-key cache probes.
+  - Hardened queue-status repository behavior:
+    - default cache TTL increased to `20s`,
+    - stale-last-good fallback window added (`SOCIAL_QUEUE_STATUS_STALE_FALLBACK_SECONDS`, default `120s`),
+    - optional recent-failure query skip for lightweight consumers (`include_recent_failures=False`).
+  - Added/extended tests for health-dot route, bulk cache route behavior, and stale fallback/caching semantics.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py -q` (pass, `47 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_reddit_refresh_routes.py -q` (pass, `10 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "queue_status_uses_cache_ttl or stale_last_good" -q` (pass, `2 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/repositories/test_social_season_analytics.py -k "health_dot or queue_status or reddit_cached_period_payload_bulk or stale_last_good or queue_status_uses_cache_ttl" -q` (pass, `9 passed`)
+- residual_risks:
+  - Queue-status stale fallback currently depends on an existing last-good payload in process memory; a cold process start has no fallback until the first successful queue-status query completes.
+
+Continuation (same session, 2026-02-28) — Wave 1 backend env-isolation fix + test-secret hardening.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/**` (bulk replacement of weak `test-secret` literals with 32+ char test secret values)
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed Twikit credential fallback test isolation by explicitly clearing all Twitter cookie env variants before exercising browser-cookie fallback.
+  - Standardized backend test JWT secrets to >=32 chars across test files to remove insecure-key warnings/noise during test runs.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py::test_load_twikit_credentials_falls_back_to_browser_cookies` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q --maxfail=20` (pass, `1206 passed, 18 skipped`)
+- residual_risks:
+  - Integration tests gated by `RUN_DB_TESTS` remain intentionally skipped.
+
+Continuation (same session, 2026-02-28) — Refresh links social-handle validation and stale-profile cleanup.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added person social-link validation (`instagram`, `twitter/x`, `facebook`, `youtube`, `tiktok`, `reddit`, `threads`) with missing-profile pattern checks and fetch-error handling.
+  - Discovery now validates social URLs before emitting person social rows, so stale handles are not auto-added.
+  - Added person-social cleanup pass in refresh pipeline to validate existing social rows and delete invalid stale URLs; valid pending social rows are promoted.
+  - Wired social cleanup into discovery summary counts (`links_validated`, `links_promoted`, `deleted_invalid`, `validation_reasons`) and added social-specific result counters.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py -q` (pass, `94 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py tests/api/routers/test_admin_show_links.py` (pass)
+- residual_risks:
+  - Social sites can intermittently return anti-bot/challenge responses; these are treated as fetch errors to avoid false deletions, so some stale links may remain until a deterministic invalid response is observed.
+
+Continuation (same session, 2026-02-28) — Persist manual Fandom seed domains across page reload and refresh cycles.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added explicit fandom-seed URL detection for root/non-`/wiki/` Fandom domains.
+  - Manual classifier now marks root-domain fandom submissions with seed metadata (`fandom_seed_domain`, `fandom_seed_url`).
+  - Show-link cleanup now preserves valid show-level fandom seed domains (allowlisted + domain-matched) instead of treating them as missing page links.
+  - This keeps manually-added seeds like `https://thetraitors.fandom.com/` and `thetraitorsuk.fandom.com` persisted in active links across reloads and subsequent refresh jobs.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py tests/api/routers/test_admin_show_links.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py -q` (pass, `96 passed`)
+- residual_risks:
+  - Seed URLs are intentionally preserved without requiring a concrete `/wiki/...` article; if a disallowed or wrong-domain seed is added, existing allowlist/domain checks still reject it.
+
+Continuation (same session, 2026-02-28) — Fandom root-seed expansion with multi-pattern probing and AllPages `from=` fallback.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added Fandom AllPages HTML candidate harvesting helper using explicit URLs in the form `https://{domain}/wiki/Special:AllPages?from={prefix}&to=&namespace=0`.
+  - Added show-page candidate scoring for Fandom URLs and root-seed expansion logic in show discovery:
+    - keeps root seed URL,
+    - probes direct `/wiki/<show>` pattern,
+    - probes search results,
+    - probes AllPages `from=` candidates,
+    - promotes the best validated show-page candidate per seed.
+  - Added AllPages `from=` fallback to person fandom candidate discovery for each show-level fandom domain.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py tests/api/routers/test_admin_show_links.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py -q` (pass, `98 passed`)
+- residual_risks:
+  - Fandom community HTML/search structures can vary; this path intentionally combines direct URL probes + search + AllPages to reduce misses, but anti-bot/intermittent fetch failures can still defer discovery.
+
+## Latest Update (2026-02-28) — Links refresh timeout remediation + live stream telemetry
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- behavior_summary:
+  - `api/routers/admin_show_links.py` now emits real-time progress telemetry for links discovery with run envelope fields (`run_id`, `started_at`, `finished_at`, `duration_ms`, `status_counts`, `validation_reasons`, `stage_counts`).
+  - Stream endpoint `/admin/shows/{show_id}/links/discover/stream` now emits progress incrementally (queue + worker thread) with heartbeat progress events while discovery is running.
+  - Added structured timeout context and status in discovery results (`status`, `timed_out`, `timeout`) plus per-stage timings (`show_stage_ms`, `season_stage_ms`, `people_stage_ms`, `validation_ms`).
+  - Added stage budget controls and candidate caps to reduce runaway fandom lookups and to preserve partial progress under long-running workloads.
+  - Added backend tests for structured timeout context and stream event ordering.
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py` (pass; `100 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py tests/api/routers/test_admin_show_links.py` (pass)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+Continuation (same session, 2026-03-01) — YouTube Shorts comments + duration remediation for RHOSLC S6.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+- risk_class: `ops+validation`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no` (consumer reads additive existing fields)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Verified comments-only remediation run completed for RHOSLC S6 YouTube scope:
+    - `run_id=c7fbace4-c72a-469c-91bb-2f39a4151cd0`, `status=completed`, `items_found_total=396`.
+  - Attempted additional posts-only rerun for duration hydration:
+    - `run_id=9820138a-bc13-4ca1-a2dc-a3f5a9719379` remained in long after-range continuation traversal and was cancelled cleanly.
+  - Applied controlled season-scoped Shorts duration backfill for rows with `duration_seconds<=0` using yt-dlp metadata:
+    - affected rows: `7`
+    - updated rows: `7`
+    - remaining RHOSLC S6 Shorts with zero duration: `0`
+  - Verified target short `qBSM51RWLAw` now has:
+    - `duration_seconds=51`
+    - `comments_count=32`
+    - saved comments in DB: `32`
+    - `is_short=true`, `source_surface='shorts'`, week detail URL `/shorts/qBSM51RWLAw`.
+- validation_evidence:
+  - `scripts/db/run_sql.sh -c "select video_id,is_short,source_surface,duration_seconds,comments_count,(select count(*) ...) as saved_comments ... where video_id='qBSM51RWLAw'"` (`duration_seconds=51`, `comments_count=32`, `saved_comments=32`)
+  - `scripts/db/run_sql.sh -c "select count(*) ... where coalesce(is_short,false)=true and coalesce(duration_seconds,0)<=0"` (`0`)
+  - `PYTHONPATH=. .venv/bin/python - <<'PY' ... get_week_detail(... platforms=['youtube'] ...) ... PY` (`qBSM51RWLAw` found with `is_short=True`, `/shorts/` URL, `duration_seconds=51`, `comments_count=32`)
+  - `scripts/db/run_sql.sh -c "select id::text,status ... from social.scrape_runs where id in (...)"` (`c7fbace4...=completed`, `9820138a...=cancelled`)
+
+Continuation (same session, 2026-03-01) — `sync-from-lists` explicit-empty payload handling (no unintended env fallback).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no` (existing proxy/UI contract unchanged)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- root_cause:
+  - `sync_from_lists` normalized list fields first and then used `if not imdb_lists/tmdb_lists` to load env defaults. Explicit `[]` from callers was indistinguishable from omitted fields and triggered unintended fallback to `IMDB_LIST_URL`/`TMDB_LIST_ID`.
+- behavior_summary:
+  - Added `_field_provided(...)` helper and changed fallback conditions to only apply env defaults when the field is omitted from the request payload.
+  - Explicitly-provided empty arrays now remain empty (e.g. `{"imdb_lists": [], "tmdb_lists": ["8301274"]}` no longer imports env IMDb list).
+  - Added regression test covering explicit-empty IMDb list with env default present.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_sync.py tests/api/routers/test_admin_show_sync.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_sync.py -k "sync_from_lists or TestSyncFromLists or explicit_empty_imdb"` (pass, `5 passed`)
+  - Live request verification:
+    - `POST /api/v1/admin/shows/sync-from-lists` with body `{"imdb_lists":[],"tmdb_lists":["8301274"],"region":"US","concurrency":1,"force_refresh":false}`
+    - Response `200`: `{"imdb_lists_used":[],"tmdb_lists_used":["8301274"],"candidates_collected":2,"created":0,"updated":2,"skipped":0,...}`
+- residual_risks:
+  - Callers that previously relied on sending explicit empty arrays to still use env defaults will now get strict-empty behavior; this is intentional and matches explicit-input semantics.
+
+Continuation (same session, 2026-03-01) — RHOSLC Fandom links retained in Settings cleanup/discovery paths.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no` (UI consumes existing links payload)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- root_cause:
+  - RHOSLC/Bravo Fandom domains could be filtered out because show-link cleanup still validated against the raw global Fandom allowlist instead of show/network-aware allowlist expansion.
+- behavior_summary:
+  - Updated `_scan_invalid_show_knowledge_links(...)` to load `networks` and validate Fandom URLs with `_effective_fandom_allowlist(...)`, preserving Bravo-domain fandom seeds/pages (`real-housewives.fandom.com`) when globally absent.
+  - Updated `_discover_people_links(...)` to use `_effective_fandom_allowlist(...)` as well, aligning discovery with show/network-specific fandom-domain rules.
+  - Added regression test `test_cleanup_invalid_show_knowledge_links_keeps_bravo_fandom_domains_without_global_allowlist`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py tests/api/routers/test_admin_show_links.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py -q -k "keeps_bravo_fandom_domains_without_global_allowlist or keeps_show_level_fandom_seed_domains"` (pass, `2 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_show_links.py -q` (non-blocking pre-existing branch failures: 2 tests failing around broader fandom-source expectations)
+
+## Latest Update (2026-03-01) — RHOSLC Threads relevance filter + topic surfacing (non-destructive)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/run_rhoslc_threads_full_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added RHOSLC-only Threads relevance gating for analytics read paths using season context (`show_slug == rhoslc` or show name contains `salt lake city`).
+  - Added Threads relevance term builder that combines active Threads target hashtags/keywords with show-derived aliases and drops generic season tokens (`season N`, `sN`).
+  - Added Threads topic extraction helpers from `raw_data` (known key paths + recursive topic/activity key scan) and Text+Topic matching semantics.
+  - Applied read-time filtering (non-destructive) to:
+    - `_rows_for_platform(..., platform='threads')`
+    - `_week_detail_threads(...)`
+    - `_comments_coverage_for_platform(..., platform='threads')`
+    - `_mirror_coverage_for_platform(..., platform='threads')`
+  - Added `topic` to Threads payloads in:
+    - week detail Threads posts
+    - `get_post_comments(..., platform='threads')`
+  - Added RHOSLC Threads full-refresh runner script that resolves RHOSLC seasons, enqueues `full_refresh` Threads ingest (`posts_and_comments`), and executes runs synchronously.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "threads or comments_coverage_threads or mirror_coverage_threads or topic"` (pass, `8 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_season_analytics.py -k "week_detail_endpoint_passes_threads_topic_field or post_comments_endpoint_passes_threads_topic_field"` (pass, `2 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile trr_backend/repositories/social_season_analytics.py scripts/socials/run_rhoslc_threads_full_refresh.py` (pass)
+- residual_risks:
+  - Strict RHOSLC filtering is intentionally scoped to seasons resolved as RHOSLC; other shows currently retain existing Threads behavior.
+  - Workspace-wide `ruff check` still reports pre-existing long-line/style issues in untouched sections; targeted behavior tests for this change pass.
+
+## Latest Update (2026-03-01) — Unified post refresh orchestration + YouTube transcript/detail/media diagnostics
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (additive payload consumption updates)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/media_resolver.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/media_resolver.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/media_resolver.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0159_add_youtube_transcripts.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added full post refresh orchestration (`refresh_post`) used by `/analytics/posts/{platform}/{source_id}/refresh` route:
+    - detail re-sync step
+    - comments re-sync step (existing strict completeness behavior retained)
+    - media resolve/mirror re-sync step
+    - additive refresh diagnostics (`detail_sync`, `warnings`, `comment_gap`)
+  - Kept `refresh_post_comments` compatibility path intact for internal/tests usage.
+  - Added YouTube transcript capture plumbing:
+    - scraper transcript fetch support + retry-capable comments continuation behavior
+    - ingest-time transcript persistence when enabled
+    - additive transcript columns migration for `social.youtube_videos`
+    - post-detail response now includes transcript fields and `duration_seconds`.
+  - Added additive `media_asset_meta` surfacing in post-detail payloads and persisted normalized mirror metadata (`best_per_asset` policy).
+  - Preserved strict YouTube show-term filtering authority in backend while keeping checked-vs-matched progress semantics.
+- validation_evidence:
+  - `python3 -m py_compile trr_backend/repositories/social_season_analytics.py trr_backend/socials/threads/scraper.py api/routers/socials.py trr_backend/socials/youtube/scraper.py trr_backend/socials/youtube/media_resolver.py trr_backend/socials/tiktok/media_resolver.py trr_backend/socials/threads/media_resolver.py` (pass)
+  - `pytest -q tests/api/routers/test_socials_season_analytics.py -k refresh_post_comments_endpoint_returns_latest_post_detail` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py -k "refresh_post_comments_youtube_reports_comment_count_sync or refresh_post_comments_tiktok_returns_additive_completeness_fields or refresh_post_comments_twitter_zero_limit_sets_fetch_disabled"` (pass)
+- residual_risks:
+  - End-to-end runtime verification still required against live RHOSLC season data after migration apply + season rerun (queue/worker availability dependent).
+  - Transcript availability depends on caption track presence/access; failures are surfaced as additive `transcript_error`.
+
+Continuation (same session, 2026-03-01) — YouTube checked-renderer accounting fix + `refresh_post` regression coverage.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (diagnostics payload now protected by backend tests)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed continuation ownership-filter accounting to avoid cumulative over-counting across pages by using per-page counters.
+  - Tightened `posts_checked` semantics in YouTube renderer processing so checked count increments on each owner-matched renderer scan (including parse-drop renderers).
+  - Added repository tests for new full refresh semantics (`refresh_post`) to assert additive `detail_sync`, `warnings`, and `comment_gap` payload behavior.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/socials/test_comment_scraper_fixes.py -k "youtube_scrape or fetch_comments or transcript"` (pass, `11 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "refresh_post_returns_detail_sync_media_and_comment_gap or refresh_post_collects_warning_when_detail_or_media_sync_fails or refresh_post_comments_youtube_reports_comment_count_sync"` (pass, `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_season_analytics.py -k refresh_post_comments_endpoint_returns_latest_post_detail` (pass, `1 passed`)
+- residual_risks:
+  - This continuation does not execute live season rerun/backfill; runtime verification for RHOSLC queue/worker path is still required in environment.
+
+## Latest Update (2026-03-01) — X quote ingestion recovery, metric verification, and quote media mirror drain (RHOSLC S6)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`, `functions.mcp__playwright__browser_run_code`
+  - fallback: `functions.mcp__playwright__browser_network_requests`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (already aligned from prior session edits; no additional app code changes in this continuation)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/repair_twitter_quotes_metrics_and_comment_media.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed repair script runtime blocker by removing invalid `source_scope` arg from `_fetch_and_apply_twitter_metric_summary(...)` call.
+  - Hardened quote search request shaping for `/retweets/with_comments` flow:
+    - `querySource="tdqt"`
+    - quote-route feature overrides aligned with browser-observed request
+    - optional `TWITTER_X_CLIENT_TRANSACTION_ID` header support for operator override/debugging.
+  - Added quote parsing helper for SearchTimeline payload reuse (`_extract_quote_tweets_from_search_payload`).
+  - Added browser fallback path for quote discovery (`_fetch_tweet_quotes_via_playwright`) and wired it as final fallback in `fetch_tweet_quotes(...)` after SearchTimeline/TweetDetail/Twikit.
+  - Preserved bounded failure metadata (`last_quote_fetch_reason`, `last_quote_fetch_meta.attempts`) across all quote fetch sources.
+  - Added unit coverage for Playwright fallback selection and updated quote-search test doubles for expanded `_fetch_search(...)` signature.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/socials/test_comment_scraper_fixes.py -k "twitter or twikit"` (pass, `22 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "twitter and (quote or mirror or reconcile or complete)"` (pass, `9 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/scripts/test_repair_twitter_quotes_metrics_and_comment_media.py` (pass, `3 passed`)
+  - `python -m scripts.socials.repair_twitter_quotes_metrics_and_comment_media --season-id e9161955-6ee4-4985-865e-3386a0f670fb --tweet-id 1956000357282406729 --apply` (pass; `quotes_fetched=17`, `quotes_upserted=17`, `media_jobs_enqueued=6`)
+  - Quote-media job drain:
+    - `process_next_queued_job(worker_id=<uuid>, stage=comment_media_mirror, platform=twitter)` loop drained 3 pending quote-media jobs (all completed).
+  - Post-repair DB spot checks (`tweet_id=1956000357282406729`):
+    - root row: `likes=7102`, `replies_count=338`, `retweets=970`, `quotes=863`, `views=618001`
+    - quote rows: `17`
+    - quote rows with media: `3`
+    - quote rows with hosted media: `3`
+  - Live scraper metric probe:
+    - `fetch_tweet_detail_summary(...)` returned `likes=7092`, `replies=338`, `retweets=970`, `quotes=863`, `views=618000` at run time.
+- residual_risks:
+  - `max-by-metric` persistence policy intentionally prevents downward drift, so stored root metrics can remain above current live values (example: stored likes `7102` vs live `7092`).
+  - Quote ingestion remains dependent on X anti-bot behavior/rate limits; this pass recovered quote persistence for the target post but did not prove full historical quote coverage equals `quote_count`.
+  - Browser fallback path for quotes is operationally heavier than API-only paths and should be monitored in worker environments.
+
+## Latest Update (2026-03-01) — Threads view-count extraction from View Activity GraphQL
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_threads_scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added Threads post-activity view query support in scraper via `BarcelonaPostViewCountQuery` (`doc_id=25038761902481747`) and mapped `data.media.text_post_app_info.impression_count` to `ThreadsPost.views`.
+  - Added normalized count parsing for GraphQL count payloads (including comma-formatted values).
+  - Updated GraphQL post build path to use feed-provided `impression_count` when available.
+  - During profile GraphQL scrape, if feed payload does not include views, scraper now does per-post activity lookup using post `pk` and writes `impression_count` into `raw_data.text_post_app_info`.
+  - Extended `scrape_post(...)` (single-post HTML path) to fetch View Activity `impression_count` using extracted page tokens + `post_pk`, so post-level refresh/detail sync can hydrate views too.
+  - Fixed Threads `refresh_post` detail upsert path to avoid `meta_threads_posts.job_id` FK violations by writing refresh detail rows with `job_id=None`.
+  - Hardened Threads refresh detail merge to prevent metric degradation from partial HTML payloads: likes/replies/reposts/quotes/views now preserve non-zero stored values and replies also respect stored-comment fallback.
+  - Fixed ingest depth normalization so explicit `max_posts_per_target=0` is preserved (no-cap semantics), instead of being coerced to `1` by `or`-based defaults.
+  - Confirmed posts-only RHOSLC S6 run config now stores `max_posts_per_target='0'` for both `bravotv` and `bravowwhl`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check tests/socials/test_threads_scraper.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/socials/test_threads_scraper.py` (pass, `4 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "resolve_depth_defaults_respects_explicit_values_and_env_defaults or ingest_season_stores_sync_strategy_and_platform_scope or execute_claimed_job_uses_crawlee_path_for_instagram_with_auth"` (pass, `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k upsert_threads_post_falls_back_to_scraped_at_when_posted_at_missing` (pass, `1 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "refresh_threads_post_detail_sync_upserts_without_job_fk or resolve_depth_defaults_respects_explicit_values_and_env_defaults or refresh_post_returns_detail_sync_media_and_comment_gap"` (pass, `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/socials/threads/scraper.py tests/socials/test_threads_scraper.py` (fails due pre-existing line-length violations in `trr_backend/socials/threads/scraper.py` at lines 80, 204, 233 unrelated to this patch)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m scripts.socials.run_rhoslc_threads_full_refresh --season-number 6` (started; run `f87b2648-2823-4295-a34d-4bdaeed1629b` currently running with posts completed and comments/mirror jobs in progress)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python - <<'PY' ... ingest_season(... ingest_mode='posts_only', max_posts_per_target=0) + execute_run(..., stage='posts') ... PY` (started; run `cb70537c-07ee-4312-8ab4-cf66d3397019` currently running, posts jobs active for `bravotv` and pending for `bravowwhl`)
+  - Targeted Threads post refresh:
+    - `refresh_post(season_id='e9161955-6ee4-4985-865e-3386a0f670fb', platform='threads', source_id='DNVtpvYM3yI', max_comments_per_post=0, fetch_replies=False)` (pass after FK fix)
+    - DB spot check confirms `post_id='DNVtpvYM3yI'` now has `views=6832`, `likes=186`, `replies_count=6`, `reposts=11`, `quotes=2` at latest `scraped_at`.
+  - Queue cleanup:
+    - Cancelled duplicate stale running runs for season `e9161955-6ee4-4985-865e-3386a0f670fb`: `f87b2648-2823-4295-a34d-4bdaeed1629b`, `be2b8406-1ffe-4fcf-b2ad-ac9dcfcd2e91`, `b22cd919-ac18-45bf-b675-0c852ae8d5d5`, `0828b677-88aa-4dbf-916c-57ed292453aa`.
+- residual_risks:
+  - Run `cb70537c-07ee-4312-8ab4-cf66d3397019` (posts-only, max=0) is still in-progress at handoff time; full-history row coverage verification remains pending until completion.
+  - Full-refresh sync command for RHOSLC S6 (`python -m scripts.socials.run_rhoslc_threads_full_refresh --season-number 6`) is long-running for full-history scope and may take extended time based on Threads/Instagram endpoint latency and retries.
+  - Replies endpoint (`i.instagram.com/text_feed/.../replies`) intermittently returns 500 for some posts; run continues but can reduce comment completeness for affected posts.
+
+Continuation (same session, 2026-02-28) — Owner-seeded face identity assignment for gallery auto-count (TRR-show gated).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/clients/screenalytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_image_counts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images_auto_count_enrichment.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added candidate-constrained Screenalytics calls from backend auto-count paths so matching is restricted to gallery-owner/tagged people IDs on TRR-show-eligible rows.
+  - Added owner-priority assignment in face-box building: when similarity scores exist, the highest-similarity face is promoted to the gallery owner (`label_source=owner_similarity_seed`), duplicate owner assignments are cleared, then deterministic tag mapping fills remaining faces.
+  - Applied this behavior to refresh auto-count, reprocess/count-and-crop auto-count, and single-image/admin auto-count endpoints.
+  - Preserved TRR-show gating: identity inference is skipped for non-TRR-show rows.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py api/routers/admin_image_counts.py trr_backend/clients/screenalytics.py tests/api/routers/test_admin_person_images_auto_count_enrichment.py tests/api/routers/test_admin_image_counts_fallback.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images_auto_count_enrichment.py tests/api/routers/test_admin_image_counts_fallback.py tests/api/routers/test_admin_person_images.py -k "auto_count or detection_boxes or trr_show_eligible"` (pass, `17 passed`)
+- residual_risks:
+  - Owner promotion depends on available face `match_similarity`; rows without embeddings/similarity still fall back to deterministic tag mapping behavior.
+  - Low-quality/occluded faces may still need manual correction when similarity ranking is noisy.
+
+## Latest Update (2026-03-01) — Twitter/X Scraping + Persistence Stabilization (10+ Bug Fix Pass)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumer behavior/tests aligned in same pass)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_twitter_admin_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Hardened Twitter media merge and public-summary application so existing image candidates are preserved and merged even when summary includes video URLs.
+  - Added compatibility reply/quote fetch wrappers for legacy scrapers and missing quote-method implementations; wired through ingest and refresh flows.
+  - Expanded missing-comment lifecycle logic to include Twitter quotes and track observed IDs across both replies and quotes.
+  - Added `is_missing=false` filtering to Twitter post-detail reply/quote queries when lifecycle columns exist.
+  - Upgraded comment-media mirror eligibility for Twitter with hosted URL quality checks.
+  - Extended Twitter admin replies route with optional deep-page controls (`search_max_pages`, `twikit_max_pages`) and raised quote route default `max_pages` to `60`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "twitter or merge_twitter or ingest_twitter or missing or detail"` (pass, `48 passed, 127 deselected`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/socials/test_comment_scraper_fixes.py -k "twitter or twikit or quote"` (pass, `23 passed, 38 deselected`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_twitter_admin_routes.py` (pass, `8 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m scripts.socials.repair_twitter_quotes_metrics_and_comment_media --season-id e9161955-6ee4-4985-865e-3386a0f670fb --dry-run` (pass; `roots_scanned=200`, `media_jobs_enqueued=42`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m scripts.socials.repair_twitter_quotes_metrics_and_comment_media --season-id e9161955-6ee4-4985-865e-3386a0f670fb --tweet-id 1956000357282406729 --apply` (pass; `roots_refreshed=1`, `replies_upserted=36`, `quotes_upserted=0`, `media_jobs_enqueued=0`)
+  - Supabase SQL checks:
+    - root tweet `1956000357282406729`: `likes=7102`, `replies_count=338`, `retweets=970`, `quotes=863`, `views=618003`, non-video `hosted_thumbnail_url` set
+    - quote rows persisted for target: `17`
+    - quote media mirrored coverage for target: `3/3` rows with media have hosted media
+    - target reply/quote children with `is_missing=true`: `0`
+- residual_risks:
+  - Full-season `--apply` run hit X rate limits (`429`) with long-running retries; the run was intentionally halted after verification and a targeted apply on `tweet_id=1956000357282406729`. Remaining season-wide apply should be executed in controlled batches/retries.
+  - Quote/reply completeness remains sensitive to X anti-bot/rate-limit behavior; compat fallbacks prevent hard failures but cannot guarantee full historical retrieval on constrained sessions.
+
+## Latest Update (2026-03-01) — Reddit Community/Show/Flair Analytics Endpoints (Additive)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumer routing/tests aligned in same session)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added additive reddit analytics repository queries and admin API routes for:
+    - community summary (`scope=season|all`)
+    - show breakdown
+    - flair breakdown
+    - flair detail with paginated posts
+    - generic posts listing with filters.
+  - Implemented scope normalization/filtering and dedupe-oriented aggregation by `reddit_post_id` for season/all-time summaries.
+  - Added request validation (`season_id` required for `scope=season`) and explicit route-level error logging/mapping.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py trr_backend/repositories/reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/repositories/test_reddit_refresh.py` (pass)
+- residual_risks:
+  - These analytics endpoints are additive and currently unindexed beyond existing reddit tables; heavy all-time queries may need index tuning once production cardinality grows.
+
+## Latest Update (2026-03-01) — Threads-Only Hardening Sweep (Backend)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no` (verified no runtime contract dependency on Threads week/post-detail payload fields)
+  - `TRR-APP`: `yes` (same-session UI/typing updates)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/run_rhoslc_threads_full_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Ingest request contract now supports semantic unlimited posts for Threads with `max_posts_per_target=0` (non-destructive behavior retained).
+  - Week-detail cache invalidation now runs after ingest kickoff and post refresh to reduce stale admin reads.
+  - Threads scraper hardening:
+    - improved post-code/pk resolution (`/post/{code}` and scheme-less variants),
+    - fixed `fetch_replies` behavior in `fetch_comments`,
+    - added quote-fetch path + per-fetch telemetry,
+    - corrected quote endpoint URL behavior,
+    - fixed max-post limit semantics (no more `max_pages * 100` overshoot).
+  - Threads refresh/detail hardening:
+    - refresh target URL now uses fallback chain (stored URL/raw_data/canonical),
+    - Threads detail payload includes additive fields `quotes`, `total_replies_in_db`, `total_quotes_in_db`,
+    - topic extraction/normalization expanded for view-activity/breadcrumb variants,
+    - lifecycle-aware filtering excludes `is_missing=true` Threads comments where supported,
+    - coverage and reconcile paths now use replies+quotes semantics.
+  - Fixed regression/runtime bugs found during validation:
+    - robust `_build_rows` compatibility fallback for older monkeypatched signatures,
+    - removed undefined `quote_fail_reason` references from non-Threads refresh branches,
+    - comment-mirror checks no longer force CDN-host remirror for comment rows.
+  - Added RHOSLC Threads full-refresh runner updates:
+    - uses `max_posts_per_target=0`,
+    - supports account filters,
+    - executes synchronously via `execute_run`,
+    - remains non-destructive for Threads tables.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/socials/test_threads_scraper.py tests/repositories/test_social_season_analytics.py tests/api/routers/test_socials_season_analytics.py` (pass, `242 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/socials/test_threads_scraper.py` (pass, `4 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py trr_backend/socials/threads/scraper.py scripts/socials/run_rhoslc_threads_full_refresh.py` (pass)
+- residual_risks:
+  - `trr_backend/repositories/social_season_analytics.py` contains broad pre-existing lint debt outside this Threads scope; this sweep only fixed correctness issues encountered in Threads paths and targeted validations.
+  - Full-run/backfill execution in environment was not re-triggered in this pass; use `scripts/socials/run_rhoslc_threads_full_refresh.py` for operational reruns.
+
+## Latest Update (2026-03-01) — Backend Reachability Auto-Heal Hardening for Social Admin
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- delegation_map:
+  - role: `Design Context Owner`
+    scope: `Diagnose persistent BACKEND_UNREACHABLE on RHOSLC social week detail`
+    deliverable: `Root-cause evidence: backend hung during reload shutdown while process still listening`
+    verification_command: `curl -fsS http://127.0.0.1:8000/health`
+    status: `completed`
+  - role: `UI Implementer`
+    scope: `n/a in backend repo`
+    deliverable: `No UI changes in TRR-Backend`
+    verification_command: `n/a`
+    status: `completed`
+  - role: `API Integration Owner`
+    scope: `Backend startup/reload runtime behavior`
+    deliverable: `Graceful shutdown timeout env + uvicorn arg applied`
+    verification_command: `bash -n /Users/thomashulihan/Projects/TRR/TRR-Backend/start-api.sh`
+    status: `completed`
+  - role: `QA Owner`
+    scope: `Runtime resilience validation in workspace dev flow`
+    deliverable: `Auto-restart simulation evidence with backend PID rollover and restored health`
+    verification_command: `cd /Users/thomashulihan/Projects/TRR && make status`
+    status: `completed`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/start-api.sh`
+- behavior_summary:
+  - Added `TRR_BACKEND_GRACEFUL_SHUTDOWN_SECONDS` (default `10`) with strict positive-integer validation and fallback to default when invalid.
+  - Added uvicorn runtime arg `--timeout-graceful-shutdown <seconds>` to bound reload/shutdown hangs from long-running background tasks.
+  - Preserved existing reload defaults and watcher scope; no API contract changes.
+- validation_evidence:
+  - `bash -n /Users/thomashulihan/Projects/TRR/TRR-Backend/start-api.sh` (pass)
+  - Runtime check from workspace: `curl -fsS http://127.0.0.1:8000/health` (pass before and after watchdog-triggered backend restart)
+- blocked_checks:
+  - `ruff/pytest` not rerun because backend Python runtime behavior was unchanged beyond startup shell script wiring.
+- residual_risks:
+  - Very long shutdown paths can still be force-killed after timeout; this is intentional to prioritize liveness in local dev.
+
+## Latest Update (2026-03-02) — Refresh Details Hardening (Backend Stream + Identity Assignment)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no` (contract check only)
+  - `TRR-APP`: `yes` (same-session proxy/client alignment)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_image_counts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/identity_assignment.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added cooperative disconnect checks to `refresh_person_images_stream` and `reprocess_person_images_stream` (early abort points across long-running stages, plus guarded terminal stream errors).
+  - Kept blocking work off the event loop via `asyncio.to_thread(...)` and preserved SSE terminal safety (`stage_error_code`/`stage_error_detail` additive payloads).
+  - Fixed owner thumb assignment regression by passing `owner_person_name` into `_owner_face_crop_payload(...)` in cast/media auto-count paths.
+  - Unified TRR-show eligibility + identity candidate building across refresh and manual count routes by delegating to shared repository helper.
+  - Added name-based candidate ID resolution from tagged names (when IDs are absent) via cached `core.people` lookup.
+  - Added granular auto-count diagnostics and row-level error counters (`detect/persist/crop_cache`) to avoid masking partial row success.
+  - Hardened show-name resolution in shared identity helper using case-insensitive lookup + normalized exact-match filtering for both `core.shows` and `core.show_alternative_names`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py api/routers/admin_image_counts.py trr_backend/repositories/identity_assignment.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_image_counts_fallback.py -k 'reprocess or auto_count or show_context or stream'` (pass, `19 passed`)
+- residual_risks:
+  - Repo contains many unrelated in-flight edits; this change set intentionally avoided touching non-refresh surfaces.
+  - Full backend test suite was not re-run in this pass; targeted refresh/count/stream regressions were validated.
+
+## Latest Update (2026-03-02) — Multi-Brand Logo Routing V2 (Backend Contracts + Routing)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0160_brand_logo_assets_and_expand_import_targets.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_scrape_contracts.py`
+- behavior_summary:
+  - Added schema support for routed non-core brand logos via new `admin.brand_logo_assets` and expanded `admin.entity_logo_imports.target_type` check constraint.
+  - Extended scrape import payload contract with `logo_target_type`, `logo_target_key`, `logo_target_label`, and `logo_set_primary` (with backward mapping from legacy `source_logo`).
+  - Implemented non-show logo routing in both `/admin/scrape/import` and `/admin/scrape/import/stream`:
+    - `network|streaming|production` route through shared network-streaming logo asset pipeline.
+    - `franchise|publication|social|other` route into `admin.brand_logo_assets`.
+  - Added per-item logo validation/error behavior in stream/non-stream imports (missing target data now fails per-item instead of aborting whole batch).
+  - Added show-logo black/white variant enrichment for routed show logos by writing `logo_black_url` / `logo_white_url` metadata on linked media assets.
+  - Added backend read APIs:
+    - `GET /api/v1/admin/brands/logos`
+    - `GET /api/v1/admin/brands/logo-targets`
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python3 -m compileall api/routers/admin_scrape.py api/routers/admin_brands.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_brands.py tests/api/routers/test_admin_scrape_contracts.py` (pass, `15 passed`)
+- residual_risks:
+  - Full backend suite was not re-run in this pass due unrelated in-flight repo work; validation was scoped to changed contracts/routes/tests.
+  - Duplicate detection for non-show logo targets is currently source-url/upsert based with SHA indexing, not strict unique SHA constraints per target bucket.
+
+## Latest Update (2026-03-02) — Instagram Ingest + Analytics Reliability (12-Bug Plan)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no` (impact check only)
+  - `TRR-APP`: `yes` (same-session consumer updates)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Implemented backend reliability fixes for Instagram ingest and social analytics contracts:
+    - strict invalid-platform rejection with structured `INVALID_PLATFORM_FILTER` responses,
+    - additive ingest overrides (`accounts_override`, `hashtags_override`, `keywords_override`) with normalized dedupe,
+    - fail-fast `NO_INGEST_TARGETS` behavior (no false-success run/job creation),
+    - robust Instagram account normalization/validation with `INVALID_ACCOUNT_HANDLE`,
+    - queue policy consistency (`comments_only`/all modes enqueue when queue enabled),
+    - response contract additions (`execution_mode`, `job_count`),
+    - `details_refresh` ingest mode + mutable-metrics refresh path,
+    - terminal run-state week-detail cache invalidation,
+    - production-usable `/instagram/scrape/async` run creation + polling metadata.
+  - Completed final bug-fix pass for remaining regressions:
+    - analytics route value-error mapping now returns structured 400 payloads for platform-filter failures,
+    - repository test suite aligned to new no-job fail-fast semantics and UUID-safe mocked run IDs.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py::test_analytics_platform_filter_value_errors_map_to_structured_400 tests/repositories/test_social_season_analytics.py::test_ingest_season_stores_sync_strategy_and_platform_scope -q` (pass, `5 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py -q` (pass, `254 passed`)
+- blocked_checks:
+  - `ruff check` on repository-scoped files reports broad pre-existing lint debt in `trr_backend/repositories/social_season_analytics.py` and long-standing test line-length warnings outside this fix set; no new blockers from the Instagram reliability deltas.
+- residual_risks:
+  - `trr_backend/repositories/social_season_analytics.py` has substantial pre-existing lint backlog; this session prioritized behavioral correctness and contract reliability.
+
+## Latest Update (2026-03-02) — Reddit Refresh Reliability (Run Identity + Atomic Period Matches)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no` (verification-only)
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added config-aware active run reuse by computing/storing `run_config_hash` and reusing only matching queued/running runs for the same `(community, season, period)`.
+  - Eliminated delete-then-insert read gap in `reddit_period_post_matches` for non-empty runs by switching to upsert-then-prune stale rows within the same connection context.
+  - Added additive run status metadata: `queue_position`, `active_jobs`, and `run_config_hash` in `/reddit/runs/{run_id}` payloads.
+  - Extended `/reddit/cache/bulk` to accept additive `container_keys`, derive stable period keys first, and return additive `source` marker (`cache|none`).
+  - Kept `flair_mode` compatibility behavior intact (runtime column guard unchanged).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass, `41 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/reddit_refresh.py api/routers/socials.py tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass)
+- residual_risks:
+  - Background-task execution model is still process-bound; long-running runs can still be impacted by API worker restarts until queue-worker cutover is completed.
+
+## Latest Update (2026-03-02) — API + Cloud Job Runs Bug Remediation (Phase A backend contracts)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes` (downstream contract carry-forward)
+  - `TRR-APP`: `verification-only`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Restored fallback-show eligibility behavior for mapped aliases in admin person image flows.
+  - Corrected fandom source-priority ordering so existing DB `core.entity_links` show links outrank generated defaults.
+  - Implemented dual-compat social ingest execution-mode payload support:
+    - additive `execution_mode_canonical` (`queued|inline|inline_fallback`),
+    - additive `execution_mode_legacy` and `execution_mode_deprecation`,
+    - preserved existing `execution_mode` field for compatibility.
+  - Guarded ingest run cleanup path so non-UUID `run_id` values no longer crash no-target cleanup.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_person_images.py::test_is_trr_show_eligible_accepts_mapped_fallback_show_name tests/api/routers/test_admin_show_links.py::test_discover_show_links_prefers_existing_show_level_fandom_links tests/api/routers/test_socials_season_analytics.py tests/repositories/test_social_season_analytics.py::test_ingest_season_stores_sync_strategy_and_platform_scope` (pass, `62 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q` (pass, `1322 passed, 18 skipped`)
+- residual_risks:
+  - Large unrelated in-flight repository changes remain; this remediation intentionally scoped to the listed contract/cleanup surfaces.
+
+## Latest Update (2026-03-01) — Refresh Details: Partial Retries + Failed-Part Reporting + Best-Effort Labels
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_image_counts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_image_counts_fallback.py`
+- behavior_summary:
+  - Reprocess stream now runs one partial retry pass for failed `auto_count`, `word_id`, `centering_cropping`, and `resizing` stages.
+  - Added additive completion payload diagnostics:
+    - `retry_attempts`
+    - `failed_parts`
+  - Added reusable backend helper to summarize failed stage parts and reasons.
+  - Enabled best-effort tag assignment in detection mapping when tagged people are fewer than unassigned detections; labels now use `best_effort_tag_map` in this path.
+  - Kept TRR-show eligibility gating intact; best-effort assignment still runs only when identity assignment is allowed.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py api/routers/admin_image_counts.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_image_counts_fallback.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_image_counts_fallback.py -k "reprocess or auto_count or show_context or stream or best_effort"` (pass, `21 passed`)
+- residual_risks:
+  - Partial retry strategy is one additional pass; there is no indefinite retry loop.
+  - Retry payloads are additive and not yet surfaced by every frontend panel.
+
+## Latest Update (2026-03-02) — Reddit Cache Lookup Recovery for Stable Container Keys
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added stable-key cache recovery for legacy Reddit period runs:
+    - `get_cached_period_payload(...)` now resolves stable/container period keys (for example `period-preseason` / `community:...:container:period-preseason`) to the latest completed legacy run key via `request_payload.container_key` or `request_payload.period_stable_key`.
+    - This allows cache reads to return existing Supabase-backed rows even when current UI fallback windows produce different hashed period keys.
+  - Preserved additive/non-breaking response shape and canonical table reads.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass, `42 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/reddit_refresh.py tests/repositories/test_reddit_refresh.py` (pass)
+- residual_risks:
+  - If no completed/partial run exists for a container key yet, cache lookup still correctly returns empty and requires first scrape.
+
+## Latest Update (2026-03-02) — TikTok/Instagram Ingest Smoke Verification (No Backend Code Delta)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `n/a`
+- risk_class: `medium`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes` (runtime validation)
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (follow-up UI cleanup validated against this smoke)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Executed bounded RHOSLC S6 ingest smoke for `instagram+tiktok` with explicit filter params:
+    - accounts override (`bravotv`),
+    - date window,
+    - hashtags override (`rhoslc`),
+    - keywords override (`lisa`),
+    - sound IDs (`7540327234013301517`).
+  - Run `145e99bb-3560-4006-8668-59e1a72f6a48` completed successfully (`4/4` jobs completed, `items_found_total=5`).
+  - Job configs persisted all expected params (accounts/date/hashtags/keywords/sound_ids) and worker drained pending->running->completed sequence.
+  - Verified runtime persistence on this DB schema:
+    - comment rows persisted for run-linked jobs (TikTok comments lineage present via `last_seen_run_id`),
+    - post thumbnail fields are actively populated (`thumbnail_url` and many `hosted_thumbnail_url` rows).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && source .venv/bin/activate && python` smoke execution using `ingest_season(...)` + `execute_run(...)` + `list_jobs(...)` + `list_runs(...)` (pass; run reached terminal `completed`).
+  - Direct DB validation queries in same session showed:
+    - `social.instagram_posts` thumbnail coverage non-empty,
+    - `social.tiktok_posts` thumbnail coverage non-empty,
+    - run/job counts and stage transitions aligned with scrape run summary.
+- residual_risks:
+  - This environment currently lacks `social.tiktok_sounds` / `social.tiktok_sound_posts` tables (no columns in `information_schema`), so sound-ingestion persistence paths cannot be verified here until migration alignment is complete.
+  - `items_found` measures matched items processed by jobs and can exceed newly inserted row counts when existing rows are re-seen/updated.
+
+## Latest Update (2026-03-02) — Brand Family Pairing + Coverage Link Propagation + Wikipedia Show Import
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no` (smoke-verified only)
+  - `TRR-APP`: `yes`
+- migration_ids:
+  - `0162_brand_families_and_link_propagation.sql`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0162_brand_families_and_link_propagation.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/brand_families.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/sync/sync_networks_streaming_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/brands_franchises.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_brand_families.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- endpoints_added:
+  - `GET /api/v1/admin/brands/families`
+  - `POST /api/v1/admin/brands/families`
+  - `PATCH /api/v1/admin/brands/families/{family_id}`
+  - `POST /api/v1/admin/brands/families/{family_id}/members`
+  - `DELETE /api/v1/admin/brands/families/{family_id}/members/{member_id}`
+  - `GET /api/v1/admin/brands/families/suggestions`
+  - `GET /api/v1/admin/brands/families/by-entity`
+  - `GET /api/v1/admin/brands/families/{family_id}/links`
+  - `POST /api/v1/admin/brands/families/{family_id}/links`
+  - `PATCH /api/v1/admin/brands/families/{family_id}/links/{rule_id}`
+  - `POST /api/v1/admin/brands/families/{family_id}/links/apply`
+  - `POST /api/v1/admin/brands/families/{family_id}/wikipedia-import`
+  - `GET /api/v1/admin/brands/families/{family_id}/wikipedia-show-urls`
+- behavior_summary:
+  - Added brand-family schema/tables and owner clustering columns on `admin.network_streaming_completion`.
+  - Implemented family/member/link-rule CRUD, owner-based pairing suggestions, coverage resolver, and non-destructive propagation into `core.entity_links`.
+  - Added Wikipedia show-URL ingestion (manual + sync-step integration), show matching, import persistence, and optional matched-rule auto-creation/apply path.
+  - Extended `GET /families/by-entity` payload to include `family`, `family_suggestions`, `shared_links`, and `wikipedia_show_urls` for brand detail consumers.
+  - Extended shows/franchises payload with generic `link_rules` and added compatibility apply counters (`skipped_existing_manual`, `updated_derived_count`, `errors`).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_brands.py api/routers/admin_show_sync.py scripts/sync/sync_networks_streaming_links.py trr_backend/repositories/brand_families.py tests/api/routers/test_admin_brands.py tests/repositories/test_brand_families.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && PYTHONPATH=. ./.venv/bin/pytest -q tests/api/routers/test_admin_brands.py tests/repositories/test_brand_families.py tests/scripts/test_sync_networks_streaming_links.py tests/api/routers/test_admin_show_sync.py` (pass, `66 passed`)
+- blocked_checks:
+  - `ruff check trr_backend/repositories/brands_franchises.py` reports pre-existing style debt in this in-flight file (`E501`, `C408`) outside this session's newly added family-rule UI bridge logic.
+- residual_risks:
+  - Generic link-rule editing currently exists in family scope; if operators need bulk multi-family editing in one workflow, a dedicated backend batch endpoint is still a follow-up.
+
+## Latest Update (2026-03-02) — Instagram Reels Views Retrieval + Merge-Safe Persistence
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `verification-only`
+  - `TRR-APP`: `verification-only`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_instagram_reel_views_full_history.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Hardened Instagram view extraction to support multiple metric keys and compact string counts (`13.7K`, `2.1M`, comma-separated numerics), with `video_views_observed` + source provenance retained.
+  - Added reel-aware permalink normalization (`/reel/{shortcode}/`) and resilient post-detail fallback when detail endpoint returns HTML/challenge instead of JSON.
+  - Added gallery metrics index (`scrape_metrics_index`) and wired `details_refresh` to prioritize gallery view counts, fallback to detail extraction, and preserve existing DB views when no candidate is found.
+  - Changed Instagram upsert/refresh semantics to monotonic view merge (`max(existing, incoming)`) and prevented missing-value/zero clobber; persisted view provenance in `raw_data.view_metrics`.
+  - Added full-history backfill utility to run account/season details refresh and report diagnostics (`posts_scanned`, `views_updated`, `views_preserved_missing`, failures by reason).
+  - Fixed ingest runtime bug where `skipped_synced` was unbound in `details_refresh` flow.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/socials/test_comment_scraper_fixes.py -k "instagram_parse_post_node_extracts_compact_reel_views_and_reel_url or instagram_parse_post_node_extracts_nested_gallery_view_metric or instagram_fetch_post_info_falls_back_to_permalink_media_item_on_html"` (pass, `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/repositories/test_social_season_analytics.py -k "upsert_instagram_post_persists_metadata_and_hosted_urls or upsert_instagram_post_skips_missing_optional_columns or upsert_instagram_post_uses_monotonic_views_and_preserves_when_observed_missing or ingest_instagram_details_refresh_prefers_gallery_views_when_detail_missing or ingest_instagram_details_refresh_preserves_views_when_detail_has_no_view_candidate"` (pass, `5 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check scripts/socials/backfill_instagram_reel_views_full_history.py tests/socials/test_comment_scraper_fixes.py --select E501,I001` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/python -m py_compile trr_backend/socials/instagram/scraper.py trr_backend/repositories/social_season_analytics.py scripts/socials/backfill_instagram_reel_views_full_history.py tests/socials/test_comment_scraper_fixes.py tests/repositories/test_social_season_analytics.py` (pass)
+- blocked_checks:
+  - Full-file `ruff check` on `trr_backend/repositories/social_season_analytics.py` still reports broad pre-existing style debt (line-length and legacy lint patterns) outside this session’s behavior changes.
+- residual_risks:
+  - Instagram challenge/auth responses can still reduce detail coverage; gallery index fallback mitigates this for view counts but depends on successful profile-page retrieval.
+  - Monotonic view merge assumes non-decreasing views; if Instagram ever emits corrected lower counts, storage intentionally retains highest observed value.
+
+## Latest Update (2026-03-02) — Staging Rollout Verification + Apply Placeholder Fix
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/brand_families.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_brand_families.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed non-dry-run propagation bug in `_show_has_non_family_link_kind` by escaping SQL `LIKE` wildcard literal for psycopg (`brand_family_rule:%%`).
+  - Added regression test to ensure escaped placeholder is present in this query path.
+  - Ran staging rollout verification against family `5aee1680-ffce-4688-b779-c54f75035f02` (Bravo/NBC/Peacock), including family-all-shows dry run and Wikipedia matched-link propagation.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check trr_backend/repositories/brand_families.py tests/repositories/test_brand_families.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && PYTHONPATH=. ./.venv/bin/pytest -q tests/repositories/test_brand_families.py tests/api/routers/test_admin_brands.py` (pass, `16 passed`)
+  - staging rollout runtime checks (DB-backed):
+    - fandom dry-run apply for `family_all_shows`: `matched_show_count=79`, `applied_show_count=79`, `errors=0`
+    - wikipedia family rules: `34` rules; post-fix apply produced derived show-level wikipedia links (`33` rows with `source=brand_family_rule:*` and family provenance metadata)
+    - family profile rows present with matched/applied wikipedia rows for Bravo scope.
+- residual_risks:
+  - Verification run used an already-created staging family and repeated imports; row counts are cumulative for that family over multiple passes.
+
+## Latest Update (2026-03-02) — Week Detail Interpolation Regression Test + Watchdog Final Verification
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `validation-only`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/scripts/dev-workspace.sh`
+  - `/Users/thomashulihan/Projects/TRR/scripts/status-workspace.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added targeted regression coverage to enforce that YouTube week-detail comment lifecycle SQL is interpolated correctly (no literal `{youtube_comment_active_filter}` token can reach the count query).
+  - Finalized watchdog hang handling for local dev: timeout probes with active connections are now logged distinctly but still count toward restart threshold, preventing indefinite "busy" masking.
+  - Completed post-tuning auto-heal simulation: forced backend hang (`kill -STOP -- -$TRR_BACKEND_PID`) produced thresholded probe failures and backend-only restart with refreshed PID.
+- validation_evidence:
+  - `bash -n /Users/thomashulihan/Projects/TRR/scripts/dev-workspace.sh` (pass)
+  - `bash -n /Users/thomashulihan/Projects/TRR/scripts/status-workspace.sh` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/python -m py_compile trr_backend/repositories/social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && PYTHONPATH=. ./.venv/bin/pytest -q tests/repositories/test_social_season_analytics.py -k "week_detail_youtube and interpolation"` (no test match with this exact selector; `202 deselected`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && PYTHONPATH=. ./.venv/bin/pytest -q tests/repositories/test_social_season_analytics.py -k "week_detail_youtube and interpolat"` (pass, `1 passed`)
+  - `pnpm -C /Users/thomashulihan/Projects/TRR/TRR-APP/apps/web exec vitest run tests/social-season-hint-routes.test.ts tests/social-ingest-health-dot-route.test.ts` (pass, `2 files`, `24 tests`)
+  - Runtime auto-heal (workspace):
+    - `cd /Users/thomashulihan/Projects/TRR && make stop && WORKSPACE_OPEN_BROWSER=0 make dev-lite`
+    - baseline endpoint: week-detail proxy returned `200` (`total≈14s`)
+    - hang simulation: `kill -STOP -- -51450` (from `pids.env`)
+    - watchdog sequence observed:
+      - failed probes `1/6 ... 6/6` (rc=28)
+      - `Restarting TRR-Backend after repeated health failures...`
+      - new backend PID `58786`
+      - `TRR-Backend is up: http://127.0.0.1:8000/health`
+- residual_risks:
+  - This workspace currently has heavy concurrent in-flight edits, which can trigger unrelated watch reload churn during long-running local verification; runtime liveness checks were validated, but endpoint timing remains sensitive under concurrent local file churn.
+
+## Latest Update (2026-03-02) — Refresh Details pending-only semantics + partial retry diagnostics
+
+- primary_skill: `senior-fullstack`
+- supporting_skills: `orchestrate-plan-execution`, `senior-backend`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high` (admin refresh/reprocess stream behavior and stage semantics)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no` (unchanged contract in this pass)
+  - `TRR-APP`: `yes` (consumer of additive stream fields)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+- behavior_summary:
+  - Added additive stage row diagnostics for refresh/reprocess flows: `attempted_rows`, `skipped_existing_rows`, `retry_attempted_rows`, `retry_succeeded_rows`.
+  - Switched reprocess count/text default behavior to pending-only (no forced recount of already processed rows) while preserving explicit force/manual semantics.
+  - Added failed-row-only retry path for reprocess auto-count and text-overlay stages.
+  - Standardized stream terminal safety payloads with additive error fields (`stage_error_code`, `stage_error_detail`) and terminal stream-state markers.
+  - Added complete payload diagnostics for partial failures (`row_error_counts`, `retry_attempts`, `failed_parts`) used by the app for actionable stage reporting.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py api/routers/admin_image_counts.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_image_counts_fallback.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_image_counts_fallback.py -k "refresh or reprocess or auto_count or text_overlay or stream"` (pass, `24 passed`)
+- residual_risks:
+  - Runtime throughput still depends on external services (screenalytics/S3) and host resources; this patch improves semantics/diagnostics but does not change external dependency behavior.
+
+## Latest Update (2026-03-02) — API Hardening + Observability Baseline (Phase A completion)
+
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes` (contract-aligned changes)
+  - `TRR-APP`: `verification-only`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/main.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/auth.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_cast_photos.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/ws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/observability.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/db/postgrest_cache.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/imdb/graphql_persisted_client.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/media/user_uploads.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added request-level trace propagation middleware (`x-trace-id` + `x-request-id`) and request-latency/request-count Prometheus instrumentation (`/metrics`) for TRR-Backend API.
+  - Added suppressed-path conversion counter plumbing and applied it to previously silent failure paths (websocket send, PostgREST retry reload failure, malformed IMDb env headers, upload cleanup delete failures).
+  - Sanitized internal error leakage on key API surfaces (`api/auth.py`, Instagram preview, cast photo variant/text-overlay fallbacks) with stable error codes where applicable.
+  - Fixed a runtime parser blocker in `social_season_analytics.py` (`f`-string literal brace escaping) that prevented repository import and test collection.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile api/auth.py api/main.py api/routers/socials.py api/routers/admin_cast_photos.py api/routers/ws.py trr_backend/db/postgrest_cache.py trr_backend/integrations/imdb/graphql_persisted_client.py trr_backend/media/user_uploads.py trr_backend/repositories/social_season_analytics.py trr_backend/observability.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/test_auth.py tests/api/routers/test_admin_cast_photos.py tests/api/routers/test_socials_season_analytics.py::test_ingest_comments_only_queue_mode_does_not_spawn_inline_runners tests/api/routers/test_admin_person_images.py::test_is_trr_show_eligible_accepts_mapped_fallback_show_name tests/api/routers/test_admin_show_links.py::test_discover_show_links_prefers_existing_show_level_fandom_links tests/repositories/test_social_season_analytics.py::test_ingest_season_stores_sync_strategy_and_platform_scope` (pass, `10 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_season_analytics.py tests/api/routers/test_admin_person_images.py::test_is_trr_show_eligible_accepts_mapped_fallback_show_name tests/api/routers/test_admin_show_links.py::test_discover_show_links_prefers_existing_show_level_fandom_links tests/repositories/test_social_season_analytics.py::test_ingest_season_stores_sync_strategy_and_platform_scope` (pass, `66 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q` (pass, `1352 passed, 18 skipped`)
+- residual_risks:
+  - Additional endpoint-by-endpoint error taxonomy normalization remains desirable; this session focused on high-risk leakage/suppression paths and cross-cutting observability baseline.
+
+Continuation (same session, 2026-03-01) — closeout of remaining links/fandom regressions (source precedence + person match strictness).
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+  - verification: `functions.mcp__chrome-devtools__navigate_page`, `functions.mcp__chrome-devtools__take_snapshot`
+- risk_class: `high` (link-assignment correctness + auto-approval pipeline behavior)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- default_skill_chain_exception_reason: `n/a`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no` (verification-only; no code changes)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- root_cause:
+  - Show-fandom dedupe/priority merge used `existing.get("priority") or 99`, so `priority=0` (`core.entity_links`) was treated as falsy and incorrectly overwritten by lower-priority sources (for example `bravo_default`).
+  - Person fandom candidate scoring allowed weak single-token overlap (`intersection`) and could include wrong pages (for example `Alan_Carr`) when seeded/all-pages crawls returned noisy candidates.
+- behavior_summary:
+  - Added deterministic show-fandom source-priority helper `_show_fandom_source_priority(...)` with precedence:
+    - `core.entity_links` > `curated_fandom_base` > `bravo_default` > `*:derived_show_page`.
+  - Replaced show fandom append/seen handling with URL-keyed merge map so duplicate canonical URLs keep highest-priority source and preserve title metadata.
+  - Fixed priority comparison to avoid falsy-zero override (`priority=0` now retained correctly).
+  - Hardened `_score_fandom_candidate_url(...)`:
+    - requires `_person_name_candidates_match(...)` first,
+    - removes weak token-intersection acceptance,
+    - keeps strong subset/exact scoring and surname-tail bonus.
+  - Added regressions:
+    - `test_discover_show_links_prefers_core_entity_links_source_for_duplicate_fandom_url`
+    - `test_score_fandom_candidate_url_rejects_weak_token_overlap_person_match`
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_links.py -k "prefers_existing_show_level_fandom_links or uses_direct_fandom_domain_profile_urls_when_search_misses or prefers_core_entity_links_source_for_duplicate_fandom_url or weak_token_overlap_person_match"` (pass, `4 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_links.py tests/api/routers/test_admin_show_links.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_links.py` (pass, `103 passed`)
+- live_verification:
+  - Attempted UI verification on `http://admin.localhost:3000/rhoslc/settings` and `http://admin.localhost:3000/admin/trr-shows/rhoslc`.
+  - Blocked by current runtime page error before links UI render: `column reference "slug" is ambiguous`.
+  - Additional local runtime probe showed no persisted show-level fandom rows currently present for RHOSLC in local DB snapshot; this prevents end-to-end UI persistence confirmation until the slug-query runtime error is fixed and/or a valid RHOSLC fandom seed row exists.
+
+## Latest Update (2026-03-02) — Week-detail reliability, jobs pagination, X sanitizer completion, and deterministic fallbacks
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium-high` (cross-surface week-detail contract/default updates + scraper normalization)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/facebook/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0164_week_detail_and_sync_poll_hotpath_indexes.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_facebook_engagement.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Changed backend week-detail default `max_comments_per_post` from `25` to `0` and added structured trace-aware timing logs in the route.
+  - Added additive jobs pagination support (`offset`) to ingest jobs route + repository query and returned additive `pagination` metadata.
+  - Added new additive summary endpoint: `/api/v1/admin/socials/seasons/{season_id}/analytics/week/{week_index}/summary`.
+  - Added week-detail platform timing instrumentation in repository response `meta.performance` and ensured speed-first post paging behavior remains consistent for `post_limit=0`.
+  - Completed X sanitizer media-token stripping for `entities.urls` media-linked `t.co` tokens while preserving non-media URLs.
+  - Added Twitter week-detail avatar fallback via raw-data resolver when direct avatar column is empty.
+  - Replaced non-deterministic Facebook fallback IDs (`hash(url)`) with deterministic canonical-url + `sha1` fallback IDs.
+  - Hardened TikTok metric coercion for comma/suffix formats (`K/M/B`) and invalid/null cases.
+  - Added hot-path indexes migration for week-detail and sync polling query shapes.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/socials/test_comment_scraper_fixes.py` (pass; `72 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "week_detail or list_jobs or twitter or facebook or tiktok"` (pass; `61 passed, 144 deselected`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_season_analytics.py -k "week_detail or ingest_jobs or summary"` (pass; `15 passed, 49 deselected`)
+  - `cd /Users/thomashulihan/Projects/TRR/screenalytics && rg -n "analytics/week|max_comments_per_post|ingest/jobs|/summary|socials/seasons" .` (no contract coupling hits)
+  - `cd /Users/thomashulihan/Projects/TRR/screenalytics && rg -n "social|ingest/jobs|analytics/week|admin/socials|seasons/.*/analytics" apps/api/services/trr_ingest.py apps/api/routers/cast.py tests/unit/test_trr_ingest.py tests/api/test_sync_cast_from_trr.py` (no coupling to changed social admin week-detail/jobs routes)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `verification-only (no coupling found)`
+  - `TRR-APP`: `yes` (consumer updates required/implemented)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+- residual_risks:
+  - Full repo-wide lint/format gates were not run in this pass; verification focused on targeted high-risk routes/repositories/scrapers affected by week-detail/sync behavior.
+
+Continuation (same session, 2026-03-02) — Instagram Reel views backfill execution hardening + run recovery.
+- primary_skill: `senior-backend`
+- supporting_skills: `orchestrate-plan-execution`, `senior-fullstack`, `senior-qa`, `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`, `functions.apply_patch`
+  - fallback: `n/a`
+- risk_class: `high`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used: `orchestrate-plan-execution -> senior-fullstack -> senior-backend -> senior-qa -> code-reviewer`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_instagram_reel_views_full_history.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added bounded metrics-index execution for Instagram (`max pages`, `deadline`, `repeating cursor` guard, shorter request timeouts).
+  - Added details-refresh metrics progress callback wiring so heartbeat/progress update during index phase.
+  - Disabled Crawlee path for `details_refresh` jobs to avoid crawler wrapper overhead on metrics-only refresh runs.
+  - Added details-refresh detail-fetch cap support (`SOCIAL_INSTAGRAM_DETAILS_REFRESH_MAX_DETAIL_FETCHES`) with correct `0 => disable` semantics.
+  - Reduced details-refresh DB overhead by reusing one DB connection per account refresh pass.
+  - Hardened backfill script behavior in non-queue mode: explicitly executes run inline and marks timeout/cancel deterministically.
+  - Fixed additional f-string brace parse issue in social analytics query (`'{}'::jsonb` -> `'{{}}'::jsonb`).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/python -m py_compile trr_backend/socials/instagram/scraper.py trr_backend/repositories/social_season_analytics.py scripts/socials/backfill_instagram_reel_views_full_history.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/repositories/test_social_season_analytics.py -k "ingest_instagram_details_refresh_prefers_gallery_views_when_detail_missing or ingest_instagram_details_refresh_preserves_views_when_detail_has_no_view_candidate"` (pass)
+  - Executed explicit season backfill run: `b725859d-2439-4394-818f-3d865e988437` (`completed`).
+- run_notes:
+  - Backfill run `b725859d-2439-4394-818f-3d865e988437` completed with `posts_scanned=1015`, `views_updated=0`, `details_refresh_errors=1015`, `details_refresh_metrics_index_size=102` under `SOCIAL_INSTAGRAM_DETAILS_REFRESH_MAX_DETAIL_FETCHES=0`.
+  - Prior stuck runs in this session were explicitly cancelled after interruption: `127c40df-a907-486b-9303-bc5fbf23a5bc`, `21706743-0596-4920-bbcf-786eb0c9bf8d`, `0932cc25-73d1-494b-8f43-a2b1576961af`, `45db7019-90b3-4e46-b6e0-a1f73d756a97`, `89457055-f519-4529-85b8-02541d6e4e98`, `ba25ad05-8485-486e-a666-810776b6a46e`.
+- residual_risks:
+  - For this season/account, gallery index overlap with stored rows appears low under current season target filters; with detail-fetch cap `0`, refresh is deterministic but may not update views.
+  - To maximize view recovery, rerun with a positive detail-fetch cap (for example `SOCIAL_INSTAGRAM_DETAILS_REFRESH_MAX_DETAIL_FETCHES=100`) or introduce a dedicated reels-only backfill path that bypasses season hashtag filtering.
+
+## Latest Update (2026-03-02) — Reddit cache bulk lookup optimization + resolver-path test alignment
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (cache read path internals only; contract preserved)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added `resolve_cached_period_key(...)` repository helper to expose lightweight period-key resolution without loading full discovery payload rows.
+  - Updated `/api/v1/admin/socials/reddit/cache/bulk` to resolve first matching key via `resolve_cached_period_key` and fetch discovery payload exactly once.
+  - Preserved response contract (`discovery`, `matched_period_key`, `misses`, `source`) and container-key-first lookup ordering.
+  - Updated bulk-route tests to validate resolver-first behavior and single payload fetch semantics.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_reddit_refresh_routes.py tests/repositories/test_reddit_refresh.py` (pass; `42 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py trr_backend/repositories/reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/repositories/test_reddit_refresh.py` (pass)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (paired cancel-churn/cache timeout tuning in app)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-02) — Refresh Details live per-stage counters (reviewed/changed/total/failed)
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (SSE payload enrichment + live heartbeat updates for long-running refresh/reprocess stages)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added live per-stage progress fields in refresh/reprocess SSE payloads for:
+    - `metadata_repair`
+    - `auto_count`
+    - `word_id`
+    - `centering_cropping`
+    - `resizing`
+  - New additive progress counters emitted during stage execution:
+    - `reviewed_rows`
+    - `changed_rows`
+    - `total_rows`
+    - `failed_rows`
+    - `skipped_manual_rows` (centering where applicable)
+  - Implemented threaded heartbeat streaming for IMDb repair in both refresh and reprocess via `progress_cb` + 2s SSE updates.
+  - Reprocess auto-count, text overlay, and centering stages now stream intermediate heartbeat progress while helper threads run instead of waiting for end-of-stage completion.
+  - Preserved existing completion payload schema and additive diagnostics (`attempted_rows`, `skipped_existing_rows`, retry counters, row error counters).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/routers/admin_person_images.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py` (pass; `53 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py -k 'refresh_stream or reprocess_stream or resizing_heartbeat'` (pass; `6 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (progress detail rendering of new additive counters)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``

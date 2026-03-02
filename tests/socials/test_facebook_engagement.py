@@ -184,6 +184,24 @@ class TestBuildPostEngagement:
         assert post.views == 0
         assert post.reactions == {}
 
+    def test_build_post_uses_deterministic_fallback_post_id(self) -> None:
+        scraper = FacebookScraper()
+        html = "<html><head><meta property=\"og:url\" content=\"https://www.facebook.com/?utm_source=one&fbclid=abc\" /></head><body></body></html>"
+        post_one = scraper._build_post_from_html(
+            url="https://www.facebook.com/?utm_source=one&fbclid=abc",
+            html_text=html,
+            username="Bravo",
+            post_type_hint="feed",
+        )
+        post_two = scraper._build_post_from_html(
+            url="https://www.facebook.com/?utm_source=two&utm_medium=email&fbclid=xyz",
+            html_text=html,
+            username="Bravo",
+            post_type_hint="feed",
+        )
+        assert post_one.post_id == post_two.post_id
+        assert post_one.post_id.startswith("fb_")
+
 
 class TestFacebookPostDataclass:
     def test_reactions_field_exists(self) -> None:
