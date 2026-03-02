@@ -445,6 +445,56 @@ def _fetch_fandom_links(show_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
     return grouped
 
 
+def _fetch_generic_link_rules(limit: int = 1000) -> list[dict[str, Any]]:
+    try:
+        rows = pg.fetch_all(
+            """
+            select
+              id::text as id,
+              family_id::text as family_id,
+              link_group,
+              link_kind,
+              label,
+              url,
+              coverage_type,
+              coverage_value,
+              source,
+              auto_apply,
+              is_active,
+              priority,
+              metadata,
+              updated_at
+            from admin.brand_family_link_rules
+            order by is_active desc, priority asc, updated_at desc
+            limit %s
+            """,
+            [max(1, min(limit, 5000))],
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append(
+            {
+                "id": str(row.get("id") or ""),
+                "family_id": str(row.get("family_id") or "") or None,
+                "link_group": str(row.get("link_group") or "other"),
+                "link_kind": str(row.get("link_kind") or "external"),
+                "label": str(row.get("label") or "") or None,
+                "url": str(row.get("url") or ""),
+                "coverage_type": str(row.get("coverage_type") or "family_all_shows"),
+                "coverage_value": str(row.get("coverage_value") or "") or None,
+                "source": str(row.get("source") or "manual"),
+                "auto_apply": bool(row.get("auto_apply", True)),
+                "is_active": bool(row.get("is_active", True)),
+                "priority": int(row.get("priority") or 100),
+                "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
+                "updated_at": str(row.get("updated_at") or "") or None,
+            }
+        )
+    return out
+
+
 def _is_rule_fallback_link(row: dict[str, Any]) -> tuple[bool, str | None]:
     source = str(row.get("source") or "").strip().lower()
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
@@ -572,6 +622,7 @@ def list_shows_franchises(*, q: str = "", limit: int = 300) -> dict[str, Any]:
         "rows": rows,
         "count": len(rows),
         "groups": ordered_groups,
+        "link_rules": _fetch_generic_link_rules(),
     }
 
 
@@ -844,6 +895,9 @@ def apply_franchise_rule(*, franchise_key: str, missing_only: bool, dry_run: boo
         "links_upserted": links_upserted,
         "skipped_explicit": skipped_explicit,
         "skipped_already_fallback": skipped_already_fallback,
+        "skipped_existing_manual": skipped_explicit,
+        "updated_derived_count": 0,
+        "errors": [],
         "missing_only": missing_only,
         "dry_run": dry_run,
         "applied": applied_entries,

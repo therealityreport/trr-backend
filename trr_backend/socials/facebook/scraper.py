@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -48,6 +49,8 @@ _VIDEO_URL_RE = re.compile(
     r"https://(?:www\.)?facebook\.com/([^/?#]+)/videos/([0-9]+)",
     re.IGNORECASE,
 )
+_TRACKING_QUERY_PREFIXES = ("utm_",)
+_TRACKING_QUERY_KEYS = {"fbclid", "__tn__", "__cft__", "ref", "refsrc"}
 
 # Regex patterns for extracting engagement metrics from Facebook SSR JSON blobs
 _FB_FEEDBACK_BLOCK_RE = re.compile(
@@ -95,6 +98,15 @@ _FB_REACTION_EDGE_RE = re.compile(
 _FB_MESSAGE_TEXT_RE = re.compile(r'"message":\{"text":"((?:[^"\\]|\\.)*)"')
 _FB_PERMALINK_URL_RE = re.compile(r'"permalink_url":"((?:[^"\\]|\\.)*)"')
 _FB_OWNER_PAGE_NAME_RE = re.compile(r'"owner_as_page":\{[^}]*"name":"((?:[^"\\]|\\.)*)"')
+_FB_OWNER_PROFILE_PICTURE_URI_RE = re.compile(
+    r'"(?:owner_as_page|owner)":\{[^{}]*?"profile_picture":\{[^{}]*?"uri":"((?:[^"\\]|\\.)*)"',
+)
+_FB_PROFILE_PICTURE_URI_RE = re.compile(
+    r'"profile_picture":\{[^{}]*?"uri":"((?:[^"\\]|\\.)*)"',
+)
+_FB_OWNER_PROFILE_PIC_URL_RE = re.compile(
+    r'"(?:owner_as_page|owner)":\{[^{}]*?"(?:profile_pic_url|profilePicUrl|profile_image_url)":"((?:[^"\\]|\\.)*)"',
+)
 
 
 @dataclass
@@ -111,6 +123,34 @@ class FacebookScrapeConfig:
     show_id: int | None = None
     season_number: int | None = None
     person_id: int | None = None
+
+
+def _canonicalize_facebook_post_url(url: str) -> str:
+    parsed = urlparse(str(url or "").strip())
+    scheme = (parsed.scheme or "https").lower()
+    netloc = (parsed.netloc or "").strip().lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = "/" + "/".join(segment for segment in parsed.path.split("/") if segment)
+    query_items: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        normalized_key = str(key or "").strip().lower()
+        if not normalized_key:
+            continue
+        if normalized_key in _TRACKING_QUERY_KEYS:
+            continue
+        if any(normalized_key.startswith(prefix) for prefix in _TRACKING_QUERY_PREFIXES):
+            continue
+        query_items.append((normalized_key, str(value or "").strip()))
+    query_items.sort()
+    query = urlencode(query_items, doseq=True)
+    return urlunparse((scheme, netloc, path, "", query, ""))
+
+
+def _deterministic_fallback_post_id(url: str) -> str:
+    canonical = _canonicalize_facebook_post_url(url)
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]  # noqa: S324
+    return f"fb_{digest}"
 
     @property
     def normalized_handle(self) -> str:
@@ -153,6 +193,7 @@ class FacebookPost:
     caption: str
     media_urls: list[str]
     thumbnail_url: str | None
+    user_avatar_url: str | None = None
     likes: int = 0
     comments: int = 0
     shares: int = 0
@@ -619,7 +660,7 @@ class FacebookScraper:
             if pieces and pieces[-1].isdigit():
                 post_id = pieces[-1]
             else:
-                post_id = parsed.path.strip("/") or f"{username}-{abs(hash(url))}"
+                post_id = parsed.path.strip("/") or _deterministic_fallback_post_id(og_url or url)
         title = self._first_group(_OG_TITLE_RE, html_text)
         desc = self._first_group(_OG_DESC_RE, html_text)
         image_url = self._first_group(_OG_IMAGE_RE, html_text)
@@ -645,6 +686,7 @@ class FacebookScraper:
             post_type = "photo"
 
         engagement = self._extract_engagement(html_text)
+        user_avatar_url = self._extract_owner_avatar_url(html_text)
 
         return FacebookPost(
             post_id=post_id,
@@ -653,6 +695,7 @@ class FacebookScraper:
             caption=caption,
             media_urls=media_urls,
             thumbnail_url=image_url or None,
+            user_avatar_url=user_avatar_url,
             likes=engagement["reaction_count"],
             comments=engagement["comment_count"],
             shares=engagement["share_count"],
@@ -668,6 +711,7 @@ class FacebookScraper:
                 "source": "public_ssr_engagement",
                 "play_count": engagement["play_count"],
                 "video_view_count": engagement["view_count"],
+                "user_avatar_url": user_avatar_url,
             },
         )
 
@@ -675,6 +719,22 @@ class FacebookScraper:
     # owner_as_page is preferred (page name), then owner with name field.
     _FB_OWNER_PAGE_NAME_RE = re.compile(r'"owner_as_page":\{[^}]*"name":"((?:[^"\\]|\\.)*)"')
     _FB_OWNER_NAME_RE = re.compile(r'"owner":\{[^}]*"name":"((?:[^"\\]|\\.)*)"')
+
+    def _extract_owner_avatar_url(self, html_text: str) -> str | None:
+        for pattern in (_FB_OWNER_PROFILE_PICTURE_URI_RE, _FB_OWNER_PROFILE_PIC_URL_RE, _FB_PROFILE_PICTURE_URI_RE):
+            match = pattern.search(html_text)
+            if not match:
+                continue
+            raw_value = str(match.group(1) or "").strip()
+            if not raw_value:
+                continue
+            try:
+                candidate = str(json.loads(f'"{raw_value}"') or "").strip()
+            except Exception:  # noqa: BLE001
+                candidate = raw_value.replace("\\/", "/").strip()
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+        return None
 
     def scrape_post(
         self,

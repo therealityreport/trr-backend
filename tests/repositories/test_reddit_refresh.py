@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
+
+import pytest
 
 from trr_backend.repositories import reddit_refresh
 
@@ -420,10 +423,11 @@ def test_cached_period_payload_uses_canonical_rows_over_stale_run_blob(monkeypat
     ]
 
     calls = {"count": 0}
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: True)  # noqa: ARG005
 
     def fake_fetch_one(*args, **kwargs):  # noqa: ANN002, ANN003
         calls["count"] += 1
-        return run_row if calls["count"] == 1 else None
+        return run_row if calls["count"] <= 2 else None
 
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args, **kwargs: canonical_rows)  # noqa: ARG005
@@ -438,6 +442,246 @@ def test_cached_period_payload_uses_canonical_rows_over_stale_run_blob(monkeypat
     assert payload["totals"]["fetched_rows"] == 1
     assert payload["threads"][0]["reddit_post_id"] == "canon001"
     assert payload["threads"][0]["flair_mode"] == "scan_term"
+
+
+def test_replace_period_matches_skips_flair_mode_when_column_missing(monkeypatch) -> None:
+    executed: dict[str, str] = {}
+
+    class DummyCursor:
+        def __enter__(self):  # noqa: ANN204, D401
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):  # noqa: ANN001, ANN201
+            return None
+
+        def execute(self, query, params):  # noqa: ANN001, ANN201
+            return None
+
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: False)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh.pg, "db_cursor", lambda conn=None: DummyCursor())  # noqa: ARG005
+
+    def capture_execute(query, tuples, conn=None):  # noqa: ANN001, ANN201, ARG001
+        executed["query"] = query
+
+    monkeypatch.setattr(reddit_refresh.pg, "execute_values_no_return", capture_execute)
+
+    reddit_refresh._replace_period_matches(  # noqa: SLF001
+        community_id="community-1",
+        season_id="season-1",
+        period_key="pre-season",
+        period_start=datetime(2025, 8, 14, 0, 0, tzinfo=UTC),
+        period_end=datetime(2025, 9, 16, 23, 0, tzinfo=UTC),
+        run_id="run-1",
+        rows=[
+            {
+                "reddit_post_id": "abc123",
+                "is_show_match": True,
+                "passes_flair_filter": True,
+                "matched_terms": ["rhoslc"],
+                "matched_cast_terms": [],
+                "cross_show_terms": [],
+                "match_score": 5,
+                "source_sorts": ["new"],
+                "link_flair_text": "Salt Lake City",
+                "canonical_flair_key": "salt lake city",
+                "flair_mode": "all",
+            }
+        ],
+        conn=object(),
+    )
+
+    assert "flair_mode" not in executed["query"]
+
+
+def test_cached_period_payload_returns_null_flair_mode_when_column_missing(monkeypatch) -> None:
+    run_row = {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "subreddit": "bravorealhousewives",
+        "status": "completed",
+        "diagnostics": {},
+        "total_rows": 1,
+        "matched_rows": 1,
+        "tracked_flair_rows": 1,
+        "created_at": datetime(2026, 2, 28, 12, 0, tzinfo=UTC),
+        "completed_at": datetime(2026, 2, 28, 12, 1, tzinfo=UTC),
+    }
+    canonical_rows = [
+        {
+            "reddit_post_id": "canon001",
+            "title": "RHOSLC thread",
+            "selftext": "",
+            "url": "https://reddit.com/canon001",
+            "permalink": "https://reddit.com/canon001",
+            "author": "user",
+            "score": 12,
+            "num_comments": 5,
+            "posted_at": datetime(2025, 8, 20, 12, 0, tzinfo=UTC),
+            "link_flair_text": "Shitpost",
+            "source_sorts": ["new"],
+            "matched_terms": ["rhoslc"],
+            "matched_cast_terms": [],
+            "cross_show_terms": [],
+            "is_show_match": True,
+            "passes_flair_filter": True,
+            "match_score": 52,
+            "flair_mode": None,
+        }
+    ]
+
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: False)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args, **kwargs: canonical_rows)  # noqa: ANN002, ANN003, ARG005
+
+    payload = reddit_refresh.get_cached_period_payload(
+        community_id="community-1",
+        season_id="season-1",
+        period_key="pre-season",
+    )
+
+    assert payload is not None
+    assert payload["threads"][0]["flair_mode"] is None
+
+
+def test_get_cached_period_payload_resolves_stable_container_key_to_legacy_period_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_row = {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "subreddit": "bravorealhousewives",
+        "status": "completed",
+        "diagnostics": {},
+        "total_rows": 1,
+        "matched_rows": 1,
+        "tracked_flair_rows": 1,
+        "created_at": datetime(2026, 2, 28, 12, 0, tzinfo=UTC),
+        "completed_at": datetime(2026, 2, 28, 12, 1, tzinfo=UTC),
+    }
+    canonical_rows = [
+        {
+            "reddit_post_id": "canon-preseason-1",
+            "title": "RHOSLC preseason post",
+            "selftext": "",
+            "url": "https://reddit.com/canon-preseason-1",
+            "permalink": "https://reddit.com/canon-preseason-1",
+            "author": "user",
+            "score": 15,
+            "num_comments": 8,
+            "posted_at": datetime(2025, 8, 20, 12, 0, tzinfo=UTC),
+            "link_flair_text": "Salt Lake City",
+            "source_sorts": ["new"],
+            "matched_terms": ["salt lake city"],
+            "matched_cast_terms": [],
+            "cross_show_terms": [],
+            "is_show_match": True,
+            "passes_flair_filter": True,
+            "match_score": 67,
+            "flair_mode": "all",
+        }
+    ]
+
+    legacy_period_key = "legacy-preseason-key"
+    stable_period_key = "community:community-1:season:season-1:container:period-preseason"
+
+    def fake_fetch_one(query, params):  # noqa: ANN001, ANN201
+        sql = str(query)
+        if "select id," in sql and "from social.reddit_refresh_runs" in sql:
+            requested_key = str(params[2]) if len(params) >= 3 else ""
+            if requested_key == legacy_period_key:
+                return run_row
+            return None
+        if "select period_key" in sql and "request_payload->>'container_key'" in sql:
+            return {"period_key": legacy_period_key}
+        return None
+
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: True)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args, **kwargs: canonical_rows)  # noqa: ANN002, ANN003, ARG005
+
+    payload = reddit_refresh.get_cached_period_payload(
+        community_id="community-1",
+        season_id="season-1",
+        period_key=stable_period_key,
+    )
+
+    assert payload is not None
+    assert payload["totals"]["fetched_rows"] == 1
+    assert payload["threads"][0]["reddit_post_id"] == "canon-preseason-1"
+    assert payload["threads"][0]["flair_mode"] == "all"
+
+
+def test_execute_refresh_run_updates_live_progress(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000000"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {"fetch_comments": True},
+    }
+    result_payload = {
+        "subreddit": "bravorealhousewives",
+        "collection_mode": "exhaustive_window",
+        "listing_pages_fetched": 3,
+        "max_pages_applied": 500,
+        "window_exhaustive_complete": True,
+        "search_backfill": {"complete": True, "pages_fetched": 2},
+        "seed_urls": {},
+        "window_start": "2025-08-14T00:00:00Z",
+        "window_end": "2025-09-16T23:00:00Z",
+        "terms": ["rhoslc"],
+        "hints": {"suggested_include_terms": [], "suggested_exclude_terms": []},
+        "threads": [
+            {
+                "reddit_post_id": "post-1",
+                "title": "RHOSLC post",
+                "text": "body",
+                "url": "https://reddit.com/post-1",
+                "num_comments": 5,
+                "score": 10,
+            }
+        ],
+        "totals": {"fetched_rows": 1, "matched_rows": 1, "tracked_flair_rows": 1},
+    }
+    running_updates: list[dict] = []
+
+    def fake_discover(payload, *, progress_callback=None):  # noqa: ANN001
+        if progress_callback:
+            progress_callback({"listing_pages_fetched": 1, "rows_discovered_raw": 8})
+            progress_callback({"search_pages_fetched": 1, "rows_discovered_raw": 12, "rows_matched": 2})
+        return result_payload
+
+    def fake_update_run(run_id_arg, *, status, diagnostics=None, **kwargs):  # noqa: ANN001
+        if status == "running" and diagnostics:
+            running_updates.append(diagnostics)
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(reddit_refresh, "_discover_window", fake_discover)
+    monkeypatch.setattr(reddit_refresh, "_update_run", fake_update_run)
+    monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
+    monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
+    monkeypatch.setattr(reddit_refresh, "_fetch_post_comments_tree", lambda post_id: [{"reddit_comment_id": "c1"}])  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_upsert_comments", lambda rows, *, conn: len(rows))  # noqa: ARG005
+    monkeypatch.setattr(
+        reddit_refresh,
+        "get_refresh_run",
+        lambda run_id_arg: {"run_id": run_id_arg, "status": "completed"},
+    )  # noqa: ARG005
+
+    result = reddit_refresh.execute_refresh_run(run_id)
+
+    assert result["status"] == "completed"
+    progress_updates = [
+        item.get("progress")
+        for item in running_updates
+        if isinstance(item, dict) and isinstance(item.get("progress"), dict)
+    ]
+    assert progress_updates
+    assert any(update.get("stage") == "discovering_posts" for update in progress_updates)
+    assert any(update.get("stage") == "fetching_comments" for update in progress_updates)
+    assert any(int(update.get("comments_targets_done") or 0) >= 1 for update in progress_updates)
+    assert any(int(update.get("comments_rows_upserted") or 0) >= 1 for update in progress_updates)
 
 
 def test_get_refresh_run_includes_queue_counters(monkeypatch) -> None:
@@ -487,3 +731,549 @@ def test_get_refresh_run_includes_queue_counters(monkeypatch) -> None:
         "other_queued": 4,
         "queued_ahead": 3,
     }
+
+
+def test_create_or_reuse_refresh_run_recovers_stale_queued_runs(monkeypatch) -> None:
+    stale_recovered_calls: list[tuple[str, list]] = []
+    inserted_payloads: list[dict[str, str]] = []
+
+    def fake_execute_returning(query, params=None):  # noqa: ANN001
+        if "stale_queue_recovered" in query:
+            stale_recovered_calls.append((query, list(params or [])))
+            return [{"id": "old-queued-run"}]
+        return []
+
+    rows = iter(
+        [
+            {
+                "id": "new-run",
+                "community_id": "community-1",
+                "season_id": "season-1",
+                "period_key": "pre-season",
+                "status": "queued",
+                "request_payload": {},
+            },  # insert returning
+        ]
+    )
+
+    monkeypatch.setattr(reddit_refresh.pg, "execute_returning", fake_execute_returning)
+    monkeypatch.setattr(
+        reddit_refresh.pg,
+        "fetch_all",
+        lambda *args, **kwargs: [],  # noqa: ANN002, ANN003
+    )
+    def fake_fetch_one(query, params=None):  # noqa: ANN001
+        request_payload = (params or [None, None, None, None, "{}"])[4]
+        inserted_payloads.append({"query": query, "request_payload": request_payload})
+        return next(rows)
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
+
+    row = reddit_refresh.create_or_reuse_refresh_run(
+        payload={
+            "community_id": "community-1",
+            "season_id": "season-1",
+            "period_key": "pre-season",
+            "subreddit": "bravorealhousewives",
+        }
+    )
+
+    assert row["id"] == "new-run"
+    assert row["reused"] is False
+    assert len(stale_recovered_calls) == 1
+    assert len(inserted_payloads) == 1
+    assert "run_config_hash" in inserted_payloads[0]["request_payload"]
+
+
+def test_create_or_reuse_refresh_run_reuses_matching_active_config(monkeypatch) -> None:
+    payload = {
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "subreddit": "bravorealhousewives",
+        "coverage_mode": "adaptive_deep",
+        "max_pages": 1000,
+        "search_backfill": True,
+    }
+    expected_hash = reddit_refresh._build_run_config_hash(payload)  # noqa: SLF001
+    active_row = {
+        "id": "active-run",
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "status": "running",
+        "request_payload": {
+            **payload,
+            "run_config_hash": expected_hash,
+        },
+    }
+
+    monkeypatch.setattr(reddit_refresh.pg, "execute_returning", lambda *args, **kwargs: [])  # noqa: ANN002, ANN003
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args, **kwargs: [active_row])  # noqa: ANN002, ANN003
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: None)  # noqa: ANN002, ANN003
+
+    row = reddit_refresh.create_or_reuse_refresh_run(payload=payload)
+
+    assert row["id"] == "active-run"
+    assert row["reused"] is True
+
+
+def test_create_or_reuse_refresh_run_does_not_reuse_mismatched_active_config(monkeypatch) -> None:
+    payload = {
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "subreddit": "bravorealhousewives",
+        "coverage_mode": "standard",
+        "max_pages": 500,
+    }
+    active_row = {
+        "id": "active-run",
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "status": "queued",
+        "request_payload": {
+            **payload,
+            "coverage_mode": "max_coverage",
+            "max_pages": 1000,
+        },
+    }
+    inserted_row = {
+        "id": "new-run",
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "status": "queued",
+        "request_payload": {},
+    }
+
+    monkeypatch.setattr(reddit_refresh.pg, "execute_returning", lambda *args, **kwargs: [])  # noqa: ANN002, ANN003
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args, **kwargs: [active_row])  # noqa: ANN002, ANN003
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: inserted_row)  # noqa: ANN002, ANN003
+
+    row = reddit_refresh.create_or_reuse_refresh_run(payload=payload)
+
+    assert row["id"] == "new-run"
+    assert row["reused"] is False
+
+
+def test_claim_refresh_run_for_execution_claims_queued_run(monkeypatch) -> None:
+    monkeypatch.setattr(
+        reddit_refresh.pg,
+        "fetch_one",
+        lambda *args, **kwargs: {  # noqa: ANN002, ANN003
+            "id": "run-1",
+            "community_id": "community-1",
+            "season_id": "season-1",
+            "period_key": "pre-season",
+            "subreddit": "bravorealhousewives",
+            "request_payload": {},
+            "status": "running",
+            "updated_at": datetime.now(tz=UTC),
+        },
+    )
+
+    claimed = reddit_refresh._claim_refresh_run_for_execution("run-1")  # noqa: SLF001
+    assert claimed["id"] == "run-1"
+    assert claimed["period_key"] == "pre-season"
+
+
+def test_claim_refresh_run_for_execution_marks_stale_running_failed(monkeypatch) -> None:
+    now = datetime.now(tz=UTC)
+    rows = iter(
+        [
+            None,  # claim update returns nothing
+            {
+                "id": "run-1",
+                "community_id": "community-1",
+                "season_id": "season-1",
+                "period_key": "pre-season",
+                "subreddit": "bravorealhousewives",
+                "request_payload": {},
+                "status": "running",
+                "updated_at": now.replace(year=2024),
+            },
+        ]
+    )
+    updates: list[dict] = []
+
+    monkeypatch.setattr(
+        reddit_refresh.pg,
+        "fetch_one",
+        lambda *args, **kwargs: next(rows),  # noqa: ANN002, ANN003
+    )
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_update_run",
+        lambda run_id, **kwargs: updates.append({"run_id": run_id, **kwargs}),  # noqa: ANN001
+    )
+
+    with pytest.raises(RuntimeError, match="stale running"):
+        reddit_refresh._claim_refresh_run_for_execution("run-1")  # noqa: SLF001
+
+    assert updates
+    assert updates[0]["status"] == "failed"
+
+
+def test_apply_match_metadata_filters_stopword_hint_tokens() -> None:
+    row = _listing_row(
+        post_id="hint001",
+        created_at=datetime(2025, 9, 1, 12, 0, tzinfo=UTC),
+        flair="Salt Lake City",
+        title="The Season 6 RHOSLC trailer",
+    )
+
+    output, hints, _tracked_rows = reddit_refresh._apply_match_metadata(  # noqa: SLF001
+        rows=[row],
+        subreddit="bravorealhousewives",
+        terms=["rhoslc"],
+        cast_terms=[],
+        analysis_flares=[],
+        analysis_all_flares=["Salt Lake City"],
+        force_include_flares=[],
+        show_focused=False,
+    )
+
+    assert len(output) == 1
+    assert "rhoslc" in hints["suggested_include_terms"]
+    assert "the" not in hints["suggested_include_terms"]
+    assert "season" not in hints["suggested_include_terms"]
+    assert "trailer" not in hints["suggested_include_terms"]
+    assert "6" not in hints["suggested_include_terms"]
+
+
+def test_execute_refresh_run_adaptive_deep_completes_after_second_pass(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000010"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {"fetch_comments": False, "coverage_mode": "adaptive_deep"},
+        "status": "running",
+        "updated_at": datetime.now(tz=UTC),
+    }
+    first_result = {
+        "subreddit": "bravorealhousewives",
+        "collection_mode": "exhaustive_window",
+        "listing_pages_fetched": 12,
+        "max_pages_applied": 500,
+        "max_backfill_queries_applied": 12,
+        "max_backfill_pages_per_query_applied": 20,
+        "window_exhaustive_complete": False,
+        "search_backfill": {
+            "complete": False,
+            "pages_fetched": 3,
+            "queries_run": 6,
+            "rows_fetched": 20,
+            "rows_in_window": 2,
+            "query_diagnostics": [],
+        },
+        "seed_urls": {},
+        "window_start": "2025-08-14T00:00:00Z",
+        "window_end": "2025-09-16T23:00:00Z",
+        "terms": ["rhoslc"],
+        "hints": {"suggested_include_terms": ["rhoslc"], "suggested_exclude_terms": []},
+        "threads": [
+            {
+                "reddit_post_id": "p1",
+                "title": "Post 1",
+                "text": "body",
+                "posted_at": "2025-09-01T00:00:00Z",
+                "num_comments": 1,
+                "score": 1,
+                "passes_flair_filter": True,
+            }
+        ],
+        "totals": {"fetched_rows": 12, "matched_rows": 1, "tracked_flair_rows": 1},
+    }
+    second_result = {
+        "subreddit": "bravorealhousewives",
+        "collection_mode": "exhaustive_window",
+        "listing_pages_fetched": 40,
+        "max_pages_applied": 1000,
+        "max_backfill_queries_applied": 30,
+        "max_backfill_pages_per_query_applied": 50,
+        "window_exhaustive_complete": True,
+        "search_backfill": {
+            "complete": True,
+            "pages_fetched": 10,
+            "queries_run": 20,
+            "rows_fetched": 120,
+            "rows_in_window": 20,
+            "query_diagnostics": [],
+        },
+        "seed_urls": {},
+        "window_start": "2025-08-14T00:00:00Z",
+        "window_end": "2025-09-16T23:00:00Z",
+        "terms": ["rhoslc", "salt lake city"],
+        "hints": {"suggested_include_terms": ["rhoslc"], "suggested_exclude_terms": []},
+        "threads": [
+            {
+                "reddit_post_id": "p1",
+                "title": "Post 1",
+                "text": "body",
+                "posted_at": "2025-09-01T00:00:00Z",
+                "num_comments": 2,
+                "score": 2,
+                "passes_flair_filter": True,
+            },
+            {
+                "reddit_post_id": "p2",
+                "title": "Post 2",
+                "text": "body",
+                "posted_at": "2025-09-02T00:00:00Z",
+                "num_comments": 3,
+                "score": 3,
+                "passes_flair_filter": True,
+            },
+        ],
+        "totals": {"fetched_rows": 120, "matched_rows": 2, "tracked_flair_rows": 2},
+    }
+
+    discover_payloads: list[dict] = []
+    updates: list[dict] = []
+
+    def fake_discover(payload, *, progress_callback=None):  # noqa: ANN001
+        discover_payloads.append(dict(payload))
+        if progress_callback:
+            progress_callback(
+                {
+                    "listing_pages_fetched": len(discover_payloads),
+                    "rows_discovered_raw": 10 * len(discover_payloads),
+                }
+            )
+        return first_result if len(discover_payloads) == 1 else second_result
+
+    def fake_update_run(run_id_arg, **kwargs):  # noqa: ANN001
+        updates.append({"run_id": run_id_arg, **kwargs})
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(reddit_refresh, "_discover_window", fake_discover)
+    monkeypatch.setattr(reddit_refresh, "_update_run", fake_update_run)
+    monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
+    monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
+    monkeypatch.setattr(
+        reddit_refresh,
+        "get_refresh_run",
+        lambda run_id_arg: {"run_id": run_id_arg, "status": "completed"},
+    )  # noqa: ARG005
+
+    result = reddit_refresh.execute_refresh_run(run_id)
+
+    assert result["status"] == "completed"
+    assert len(discover_payloads) == 2
+    assert int(discover_payloads[1].get("max_pages") or 0) >= 1000
+    assert int(discover_payloads[1].get("max_backfill_queries") or 0) >= 30
+    assert int(discover_payloads[1].get("max_backfill_pages_per_query") or 0) >= 50
+    completed_update = next(
+        (item for item in updates if item.get("status") in {"completed", "partial"}),
+        None,
+    )
+    assert completed_update is not None
+    assert completed_update["status"] == "completed"
+    diagnostics = completed_update.get("diagnostics") or {}
+    assert diagnostics.get("coverage_mode") == "adaptive_deep"
+    assert diagnostics.get("passes_run") == 2
+    assert diagnostics.get("final_completeness") == {
+        "listing_complete": True,
+        "backfill_complete": True,
+    }
+    passes = diagnostics.get("passes") or []
+    assert len(passes) == 2
+    assert passes[0]["window_exhaustive_complete"] is False
+    assert passes[1]["window_exhaustive_complete"] is True
+
+
+def test_execute_refresh_run_adaptive_deep_remains_partial_when_second_pass_incomplete(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000011"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {"fetch_comments": False, "coverage_mode": "adaptive_deep"},
+        "status": "running",
+        "updated_at": datetime.now(tz=UTC),
+    }
+    incomplete_result = {
+        "subreddit": "bravorealhousewives",
+        "collection_mode": "exhaustive_window",
+        "listing_pages_fetched": 50,
+        "max_pages_applied": 1000,
+        "max_backfill_queries_applied": 30,
+        "max_backfill_pages_per_query_applied": 50,
+        "window_exhaustive_complete": False,
+        "search_backfill": {
+            "complete": False,
+            "pages_fetched": 15,
+            "queries_run": 30,
+            "rows_fetched": 180,
+            "rows_in_window": 15,
+            "query_diagnostics": [],
+        },
+        "seed_urls": {},
+        "window_start": "2025-08-14T00:00:00Z",
+        "window_end": "2025-09-16T23:00:00Z",
+        "terms": ["rhoslc"],
+        "hints": {"suggested_include_terms": ["rhoslc"], "suggested_exclude_terms": []},
+        "threads": [
+            {
+                "reddit_post_id": "p1",
+                "title": "Post 1",
+                "text": "body",
+                "posted_at": "2025-09-01T00:00:00Z",
+                "num_comments": 1,
+                "score": 1,
+                "passes_flair_filter": True,
+            }
+        ],
+        "totals": {"fetched_rows": 50, "matched_rows": 1, "tracked_flair_rows": 1},
+    }
+
+    discover_payloads: list[dict] = []
+    updates: list[dict] = []
+
+    def fake_discover(payload, *, progress_callback=None):  # noqa: ANN001
+        discover_payloads.append(dict(payload))
+        if progress_callback:
+            progress_callback(
+                {
+                    "listing_pages_fetched": len(discover_payloads),
+                    "rows_discovered_raw": 10 * len(discover_payloads),
+                }
+            )
+        return incomplete_result
+
+    def fake_update_run(run_id_arg, **kwargs):  # noqa: ANN001
+        updates.append({"run_id": run_id_arg, **kwargs})
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(reddit_refresh, "_discover_window", fake_discover)
+    monkeypatch.setattr(reddit_refresh, "_update_run", fake_update_run)
+    monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
+    monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
+    monkeypatch.setattr(
+        reddit_refresh,
+        "get_refresh_run",
+        lambda run_id_arg: {"run_id": run_id_arg, "status": "partial"},
+    )  # noqa: ARG005
+
+    result = reddit_refresh.execute_refresh_run(run_id)
+
+    assert result["status"] == "partial"
+    assert len(discover_payloads) == 2
+    completed_update = next(
+        (item for item in updates if item.get("status") in {"completed", "partial"}),
+        None,
+    )
+    assert completed_update is not None
+    assert completed_update["status"] == "partial"
+    diagnostics = completed_update.get("diagnostics") or {}
+    assert diagnostics.get("coverage_mode") == "adaptive_deep"
+    assert diagnostics.get("passes_run") == 2
+    assert diagnostics.get("final_completeness") == {
+        "listing_complete": False,
+        "backfill_complete": False,
+    }
+
+
+def test_get_reddit_community_analytics_summary_season_scope_filters_season(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fetch_one(query, params):  # noqa: ANN001
+        captured["query"] = query
+        captured["params"] = list(params)
+        return {
+            "post_count": 5,
+            "tracked_flair_post_count": 4,
+            "show_match_post_count": 3,
+            "comment_count": 80,
+            "score_sum": 900,
+            "season_count": 1,
+            "updated_at": datetime(2026, 3, 1, 0, 0, tzinfo=UTC),
+        }
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
+
+    payload = reddit_refresh.get_reddit_community_analytics_summary(
+        community_id="community-1",
+        scope="season",
+        season_id="season-1",
+    )
+
+    assert payload["scope"] == "season"
+    assert payload["totals"]["post_count"] == 5
+    assert payload["totals"]["tracked_flair_post_count"] == 4
+    assert payload["diagnostics"]["row_count"] == 5
+    assert "m.season_id = %s" in str(captured["query"])
+    assert captured["params"] == ["community-1", "season-1"]
+
+
+def test_list_reddit_community_posts_applies_flair_and_container_filters(monkeypatch) -> None:
+    captured_queries: list[tuple[str, list]] = []
+
+    def fake_fetch_one(query, params):  # noqa: ANN001
+        captured_queries.append((query, list(params)))
+        return {"total_count": 1}
+
+    def fake_fetch_all(query, params):  # noqa: ANN001
+        captured_queries.append((query, list(params)))
+        return [
+            {
+                "reddit_post_id": "abc123",
+                "title": "RHOSLC post",
+                "selftext": "body",
+                "url": "https://reddit.com/abc123",
+                "permalink": "https://reddit.com/abc123",
+                "author": "poster",
+                "score": 22,
+                "num_comments": 14,
+                "posted_at": datetime(2025, 9, 1, 0, 0, tzinfo=UTC),
+                "link_flair_text": "Salt Lake City",
+                "source_sorts": ["new"],
+                "matched_terms": ["rhoslc"],
+                "matched_cast_terms": [],
+                "cross_show_terms": [],
+                "is_show_match": True,
+                "passes_flair_filter": True,
+                "match_score": 65,
+                "flair_mode": "all",
+            }
+        ]
+
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: True)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_all", fake_fetch_all)
+
+    payload = reddit_refresh.list_reddit_community_posts(
+        community_id="community-1",
+        scope="season",
+        season_id="season-1",
+        container_key="period-preseason",
+        flair_key=" Salt Lake City ",
+        page=1,
+        per_page=10,
+    )
+
+    assert payload["scope"] == "season"
+    assert payload["flair_key"] == "salt lake city"
+    assert payload["pagination"]["total_count"] == 1
+    assert payload["posts"][0]["reddit_post_id"] == "abc123"
+    assert any("m.period_key = %s" in query for query, _ in captured_queries)
+    assert any("canonical_flair_key" in query for query, _ in captured_queries)
+
+
+def test_get_reddit_community_flair_detail_requires_flair_key() -> None:
+    with pytest.raises(ValueError, match="flair_key is required"):
+        reddit_refresh.get_reddit_community_flair_detail(
+            community_id="community-1",
+            flair_key="",
+            scope="all",
+            season_id=None,
+        )

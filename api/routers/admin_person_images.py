@@ -19,16 +19,22 @@ from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime
 from threading import Lock
 from typing import Any, Literal
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlunparse
 from uuid import UUID
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.auth import AdminUser, FacebankSeedAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.face_crops import generate_and_upload_face_crops
+from trr_backend.repositories.identity_assignment import (
+    build_identity_candidate_person_ids as build_identity_candidate_person_ids_shared,
+)
+from trr_backend.repositories.identity_assignment import (
+    is_trr_show_eligible as is_trr_show_eligible_shared,
+)
 from trr_backend.repositories.media_links import update_media_link_facebank_seed
 
 logger = logging.getLogger(__name__)
@@ -54,6 +60,19 @@ IMDB_REFRESH_DIAGNOSTIC_FIELDS = (
     "imdb_filtered_people",
     "imdb_filtered_episode",
     "imdb_filtered_other",
+)
+AUTO_COUNT_DIAGNOSTIC_FIELDS = (
+    "auto_faces_detected",
+    "auto_face_crops_generated",
+    "auto_person_fallback_crops_generated",
+    "auto_no_face_rows",
+    "auto_identity_skipped_non_trr_show",
+    "auto_detect_success_rows",
+    "auto_detect_failed_rows",
+    "auto_persist_success_rows",
+    "auto_persist_failed_rows",
+    "auto_crop_cache_success_rows",
+    "auto_crop_cache_failed_rows",
 )
 IMDB_VIEWER_ID_RE = re.compile(r"/mediaviewer/(rm\d+)/", re.IGNORECASE)
 
@@ -146,10 +165,30 @@ class RefreshImagesResponse(BaseModel):
     auto_counts_attempted: int = 0
     auto_counts_succeeded: int = 0
     auto_counts_failed: int = 0
+    auto_count_attempted_rows: int = 0
+    auto_count_skipped_existing_rows: int = 0
+    auto_count_retry_attempted_rows: int = 0
+    auto_count_retry_succeeded_rows: int = 0
+    auto_faces_detected: int = 0
+    auto_face_crops_generated: int = 0
+    auto_person_fallback_crops_generated: int = 0
+    auto_no_face_rows: int = 0
+    auto_identity_skipped_non_trr_show: int = 0
+    auto_detect_success_rows: int = 0
+    auto_detect_failed_rows: int = 0
+    auto_persist_success_rows: int = 0
+    auto_persist_failed_rows: int = 0
+    auto_crop_cache_success_rows: int = 0
+    auto_crop_cache_failed_rows: int = 0
+    row_error_counts: dict[str, int] = Field(default_factory=dict)
     text_overlay_attempted: int = 0
     text_overlay_succeeded: int = 0
     text_overlay_unknown: int = 0
     text_overlay_failed: int = 0
+    text_overlay_attempted_rows: int = 0
+    text_overlay_skipped_existing_rows: int = 0
+    text_overlay_retry_attempted_rows: int = 0
+    text_overlay_retry_succeeded_rows: int = 0
     text_overlay_failure_reasons: dict[str, int] = Field(default_factory=dict)
     episode_metadata_tagged: int = 0
     show_context_tagged: int = 0
@@ -164,12 +203,15 @@ class RefreshImagesResponse(BaseModel):
     resize_crop_attempted: int = 0
     resize_crop_succeeded: int = 0
     resize_crop_failed: int = 0
+    retry_attempts: dict[str, int] = Field(default_factory=dict)
+    failed_parts: list[dict[str, Any]] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 
 
 class ReprocessImagesRequest(BaseModel):
     """Request to reprocess existing gallery assets."""
 
+    run_metadata: bool = Field(default=False, description="Run IMDb metadata repair stage.")
     run_count: bool = Field(default=True, description="Run people auto-count stage.")
     run_id_text: bool = Field(default=True, description="Run text overlay detection stage.")
     run_crop: bool = Field(default=True, description="Run centering/cropping stage.")
@@ -177,6 +219,14 @@ class ReprocessImagesRequest(BaseModel):
     sources: list[SourceType] | None = Field(
         default=None,
         description="Optional source filter for cast-photo stages.",
+    )
+    show_id: UUID | None = Field(
+        default=None,
+        description="Optional show context used for metadata repair and TRR-show eligibility checks.",
+    )
+    show_name: str | None = Field(
+        default=None,
+        description="Optional show name used for metadata repair and TRR-show eligibility checks.",
     )
 
 
@@ -336,6 +386,212 @@ def _resolve_imdb_focus_filters(
 
 def _empty_imdb_refresh_diagnostics() -> dict[str, int]:
     return dict.fromkeys(IMDB_REFRESH_DIAGNOSTIC_FIELDS, 0)
+
+
+def _empty_auto_count_diagnostics() -> dict[str, int]:
+    return dict.fromkeys(AUTO_COUNT_DIAGNOSTIC_FIELDS, 0)
+
+
+def _empty_stage_row_stats() -> dict[str, int]:
+    return {
+        "attempted_rows": 0,
+        "skipped_existing_rows": 0,
+        "retry_attempted_rows": 0,
+        "retry_succeeded_rows": 0,
+    }
+
+
+def _merge_stage_row_stats(target: dict[str, int], source: dict[str, int]) -> None:
+    for key in ("attempted_rows", "skipped_existing_rows", "retry_attempted_rows", "retry_succeeded_rows"):
+        target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
+
+
+def _record_stage_row_stats(
+    stats: dict[str, int] | None,
+    *,
+    attempted_rows: int = 0,
+    skipped_existing_rows: int = 0,
+    retry_attempted_rows: int = 0,
+    retry_succeeded_rows: int = 0,
+) -> None:
+    if not isinstance(stats, dict):
+        return
+    stats["attempted_rows"] = int(stats.get("attempted_rows", 0)) + int(max(attempted_rows, 0))
+    stats["skipped_existing_rows"] = int(stats.get("skipped_existing_rows", 0)) + int(max(skipped_existing_rows, 0))
+    stats["retry_attempted_rows"] = int(stats.get("retry_attempted_rows", 0)) + int(max(retry_attempted_rows, 0))
+    stats["retry_succeeded_rows"] = int(stats.get("retry_succeeded_rows", 0)) + int(max(retry_succeeded_rows, 0))
+
+
+def _merge_counter_fields(target: dict[str, int], source: dict[str, int], fields: tuple[str, ...]) -> None:
+    for key in fields:
+        target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
+
+
+def _build_auto_count_row_error_counts(diagnostics: dict[str, int]) -> dict[str, int]:
+    return {
+        "detect_failed": int(diagnostics.get("auto_detect_failed_rows", 0)),
+        "persist_failed": int(diagnostics.get("auto_persist_failed_rows", 0)),
+        "crop_cache_failed": int(diagnostics.get("auto_crop_cache_failed_rows", 0)),
+    }
+
+
+def _build_failed_parts_summary(
+    *,
+    metadata_enrichment_failed: int = 0,
+    auto_counts_failed: int = 0,
+    row_error_counts: dict[str, int] | None = None,
+    text_overlay_failed: int = 0,
+    text_overlay_failure_reasons: dict[str, int] | None = None,
+    centering_failed: int = 0,
+    resize_failed: int = 0,
+    resize_crop_failed: int = 0,
+) -> list[dict[str, Any]]:
+    failed_parts: list[dict[str, Any]] = []
+    if int(metadata_enrichment_failed) > 0:
+        failed_parts.append(
+            {
+                "part": "metadata_enrichment",
+                "failed": int(metadata_enrichment_failed),
+            }
+        )
+    if int(auto_counts_failed) > 0:
+        part: dict[str, Any] = {
+            "part": "people_count_face_crops",
+            "failed": int(auto_counts_failed),
+        }
+        if isinstance(row_error_counts, dict):
+            normalized_row_errors = {
+                key: int(value)
+                for key, value in row_error_counts.items()
+                if isinstance(value, (int, float)) and int(value) > 0
+            }
+            if normalized_row_errors:
+                part["row_error_counts"] = normalized_row_errors
+        failed_parts.append(part)
+    if int(text_overlay_failed) > 0:
+        part = {
+            "part": "text_overlay",
+            "failed": int(text_overlay_failed),
+        }
+        if isinstance(text_overlay_failure_reasons, dict):
+            reason_counts = {
+                key: int(value)
+                for key, value in text_overlay_failure_reasons.items()
+                if isinstance(value, (int, float)) and int(value) > 0
+            }
+            if reason_counts:
+                part["reason_counts"] = reason_counts
+        failed_parts.append(part)
+    if int(centering_failed) > 0:
+        failed_parts.append(
+            {
+                "part": "centering_cropping",
+                "failed": int(centering_failed),
+            }
+        )
+    if int(resize_failed) > 0 or int(resize_crop_failed) > 0:
+        failed_parts.append(
+            {
+                "part": "resizing",
+                "failed": int(resize_failed) + int(resize_crop_failed),
+                "base_failed": int(resize_failed),
+                "crop_failed": int(resize_crop_failed),
+            }
+        )
+    return failed_parts
+
+
+def _has_face_metadata_backfill_needed(metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return True
+    face_boxes = metadata.get("face_boxes")
+    face_crops = metadata.get("face_crops")
+    return not isinstance(face_boxes, list) or not isinstance(face_crops, list)
+
+
+def _normalize_uuid_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    try:
+        return str(UUID(candidate))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _is_trr_show_eligible(
+    db: SupabaseAdminClient,
+    *,
+    metadata: Any,
+    request_show_id: UUID | None = None,
+    request_show_name: str | None = None,
+    show_lookup_by_alias: dict[str, dict[str, Any]] | None = None,
+    show_exists_cache: dict[str, bool] | None = None,
+    show_name_cache: dict[str, str | None] | None = None,
+) -> bool:
+    # Use shared repository logic first.
+    if is_trr_show_eligible_shared(
+        db,
+        metadata=metadata,
+        request_show_id=request_show_id,
+        request_show_name=request_show_name,
+        show_exists_cache=show_exists_cache,
+        show_name_cache=show_name_cache,
+    ):
+        return True
+
+    # Backward-compatible alias fallback for contexts that only provide a show name.
+    metadata_obj = metadata if isinstance(metadata, dict) else {}
+    requested_show_id = _normalize_uuid_text(str(request_show_id) if request_show_id is not None else None)
+    resolved_alias_map = show_lookup_by_alias
+    if resolved_alias_map is None:
+        try:
+            _, resolved_alias_map, _ = _build_show_lookup_maps(db)
+        except Exception:  # noqa: BLE001
+            resolved_alias_map = {}
+
+    resolved_show_id: str | None = None
+    for raw_name in (
+        metadata_obj.get("imdb_fallback_show_name"),
+        metadata_obj.get("show_name"),
+        request_show_name,
+    ):
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            continue
+        show_row = _find_show_row_by_alias(resolved_alias_map or {}, raw_name)
+        if not isinstance(show_row, dict):
+            continue
+        resolved_show_id = _normalize_uuid_text(show_row.get("id"))
+        if resolved_show_id:
+            break
+
+    if not resolved_show_id:
+        return False
+    if requested_show_id and resolved_show_id != requested_show_id:
+        return False
+
+    if show_exists_cache is None:
+        show_exists_cache = {}
+    if resolved_show_id in show_exists_cache:
+        return bool(show_exists_cache[resolved_show_id])
+
+    exists = False
+    try:
+        response = (
+            db.schema("core")
+            .table("shows")
+            .select("id")
+            .eq("id", resolved_show_id)
+            .limit(1)
+            .execute()
+        )
+        exists = bool(getattr(response, "data", None))
+    except Exception:  # noqa: BLE001
+        exists = False
+    show_exists_cache[resolved_show_id] = exists
+    return exists
 
 
 def _is_traitors_show_name(show_name: str | None) -> bool:
@@ -600,13 +856,248 @@ def _normalize_face_coord(value: float) -> float:
     return round(max(0.0, min(1.0, value)), 4)
 
 
-def _build_face_boxes(result: Any) -> list[dict[str, Any]]:
+def _coerce_people_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            continue
+        normalized = entry.strip()
+        if normalized:
+            out.append(normalized)
+    return out
+
+
+def _coerce_people_names(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            continue
+        normalized = entry.strip()
+        if normalized:
+            out.append(normalized)
+    return out
+
+
+def _build_tagged_people(people_ids: Any, people_names: Any) -> list[dict[str, str | None]]:
+    ids = _coerce_people_ids(people_ids)
+    names = _coerce_people_names(people_names)
+    count = max(len(ids), len(names))
+    out: list[dict[str, str | None]] = []
+    for idx in range(count):
+        person_id = ids[idx] if idx < len(ids) else None
+        person_name = names[idx] if idx < len(names) else None
+        if person_id is None and person_name is None:
+            continue
+        out.append({"person_id": person_id, "person_name": person_name})
+    return out
+
+
+def _normalize_person_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _person_name_key(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _resolve_owner_person_name(
+    *,
+    owner_person_id: str | None,
+    owner_person_name: str | None,
+    tagged_people_ids: Any,
+    tagged_people_names: Any,
+) -> str | None:
+    explicit_name = str(owner_person_name or "").strip()
+    if explicit_name:
+        return explicit_name
+    owner_id = _normalize_person_id(owner_person_id)
+    tagged_people = _build_tagged_people(tagged_people_ids, tagged_people_names)
+    if owner_id:
+        for tagged in tagged_people:
+            tagged_id = _normalize_person_id(tagged.get("person_id"))
+            tagged_name = str(tagged.get("person_name") or "").strip()
+            if tagged_id == owner_id and tagged_name:
+                return tagged_name
+    if len(tagged_people) == 1:
+        tagged_name = str(tagged_people[0].get("person_name") or "").strip()
+        if tagged_name:
+            return tagged_name
+    return None
+
+
+def _build_identity_candidate_person_ids(
+    *,
+    db: SupabaseAdminClient | None,
+    allow_identity_assignment: bool,
+    owner_person_id: str | None,
+    tagged_people_ids: Any,
+    tagged_people_names: Any = None,
+    person_name_id_cache: dict[str, str | None] | None = None,
+) -> list[str]:
+    return build_identity_candidate_person_ids_shared(
+        db=db,
+        allow_identity_assignment=allow_identity_assignment,
+        owner_person_id=owner_person_id,
+        tagged_people_ids=tagged_people_ids,
+        tagged_people_names=tagged_people_names,
+        person_name_id_cache=person_name_id_cache,
+    )
+
+
+def _promote_owner_similarity_assignment(
+    boxes: list[dict[str, Any]],
+    *,
+    owner_person_id: str | None,
+    owner_person_name: str | None,
+    allow_identity_assignment: bool,
+) -> None:
+    if not allow_identity_assignment or not boxes:
+        return
+    owner_id = _normalize_person_id(owner_person_id)
+    owner_name = str(owner_person_name or "").strip() or None
+    owner_name_key = _person_name_key(owner_name)
+    if not owner_id and not owner_name_key:
+        return
+
+    scored_indexes = [
+        idx for idx, box in enumerate(boxes) if isinstance(box.get("match_similarity"), (int, float))
+    ]
+    if not scored_indexes:
+        return
+
+    winner_idx = max(
+        scored_indexes,
+        key=lambda idx: (
+            float(boxes[idx].get("match_similarity") or 0.0),
+            float(boxes[idx].get("confidence") or 0.0),
+            float(boxes[idx].get("width") or 0.0) * float(boxes[idx].get("height") or 0.0),
+        ),
+    )
+
+    for idx, box in enumerate(boxes):
+        if idx == winner_idx:
+            continue
+        matches_owner_id = owner_id and _normalize_person_id(box.get("person_id")) == owner_id
+        matches_owner_name = owner_name_key and _person_name_key(box.get("person_name")) == owner_name_key
+        if not matches_owner_id and not matches_owner_name:
+            continue
+        box.pop("person_id", None)
+        box.pop("person_name", None)
+        if box.get("label_source") in {"identity_match", "owner_similarity_seed"}:
+            box["label_source"] = "generic"
+            box.pop("label", None)
+
+    winner = boxes[winner_idx]
+    if owner_id:
+        winner["person_id"] = owner_id
+    if owner_name:
+        winner["person_name"] = owner_name
+        winner["label"] = owner_name
+    winner["label_source"] = "owner_similarity_seed"
+
+
+def _apply_tagged_people_assignments(
+    boxes: list[dict[str, Any]],
+    *,
+    tagged_people_ids: Any,
+    tagged_people_names: Any,
+) -> None:
+    if not boxes:
+        return
+    tagged_people = _build_tagged_people(tagged_people_ids, tagged_people_names)
+    if not tagged_people:
+        return
+
+    remaining_tags = list(tagged_people)
+    assigned_name_keys = {
+        _person_name_key(box.get("person_name"))
+        for box in boxes
+        if isinstance(box.get("person_name"), str) and box.get("person_name")
+    }
+    assigned_ids = {
+        str(box.get("person_id")).strip()
+        for box in boxes
+        if isinstance(box.get("person_id"), str) and str(box.get("person_id")).strip()
+    }
+    filtered_remaining: list[dict[str, str | None]] = []
+    for tagged in remaining_tags:
+        tagged_id = str(tagged.get("person_id") or "").strip()
+        tagged_name_key = _person_name_key(tagged.get("person_name"))
+        if tagged_id and tagged_id in assigned_ids:
+            continue
+        if tagged_name_key and tagged_name_key in assigned_name_keys:
+            continue
+        filtered_remaining.append(tagged)
+    remaining_tags = filtered_remaining
+
+    unassigned_indexes = [
+        idx
+        for idx, box in enumerate(boxes)
+        if not (
+            (isinstance(box.get("person_id"), str) and str(box.get("person_id")).strip())
+            or (isinstance(box.get("person_name"), str) and str(box.get("person_name")).strip())
+        )
+    ]
+    if not unassigned_indexes or not remaining_tags:
+        return
+
+    # Best-effort mode: assign as many remaining tags as possible in stable left->right order.
+    # Deterministic mapping is still preferred when cardinality matches exactly.
+    if len(remaining_tags) > len(unassigned_indexes):
+        return
+
+    sorted_unassigned = sorted(
+        unassigned_indexes,
+        key=lambda idx: (
+            float(boxes[idx].get("x") or 0.0),
+            float(boxes[idx].get("y") or 0.0),
+        ),
+    )
+    for idx, tagged in zip(sorted_unassigned, remaining_tags, strict=False):
+        tagged_id = str(tagged.get("person_id") or "").strip() or None
+        tagged_name = str(tagged.get("person_name") or "").strip() or None
+        if tagged_id:
+            boxes[idx]["person_id"] = tagged_id
+        if tagged_name:
+            boxes[idx]["person_name"] = tagged_name
+            boxes[idx]["label"] = tagged_name
+        boxes[idx]["label_source"] = (
+            "deterministic_tag_map"
+            if len(remaining_tags) == len(sorted_unassigned)
+            else "best_effort_tag_map"
+        )
+
+
+def _extract_square_crop_bbox(square_crop_bbox_raw: Any) -> list[float] | None:
+    if isinstance(square_crop_bbox_raw, list) and len(square_crop_bbox_raw) >= 4:
+        try:
+            sx1 = _normalize_face_coord(float(square_crop_bbox_raw[0]))
+            sy1 = _normalize_face_coord(float(square_crop_bbox_raw[1]))
+            sx2 = _normalize_face_coord(float(square_crop_bbox_raw[2]))
+            sy2 = _normalize_face_coord(float(square_crop_bbox_raw[3]))
+            if sx2 > sx1 and sy2 > sy1:
+                return [sx1, sy1, sx2, sy2]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _extract_detection_boxes(result: Any, *, kind: str) -> list[dict[str, Any]]:
     detections = getattr(result, "detections", None) or []
     boxes: list[dict[str, Any]] = []
-    index = 1
     for det in detections:
-        kind = str(getattr(det, "kind", "face")).lower()
-        if kind != "face":
+        det_kind = str(getattr(det, "kind", "face")).strip().lower()
+        if det_kind != kind:
             continue
         try:
             x1 = float(det.x1)
@@ -650,22 +1141,10 @@ def _build_face_boxes(result: Any) -> list[dict[str, Any]]:
             if isinstance(match_status_raw, str) and match_status_raw.strip()
             else None
         )
-        square_crop_bbox: list[float] | None = None
-        if isinstance(square_crop_bbox_raw, list) and len(square_crop_bbox_raw) >= 4:
-            try:
-                sx1 = _normalize_face_coord(float(square_crop_bbox_raw[0]))
-                sy1 = _normalize_face_coord(float(square_crop_bbox_raw[1]))
-                sx2 = _normalize_face_coord(float(square_crop_bbox_raw[2]))
-                sy2 = _normalize_face_coord(float(square_crop_bbox_raw[3]))
-                if sx2 > sx1 and sy2 > sy1:
-                    square_crop_bbox = [sx1, sy1, sx2, sy2]
-            except (TypeError, ValueError):
-                square_crop_bbox = None
-
+        square_crop_bbox = _extract_square_crop_bbox(square_crop_bbox_raw)
         boxes.append(
             {
-                "index": index,
-                "kind": "face",
+                "kind": kind,
                 "x": x1,
                 "y": y1,
                 "width": width,
@@ -679,7 +1158,154 @@ def _build_face_boxes(result: Any) -> list[dict[str, Any]]:
                 **({"square_crop_bbox": square_crop_bbox} if square_crop_bbox else {}),
             }
         )
-        index += 1
+    return boxes
+
+
+def _build_detection_boxes(
+    result: Any,
+    *,
+    tagged_people_ids: Any = None,
+    tagged_people_names: Any = None,
+    owner_person_id: str | None = None,
+    owner_person_name: str | None = None,
+    allow_identity_assignment: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    face_boxes = _extract_detection_boxes(result, kind="face")
+    diagnostics = _empty_auto_count_diagnostics()
+    diagnostics["auto_faces_detected"] = len(face_boxes)
+
+    if face_boxes:
+        boxes: list[dict[str, Any]] = []
+        for idx, box in enumerate(face_boxes, start=1):
+            has_identity = allow_identity_assignment and bool(box.get("person_id") or box.get("person_name"))
+            entry = {
+                "index": idx,
+                "kind": "face",
+                "x": box["x"],
+                "y": box["y"],
+                "width": box["width"],
+                "height": box["height"],
+                "confidence": box.get("confidence"),
+                "source_kind": "face",
+                "label_source": "identity_match" if has_identity else "generic",
+                **(
+                    {"person_id": box.get("person_id")}
+                    if allow_identity_assignment and box.get("person_id")
+                    else {}
+                ),
+                **(
+                    {"person_name": box.get("person_name")}
+                    if allow_identity_assignment and box.get("person_name")
+                    else {}
+                ),
+                **({"label": box.get("label")} if allow_identity_assignment and box.get("label") else {}),
+                **(
+                    {"match_similarity": box.get("match_similarity")}
+                    if allow_identity_assignment and box.get("match_similarity") is not None
+                    else {}
+                ),
+                **(
+                    {"match_status": box.get("match_status")}
+                    if allow_identity_assignment and box.get("match_status")
+                    else {}
+                ),
+                **({"square_crop_bbox": box.get("square_crop_bbox")} if box.get("square_crop_bbox") else {}),
+            }
+            boxes.append(entry)
+        if allow_identity_assignment:
+            resolved_owner_name = _resolve_owner_person_name(
+                owner_person_id=owner_person_id,
+                owner_person_name=owner_person_name,
+                tagged_people_ids=tagged_people_ids,
+                tagged_people_names=tagged_people_names,
+            )
+            _promote_owner_similarity_assignment(
+                boxes,
+                owner_person_id=owner_person_id,
+                owner_person_name=resolved_owner_name,
+                allow_identity_assignment=allow_identity_assignment,
+            )
+            _apply_tagged_people_assignments(
+                boxes,
+                tagged_people_ids=tagged_people_ids,
+                tagged_people_names=tagged_people_names,
+            )
+        return boxes, diagnostics
+
+    if int(getattr(result, "people_count", 0) or 0) > 0:
+        diagnostics["auto_no_face_rows"] = 1
+
+    person_boxes = _extract_detection_boxes(result, kind="person")
+    if not person_boxes:
+        return [], diagnostics
+
+    person_boxes = sorted(
+        person_boxes,
+        key=lambda box: (
+            -(box.get("confidence") if isinstance(box.get("confidence"), (int, float)) else 0.0),
+            float(box.get("x") or 0.0),
+            float(box.get("y") or 0.0),
+        ),
+    )
+
+    tagged_people = _build_tagged_people(tagged_people_ids, tagged_people_names)
+    deterministic_assignments: dict[int, dict[str, str | None]] = {}
+    if allow_identity_assignment and len(tagged_people) == 1:
+        deterministic_assignments[0] = tagged_people[0]
+    elif allow_identity_assignment and len(tagged_people) == len(person_boxes):
+        for idx, tagged in enumerate(tagged_people):
+            deterministic_assignments[idx] = tagged
+
+    boxes: list[dict[str, Any]] = []
+    for idx, box in enumerate(person_boxes, start=1):
+        assignment = deterministic_assignments.get(idx - 1)
+        assigned_person_id = assignment.get("person_id") if assignment else None
+        assigned_person_name = assignment.get("person_name") if assignment else None
+        fallback_label = str(box.get("label") or "").strip() or f"Person {idx}"
+        label = assigned_person_name or fallback_label
+        label_source = "deterministic_tag_map" if assignment else "generic"
+        entry = {
+            "index": idx,
+            "kind": "face",
+            "x": box["x"],
+            "y": box["y"],
+            "width": box["width"],
+            "height": box["height"],
+            "confidence": box.get("confidence"),
+            "source_kind": "person_fallback",
+            "label_source": label_source,
+            "fallback_reason": "no_faces_detected",
+            "label": label,
+            **({"person_id": assigned_person_id} if assigned_person_id else {}),
+            **({"person_name": assigned_person_name} if assigned_person_name else {}),
+            **({"square_crop_bbox": box.get("square_crop_bbox")} if box.get("square_crop_bbox") else {}),
+        }
+        boxes.append(entry)
+    return boxes, diagnostics
+
+
+def _count_face_crop_sources(face_boxes: list[dict[str, Any]], face_crops: list[dict[str, Any]]) -> tuple[int, int]:
+    if not face_crops:
+        return (0, 0)
+    source_by_index: dict[int, str] = {}
+    for box in face_boxes:
+        index = box.get("index")
+        if isinstance(index, int):
+            source_by_index[index] = str(box.get("source_kind") or "face")
+    face_crops_generated = 0
+    person_fallback_crops_generated = 0
+    for crop in face_crops:
+        index = crop.get("index")
+        source_kind = source_by_index.get(int(index)) if isinstance(index, int) else "face"
+        if source_kind == "person_fallback":
+            person_fallback_crops_generated += 1
+        else:
+            face_crops_generated += 1
+    return face_crops_generated, person_fallback_crops_generated
+
+
+def _build_face_boxes(result: Any) -> list[dict[str, Any]]:
+    boxes, _ = _build_detection_boxes(result)
     return boxes
 
 
@@ -843,6 +1469,57 @@ def _apply_auto_crop_payload(
         "zoom": 1,
         "mode": "auto",
         "strategy": fallback_strategy,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _owner_face_crop_payload(
+    face_boxes: list[dict[str, Any]],
+    *,
+    owner_person_id: str | None = None,
+    owner_person_name: str | None = None,
+) -> dict[str, Any] | None:
+    if not face_boxes:
+        return None
+    owner_id = str(owner_person_id or "").strip()
+    owner_name_key = _person_name_key(owner_person_name)
+
+    candidates: list[dict[str, Any]] = []
+    for box in face_boxes:
+        box_person_id = str(box.get("person_id") or "").strip()
+        box_person_name_key = _person_name_key(box.get("person_name"))
+        if owner_id and box_person_id == owner_id:
+            candidates.append(box)
+            continue
+        if owner_name_key and box_person_name_key == owner_name_key:
+            candidates.append(box)
+
+    if not candidates and len(face_boxes) == 1 and (owner_id or owner_name_key):
+        candidates = [face_boxes[0]]
+    if not candidates:
+        return None
+
+    best = max(
+        candidates,
+        key=lambda item: (
+            float(item.get("confidence") or 0.0),
+            float(item.get("width") or 0.0) * float(item.get("height") or 0.0),
+        ),
+    )
+    x = float(best.get("x") or 0.0)
+    y = float(best.get("y") or 0.0)
+    width = max(float(best.get("width") or 0.0), 1e-4)
+    height = max(float(best.get("height") or 0.0), 1e-4)
+    cx = max(0.0, min(1.0, x + (width / 2.0)))
+    cy = max(0.0, min(1.0, y + (height * 0.62)))
+    target_span = max(0.34, min(0.72, height * 2.8))
+    zoom = max(1.05, min(1.9, 0.8 / target_span))
+    return {
+        "x": round(cx * 100.0, 1),
+        "y": round(cy * 100.0, 1),
+        "zoom": round(zoom, 2),
+        "mode": "auto",
+        "strategy": "owner_face_box_v1",
         "generated_at": datetime.now(UTC).isoformat(),
     }
 
@@ -1140,17 +1817,26 @@ def _auto_count_cast_photos(
     person_id: str,
     sources: list[SourceType],
     *,
+    owner_person_name: str | None = None,
     photo_ids: list[str] | None = None,
     force_recount: bool = False,
+    request_show_id: UUID | None = None,
+    request_show_name: str | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    diagnostics: dict[str, int] | None = None,
+    stage_stats: dict[str, int] | None = None,
+    failed_photo_ids: list[str] | None = None,
 ) -> tuple[int, int, int]:
     """Auto-count people for selected cast photos. Returns (attempted, succeeded, failed)."""
     auto_counts_attempted = 0
     auto_counts_succeeded = 0
     auto_counts_failed = 0
+    diagnostics_local = _empty_auto_count_diagnostics()
 
     candidate_sources = [s for s in sources if s in ALL_SOURCES]
     if not candidate_sources:
+        if diagnostics is not None:
+            _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
         return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
     if photo_ids is not None and not photo_ids:
         # No new photos, but still allow backfill of missing counts.
@@ -1159,7 +1845,9 @@ def _auto_count_cast_photos(
     try:
         from trr_backend.clients.screenalytics import (
             ScreenalyticsClientError,
+            ScreenalyticsUnavailableError,
             count_people,
+            get_screenalytics_unavailable_state,
             is_screenalytics_configured,
         )
         from trr_backend.repositories.cast_photo_tags import (
@@ -1169,6 +1857,13 @@ def _auto_count_cast_photos(
         )
 
         if not is_screenalytics_configured():
+            if diagnostics is not None:
+                _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
+            return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
+        unavailable, _, _ = get_screenalytics_unavailable_state()
+        if unavailable:
+            if diagnostics is not None:
+                _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
             return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
 
         query = (
@@ -1187,54 +1882,126 @@ def _auto_count_cast_photos(
 
         if hasattr(response, "error") and response.error:
             logger.warning("Auto-count query failed for %s: %s", person_id, response.error)
+            if diagnostics is not None:
+                _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
             return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
 
         rows = response.data or []
         if not rows:
+            if diagnostics is not None:
+                _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
             return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
 
         tag_rows = get_tags_by_photo_ids(db, [str(row["id"]) for row in rows])
+        show_lookup_by_alias: dict[str, dict[str, Any]] | None = None
+        try:
+            _, show_lookup_by_alias, _ = _build_show_lookup_maps(db)
+        except Exception:  # noqa: BLE001
+            show_lookup_by_alias = {}
+        show_exists_cache: dict[str, bool] = {}
+        show_name_cache: dict[str, str | None] = {}
+        person_name_id_cache: dict[str, str | None] = {}
         to_process: list[dict[str, Any]] = []
+        skipped_existing_rows = 0
         for row in rows:
             tag_row = tag_rows.get(str(row["id"]))
             if has_manual_tags(tag_row):
                 continue
-            if not force_recount and tag_row and tag_row.get("people_count") is not None:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            has_people_count = bool(tag_row and tag_row.get("people_count") is not None)
+            if not force_recount and has_people_count and not _has_face_metadata_backfill_needed(metadata):
+                skipped_existing_rows += 1
                 continue
             image_urls = _pick_autocount_urls(row)
             if not image_urls:
                 continue
+            trr_show_eligible = _is_trr_show_eligible(
+                db,
+                metadata=metadata,
+                request_show_id=request_show_id,
+                request_show_name=request_show_name,
+                show_lookup_by_alias=show_lookup_by_alias,
+                show_exists_cache=show_exists_cache,
+                show_name_cache=show_name_cache,
+            )
             to_process.append(
                 {
                     "photo_id": str(row["id"]),
                     "image_urls": image_urls,
                     "row": row,
                     "tag_row": tag_row,
+                    "trr_show_eligible": trr_show_eligible,
                 }
             )
 
         total = len(to_process)
+        _record_stage_row_stats(
+            stage_stats,
+            attempted_rows=total,
+            skipped_existing_rows=skipped_existing_rows,
+        )
         for idx, item in enumerate(to_process, start=1):
             row = item["row"]
             tag_row = item["tag_row"]
+            existing_people_names = tag_row.get("people_names") if tag_row else None
+            existing_people_ids = tag_row.get("people_ids") if tag_row else None
+            allow_identity_assignment = bool(item.get("trr_show_eligible"))
+            candidate_person_ids = _build_identity_candidate_person_ids(
+                db=db,
+                allow_identity_assignment=allow_identity_assignment,
+                owner_person_id=person_id,
+                tagged_people_ids=existing_people_ids,
+                tagged_people_names=existing_people_names,
+                person_name_id_cache=person_name_id_cache,
+            )
             auto_counts_attempted += 1
             result = None
             selected_image_url: str | None = None
             last_error: ScreenalyticsClientError | None = None
+            service_unavailable_error: ScreenalyticsUnavailableError | None = None
             for image_url in item["image_urls"]:
                 try:
+                    if candidate_person_ids:
+                        result = count_people(image_url, candidate_person_ids=candidate_person_ids)
+                    else:
+                        result = count_people(image_url)
+                    selected_image_url = image_url
+                    break
+                except TypeError:
                     result = count_people(image_url)
                     selected_image_url = image_url
                     break
+                except ScreenalyticsUnavailableError as exc:
+                    service_unavailable_error = exc
+                    last_error = exc
+                    break
                 except ScreenalyticsClientError as exc:
                     last_error = exc
+            if service_unavailable_error is not None:
+                auto_counts_failed += 1
+                if failed_photo_ids is not None:
+                    failed_photo_ids.append(item["photo_id"])
+                logger.warning("Auto-count halted for %s: %s", person_id, service_unavailable_error)
+                break
             try:
                 if result is None:
+                    diagnostics_local["auto_detect_failed_rows"] += 1
+                    if failed_photo_ids is not None:
+                        failed_photo_ids.append(item["photo_id"])
                     raise last_error or ScreenalyticsClientError("Unable to auto-count image")
-                face_boxes = _build_face_boxes(result)
+                diagnostics_local["auto_detect_success_rows"] += 1
+                if not allow_identity_assignment:
+                    diagnostics_local["auto_identity_skipped_non_trr_show"] += 1
+                face_boxes, row_diagnostics = _build_detection_boxes(
+                    result,
+                    tagged_people_ids=existing_people_ids,
+                    tagged_people_names=existing_people_names,
+                    owner_person_id=person_id,
+                    owner_person_name=owner_person_name,
+                    allow_identity_assignment=allow_identity_assignment,
+                )
+                _merge_counter_fields(diagnostics_local, row_diagnostics, AUTO_COUNT_DIAGNOSTIC_FIELDS)
                 auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
-                existing_people_names = tag_row.get("people_names") if tag_row else None
-                existing_people_ids = tag_row.get("people_ids") if tag_row else None
                 upsert_cast_photo_tags(
                     db,
                     cast_photo_id=item["photo_id"],
@@ -1256,21 +2023,26 @@ def _auto_count_cast_photos(
                         face_boxes=face_boxes,
                         size=256,
                     )
-                if face_boxes:
-                    if existing_meta.get("face_boxes") != face_boxes:
-                        existing_meta["face_boxes"] = face_boxes
-                        metadata_changed = True
-                elif "face_boxes" in existing_meta:
-                    existing_meta.pop("face_boxes", None)
+                    if face_crops:
+                        diagnostics_local["auto_crop_cache_success_rows"] += 1
+                    else:
+                        diagnostics_local["auto_crop_cache_failed_rows"] += 1
+                else:
+                    diagnostics_local["auto_crop_cache_success_rows"] += 1
+                face_crop_counts = _count_face_crop_sources(face_boxes, face_crops)
+                diagnostics_local["auto_face_crops_generated"] += face_crop_counts[0]
+                diagnostics_local["auto_person_fallback_crops_generated"] += face_crop_counts[1]
+                if existing_meta.get("face_boxes") != face_boxes:
+                    existing_meta["face_boxes"] = face_boxes
                     metadata_changed = True
-                if face_crops:
-                    if existing_meta.get("face_crops") != face_crops:
-                        existing_meta["face_crops"] = face_crops
-                        metadata_changed = True
-                elif "face_crops" in existing_meta:
-                    existing_meta.pop("face_crops", None)
+                if existing_meta.get("face_crops") != face_crops:
+                    existing_meta["face_crops"] = face_crops
                     metadata_changed = True
-                crop_payload = _apply_auto_crop_payload(result)
+                crop_payload = _owner_face_crop_payload(
+                    face_boxes,
+                    owner_person_id=person_id,
+                    owner_person_name=owner_person_name,
+                ) or _apply_auto_crop_payload(result)
                 if crop_payload is not None:
                     existing_crop = existing_meta.get("thumbnail_crop")
                     if not (isinstance(existing_crop, dict) and existing_crop.get("mode") == "manual"):
@@ -1287,15 +2059,29 @@ def _auto_count_cast_photos(
                             row.get("id"),
                             crop_exc,
                         )
+                        diagnostics_local["auto_persist_failed_rows"] += 1
+                        auto_counts_failed += 1
+                        if failed_photo_ids is not None:
+                            failed_photo_ids.append(item["photo_id"])
+                        if progress_cb:
+                            progress_cb(idx, total)
+                        continue
+                diagnostics_local["auto_persist_success_rows"] += 1
                 auto_counts_succeeded += 1
             except ScreenalyticsClientError as exc:
                 auto_counts_failed += 1
+                if result is not None:
+                    diagnostics_local["auto_persist_failed_rows"] += 1
+                if failed_photo_ids is not None:
+                    failed_photo_ids.append(item["photo_id"])
                 logger.warning("Auto-count failed for %s: %s", row.get("id"), exc)
             if progress_cb:
                 progress_cb(idx, total)
     except Exception as exc:
         logger.exception("Auto-count setup failed for %s: %s", person_id, exc)
 
+    if diagnostics is not None:
+        _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
     return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
 
 
@@ -1303,17 +2089,27 @@ def _auto_count_media_links(
     db: SupabaseAdminClient,
     person_id: str,
     *,
+    owner_person_name: str | None = None,
     force_recount: bool = False,
+    media_link_ids: list[str] | None = None,
+    request_show_id: UUID | None = None,
+    request_show_name: str | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    diagnostics: dict[str, int] | None = None,
+    stage_stats: dict[str, int] | None = None,
+    failed_link_ids: list[str] | None = None,
 ) -> tuple[int, int, int]:
     attempted = 0
     succeeded = 0
     failed = 0
+    diagnostics_local = _empty_auto_count_diagnostics()
 
     try:
         from trr_backend.clients.screenalytics import (
             ScreenalyticsClientError,
+            ScreenalyticsUnavailableError,
             count_people,
+            get_screenalytics_unavailable_state,
             is_screenalytics_configured,
         )
         from trr_backend.repositories.media_links import (
@@ -1322,40 +2118,123 @@ def _auto_count_media_links(
         )
 
         if not is_screenalytics_configured():
+            if diagnostics is not None:
+                _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
+            return attempted, succeeded, failed
+        unavailable, _, _ = get_screenalytics_unavailable_state()
+        if unavailable:
+            if diagnostics is not None:
+                _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
             return attempted, succeeded, failed
 
         rows = _fetch_person_media_link_rows(db, person_id)
+        allowed_link_ids = {str(value).strip() for value in (media_link_ids or []) if str(value).strip()}
+        show_lookup_by_alias: dict[str, dict[str, Any]] | None = None
+        try:
+            _, show_lookup_by_alias, _ = _build_show_lookup_maps(db)
+        except Exception:  # noqa: BLE001
+            show_lookup_by_alias = {}
+        show_exists_cache: dict[str, bool] = {}
+        show_name_cache: dict[str, str | None] = {}
+        person_name_id_cache: dict[str, str | None] = {}
         to_process: list[dict[str, Any]] = []
+        skipped_existing_rows = 0
         for row in rows:
+            row_id = str(row.get("id") or "").strip()
+            if allowed_link_ids and row_id not in allowed_link_ids:
+                continue
             context = row.get("context") if isinstance(row.get("context"), dict) else {}
             if has_manual_people_tags(context):
                 continue
-            if not force_recount and has_people_count(context):
+            if not force_recount and has_people_count(context) and not _has_face_metadata_backfill_needed(context):
+                skipped_existing_rows += 1
                 continue
             urls = _build_media_link_autocount_urls(row)
             if not urls:
                 continue
-            to_process.append({"row": row, "urls": urls, "context": dict(context or {})})
+            trr_show_eligible = _is_trr_show_eligible(
+                db,
+                metadata=context,
+                request_show_id=request_show_id,
+                request_show_name=request_show_name,
+                show_lookup_by_alias=show_lookup_by_alias,
+                show_exists_cache=show_exists_cache,
+                show_name_cache=show_name_cache,
+            )
+            to_process.append(
+                {
+                    "row": row,
+                    "urls": urls,
+                    "context": dict(context or {}),
+                    "trr_show_eligible": trr_show_eligible,
+                }
+            )
 
         total = len(to_process)
+        _record_stage_row_stats(
+            stage_stats,
+            attempted_rows=total,
+            skipped_existing_rows=skipped_existing_rows,
+        )
         for idx, item in enumerate(to_process, start=1):
             attempted += 1
             row = item["row"]
             context = item["context"]
+            allow_identity_assignment = bool(item.get("trr_show_eligible"))
+            candidate_person_ids = _build_identity_candidate_person_ids(
+                db=db,
+                allow_identity_assignment=allow_identity_assignment,
+                owner_person_id=person_id,
+                tagged_people_ids=context.get("people_ids"),
+                tagged_people_names=context.get("people_names"),
+                person_name_id_cache=person_name_id_cache,
+            )
             result = None
             selected_image_url: str | None = None
             last_error: ScreenalyticsClientError | None = None
+            service_unavailable_error: ScreenalyticsUnavailableError | None = None
             for image_url in item["urls"]:
                 try:
+                    if candidate_person_ids:
+                        result = count_people(image_url, candidate_person_ids=candidate_person_ids)
+                    else:
+                        result = count_people(image_url)
+                    selected_image_url = image_url
+                    break
+                except TypeError:
                     result = count_people(image_url)
                     selected_image_url = image_url
                     break
+                except ScreenalyticsUnavailableError as exc:
+                    service_unavailable_error = exc
+                    last_error = exc
+                    break
                 except ScreenalyticsClientError as exc:
                     last_error = exc
+            if service_unavailable_error is not None:
+                failed += 1
+                if failed_link_ids is not None:
+                    failed_link_ids.append(str(row.get("id") or ""))
+                logger.warning("Auto-count media_links halted for %s: %s", person_id, service_unavailable_error)
+                break
             try:
                 if result is None:
+                    diagnostics_local["auto_detect_failed_rows"] += 1
+                    if failed_link_ids is not None:
+                        failed_link_ids.append(str(row.get("id") or ""))
                     raise last_error or ScreenalyticsClientError("Unable to auto-count image")
-                face_boxes = _build_face_boxes(result)
+                diagnostics_local["auto_detect_success_rows"] += 1
+                if not allow_identity_assignment:
+                    diagnostics_local["auto_identity_skipped_non_trr_show"] += 1
+                face_boxes, row_diagnostics = _build_detection_boxes(
+                    result,
+                    tagged_people_ids=context.get("people_ids"),
+                    tagged_people_names=context.get("people_names"),
+                    owner_person_id=person_id,
+                    owner_person_name=owner_person_name,
+                    allow_identity_assignment=allow_identity_assignment,
+                )
+                _merge_counter_fields(diagnostics_local, row_diagnostics, AUTO_COUNT_DIAGNOSTIC_FIELDS)
                 auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
                 context["people_count"] = result.people_count
                 context["people_count_source"] = "auto"
@@ -1371,6 +2250,15 @@ def _auto_count_media_links(
                         face_boxes=face_boxes,
                         size=256,
                     )
+                    if face_crops:
+                        diagnostics_local["auto_crop_cache_success_rows"] += 1
+                    else:
+                        diagnostics_local["auto_crop_cache_failed_rows"] += 1
+                else:
+                    diagnostics_local["auto_crop_cache_success_rows"] += 1
+                face_crop_counts = _count_face_crop_sources(face_boxes, face_crops)
+                diagnostics_local["auto_face_crops_generated"] += face_crop_counts[0]
+                diagnostics_local["auto_person_fallback_crops_generated"] += face_crop_counts[1]
                 context["face_crops"] = face_crops
                 if not (
                     isinstance(context.get("people_ids"), list) and context.get("people_ids")
@@ -1380,21 +2268,32 @@ def _auto_count_media_links(
                     isinstance(context.get("people_names"), list) and context.get("people_names")
                 ) and auto_people_names:
                     context["people_names"] = auto_people_names
-                crop_payload = _apply_auto_crop_payload(result)
+                crop_payload = _owner_face_crop_payload(
+                    face_boxes,
+                    owner_person_id=person_id,
+                    owner_person_name=owner_person_name,
+                ) or _apply_auto_crop_payload(result)
                 if crop_payload is not None and not _is_manual_thumbnail_crop(context.get("thumbnail_crop")):
                     context["thumbnail_crop"] = crop_payload
                 db.schema("core").table("media_links").update(
                     {"context": context, "updated_at": datetime.now(UTC).isoformat()}
                 ).eq("id", row["id"]).execute()
+                diagnostics_local["auto_persist_success_rows"] += 1
                 succeeded += 1
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                if result is not None:
+                    diagnostics_local["auto_persist_failed_rows"] += 1
+                if failed_link_ids is not None:
+                    failed_link_ids.append(str(row.get("id") or ""))
                 logger.warning("Auto-count media_link failed for %s: %s", row.get("id"), exc)
             if progress_cb:
                 progress_cb(idx, total)
     except Exception as exc:
         logger.exception("Auto-count media_links setup failed for %s: %s", person_id, exc)
 
+    if diagnostics is not None:
+        _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
     return attempted, succeeded, failed
 
 
@@ -1770,6 +2669,91 @@ def _fetch_imdb_title_fallback_metadata(
     return out
 
 
+_WWHL_SHOW_NAME = "Watch What Happens Live with Andy Cohen"
+_WWHL_SHOW_IMDB_ID = "tt2057880"
+
+
+def _is_wwhl_show_name(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower()
+    return bool(normalized) and ("watch what happens live" in normalized or "wwhl" in normalized)
+
+
+def _load_person_wwhl_episode_imdb_ids_from_credits(
+    db: SupabaseAdminClient,
+    person_id: str,
+) -> set[str]:
+    normalized_person_id = str(person_id or "").strip()
+    if not normalized_person_id:
+        return set()
+
+    try:
+        response = (
+            db.schema("core")
+            .table("v_episode_appearances_from_credits")
+            .select("show_id,imdb_episode_title_ids")
+            .eq("person_id", normalized_person_id)
+            .limit(5000)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("WWHL credit lookup failed person_id=%s error=%s", normalized_person_id, exc)
+        return set()
+    if hasattr(response, "error") and response.error:
+        logger.debug("WWHL credit lookup error person_id=%s error=%s", normalized_person_id, response.error)
+        return set()
+
+    rows = response.data if isinstance(getattr(response, "data", None), list) else []
+    if not rows:
+        return set()
+
+    show_ids = {
+        str(row.get("show_id") or "").strip()
+        for row in rows
+        if isinstance(row, dict) and str(row.get("show_id") or "").strip()
+    }
+    if not show_ids:
+        return set()
+
+    try:
+        shows_response = (
+            db.schema("core")
+            .table("shows")
+            .select("id,name")
+            .in_("id", list(show_ids))
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("WWHL show lookup failed person_id=%s error=%s", normalized_person_id, exc)
+        return set()
+    if hasattr(shows_response, "error") and shows_response.error:
+        logger.debug("WWHL show lookup error person_id=%s error=%s", normalized_person_id, shows_response.error)
+        return set()
+
+    wwhl_show_ids = {
+        str(show_row.get("id") or "").strip()
+        for show_row in (shows_response.data or [])
+        if isinstance(show_row, dict) and _is_wwhl_show_name(show_row.get("name"))
+    }
+    if not wwhl_show_ids:
+        return set()
+
+    out: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        show_id = str(row.get("show_id") or "").strip()
+        if show_id not in wwhl_show_ids:
+            continue
+        imdb_ids = row.get("imdb_episode_title_ids")
+        if not isinstance(imdb_ids, list):
+            continue
+        for imdb_id in imdb_ids:
+            normalized = str(imdb_id or "").strip().lower()
+            if normalized:
+                out.add(normalized)
+    return out
+
+
 def _normalize_show_lookup_key(value: str | None) -> str:
     text = str(value or "").strip().lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
@@ -1928,6 +2912,8 @@ def _lookup_show_ids_by_name(db: SupabaseAdminClient, show_names: list[str]) -> 
 def _enrich_cast_photos_with_episode_metadata(
     db: SupabaseAdminClient,
     photos: list[dict[str, Any]],
+    *,
+    person_wwhl_episode_imdb_ids: set[str] | None = None,
 ) -> tuple[int, int]:
     tagged = 0
     failed = 0
@@ -1966,9 +2952,14 @@ def _enrich_cast_photos_with_episode_metadata(
 
     unresolved_ids = [imdb_id for imdb_id in imdb_ids if imdb_id not in episodes_by_imdb]
     imdb_fallback_by_id = _fetch_imdb_title_fallback_metadata(unresolved_ids)
+    wwhl_credit_episode_ids = {
+        str(imdb_id or "").strip().lower()
+        for imdb_id in (person_wwhl_episode_imdb_ids or set())
+        if str(imdb_id or "").strip()
+    }
     show_lookup_by_imdb_id, show_lookup_by_alias, show_lookup_by_id = _build_show_lookup_maps(db)
 
-    if not episodes_by_imdb and not imdb_fallback_by_id:
+    if not episodes_by_imdb and not imdb_fallback_by_id and not wwhl_credit_episode_ids:
         return tagged, failed
 
     for row in photos:
@@ -1985,6 +2976,32 @@ def _enrich_cast_photos_with_episode_metadata(
                 break
             if imdb_id in imdb_fallback_by_id:
                 fallback = imdb_fallback_by_id[imdb_id]
+                break
+            imdb_id_norm = str(imdb_id or "").strip().lower()
+            if imdb_id_norm and imdb_id_norm in wwhl_credit_episode_ids:
+                title_names = row.get("title_names")
+                episode_title: str | None = None
+                if isinstance(title_names, list):
+                    for candidate_title in title_names:
+                        if isinstance(candidate_title, str) and candidate_title.strip():
+                            episode_title = candidate_title.strip()
+                            break
+                row_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                fallback = {
+                    "episode_imdb_id": str(imdb_id).strip(),
+                    "episode_title": episode_title,
+                    "season_number": _to_int(row_metadata.get("season_number")),
+                    "episode_number": _to_int(row_metadata.get("episode_number")),
+                    "episode_air_date": row_metadata.get("episode_air_date"),
+                    "show_name": _WWHL_SHOW_NAME,
+                    "show_imdb_id": _WWHL_SHOW_IMDB_ID,
+                    "show_short_code": None,
+                    "imdb_title_type": (
+                        str(row_metadata.get("imdb_title_type")).strip()
+                        if str(row_metadata.get("imdb_title_type") or "").strip()
+                        else "TVEpisode"
+                    ),
+                }
                 break
         if not episode and not fallback:
             continue
@@ -2394,6 +3411,126 @@ def _extract_imdb_viewer_id_from_row(row: dict[str, Any]) -> str | None:
 
 
 def _needs_imdb_metadata_refresh(row: dict[str, Any]) -> bool:
+    return _needs_imdb_metadata_refresh_with_show_lookup(
+        row,
+        show_lookup_by_imdb_id=None,
+        show_lookup_by_alias=None,
+        show_lookup_by_id=None,
+    )
+
+
+def _resolve_show_row_from_metadata(
+    metadata: dict[str, Any],
+    *,
+    show_lookup_by_imdb_id: dict[str, dict[str, Any]] | None,
+    show_lookup_by_alias: dict[str, dict[str, Any]] | None,
+    show_lookup_by_id: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    show_id = str(metadata.get("show_id") or "").strip()
+    if show_id and isinstance(show_lookup_by_id, dict):
+        show_row = show_lookup_by_id.get(show_id)
+        if isinstance(show_row, dict):
+            return show_row
+
+    show_imdb_id = str(metadata.get("show_imdb_id") or "").strip()
+    if show_imdb_id and isinstance(show_lookup_by_imdb_id, dict):
+        show_row = show_lookup_by_imdb_id.get(show_imdb_id)
+        if isinstance(show_row, dict):
+            return show_row
+
+    show_name = str(metadata.get("show_name") or "").strip()
+    if show_name and isinstance(show_lookup_by_alias, dict):
+        show_row = _find_show_row_by_alias(show_lookup_by_alias, show_name)
+        if isinstance(show_row, dict):
+            return show_row
+    return None
+
+
+def _resolve_fallback_show_row_from_metadata(
+    metadata: dict[str, Any],
+    *,
+    show_lookup_by_imdb_id: dict[str, dict[str, Any]] | None,
+    show_lookup_by_alias: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    fallback_show_imdb_id = str(metadata.get("imdb_fallback_show_imdb_id") or "").strip()
+    if fallback_show_imdb_id and isinstance(show_lookup_by_imdb_id, dict):
+        show_row = show_lookup_by_imdb_id.get(fallback_show_imdb_id)
+        if isinstance(show_row, dict):
+            return show_row
+
+    fallback_show_name = str(metadata.get("imdb_fallback_show_name") or "").strip()
+    if fallback_show_name and isinstance(show_lookup_by_alias, dict):
+        show_row = _find_show_row_by_alias(show_lookup_by_alias, fallback_show_name)
+        if isinstance(show_row, dict):
+            return show_row
+    return None
+
+
+def _evaluate_imdb_request_context_staleness(
+    row: dict[str, Any],
+    *,
+    show_lookup_by_imdb_id: dict[str, dict[str, Any]] | None,
+    show_lookup_by_alias: dict[str, dict[str, Any]] | None,
+    show_lookup_by_id: dict[str, dict[str, Any]] | None,
+) -> tuple[bool, str | None]:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    show_context_source = str(metadata.get("show_context_source") or "").strip().lower()
+    if show_context_source not in {"request_context", "request_context_inferred", "show_context_request"}:
+        return False, None
+
+    imdb_title_type = str(metadata.get("imdb_title_type") or "").strip().upper()
+    context_type = str(row.get("context_type") or "").strip().lower()
+    image_type = str(metadata.get("imdb_image_type") or "").strip().lower()
+    has_episode_evidence = bool(
+        imdb_title_type == "TVEPISODE"
+        or (isinstance(metadata.get("episode_imdb_id"), str) and str(metadata.get("episode_imdb_id")).strip())
+        or (isinstance(metadata.get("episode_title"), str) and str(metadata.get("episode_title")).strip())
+        or metadata.get("season_number") is not None
+        or metadata.get("episode_number") is not None
+        or ("episode" in context_type)
+        or image_type in {"still_frame", "still frame", "episode_still", "episode still"}
+    )
+    fallback_show_name = str(metadata.get("imdb_fallback_show_name") or "").strip()
+    fallback_show_imdb_id = str(metadata.get("imdb_fallback_show_imdb_id") or "").strip()
+    has_fallback = bool(fallback_show_name or fallback_show_imdb_id)
+
+    if show_context_source == "request_context_inferred" and not has_episode_evidence:
+        return True, "missing_corroboration"
+
+    if has_episode_evidence and not has_fallback:
+        return True, "missing_corroboration"
+
+    current_show_row = _resolve_show_row_from_metadata(
+        metadata,
+        show_lookup_by_imdb_id=show_lookup_by_imdb_id,
+        show_lookup_by_alias=show_lookup_by_alias,
+        show_lookup_by_id=show_lookup_by_id,
+    )
+    fallback_show_row = _resolve_fallback_show_row_from_metadata(
+        metadata,
+        show_lookup_by_imdb_id=show_lookup_by_imdb_id,
+        show_lookup_by_alias=show_lookup_by_alias,
+    )
+    current_show_id = (
+        str(current_show_row.get("id") or "").strip() if isinstance(current_show_row, dict) else ""
+    ) or None
+    fallback_show_id = (
+        str(fallback_show_row.get("id") or "").strip() if isinstance(fallback_show_row, dict) else ""
+    ) or None
+
+    if has_fallback and current_show_id and fallback_show_id and current_show_id != fallback_show_id:
+        return True, "stale_request_context_mismatch"
+
+    return False, None
+
+
+def _needs_imdb_metadata_refresh_with_show_lookup(
+    row: dict[str, Any],
+    *,
+    show_lookup_by_imdb_id: dict[str, dict[str, Any]] | None,
+    show_lookup_by_alias: dict[str, dict[str, Any]] | None,
+    show_lookup_by_id: dict[str, dict[str, Any]] | None,
+) -> bool:
     if str(row.get("source") or "").strip().lower() != "imdb":
         return False
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
@@ -2403,8 +3540,46 @@ def _needs_imdb_metadata_refresh(row: dict[str, Any]) -> bool:
     has_tags = isinstance(tags, dict) and bool(tags)
     imdb_image_type = metadata.get("imdb_image_type")
     has_image_type = isinstance(imdb_image_type, str) and bool(imdb_image_type.strip())
-    unresolved_show = str(metadata.get("show_context_source") or "").strip().lower() == "imdb_episode_unresolved"
-    return (not title_ids) or (not people_ids) or (not has_tags) or (not has_image_type) or unresolved_show
+    show_context_source = str(metadata.get("show_context_source") or "").strip().lower()
+    unresolved_show = show_context_source == "imdb_episode_unresolved"
+
+    imdb_title_type = str(metadata.get("imdb_title_type") or "").strip().upper()
+    context_type = str(row.get("context_type") or "").strip().lower()
+    image_type = str(imdb_image_type or "").strip().lower()
+    has_episode_evidence = bool(
+        imdb_title_type == "TVEPISODE"
+        or (isinstance(metadata.get("episode_imdb_id"), str) and str(metadata.get("episode_imdb_id")).strip())
+        or (isinstance(metadata.get("episode_title"), str) and str(metadata.get("episode_title")).strip())
+        or metadata.get("season_number") is not None
+        or metadata.get("episode_number") is not None
+        or ("episode" in context_type)
+        or image_type in {"still_frame", "still frame", "episode_still", "episode still"}
+    )
+
+    fallback_show_name = str(metadata.get("imdb_fallback_show_name") or "").strip()
+    fallback_show_imdb_id = str(metadata.get("imdb_fallback_show_imdb_id") or "").strip()
+    missing_episode_show_fallback = bool(
+        has_episode_evidence
+        and not fallback_show_name
+        and not fallback_show_imdb_id
+        and show_context_source in {"", "request_context", "request_context_inferred", "imdb_title_fallback"}
+    )
+    stale_request_context, _ = _evaluate_imdb_request_context_staleness(
+        row,
+        show_lookup_by_imdb_id=show_lookup_by_imdb_id,
+        show_lookup_by_alias=show_lookup_by_alias,
+        show_lookup_by_id=show_lookup_by_id,
+    )
+
+    return (
+        (not title_ids)
+        or (not people_ids)
+        or (not has_tags)
+        or (not has_image_type)
+        or unresolved_show
+        or missing_episode_show_fallback
+        or stale_request_context
+    )
 
 
 def _load_imdb_viewer_image_types(
@@ -2527,6 +3702,8 @@ def _repair_existing_imdb_cast_photos(
     show_id: UUID | None,
     show_name: str | None,
     strict_context: dict[str, Any] | None = None,
+    wwhl_credit_episode_imdb_ids: set[str] | None = None,
+    progress_cb: Callable[[int, int, int, int], None] | None = None,
 ) -> tuple[int, int]:
     from trr_backend.integrations.imdb.person_gallery import (
         fetch_imdb_person_mediaviewer_html,
@@ -2536,13 +3713,32 @@ def _repair_existing_imdb_cast_photos(
 
     rows = _load_existing_imdb_cast_photos_for_person(db, person_id)
     if not rows:
+        if progress_cb:
+            progress_cb(0, 0, 0, 0)
         return 0, 0
 
-    repair_rows = [row for row in rows if _needs_imdb_metadata_refresh(row)]
+    show_lookup_by_imdb_id, show_lookup_by_alias, show_lookup_by_id = _build_show_lookup_maps(db)
+    repair_rows = [
+        row
+        for row in rows
+        if _needs_imdb_metadata_refresh_with_show_lookup(
+            row,
+            show_lookup_by_imdb_id=show_lookup_by_imdb_id,
+            show_lookup_by_alias=show_lookup_by_alias,
+            show_lookup_by_id=show_lookup_by_id,
+        )
+    ]
     if not repair_rows:
+        if progress_cb:
+            progress_cb(0, 0, 0, 0)
         return 0, 0
 
     metadata_failures = 0
+    reviewed_rows = 0
+    changed_rows = 0
+    total_rows = len(repair_rows)
+    if progress_cb:
+        progress_cb(0, total_rows, 0, 0)
     imdb_person_id = ""
     for row in repair_rows:
         imdb_person_id = str(row.get("imdb_person_id") or "").strip()
@@ -2630,9 +3826,22 @@ def _repair_existing_imdb_cast_photos(
         row["metadata"] = metadata
         if isinstance(strict_context, dict) and strict_context:
             _apply_traitors_filter_metadata_to_existing_row(row, strict_context=strict_context)
+        reviewed_rows += 1
+        changed_rows += 1
+        if progress_cb:
+            progress_cb(reviewed_rows, total_rows, changed_rows, metadata_failures)
 
     try:
-        _, episode_failed = _enrich_cast_photos_with_episode_metadata(db, repair_rows)
+        effective_wwhl_credit_episode_imdb_ids = (
+            wwhl_credit_episode_imdb_ids
+            if wwhl_credit_episode_imdb_ids is not None
+            else _load_person_wwhl_episode_imdb_ids_from_credits(db, person_id)
+        )
+        _, episode_failed = _enrich_cast_photos_with_episode_metadata(
+            db,
+            repair_rows,
+            person_wwhl_episode_imdb_ids=effective_wwhl_credit_episode_imdb_ids,
+        )
         metadata_failures += episode_failed
     except Exception as exc:  # noqa: BLE001
         metadata_failures += 1
@@ -2650,20 +3859,43 @@ def _repair_existing_imdb_cast_photos(
         metadata_failures += 1
         logger.warning("Existing IMDb repair show-context failed person_id=%s error=%s", person_id, exc)
 
+    for row in repair_rows:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        is_stale_request_context, stale_reason = _evaluate_imdb_request_context_staleness(
+            row,
+            show_lookup_by_imdb_id=show_lookup_by_imdb_id,
+            show_lookup_by_alias=show_lookup_by_alias,
+            show_lookup_by_id=show_lookup_by_id,
+        )
+        if not is_stale_request_context:
+            continue
+        metadata["show_id"] = None
+        metadata["show_name"] = None
+        metadata["show_imdb_id"] = None
+        metadata["show_short_code"] = None
+        metadata["show_context_source"] = "request_context_rejected"
+        metadata["show_context_repair_reason"] = stale_reason or "stale_request_context_mismatch"
+        row["metadata"] = metadata
+
     repair_rows = [
         row
         for row in repair_rows
         if isinstance(row.get("source_image_id"), str) and str(row.get("source_image_id")).strip()
     ]
     if not repair_rows:
+        if progress_cb:
+            progress_cb(reviewed_rows, total_rows, changed_rows, metadata_failures)
         return 0, metadata_failures
 
     try:
         upserted = upsert_cast_photos(db, repair_rows, dedupe_on="source_image_id")
     except Exception as exc:  # noqa: BLE001
         logger.warning("Existing IMDb repair upsert failed person_id=%s error=%s", person_id, exc)
+        if progress_cb:
+            progress_cb(reviewed_rows, total_rows, 0, metadata_failures + 1)
         return 0, metadata_failures + 1
-
+    if progress_cb:
+        progress_cb(total_rows, total_rows, len(upserted), metadata_failures)
     return len(upserted), metadata_failures
 
 
@@ -2673,6 +3905,67 @@ def _refresh_tmdb_profile(
     *,
     tmdb_person_id: int | None,
 ) -> Literal["updated", "not_found", "skipped"]:
+    def _canonicalize_link_url(value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        parsed = urlparse(raw)
+        if not parsed.scheme or not parsed.netloc:
+            return raw
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return raw
+        netloc = host
+        if parsed.port and not ((scheme == "http" and parsed.port == 80) or (scheme == "https" and parsed.port == 443)):
+            netloc = f"{netloc}:{parsed.port}"
+        path = parsed.path or "/"
+        if path != "/":
+            path = path.rstrip("/")
+        return urlunparse((scheme, netloc, path, "", parsed.query, ""))
+
+    def _url_key(value: str) -> str:
+        return _canonicalize_link_url(value).lower()
+
+    def _build_tmdb_social_links(person_name: str | None, external_ids: Any) -> list[dict[str, str]]:
+        display_name = str(person_name or "").strip()
+        out: list[dict[str, str]] = []
+
+        def add(platform: str, label: str, raw_value: str | None) -> None:
+            value = str(raw_value or "").strip().lstrip("@")
+            if not value:
+                return
+            if platform == "twitter":
+                url = f"https://x.com/{value}"
+            elif platform == "instagram":
+                url = f"https://www.instagram.com/{value}/"
+            elif platform == "facebook":
+                url = f"https://www.facebook.com/{value}"
+            elif platform == "youtube":
+                url = f"https://www.youtube.com/channel/{value}"
+            elif platform == "tiktok":
+                url = f"https://www.tiktok.com/@{value}"
+            else:
+                return
+            canonical_url = _canonicalize_link_url(url)
+            if not canonical_url:
+                return
+            out.append(
+                {
+                    "link_kind": platform,
+                    "link_group": "social",
+                    "label": f"{display_name} {label}".strip() if display_name else label,
+                    "url": canonical_url,
+                }
+            )
+
+        add("twitter", "Twitter/X", getattr(external_ids, "twitter_id", None))
+        add("instagram", "Instagram", getattr(external_ids, "instagram_id", None))
+        add("facebook", "Facebook", getattr(external_ids, "facebook_id", None))
+        add("youtube", "YouTube", getattr(external_ids, "youtube_id", None))
+        add("tiktok", "TikTok", getattr(external_ids, "tiktok_id", None))
+        return out
+
     if not tmdb_person_id:
         return "skipped"
     from trr_backend.integrations.tmdb_person import fetch_tmdb_person_full
@@ -2682,6 +3975,51 @@ def _refresh_tmdb_profile(
     if not person_full:
         return "not_found"
     upsert_cast_tmdb(db, person_full.to_cast_tmdb_row(person_id))
+
+    try:
+        social_rows = _build_tmdb_social_links(person_full.details.name, person_full.external_ids)
+        if social_rows:
+            show_cast_response = (
+                db.schema("core")
+                .table("show_cast")
+                .select("show_id")
+                .eq("person_id", str(person_id))
+                .execute()
+            )
+            if not (hasattr(show_cast_response, "error") and show_cast_response.error):
+                show_ids = sorted(
+                    {
+                        str(item.get("show_id") or "").strip()
+                        for item in (show_cast_response.data or [])
+                        if isinstance(item, dict) and str(item.get("show_id") or "").strip()
+                    }
+                )
+                for show_id in show_ids:
+                    for row in social_rows:
+                        payload = {
+                            "show_id": show_id,
+                            "entity_type": "person",
+                            "entity_id": str(person_id),
+                            "season_number": 0,
+                            "link_group": row["link_group"],
+                            "link_kind": row["link_kind"],
+                            "label": row["label"],
+                            "url": row["url"],
+                            "url_key": _url_key(row["url"]),
+                            "status": "approved",
+                            "confidence": 0.95,
+                            "source": "tmdb_profile_refresh",
+                            "discovered_by": "tmdb_profile_refresh",
+                            "metadata": {"source": "core.cast_tmdb"},
+                            "created_by": "tmdb_profile_refresh",
+                            "updated_by": "tmdb_profile_refresh",
+                        }
+                        db.schema("core").table("entity_links").upsert(
+                            payload,
+                            on_conflict="show_id,entity_type,entity_id,link_kind,season_number,url_key",
+                        ).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TMDb social link sync failed for %s: %s", person_id, exc)
     return "updated"
 
 
@@ -2857,6 +4195,8 @@ def _detect_text_overlay_cast_photos(
     photo_ids: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
     reason_counts: dict[str, int] | None = None,
+    stage_stats: dict[str, int] | None = None,
+    failed_photo_ids: list[str] | None = None,
 ) -> tuple[int, int, int, int]:
     """
     Best-effort "word id" detection for cast_photos rows.
@@ -2901,15 +4241,22 @@ def _detect_text_overlay_cast_photos(
 
         rows = response.data or []
         to_process: list[str] = []
+        skipped_existing_rows = 0
         for row in rows:
             meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
             if "has_text_overlay" in (meta or {}):
+                skipped_existing_rows += 1
                 continue
             rid = row.get("id")
             if rid:
                 to_process.append(str(rid))
 
         total = len(to_process)
+        _record_stage_row_stats(
+            stage_stats,
+            attempted_rows=total,
+            skipped_existing_rows=skipped_existing_rows,
+        )
         for idx, photo_id in enumerate(to_process, start=1):
             attempted += 1
             try:
@@ -2923,12 +4270,16 @@ def _detect_text_overlay_cast_photos(
                     succeeded += 1
             except TextOverlayDetectionError as exc:
                 failed += 1
+                if failed_photo_ids is not None:
+                    failed_photo_ids.append(photo_id)
                 if reason_counts is not None:
                     reason = classify_text_overlay_failure_reason(exc)
                     reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 logger.warning("Word detection failed photo_id=%s error=%s", photo_id, exc)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                if failed_photo_ids is not None:
+                    failed_photo_ids.append(photo_id)
                 if reason_counts is not None:
                     reason_counts["gemini_request_failed"] = reason_counts.get("gemini_request_failed", 0) + 1
                 logger.warning("Word detection failed photo_id=%s error=%s", photo_id, exc)
@@ -2948,6 +4299,8 @@ def _detect_text_overlay_media_links(
     asset_ids: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
     reason_counts: dict[str, int] | None = None,
+    stage_stats: dict[str, int] | None = None,
+    failed_asset_ids: list[str] | None = None,
 ) -> tuple[int, int, int, int]:
     attempted = 0
     succeeded = 0
@@ -2969,6 +4322,7 @@ def _detect_text_overlay_media_links(
         to_process: list[str] = []
         seen_asset_ids: set[str] = set()
         allowed_asset_ids = set(asset_ids or [])
+        skipped_existing_rows = 0
         for row in rows:
             asset_id = str(row.get("media_asset_id") or "")
             if not asset_id or asset_id in seen_asset_ids:
@@ -2976,12 +4330,19 @@ def _detect_text_overlay_media_links(
             if allowed_asset_ids and asset_id not in allowed_asset_ids:
                 continue
             seen_asset_ids.add(asset_id)
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-            if "has_text_overlay" in metadata:
+            if "has_text_overlay" in context or "has_text_overlay" in metadata:
+                skipped_existing_rows += 1
                 continue
             to_process.append(asset_id)
 
         total = len(to_process)
+        _record_stage_row_stats(
+            stage_stats,
+            attempted_rows=total,
+            skipped_existing_rows=skipped_existing_rows,
+        )
         for idx, asset_id in enumerate(to_process, start=1):
             attempted += 1
             try:
@@ -2995,12 +4356,16 @@ def _detect_text_overlay_media_links(
                     succeeded += 1
             except TextOverlayDetectionError as exc:
                 failed += 1
+                if failed_asset_ids is not None:
+                    failed_asset_ids.append(asset_id)
                 if reason_counts is not None:
                     reason = classify_text_overlay_failure_reason(exc)
                     reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 logger.warning("Word detection failed media_asset_id=%s error=%s", asset_id, exc)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                if failed_asset_ids is not None:
+                    failed_asset_ids.append(asset_id)
                 if reason_counts is not None:
                     reason_counts["gemini_request_failed"] = reason_counts.get("gemini_request_failed", 0) + 1
                 logger.warning("Word detection failed media_asset_id=%s error=%s", asset_id, exc)
@@ -3044,6 +4409,7 @@ def refresh_person_images(
     imdb_person_id = _extract_imdb_id(external_ids)
     tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
     person_name = person.get("full_name")
+    wwhl_credit_episode_imdb_ids = _load_person_wwhl_episode_imdb_ids_from_credits(db, person_id_str)
     sources, fandom_skipped = _resolve_refresh_sources(db, request)
     errors: list[str] = []
     tmdb_profile_status: Literal["ok", "skipped", "failed"] | None = None
@@ -3115,7 +4481,11 @@ def refresh_person_images(
         show_context_tagged = 0
         metadata_enrichment_failed = 0
         try:
-            episode_metadata_tagged, episode_metadata_failed = _enrich_cast_photos_with_episode_metadata(db, photos)
+            episode_metadata_tagged, episode_metadata_failed = _enrich_cast_photos_with_episode_metadata(
+                db,
+                photos,
+                person_wwhl_episode_imdb_ids=wwhl_credit_episode_imdb_ids,
+            )
             metadata_enrichment_failed += episode_metadata_failed
         except Exception as exc:
             logger.warning("Episode metadata enrichment failed for %s: %s", person_id, exc)
@@ -3160,6 +4530,7 @@ def refresh_person_images(
             show_id=request.show_id,
             show_name=request.show_name,
             strict_context=imdb_strict_context,
+            wwhl_credit_episode_imdb_ids=wwhl_credit_episode_imdb_ids,
         )
         metadata_enrichment_failed += existing_imdb_repair_failed
         if existing_imdb_rows_repaired > 0:
@@ -3194,17 +4565,29 @@ def refresh_person_images(
     auto_counts_attempted = 0
     auto_counts_succeeded = 0
     auto_counts_failed = 0
+    auto_count_diagnostics = _empty_auto_count_diagnostics()
+    auto_count_stage_stats = _empty_stage_row_stats()
     if not request.skip_auto_count:
         auto_counts_attempted_cast, auto_counts_succeeded_cast, auto_counts_failed_cast = _auto_count_cast_photos(
             db,
             person_id_str,
             sources,
+            owner_person_name=person_name,
             photo_ids=None,
+            request_show_id=request.show_id,
+            request_show_name=request.show_name,
+            diagnostics=auto_count_diagnostics,
+            stage_stats=auto_count_stage_stats,
         )
         auto_counts_attempted_media, auto_counts_succeeded_media, auto_counts_failed_media = _auto_count_media_links(
             db,
             person_id_str,
+            owner_person_name=person_name,
             force_recount=False,
+            request_show_id=request.show_id,
+            request_show_name=request.show_name,
+            diagnostics=auto_count_diagnostics,
+            stage_stats=auto_count_stage_stats,
         )
         auto_counts_attempted = auto_counts_attempted_cast + auto_counts_attempted_media
         auto_counts_succeeded = auto_counts_succeeded_cast + auto_counts_succeeded_media
@@ -3216,6 +4599,7 @@ def refresh_person_images(
     text_overlay_unknown = 0
     text_overlay_failed = 0
     text_overlay_reason_counts: dict[str, int] = {}
+    text_overlay_stage_stats = _empty_stage_row_stats()
     if not request.skip_word_detection:
         (
             text_overlay_attempted_cast,
@@ -3228,6 +4612,7 @@ def refresh_person_images(
             sources,
             photo_ids=None,
             reason_counts=text_overlay_reason_counts,
+            stage_stats=text_overlay_stage_stats,
         )
         (
             text_overlay_attempted_media,
@@ -3238,6 +4623,7 @@ def refresh_person_images(
             db,
             person_id_str,
             reason_counts=text_overlay_reason_counts,
+            stage_stats=text_overlay_stage_stats,
         )
         text_overlay_attempted = text_overlay_attempted_cast + text_overlay_attempted_media
         text_overlay_succeeded = text_overlay_succeeded_cast + text_overlay_succeeded_media
@@ -3290,6 +4676,18 @@ def refresh_person_images(
         person_identifier = imdb_person_id or person_id_str
         photos_pruned = _prune_person_s3_objects(db, person_identifier)
 
+    row_error_counts = _build_auto_count_row_error_counts(auto_count_diagnostics)
+    failed_parts = _build_failed_parts_summary(
+        metadata_enrichment_failed=metadata_enrichment_failed,
+        auto_counts_failed=auto_counts_failed,
+        row_error_counts=row_error_counts,
+        text_overlay_failed=text_overlay_failed,
+        text_overlay_failure_reasons=text_overlay_failure_reasons,
+        centering_failed=centering_failed,
+        resize_failed=resize_failed,
+        resize_crop_failed=resize_crop_failed,
+    )
+
     return RefreshImagesResponse(
         person_id=person_id_str,
         person_name=person_name,
@@ -3318,10 +4716,34 @@ def refresh_person_images(
         auto_counts_attempted=auto_counts_attempted,
         auto_counts_succeeded=auto_counts_succeeded,
         auto_counts_failed=auto_counts_failed,
+        auto_count_attempted_rows=int(auto_count_stage_stats.get("attempted_rows", 0)),
+        auto_count_skipped_existing_rows=int(auto_count_stage_stats.get("skipped_existing_rows", 0)),
+        auto_count_retry_attempted_rows=0,
+        auto_count_retry_succeeded_rows=0,
+        auto_faces_detected=int(auto_count_diagnostics.get("auto_faces_detected", 0)),
+        auto_face_crops_generated=int(auto_count_diagnostics.get("auto_face_crops_generated", 0)),
+        auto_person_fallback_crops_generated=int(
+            auto_count_diagnostics.get("auto_person_fallback_crops_generated", 0)
+        ),
+        auto_no_face_rows=int(auto_count_diagnostics.get("auto_no_face_rows", 0)),
+        auto_identity_skipped_non_trr_show=int(
+            auto_count_diagnostics.get("auto_identity_skipped_non_trr_show", 0)
+        ),
+        auto_detect_success_rows=int(auto_count_diagnostics.get("auto_detect_success_rows", 0)),
+        auto_detect_failed_rows=int(auto_count_diagnostics.get("auto_detect_failed_rows", 0)),
+        auto_persist_success_rows=int(auto_count_diagnostics.get("auto_persist_success_rows", 0)),
+        auto_persist_failed_rows=int(auto_count_diagnostics.get("auto_persist_failed_rows", 0)),
+        auto_crop_cache_success_rows=int(auto_count_diagnostics.get("auto_crop_cache_success_rows", 0)),
+        auto_crop_cache_failed_rows=int(auto_count_diagnostics.get("auto_crop_cache_failed_rows", 0)),
+        row_error_counts=row_error_counts,
         text_overlay_attempted=text_overlay_attempted,
         text_overlay_succeeded=text_overlay_succeeded,
         text_overlay_unknown=text_overlay_unknown,
         text_overlay_failed=text_overlay_failed,
+        text_overlay_attempted_rows=int(text_overlay_stage_stats.get("attempted_rows", 0)),
+        text_overlay_skipped_existing_rows=int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
+        text_overlay_retry_attempted_rows=0,
+        text_overlay_retry_succeeded_rows=0,
         text_overlay_failure_reasons=text_overlay_failure_reasons,
         episode_metadata_tagged=episode_metadata_tagged,
         show_context_tagged=show_context_tagged,
@@ -3336,6 +4758,13 @@ def refresh_person_images(
         resize_crop_attempted=resize_crop_attempted,
         resize_crop_succeeded=resize_crop_succeeded,
         resize_crop_failed=resize_crop_failed,
+        retry_attempts={
+            "auto_count": 1,
+            "word_id": 1,
+            "centering_cropping": 1,
+            "resizing": 1,
+        },
+        failed_parts=failed_parts,
         errors=errors,
     )
 
@@ -3343,6 +4772,7 @@ def refresh_person_images(
 @router.post("/{person_id}/refresh-images/stream")
 async def refresh_person_images_stream(
     person_id: UUID,
+    connection: Request,
     request: RefreshImagesRequest | None = None,
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
@@ -3370,11 +4800,15 @@ async def refresh_person_images_stream(
         photos_upserted = 0
         existing_imdb_rows_repaired = 0
         imdb_diagnostics = _empty_imdb_refresh_diagnostics()
+        wwhl_credit_episode_imdb_ids: set[str] = set()
         photos_mirrored = 0
         cast_photos_mirrored = 0
         media_assets_mirrored = 0
         auto_counts_succeeded = 0
+        auto_count_diagnostics = _empty_auto_count_diagnostics()
+        auto_count_stage_stats = _empty_stage_row_stats()
         text_overlay_succeeded = 0
+        text_overlay_stage_stats = _empty_stage_row_stats()
         centering_succeeded = 0
         resize_succeeded = 0
         tmdb_profile_status: Literal["ok", "skipped", "failed"] | None = None
@@ -3398,11 +4832,31 @@ async def refresh_person_images_stream(
                 + "\n\n"
             )
 
-        def error_event(*, stage: str, error: str, detail: str | None = None) -> str:
+        def error_event(
+            *,
+            stage: str,
+            error: str,
+            detail: str | None = None,
+            stage_error_code: str | None = None,
+            stage_error_detail: str | None = None,
+        ) -> str:
             payload: dict[str, Any] = {"run_id": run_id, "stage": stage, "error": error}
             if detail:
                 payload["detail"] = detail
+            if stage_error_code:
+                payload["stage_error_code"] = stage_error_code
+            if stage_error_detail:
+                payload["stage_error_detail"] = stage_error_detail
             return f"event: error\ndata: {json.dumps(payload)}\n\n"
+
+        async def _client_disconnected(stage: str) -> bool:
+            try:
+                disconnected = await connection.is_disconnected()
+            except Exception:  # noqa: BLE001
+                disconnected = False
+            if disconnected:
+                logger.info("Refresh stream client disconnected person_id=%s stage=%s", person_id_str, stage)
+            return disconnected
 
         yield progress(
             {
@@ -3414,6 +4868,8 @@ async def refresh_person_images_stream(
                 "elapsed_ms": 0,
             }
         )
+        if await _client_disconnected("starting"):
+            return
 
         # 1. Get person
         try:
@@ -3426,15 +4882,28 @@ async def refresh_person_images_stream(
             imdb_person_id = _extract_imdb_id(external_ids)
             tmdb_person_id = await asyncio.to_thread(_get_tmdb_id, db, person_id_str, external_ids)
             person_name = person.get("full_name")
+            wwhl_credit_episode_imdb_ids = await asyncio.to_thread(
+                _load_person_wwhl_episode_imdb_ids_from_credits,
+                db,
+                person_id_str,
+            )
             sources, fandom_skipped = await asyncio.to_thread(_resolve_refresh_sources, db, request)
             if fandom_skipped:
                 errors.append("Fandom sources skipped for non-Real Housewives show context.")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Refresh stream setup failed for %s: %s", person_id_str, exc)
-            yield error_event(stage="setup", error="Failed to initialize refresh", detail=str(exc))
+            yield error_event(
+                stage="setup",
+                error="Failed to initialize refresh",
+                detail=str(exc),
+                stage_error_code="REFRESH_SETUP_FAILED",
+                stage_error_detail=str(exc),
+            )
             return
 
         # 1.5 Refresh person profiles (best-effort)
+        if await _client_disconnected("tmdb_profile"):
+            return
         yield progress({"stage": "tmdb_profile", "message": "Syncing TMDb profile..."})
         tmdb_profile_status, tmdb_profile_error_code, tmdb_profile_error_detail = await asyncio.to_thread(
             _run_tmdb_profile_refresh,
@@ -3479,6 +4948,8 @@ async def refresh_person_images_stream(
             )
 
         if "fandom" in sources or "fandom-gallery" in sources:
+            if await _client_disconnected("fandom_profile"):
+                return
             yield progress({"stage": "fandom_profile", "message": "Syncing Fandom profile..."})
             try:
                 await asyncio.to_thread(_refresh_fandom_profile, db, person_id_str, person_name=person_name)
@@ -3710,7 +5181,10 @@ async def refresh_person_images_stream(
         )
         try:
             episode_metadata_tagged, episode_failed = await asyncio.to_thread(
-                _enrich_cast_photos_with_episode_metadata, db, photos
+                _enrich_cast_photos_with_episode_metadata,
+                db,
+                photos,
+                person_wwhl_episode_imdb_ids=wwhl_credit_episode_imdb_ids,
             )
             metadata_enrichment_failed += episode_failed
         except Exception as exc:
@@ -3795,41 +5269,118 @@ async def refresh_person_images_stream(
             yield progress({"stage": "upserting", "message": "No photos to upsert.", "current": 0, "total": 0})
 
         # 3.5 Repair existing IMDb rows for this person.
+        metadata_repair_progress = {
+            "reviewed_rows": 0,
+            "changed_rows": 0,
+            "total_rows": 0,
+            "failed_rows": 0,
+        }
+        metadata_repair_lock = Lock()
+
+        def _update_metadata_repair_progress(
+            reviewed_rows: int,
+            total_rows: int,
+            changed_rows: int,
+            failed_rows: int,
+        ) -> None:
+            with metadata_repair_lock:
+                metadata_repair_progress["reviewed_rows"] = max(0, int(reviewed_rows))
+                metadata_repair_progress["total_rows"] = max(0, int(total_rows))
+                metadata_repair_progress["changed_rows"] = max(0, int(changed_rows))
+                metadata_repair_progress["failed_rows"] = max(0, int(failed_rows))
+
         yield progress(
             {
                 "stage": "metadata_repair",
                 "message": "Repairing existing IMDb metadata...",
                 "current": 0,
-                "total": 1,
+                "total": 0,
+                "reviewed_rows": 0,
+                "changed_rows": 0,
+                "total_rows": 0,
+                "failed_rows": 0,
             }
         )
         try:
-            existing_imdb_rows_repaired, repair_failed = await asyncio.to_thread(
-                _repair_existing_imdb_cast_photos,
-                db,
-                person_id_str,
-                show_id=request.show_id,
-                show_name=request.show_name,
-                strict_context=imdb_strict_context,
+            metadata_repair_started_at = time.perf_counter()
+            metadata_repair_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _repair_existing_imdb_cast_photos,
+                    db,
+                    person_id_str,
+                    show_id=request.show_id,
+                    show_name=request.show_name,
+                    strict_context=imdb_strict_context,
+                    wwhl_credit_episode_imdb_ids=wwhl_credit_episode_imdb_ids,
+                    progress_cb=_update_metadata_repair_progress,
+                )
             )
+            while not metadata_repair_task.done():
+                await asyncio.sleep(2)
+                if metadata_repair_task.done():
+                    break
+                if await _client_disconnected("metadata_repair"):
+                    metadata_repair_task.cancel()
+                    return
+                with metadata_repair_lock:
+                    metadata_repair_snapshot = dict(metadata_repair_progress)
+                total_rows = int(metadata_repair_snapshot.get("total_rows", 0))
+                reviewed_rows = int(metadata_repair_snapshot.get("reviewed_rows", 0))
+                yield progress(
+                    {
+                        "stage": "metadata_repair",
+                        "message": "Repairing existing IMDb metadata...",
+                        "current": reviewed_rows,
+                        "total": total_rows,
+                        "reviewed_rows": reviewed_rows,
+                        "changed_rows": int(metadata_repair_snapshot.get("changed_rows", 0)),
+                        "total_rows": total_rows,
+                        "failed_rows": int(metadata_repair_snapshot.get("failed_rows", 0)),
+                        "heartbeat": True,
+                        "elapsed_ms": int((time.perf_counter() - metadata_repair_started_at) * 1000),
+                    }
+                )
+            existing_imdb_rows_repaired, repair_failed = await metadata_repair_task
             metadata_enrichment_failed += repair_failed
+            with metadata_repair_lock:
+                metadata_repair_snapshot = dict(metadata_repair_progress)
+            reviewed_rows = int(metadata_repair_snapshot.get("reviewed_rows", 0))
+            total_rows = int(metadata_repair_snapshot.get("total_rows", 0))
+            changed_rows = int(metadata_repair_snapshot.get("changed_rows", 0))
+            failed_rows = int(metadata_repair_snapshot.get("failed_rows", 0))
             yield progress(
                 {
                     "stage": "metadata_repair",
-                    "message": f"Existing IMDb metadata repaired ({existing_imdb_rows_repaired} rows).",
-                    "current": 1,
-                    "total": 1,
+                    "message": (
+                        "IMDb metadata repair complete "
+                        f"(reviewed {reviewed_rows}/{total_rows}, "
+                        f"changed {changed_rows}, failed {failed_rows})."
+                    ),
+                    "current": reviewed_rows,
+                    "total": total_rows,
+                    "reviewed_rows": reviewed_rows,
+                    "changed_rows": changed_rows,
+                    "total_rows": total_rows,
+                    "failed_rows": failed_rows,
                 }
             )
         except Exception as exc:  # noqa: BLE001
             metadata_enrichment_failed += 1
             errors.append(f"Metadata repair: {exc}")
+            with metadata_repair_lock:
+                metadata_repair_snapshot = dict(metadata_repair_progress)
+            reviewed_rows = int(metadata_repair_snapshot.get("reviewed_rows", 0))
+            total_rows = int(metadata_repair_snapshot.get("total_rows", 0))
             yield progress(
                 {
                     "stage": "metadata_repair",
                     "message": f"Existing IMDb metadata repair failed: {exc}",
-                    "current": 1,
-                    "total": 1,
+                    "current": reviewed_rows,
+                    "total": total_rows,
+                    "reviewed_rows": reviewed_rows,
+                    "changed_rows": int(metadata_repair_snapshot.get("changed_rows", 0)),
+                    "total_rows": total_rows,
+                    "failed_rows": int(metadata_repair_snapshot.get("failed_rows", 0)),
                 }
             )
 
@@ -3988,16 +5539,37 @@ async def refresh_person_images_stream(
 
                         cast_rows, tag_rows, media_rows = await asyncio.to_thread(_fetch_auto_count_candidates)
 
+                        show_lookup_by_alias: dict[str, dict[str, Any]] | None = None
+                        try:
+                            _, show_lookup_by_alias, _ = _build_show_lookup_maps(db)
+                        except Exception:  # noqa: BLE001
+                            show_lookup_by_alias = {}
+                        show_exists_cache: dict[str, bool] = {}
+                        show_name_cache: dict[str, str | None] = {}
+                        person_name_id_cache: dict[str, str | None] = {}
                         to_process: list[dict[str, Any]] = []
+                        skipped_existing_rows = 0
                         for row in cast_rows:
                             tag_row = tag_rows.get(str(row["id"]))
                             if has_manual_tags(tag_row):
                                 continue
-                            if tag_row and tag_row.get("people_count") is not None:
+                            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                            has_existing_count = bool(tag_row and tag_row.get("people_count") is not None)
+                            if has_existing_count and not _has_face_metadata_backfill_needed(metadata):
+                                skipped_existing_rows += 1
                                 continue
                             urls = _pick_autocount_urls(row)
                             if not urls:
                                 continue
+                            trr_show_eligible = _is_trr_show_eligible(
+                                db,
+                                metadata=metadata,
+                                request_show_id=request.show_id,
+                                request_show_name=request.show_name,
+                                show_lookup_by_alias=show_lookup_by_alias,
+                                show_exists_cache=show_exists_cache,
+                                show_name_cache=show_name_cache,
+                            )
                             to_process.append(
                                 {
                                     "origin": "cast_photos",
@@ -4005,6 +5577,7 @@ async def refresh_person_images_stream(
                                     "urls": urls,
                                     "tag_row": tag_row,
                                     "row": row,
+                                    "trr_show_eligible": trr_show_eligible,
                                 }
                             )
 
@@ -4012,11 +5585,21 @@ async def refresh_person_images_stream(
                             context = row.get("context") if isinstance(row.get("context"), dict) else {}
                             if has_manual_people_tags(context):
                                 continue
-                            if has_people_count(context):
+                            if has_people_count(context) and not _has_face_metadata_backfill_needed(context):
+                                skipped_existing_rows += 1
                                 continue
                             urls = _build_media_link_autocount_urls(row)
                             if not urls:
                                 continue
+                            trr_show_eligible = _is_trr_show_eligible(
+                                db,
+                                metadata=context,
+                                request_show_id=request.show_id,
+                                request_show_name=request.show_name,
+                                show_lookup_by_alias=show_lookup_by_alias,
+                                show_exists_cache=show_exists_cache,
+                                show_name_cache=show_name_cache,
+                            )
                             to_process.append(
                                 {
                                     "origin": "media_links",
@@ -4024,26 +5607,97 @@ async def refresh_person_images_stream(
                                     "media_asset_id": str(row.get("media_asset_id") or ""),
                                     "urls": urls,
                                     "context": dict(context or {}),
+                                    "trr_show_eligible": trr_show_eligible,
                                 }
                             )
 
                         total_to_count = len(to_process)
-                        yield progress(
-                            {
-                                "stage": "auto_count",
-                                "message": "Auto-counting people in images...",
-                                "current": 0,
-                                "total": total_to_count,
-                            }
+                        _record_stage_row_stats(
+                            auto_count_stage_stats,
+                            attempted_rows=total_to_count,
+                            skipped_existing_rows=skipped_existing_rows,
                         )
+                        if total_to_count == 0:
+                            yield progress(
+                                {
+                                    "stage": "auto_count",
+                                    "message": "People count + face crops already up to date (no pending images).",
+                                    "current": 0,
+                                    "total": 0,
+                                    "reviewed_rows": 0,
+                                    "changed_rows": 0,
+                                    "total_rows": 0,
+                                    "failed_rows": 0,
+                                    "skip_reason": "no_pending_images",
+                                    "attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+                                    "skipped_existing_rows": int(
+                                        auto_count_stage_stats.get("skipped_existing_rows", 0)
+                                    ),
+                                }
+                            )
+                        else:
+                            yield progress(
+                                {
+                                    "stage": "auto_count",
+                                    "message": "Auto-counting people in images...",
+                                    "current": 0,
+                                    "total": total_to_count,
+                                    "reviewed_rows": 0,
+                                    "changed_rows": 0,
+                                    "total_rows": total_to_count,
+                                    "failed_rows": 0,
+                                    "attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+                                    "skipped_existing_rows": int(
+                                        auto_count_stage_stats.get("skipped_existing_rows", 0)
+                                    ),
+                                    "auto_faces_detected": 0,
+                                    "auto_face_crops_generated": 0,
+                                    "auto_person_fallback_crops_generated": 0,
+                                    "auto_no_face_rows": 0,
+                                    "auto_identity_skipped_non_trr_show": 0,
+                                }
+                            )
                         service_unavailable_error: ScreenalyticsUnavailableError | None = None
                         for idx, entry in enumerate(to_process, start=1):
+                            if await _client_disconnected("auto_count"):
+                                return
+                            allow_identity_assignment = bool(entry.get("trr_show_eligible"))
+                            tagged_people_ids = None
+                            if entry["origin"] == "cast_photos":
+                                tag_row = entry.get("tag_row")
+                                tagged_people_ids = tag_row.get("people_ids") if tag_row else None
+                                tagged_people_names = tag_row.get("people_names") if tag_row else None
+                            else:
+                                context_for_candidates = (
+                                    entry.get("context") if isinstance(entry.get("context"), dict) else {}
+                                )
+                                tagged_people_ids = context_for_candidates.get("people_ids")
+                                tagged_people_names = context_for_candidates.get("people_names")
+                            candidate_person_ids = _build_identity_candidate_person_ids(
+                                db=db,
+                                allow_identity_assignment=allow_identity_assignment,
+                                owner_person_id=person_id_str,
+                                tagged_people_ids=tagged_people_ids,
+                                tagged_people_names=tagged_people_names,
+                                person_name_id_cache=person_name_id_cache,
+                            )
                             auto_counts_attempted += 1
                             result = None
                             selected_image_url: str | None = None
                             last_error: ScreenalyticsClientError | None = None
                             for url in entry["urls"]:
                                 try:
+                                    if candidate_person_ids:
+                                        result = await asyncio.to_thread(
+                                            count_people,
+                                            url,
+                                            candidate_person_ids=candidate_person_ids,
+                                        )
+                                    else:
+                                        result = await asyncio.to_thread(count_people, url)
+                                    selected_image_url = url
+                                    break
+                                except TypeError:
                                     result = await asyncio.to_thread(count_people, url)
                                     selected_image_url = url
                                     break
@@ -4064,6 +5718,10 @@ async def refresh_person_images_stream(
                                         "message": "Auto-count paused (Screenalytics unavailable).",
                                         "current": max(0, idx - 1),
                                         "total": total_to_count,
+                                        "reviewed_rows": max(0, idx - 1),
+                                        "changed_rows": auto_counts_succeeded,
+                                        "total_rows": total_to_count,
+                                        "failed_rows": auto_counts_failed,
                                         "skip_reason": "service_unavailable",
                                         "service_unavailable": True,
                                         "retry_after_s": retry_after,
@@ -4073,13 +5731,24 @@ async def refresh_person_images_stream(
                                 break
                             try:
                                 if result is None:
+                                    auto_count_diagnostics["auto_detect_failed_rows"] += 1
                                     raise last_error or ScreenalyticsClientError("Unable to auto-count image")
-                                face_boxes = _build_face_boxes(result)
-                                auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
+                                auto_count_diagnostics["auto_detect_success_rows"] += 1
                                 if entry["origin"] == "cast_photos":
                                     tag_row = entry.get("tag_row")
                                     existing_people_names = tag_row.get("people_names") if tag_row else None
                                     existing_people_ids = tag_row.get("people_ids") if tag_row else None
+                                    if not allow_identity_assignment:
+                                        auto_count_diagnostics["auto_identity_skipped_non_trr_show"] += 1
+                                    face_boxes, row_diagnostics = _build_detection_boxes(
+                                        result,
+                                        tagged_people_ids=existing_people_ids,
+                                        tagged_people_names=existing_people_names,
+                                        owner_person_id=person_id_str,
+                                        owner_person_name=person_name,
+                                        allow_identity_assignment=allow_identity_assignment,
+                                    )
+                                    auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
                                     await asyncio.to_thread(
                                         upsert_cast_photo_tags,
                                         db,
@@ -4099,6 +5768,11 @@ async def refresh_person_images_stream(
                                         detector=result.detector,
                                         updated_by_firebase_uid="system:auto",
                                     )
+                                    _merge_counter_fields(
+                                        auto_count_diagnostics,
+                                        row_diagnostics,
+                                        AUTO_COUNT_DIAGNOSTIC_FIELDS,
+                                    )
                                     metadata = dict(entry["row"].get("metadata") or {})
                                     metadata_changed = False
                                     face_crops: list[dict[str, Any]] = []
@@ -4111,21 +5785,28 @@ async def refresh_person_images_stream(
                                             face_boxes=face_boxes,
                                             size=256,
                                         )
-                                    if face_boxes:
-                                        if metadata.get("face_boxes") != face_boxes:
-                                            metadata["face_boxes"] = face_boxes
-                                            metadata_changed = True
-                                    elif "face_boxes" in metadata:
-                                        metadata.pop("face_boxes", None)
+                                        if face_crops:
+                                            auto_count_diagnostics["auto_crop_cache_success_rows"] += 1
+                                        else:
+                                            auto_count_diagnostics["auto_crop_cache_failed_rows"] += 1
+                                    else:
+                                        auto_count_diagnostics["auto_crop_cache_success_rows"] += 1
+                                    face_crop_counts = _count_face_crop_sources(face_boxes, face_crops)
+                                    auto_count_diagnostics["auto_face_crops_generated"] += face_crop_counts[0]
+                                    auto_count_diagnostics["auto_person_fallback_crops_generated"] += (
+                                        face_crop_counts[1]
+                                    )
+                                    if metadata.get("face_boxes") != face_boxes:
+                                        metadata["face_boxes"] = face_boxes
                                         metadata_changed = True
-                                    if face_crops:
-                                        if metadata.get("face_crops") != face_crops:
-                                            metadata["face_crops"] = face_crops
-                                            metadata_changed = True
-                                    elif "face_crops" in metadata:
-                                        metadata.pop("face_crops", None)
+                                    if metadata.get("face_crops") != face_crops:
+                                        metadata["face_crops"] = face_crops
                                         metadata_changed = True
-                                    crop_payload = _apply_auto_crop_payload(result)
+                                    crop_payload = _owner_face_crop_payload(
+                                        face_boxes,
+                                        owner_person_id=person_id_str,
+                                        owner_person_name=person_name,
+                                    ) or _apply_auto_crop_payload(result)
                                     if crop_payload is not None:
                                         if not _is_manual_thumbnail_crop(metadata.get("thumbnail_crop")):
                                             metadata["thumbnail_crop"] = crop_payload
@@ -4138,8 +5819,25 @@ async def refresh_person_images_stream(
                                             .eq("id", entry_id)
                                             .execute()
                                         )
+                                    auto_count_diagnostics["auto_persist_success_rows"] += 1
                                 else:
                                     context = dict(entry.get("context") or {})
+                                    if not allow_identity_assignment:
+                                        auto_count_diagnostics["auto_identity_skipped_non_trr_show"] += 1
+                                    face_boxes, row_diagnostics = _build_detection_boxes(
+                                        result,
+                                        tagged_people_ids=context.get("people_ids"),
+                                        tagged_people_names=context.get("people_names"),
+                                        owner_person_id=person_id_str,
+                                        owner_person_name=person_name,
+                                        allow_identity_assignment=allow_identity_assignment,
+                                    )
+                                    _merge_counter_fields(
+                                        auto_count_diagnostics,
+                                        row_diagnostics,
+                                        AUTO_COUNT_DIAGNOSTIC_FIELDS,
+                                    )
+                                    auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
                                     context["people_count"] = result.people_count
                                     context["people_count_source"] = "auto"
                                     context["people_count_detector"] = result.detector
@@ -4157,6 +5855,17 @@ async def refresh_person_images_stream(
                                             face_boxes=face_boxes,
                                             size=256,
                                         )
+                                        if face_crops:
+                                            auto_count_diagnostics["auto_crop_cache_success_rows"] += 1
+                                        else:
+                                            auto_count_diagnostics["auto_crop_cache_failed_rows"] += 1
+                                    else:
+                                        auto_count_diagnostics["auto_crop_cache_success_rows"] += 1
+                                    face_crop_counts = _count_face_crop_sources(face_boxes, face_crops)
+                                    auto_count_diagnostics["auto_face_crops_generated"] += face_crop_counts[0]
+                                    auto_count_diagnostics["auto_person_fallback_crops_generated"] += (
+                                        face_crop_counts[1]
+                                    )
                                     context["face_crops"] = face_crops
                                     if not (
                                         isinstance(context.get("people_ids"), list) and context.get("people_ids")
@@ -4166,7 +5875,11 @@ async def refresh_person_images_stream(
                                         isinstance(context.get("people_names"), list) and context.get("people_names")
                                     ) and auto_people_names:
                                         context["people_names"] = auto_people_names
-                                    crop_payload = _apply_auto_crop_payload(result)
+                                    crop_payload = _owner_face_crop_payload(
+                                        face_boxes,
+                                        owner_person_id=person_id_str,
+                                        owner_person_name=person_name,
+                                    ) or _apply_auto_crop_payload(result)
                                     if crop_payload is not None and not _is_manual_thumbnail_crop(
                                         context.get("thumbnail_crop")
                                     ):
@@ -4183,9 +5896,12 @@ async def refresh_person_images_stream(
                                         .eq("id", entry_id)
                                         .execute()
                                     )
+                                    auto_count_diagnostics["auto_persist_success_rows"] += 1
                                 auto_counts_succeeded += 1
                             except Exception as exc:  # noqa: BLE001
                                 auto_counts_failed += 1
+                                if result is not None:
+                                    auto_count_diagnostics["auto_persist_failed_rows"] += 1
                                 errors.append(f"Auto-count {entry['id']}: {exc}")
                                 continue
 
@@ -4196,6 +5912,30 @@ async def refresh_person_images_stream(
                                         "message": "Auto-counting people in images...",
                                         "current": idx,
                                         "total": total_to_count,
+                                        "reviewed_rows": idx,
+                                        "changed_rows": auto_counts_succeeded,
+                                        "total_rows": total_to_count,
+                                        "failed_rows": auto_counts_failed,
+                                        "attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+                                        "skipped_existing_rows": int(
+                                            auto_count_stage_stats.get("skipped_existing_rows", 0)
+                                        ),
+                                        "auto_faces_detected": int(
+                                            auto_count_diagnostics.get("auto_faces_detected", 0)
+                                        ),
+                                        "auto_face_crops_generated": int(
+                                            auto_count_diagnostics.get("auto_face_crops_generated", 0)
+                                        ),
+                                        "auto_person_fallback_crops_generated": int(
+                                            auto_count_diagnostics.get("auto_person_fallback_crops_generated", 0)
+                                        ),
+                                        "auto_no_face_rows": int(auto_count_diagnostics.get("auto_no_face_rows", 0)),
+                                        "auto_identity_skipped_non_trr_show": int(
+                                            auto_count_diagnostics.get("auto_identity_skipped_non_trr_show", 0)
+                                        ),
+                                        "row_error_counts": _build_auto_count_row_error_counts(
+                                            auto_count_diagnostics
+                                        ),
                                     }
                                 )
                 else:
@@ -4205,6 +5945,10 @@ async def refresh_person_images_stream(
                             "message": "Skipping auto-count (not configured).",
                             "current": 0,
                             "total": 0,
+                            "reviewed_rows": 0,
+                            "changed_rows": 0,
+                            "total_rows": 0,
+                            "failed_rows": 0,
                             "skip_reason": "not_configured",
                         }
                     )
@@ -4227,6 +5971,10 @@ async def refresh_person_images_stream(
                     "message": "Skipping word detection (request).",
                     "current": 0,
                     "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
                 }
             )
         else:
@@ -4258,9 +6006,11 @@ async def refresh_person_images_stream(
                     cast_rows, media_rows = await asyncio.to_thread(_fetch_text_overlay_candidates)
 
                     to_process: list[dict[str, str]] = []
+                    skipped_existing_rows = 0
                     for row in cast_rows:
                         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
                         if "has_text_overlay" in (meta or {}):
+                            skipped_existing_rows += 1
                             continue
                         rid = row.get("id")
                         if rid:
@@ -4272,13 +6022,20 @@ async def refresh_person_images_stream(
                         if not asset_id or asset_id in seen_media_assets:
                             continue
                         seen_media_assets.add(asset_id)
+                        context = row.get("context") if isinstance(row.get("context"), dict) else {}
                         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-                        if "has_text_overlay" in metadata:
+                        if "has_text_overlay" in context or "has_text_overlay" in metadata:
+                            skipped_existing_rows += 1
                             continue
                         to_process.append({"origin": "media_links", "id": asset_id})
 
                     total_text = len(to_process)
                     text_overlay_candidates = total_text
+                    _record_stage_row_stats(
+                        text_overlay_stage_stats,
+                        attempted_rows=total_text,
+                        skipped_existing_rows=skipped_existing_rows,
+                    )
                     if total_text == 0:
                         text_overlay_skipped_reason = "no_pending_images"
                         yield progress(
@@ -4287,6 +6044,14 @@ async def refresh_person_images_stream(
                                 "message": "Text overlay already up to date (no pending images).",
                                 "current": 0,
                                 "total": 0,
+                                "reviewed_rows": 0,
+                                "changed_rows": 0,
+                                "total_rows": 0,
+                                "failed_rows": 0,
+                                "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                                "skipped_existing_rows": int(
+                                    text_overlay_stage_stats.get("skipped_existing_rows", 0)
+                                ),
                             }
                         )
                     else:
@@ -4296,6 +6061,14 @@ async def refresh_person_images_stream(
                                 "message": "Detecting words/text overlays...",
                                 "current": 0,
                                 "total": total_text,
+                                "reviewed_rows": 0,
+                                "changed_rows": 0,
+                                "total_rows": total_text,
+                                "failed_rows": 0,
+                                "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                                "skipped_existing_rows": int(
+                                    text_overlay_stage_stats.get("skipped_existing_rows", 0)
+                                ),
                             }
                         )
                         for idx, item in enumerate(to_process, start=1):
@@ -4334,6 +6107,14 @@ async def refresh_person_images_stream(
                                         "message": "Detecting words/text overlays...",
                                         "current": idx,
                                         "total": total_text,
+                                        "reviewed_rows": idx,
+                                        "changed_rows": text_overlay_succeeded + text_overlay_unknown,
+                                        "total_rows": total_text,
+                                        "failed_rows": text_overlay_failed,
+                                        "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                                        "skipped_existing_rows": int(
+                                            text_overlay_stage_stats.get("skipped_existing_rows", 0)
+                                        ),
                                     }
                                 )
                 else:
@@ -4344,6 +6125,10 @@ async def refresh_person_images_stream(
                             "message": "Skipping word detection (not configured).",
                             "current": 0,
                             "total": 0,
+                            "reviewed_rows": 0,
+                            "changed_rows": 0,
+                            "total_rows": 0,
+                            "failed_rows": 0,
                         }
                     )
             except Exception as exc:  # noqa: BLE001
@@ -4361,6 +6146,10 @@ async def refresh_person_images_stream(
                     "message": "Skipping centering/cropping (request).",
                     "current": 0,
                     "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
                 }
             )
         else:
@@ -4458,6 +6247,11 @@ async def refresh_person_images_stream(
                                 "message": "Centering/cropping thumbnails...",
                                 "current": 0,
                                 "total": total_crop,
+                                "reviewed_rows": 0,
+                                "changed_rows": 0,
+                                "total_rows": total_crop,
+                                "failed_rows": 0,
+                                "skipped_manual_rows": centering_skipped_manual,
                             }
                         )
                         service_unavailable_error: ScreenalyticsUnavailableError | None = None
@@ -4486,6 +6280,11 @@ async def refresh_person_images_stream(
                                         "message": "Centering/cropping paused (Screenalytics unavailable).",
                                         "current": max(0, idx - 1),
                                         "total": total_crop,
+                                        "reviewed_rows": max(0, idx - 1),
+                                        "changed_rows": centering_succeeded,
+                                        "total_rows": total_crop,
+                                        "failed_rows": centering_failed,
+                                        "skipped_manual_rows": centering_skipped_manual,
                                         "skip_reason": "service_unavailable",
                                         "service_unavailable": True,
                                         "retry_after_s": retry_after,
@@ -4536,6 +6335,11 @@ async def refresh_person_images_stream(
                                         "message": "Centering/cropping thumbnails...",
                                         "current": idx,
                                         "total": total_crop,
+                                        "reviewed_rows": idx,
+                                        "changed_rows": centering_succeeded,
+                                        "total_rows": total_crop,
+                                        "failed_rows": centering_failed,
+                                        "skipped_manual_rows": centering_skipped_manual,
                                     }
                                 )
                 else:
@@ -4545,6 +6349,10 @@ async def refresh_person_images_stream(
                             "message": "Skipping centering/cropping (not configured).",
                             "current": 0,
                             "total": 0,
+                            "reviewed_rows": 0,
+                            "changed_rows": 0,
+                            "total_rows": 0,
+                            "failed_rows": 0,
                             "skip_reason": "not_configured",
                         }
                     )
@@ -4565,6 +6373,10 @@ async def refresh_person_images_stream(
                     "message": "Skipping resize/variant generation (request).",
                     "current": 0,
                     "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
                 }
             )
         else:
@@ -4588,6 +6400,10 @@ async def refresh_person_images_stream(
                         "message": "Generating resized variants...",
                         "current": 0,
                         "total": 1,
+                        "reviewed_rows": 0,
+                        "changed_rows": 0,
+                        "total_rows": 1,
+                        "failed_rows": 0,
                     }
                 )
                 resize_task = asyncio.create_task(
@@ -4604,6 +6420,9 @@ async def refresh_person_images_stream(
                     await asyncio.sleep(2)
                     if resize_task.done():
                         break
+                    if await _client_disconnected("resizing"):
+                        resize_task.cancel()
+                        return
                     with resize_progress_lock:
                         progress_current = resize_progress_current
                         progress_total = resize_progress_total
@@ -4613,6 +6432,10 @@ async def refresh_person_images_stream(
                             "message": "Generating resized variants...",
                             "current": progress_current,
                             "total": progress_total,
+                            "reviewed_rows": progress_current,
+                            "changed_rows": 0,
+                            "total_rows": progress_total,
+                            "failed_rows": 0,
                             "heartbeat": True,
                             "elapsed_ms": int((time.perf_counter() - resize_started_at) * 1000),
                         }
@@ -4640,12 +6463,27 @@ async def refresh_person_images_stream(
                         ),
                         "current": min(resize_processed_ops, resize_total_ops),
                         "total": resize_total_ops,
+                        "reviewed_rows": min(resize_processed_ops, resize_total_ops),
+                        "changed_rows": resize_succeeded + resize_crop_succeeded,
+                        "total_rows": resize_total_ops,
+                        "failed_rows": resize_failed + resize_crop_failed,
                     }
                 )
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"Resizing: {exc}")
 
         # 6. Complete
+        row_error_counts = _build_auto_count_row_error_counts(auto_count_diagnostics)
+        failed_parts = _build_failed_parts_summary(
+            metadata_enrichment_failed=metadata_enrichment_failed,
+            auto_counts_failed=auto_counts_failed,
+            row_error_counts=row_error_counts,
+            text_overlay_failed=text_overlay_failed,
+            text_overlay_failure_reasons=text_overlay_reason_counts,
+            centering_failed=centering_failed,
+            resize_failed=resize_failed,
+            resize_crop_failed=resize_crop_failed,
+        )
         complete_data = {
             "run_id": run_id,
             "person_id": person_id_str,
@@ -4675,10 +6513,34 @@ async def refresh_person_images_stream(
             "auto_counts_attempted": auto_counts_attempted,
             "auto_counts_succeeded": auto_counts_succeeded,
             "auto_counts_failed": auto_counts_failed,
+            "auto_count_attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+            "auto_count_skipped_existing_rows": int(auto_count_stage_stats.get("skipped_existing_rows", 0)),
+            "auto_count_retry_attempted_rows": int(auto_count_stage_stats.get("retry_attempted_rows", 0)),
+            "auto_count_retry_succeeded_rows": int(auto_count_stage_stats.get("retry_succeeded_rows", 0)),
+            "auto_faces_detected": int(auto_count_diagnostics.get("auto_faces_detected", 0)),
+            "auto_face_crops_generated": int(auto_count_diagnostics.get("auto_face_crops_generated", 0)),
+            "auto_person_fallback_crops_generated": int(
+                auto_count_diagnostics.get("auto_person_fallback_crops_generated", 0)
+            ),
+            "auto_no_face_rows": int(auto_count_diagnostics.get("auto_no_face_rows", 0)),
+            "auto_identity_skipped_non_trr_show": int(
+                auto_count_diagnostics.get("auto_identity_skipped_non_trr_show", 0)
+            ),
+            "auto_detect_success_rows": int(auto_count_diagnostics.get("auto_detect_success_rows", 0)),
+            "auto_detect_failed_rows": int(auto_count_diagnostics.get("auto_detect_failed_rows", 0)),
+            "auto_persist_success_rows": int(auto_count_diagnostics.get("auto_persist_success_rows", 0)),
+            "auto_persist_failed_rows": int(auto_count_diagnostics.get("auto_persist_failed_rows", 0)),
+            "auto_crop_cache_success_rows": int(auto_count_diagnostics.get("auto_crop_cache_success_rows", 0)),
+            "auto_crop_cache_failed_rows": int(auto_count_diagnostics.get("auto_crop_cache_failed_rows", 0)),
+            "row_error_counts": row_error_counts,
             "text_overlay_attempted": text_overlay_attempted,
             "text_overlay_succeeded": text_overlay_succeeded,
             "text_overlay_unknown": text_overlay_unknown,
             "text_overlay_failed": text_overlay_failed,
+            "text_overlay_attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+            "text_overlay_skipped_existing_rows": int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
+            "text_overlay_retry_attempted_rows": int(text_overlay_stage_stats.get("retry_attempted_rows", 0)),
+            "text_overlay_retry_succeeded_rows": int(text_overlay_stage_stats.get("retry_succeeded_rows", 0)),
             "text_overlay_failure_reasons": text_overlay_reason_counts,
             "text_overlay_configured": text_overlay_configured,
             "text_overlay_candidates": text_overlay_candidates,
@@ -4693,6 +6555,13 @@ async def refresh_person_images_stream(
             "resize_crop_attempted": resize_crop_attempted,
             "resize_crop_succeeded": resize_crop_succeeded,
             "resize_crop_failed": resize_crop_failed,
+            "retry_attempts": {
+                "auto_count": 1,
+                "word_id": 1,
+                "centering_cropping": 1,
+                "resizing": 1,
+            },
+            "failed_parts": failed_parts,
             "sources_skipped": len(source_skip_details),
             "source_skip_details": source_skip_details,
             "live_counts": build_live_counts(),
@@ -4711,6 +6580,11 @@ async def refresh_person_images_stream(
                 "stage": "stream",
                 "error": "Refresh stream failed",
                 "detail": str(exc),
+                "stage_error_code": "STREAM_RUNTIME_FAILED",
+                "stage_error_detail": str(exc),
+                "checkpoint": "stream_runtime_failed",
+                "stream_state": "failed",
+                "is_terminal": True,
             }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n"
 
@@ -4728,22 +6602,28 @@ async def refresh_person_images_stream(
 @router.post("/{person_id}/reprocess-images/stream")
 async def reprocess_person_images_stream(
     person_id: UUID,
+    connection: Request,
     request: ReprocessImagesRequest = Body(default_factory=ReprocessImagesRequest),
     db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> StreamingResponse:
-    """Re-run counting, text-ID, centering, and resize on existing photos (no sync/mirror)."""
+    """Re-run metadata repair, counting, text-ID, centering, and resize on existing photos (no sync/mirror)."""
     person_id_str = str(person_id)
     run_id = f"reprocess-{person_id_str}-{int(datetime.now(UTC).timestamp())}"
 
     async def event_generator() -> AsyncGenerator[str, None]:
         errors: list[str] = []
         text_overlay_reason_counts: dict[str, int] = dict.fromkeys(TEXT_OVERLAY_FAILURE_REASONS, 0)
+        existing_imdb_rows_repaired = 0
+        metadata_enrichment_failed = 0
         auto_counts_attempted = 0
         auto_counts_failed = 0
         auto_counts_succeeded = 0
+        auto_count_diagnostics = _empty_auto_count_diagnostics()
+        auto_count_stage_stats = _empty_stage_row_stats()
         c_attempted = 0
         text_overlay_succeeded = 0
+        text_overlay_stage_stats = _empty_stage_row_stats()
         c_succeeded = 0
         c_failed = 0
         c_skipped = 0
@@ -4753,6 +6633,12 @@ async def reprocess_person_images_stream(
         resize_crop_attempted = 0
         resize_crop_succeeded = 0
         resize_crop_failed = 0
+        retry_attempts = {
+            "auto_count": 1,
+            "word_id": 1,
+            "centering_cropping": 1,
+            "resizing": 1,
+        }
 
         def build_live_counts() -> dict[str, int]:
             return {
@@ -4771,13 +6657,35 @@ async def reprocess_person_images_stream(
                 + "\n\n"
             )
 
-        def error_event(*, stage: str, error: str, detail: str | None = None) -> str:
+        def error_event(
+            *,
+            stage: str,
+            error: str,
+            detail: str | None = None,
+            stage_error_code: str | None = None,
+            stage_error_detail: str | None = None,
+        ) -> str:
             payload: dict[str, Any] = {"run_id": run_id, "stage": stage, "error": error}
             if detail:
                 payload["detail"] = detail
+            if stage_error_code:
+                payload["stage_error_code"] = stage_error_code
+            if stage_error_detail:
+                payload["stage_error_detail"] = stage_error_detail
             return f"event: error\ndata: {json.dumps(payload)}\n\n"
 
+        async def _client_disconnected(stage: str) -> bool:
+            try:
+                disconnected = await connection.is_disconnected()
+            except Exception:  # noqa: BLE001
+                disconnected = False
+            if disconnected:
+                logger.info("Reprocess stream client disconnected person_id=%s stage=%s", person_id_str, stage)
+            return disconnected
+
         # Verify person exists
+        if await _client_disconnected("setup"):
+            return
         person = await asyncio.to_thread(_get_person_details, db, person_id_str)
         if not person:
             yield error_event(stage="setup", error="Person not found")
@@ -4785,42 +6693,377 @@ async def reprocess_person_images_stream(
 
         sources: list[SourceType] = list(request.sources or ALL_SOURCES)
 
+        imdb_person_id = _extract_imdb_id(person.get("external_ids") or {})
+
+        # ---------- Metadata repair (IMDb) ----------
+        if request.run_metadata:
+            if await _client_disconnected("metadata_repair"):
+                return
+            metadata_repair_progress = {
+                "reviewed_rows": 0,
+                "changed_rows": 0,
+                "total_rows": 0,
+                "failed_rows": 0,
+            }
+            metadata_repair_lock = Lock()
+
+            def _update_metadata_repair_progress(
+                reviewed_rows: int,
+                total_rows: int,
+                changed_rows: int,
+                failed_rows: int,
+            ) -> None:
+                with metadata_repair_lock:
+                    metadata_repair_progress["reviewed_rows"] = max(0, int(reviewed_rows))
+                    metadata_repair_progress["total_rows"] = max(0, int(total_rows))
+                    metadata_repair_progress["changed_rows"] = max(0, int(changed_rows))
+                    metadata_repair_progress["failed_rows"] = max(0, int(failed_rows))
+
+            yield progress(
+                {
+                    "stage": "metadata_repair",
+                    "message": "Repairing existing IMDb metadata...",
+                    "current": 0,
+                    "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
+                }
+            )
+            try:
+                wwhl_credit_episode_imdb_ids = await asyncio.to_thread(
+                    _load_person_wwhl_episode_imdb_ids_from_credits,
+                    db,
+                    person_id_str,
+                )
+                imdb_strict_context = await asyncio.to_thread(
+                    _resolve_imdb_traitors_strict_context,
+                    db,
+                    show_id=request.show_id,
+                    show_name=request.show_name,
+                    target_person_imdb_id=imdb_person_id,
+                    target_person_name=person.get("full_name"),
+                )
+                metadata_repair_started_at = time.perf_counter()
+                metadata_repair_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        _repair_existing_imdb_cast_photos,
+                        db,
+                        person_id_str,
+                        show_id=request.show_id,
+                        show_name=request.show_name,
+                        strict_context=imdb_strict_context,
+                        wwhl_credit_episode_imdb_ids=wwhl_credit_episode_imdb_ids,
+                        progress_cb=_update_metadata_repair_progress,
+                    )
+                )
+                while not metadata_repair_task.done():
+                    await asyncio.sleep(2)
+                    if metadata_repair_task.done():
+                        break
+                    if await _client_disconnected("metadata_repair"):
+                        metadata_repair_task.cancel()
+                        return
+                    with metadata_repair_lock:
+                        metadata_repair_snapshot = dict(metadata_repair_progress)
+                    reviewed_rows = int(metadata_repair_snapshot.get("reviewed_rows", 0))
+                    total_rows = int(metadata_repair_snapshot.get("total_rows", 0))
+                    yield progress(
+                        {
+                            "stage": "metadata_repair",
+                            "message": "Repairing existing IMDb metadata...",
+                            "current": reviewed_rows,
+                            "total": total_rows,
+                            "reviewed_rows": reviewed_rows,
+                            "changed_rows": int(metadata_repair_snapshot.get("changed_rows", 0)),
+                            "total_rows": total_rows,
+                            "failed_rows": int(metadata_repair_snapshot.get("failed_rows", 0)),
+                            "heartbeat": True,
+                            "elapsed_ms": int((time.perf_counter() - metadata_repair_started_at) * 1000),
+                        }
+                    )
+                existing_imdb_rows_repaired, repair_failed = await metadata_repair_task
+                metadata_enrichment_failed += repair_failed
+                with metadata_repair_lock:
+                    metadata_repair_snapshot = dict(metadata_repair_progress)
+                reviewed_rows = int(metadata_repair_snapshot.get("reviewed_rows", 0))
+                total_rows = int(metadata_repair_snapshot.get("total_rows", 0))
+                changed_rows = int(metadata_repair_snapshot.get("changed_rows", 0))
+                failed_rows = int(metadata_repair_snapshot.get("failed_rows", 0))
+                yield progress(
+                    {
+                        "stage": "metadata_repair",
+                        "message": (
+                            "IMDb metadata repair complete "
+                            f"(reviewed {reviewed_rows}/{total_rows}, "
+                            f"changed {changed_rows}, failed {failed_rows})."
+                        ),
+                        "current": reviewed_rows,
+                        "total": total_rows,
+                        "reviewed_rows": reviewed_rows,
+                        "changed_rows": changed_rows,
+                        "total_rows": total_rows,
+                        "failed_rows": failed_rows,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                metadata_enrichment_failed += 1
+                errors.append(f"Metadata repair: {exc}")
+                with metadata_repair_lock:
+                    metadata_repair_snapshot = dict(metadata_repair_progress)
+                reviewed_rows = int(metadata_repair_snapshot.get("reviewed_rows", 0))
+                total_rows = int(metadata_repair_snapshot.get("total_rows", 0))
+                yield progress(
+                    {
+                        "stage": "metadata_repair",
+                        "message": f"Existing IMDb metadata repair failed: {exc}",
+                        "current": reviewed_rows,
+                        "total": total_rows,
+                        "reviewed_rows": reviewed_rows,
+                        "changed_rows": int(metadata_repair_snapshot.get("changed_rows", 0)),
+                        "total_rows": total_rows,
+                        "failed_rows": int(metadata_repair_snapshot.get("failed_rows", 0)),
+                    }
+                )
+        else:
+            yield progress(
+                {
+                    "stage": "metadata_repair",
+                    "message": "Skipping metadata repair stage.",
+                    "current": 0,
+                    "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
+                }
+            )
+
         # ---------- Auto-count (cast_photos + media_links) ----------
         if request.run_count:
+            if await _client_disconnected("auto_count"):
+                return
             yield progress(
                 {
                     "stage": "auto_count",
                     "message": "Auto-counting people in images...",
-                    "current": None,
-                    "total": None,
+                    "current": 0,
+                    "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
                 }
             )
 
-            ac_cast, sc_cast, fc_cast = await asyncio.to_thread(
-                _auto_count_cast_photos,
-                db,
-                person_id_str,
-                sources,
-                force_recount=True,
+            failed_cast_photo_ids: list[str] = []
+            failed_media_link_ids: list[str] = []
+            auto_count_progress_lock = Lock()
+            auto_count_cast_progress = {"current": 0, "total": 0}
+            auto_count_media_progress = {"current": 0, "total": 0}
+
+            def _update_auto_count_cast_progress(current: int, total: int) -> None:
+                with auto_count_progress_lock:
+                    auto_count_cast_progress["current"] = max(0, int(current))
+                    auto_count_cast_progress["total"] = max(0, int(total))
+
+            def _update_auto_count_media_progress(current: int, total: int) -> None:
+                with auto_count_progress_lock:
+                    auto_count_media_progress["current"] = max(0, int(current))
+                    auto_count_media_progress["total"] = max(0, int(total))
+
+            auto_count_cast_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _auto_count_cast_photos,
+                    db,
+                    person_id_str,
+                    sources,
+                    owner_person_name=person.get("full_name"),
+                    force_recount=False,
+                    request_show_id=request.show_id,
+                    request_show_name=request.show_name,
+                    progress_cb=_update_auto_count_cast_progress,
+                    diagnostics=auto_count_diagnostics,
+                    stage_stats=auto_count_stage_stats,
+                    failed_photo_ids=failed_cast_photo_ids,
+                )
             )
-            ac_media, sc_media, fc_media = await asyncio.to_thread(
-                _auto_count_media_links,
-                db,
-                person_id_str,
-                force_recount=True,
+            while not auto_count_cast_task.done():
+                await asyncio.sleep(2)
+                if auto_count_cast_task.done():
+                    break
+                if await _client_disconnected("auto_count"):
+                    auto_count_cast_task.cancel()
+                    return
+                with auto_count_progress_lock:
+                    cast_current = int(auto_count_cast_progress.get("current", 0))
+                    cast_total = int(auto_count_cast_progress.get("total", 0))
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": "Auto-counting people in images...",
+                        "current": cast_current,
+                        "total": cast_total,
+                        "reviewed_rows": cast_current,
+                        "changed_rows": auto_counts_succeeded,
+                        "total_rows": cast_total,
+                        "failed_rows": auto_counts_failed,
+                        "heartbeat": True,
+                        "attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+                        "skipped_existing_rows": int(auto_count_stage_stats.get("skipped_existing_rows", 0)),
+                    }
+                )
+            ac_cast, sc_cast, fc_cast = await auto_count_cast_task
+
+            auto_count_media_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _auto_count_media_links,
+                    db,
+                    person_id_str,
+                    owner_person_name=person.get("full_name"),
+                    force_recount=False,
+                    request_show_id=request.show_id,
+                    request_show_name=request.show_name,
+                    progress_cb=_update_auto_count_media_progress,
+                    diagnostics=auto_count_diagnostics,
+                    stage_stats=auto_count_stage_stats,
+                    failed_link_ids=failed_media_link_ids,
+                )
             )
+            while not auto_count_media_task.done():
+                await asyncio.sleep(2)
+                if auto_count_media_task.done():
+                    break
+                if await _client_disconnected("auto_count"):
+                    auto_count_media_task.cancel()
+                    return
+                with auto_count_progress_lock:
+                    cast_total = int(auto_count_cast_progress.get("total", 0))
+                    media_current = int(auto_count_media_progress.get("current", 0))
+                    media_total = int(auto_count_media_progress.get("total", 0))
+                reviewed_rows = cast_total + media_current
+                total_rows = cast_total + media_total
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": "Auto-counting people in images...",
+                        "current": reviewed_rows,
+                        "total": total_rows,
+                        "reviewed_rows": reviewed_rows,
+                        "changed_rows": auto_counts_succeeded + sc_cast,
+                        "total_rows": total_rows,
+                        "failed_rows": auto_counts_failed + fc_cast,
+                        "heartbeat": True,
+                        "attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+                        "skipped_existing_rows": int(auto_count_stage_stats.get("skipped_existing_rows", 0)),
+                    }
+                )
+            ac_media, sc_media, fc_media = await auto_count_media_task
             auto_counts_attempted = ac_cast + ac_media
             auto_counts_succeeded = sc_cast + sc_media
             auto_counts_failed = fc_cast + fc_media
 
-            yield progress(
-                {
-                    "stage": "auto_count",
-                    "message": f"Counted {auto_counts_succeeded} images ({auto_counts_failed} failed).",
-                    "current": auto_counts_attempted,
-                    "total": auto_counts_attempted,
-                }
-            )
+            if auto_counts_failed > 0:
+                retry_attempts["auto_count"] = 2
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": f"Retrying failed auto-count rows ({auto_counts_failed} remaining)...",
+                        "current": auto_counts_succeeded,
+                        "total": auto_counts_attempted,
+                        "retrying": True,
+                        "attempt": retry_attempts["auto_count"],
+                        "max_attempts": 2,
+                        "reviewed_rows": auto_counts_attempted,
+                        "changed_rows": auto_counts_succeeded,
+                        "total_rows": auto_counts_attempted,
+                        "failed_rows": auto_counts_failed,
+                        "attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+                        "skipped_existing_rows": int(auto_count_stage_stats.get("skipped_existing_rows", 0)),
+                    }
+                )
+                retry_cast_failed_ids: list[str] = []
+                retry_media_failed_ids: list[str] = []
+                ac_cast_retry, sc_cast_retry, fc_cast_retry = await asyncio.to_thread(
+                    _auto_count_cast_photos,
+                    db,
+                    person_id_str,
+                    sources,
+                    owner_person_name=person.get("full_name"),
+                    force_recount=False,
+                    photo_ids=failed_cast_photo_ids or None,
+                    request_show_id=request.show_id,
+                    request_show_name=request.show_name,
+                    diagnostics=auto_count_diagnostics,
+                    stage_stats=auto_count_stage_stats,
+                    failed_photo_ids=retry_cast_failed_ids,
+                )
+                ac_media_retry, sc_media_retry, fc_media_retry = await asyncio.to_thread(
+                    _auto_count_media_links,
+                    db,
+                    person_id_str,
+                    owner_person_name=person.get("full_name"),
+                    force_recount=False,
+                    media_link_ids=failed_media_link_ids or None,
+                    request_show_id=request.show_id,
+                    request_show_name=request.show_name,
+                    diagnostics=auto_count_diagnostics,
+                    stage_stats=auto_count_stage_stats,
+                    failed_link_ids=retry_media_failed_ids,
+                )
+                _record_stage_row_stats(
+                    auto_count_stage_stats,
+                    retry_attempted_rows=ac_cast_retry + ac_media_retry,
+                    retry_succeeded_rows=sc_cast_retry + sc_media_retry,
+                )
+                auto_counts_attempted += ac_cast_retry + ac_media_retry
+                auto_counts_succeeded += sc_cast_retry + sc_media_retry
+                auto_counts_failed = fc_cast_retry + fc_media_retry
+
+            if auto_counts_attempted == 0 and auto_counts_failed == 0:
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": "People count + face crops already up to date (no pending images).",
+                        "current": 0,
+                        "total": 0,
+                        "reviewed_rows": 0,
+                        "changed_rows": 0,
+                        "total_rows": 0,
+                        "failed_rows": 0,
+                        "skip_reason": "no_pending_images",
+                        "attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+                        "skipped_existing_rows": int(auto_count_stage_stats.get("skipped_existing_rows", 0)),
+                    }
+                )
+            else:
+                yield progress(
+                    {
+                        "stage": "auto_count",
+                        "message": f"Counted {auto_counts_succeeded} images ({auto_counts_failed} failed).",
+                        "current": auto_counts_attempted,
+                        "total": auto_counts_attempted,
+                        "reviewed_rows": auto_counts_attempted,
+                        "changed_rows": auto_counts_succeeded,
+                        "total_rows": auto_counts_attempted,
+                        "failed_rows": auto_counts_failed,
+                        "attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+                        "skipped_existing_rows": int(auto_count_stage_stats.get("skipped_existing_rows", 0)),
+                        "retry_attempted_rows": int(auto_count_stage_stats.get("retry_attempted_rows", 0)),
+                        "retry_succeeded_rows": int(auto_count_stage_stats.get("retry_succeeded_rows", 0)),
+                        "auto_faces_detected": int(auto_count_diagnostics.get("auto_faces_detected", 0)),
+                        "auto_face_crops_generated": int(auto_count_diagnostics.get("auto_face_crops_generated", 0)),
+                        "auto_person_fallback_crops_generated": int(
+                            auto_count_diagnostics.get("auto_person_fallback_crops_generated", 0)
+                        ),
+                        "auto_no_face_rows": int(auto_count_diagnostics.get("auto_no_face_rows", 0)),
+                        "auto_identity_skipped_non_trr_show": int(
+                            auto_count_diagnostics.get("auto_identity_skipped_non_trr_show", 0)
+                        ),
+                        "row_error_counts": _build_auto_count_row_error_counts(auto_count_diagnostics),
+                    }
+                )
         else:
             yield progress(
                 {
@@ -4828,6 +7071,10 @@ async def reprocess_person_images_stream(
                     "message": "Skipping auto-count stage.",
                     "current": 0,
                     "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
                 }
             )
 
@@ -4842,6 +7089,7 @@ async def reprocess_person_images_stream(
 
         cast_candidate_ids: list[str] = []
         media_candidate_ids: list[str] = []
+        text_overlay_skipped_existing_rows = 0
 
         if request.run_id_text:
             try:
@@ -4858,10 +7106,16 @@ async def reprocess_person_images_stream(
                     "message": "Skipping word detection stage.",
                     "current": 0,
                     "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
                 }
             )
 
         if request.run_id_text and text_overlay_configured:
+            if await _client_disconnected("word_id"):
+                return
             try:
                 cast_rows = await asyncio.to_thread(
                     lambda: (
@@ -4878,6 +7132,7 @@ async def reprocess_person_images_stream(
                 for row in cast_rows:
                     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
                     if "has_text_overlay" in metadata:
+                        text_overlay_skipped_existing_rows += 1
                         continue
                     row_id = row.get("id")
                     if row_id:
@@ -4893,15 +7148,22 @@ async def reprocess_person_images_stream(
                     if not asset_id or asset_id in seen_asset_ids:
                         continue
                     seen_asset_ids.add(asset_id)
+                    context = row.get("context") if isinstance(row.get("context"), dict) else {}
                     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-                    if "has_text_overlay" in metadata:
+                    if "has_text_overlay" in context or "has_text_overlay" in metadata:
+                        text_overlay_skipped_existing_rows += 1
                         continue
                     media_candidate_ids.append(asset_id)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"Word ID candidate media lookup: {exc}")
-    
+
             text_overlay_candidates = len(cast_candidate_ids) + len(media_candidate_ids)
-    
+            _record_stage_row_stats(
+                text_overlay_stage_stats,
+                attempted_rows=text_overlay_candidates,
+                skipped_existing_rows=text_overlay_skipped_existing_rows,
+            )
+
             if text_overlay_candidates == 0:
                 text_overlay_skipped_reason = "no_pending_images"
                 yield progress(
@@ -4910,6 +7172,12 @@ async def reprocess_person_images_stream(
                         "message": "Text overlay already up to date (no pending images).",
                         "current": 0,
                         "total": 0,
+                        "reviewed_rows": 0,
+                        "changed_rows": 0,
+                        "total_rows": 0,
+                        "failed_rows": 0,
+                        "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                        "skipped_existing_rows": int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
                     }
                 )
             else:
@@ -4919,29 +7187,167 @@ async def reprocess_person_images_stream(
                         "message": "Detecting words/text overlays...",
                         "current": 0,
                         "total": text_overlay_candidates,
+                        "reviewed_rows": 0,
+                        "changed_rows": 0,
+                        "total_rows": text_overlay_candidates,
+                        "failed_rows": 0,
+                        "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                        "skipped_existing_rows": int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
                     }
                 )
-    
-                to_cast, ts_cast, tu_cast, tf_cast = await asyncio.to_thread(
-                    _detect_text_overlay_cast_photos,
-                    db,
-                    person_id_str,
-                    sources,
-                    photo_ids=cast_candidate_ids,
-                    reason_counts=text_overlay_reason_counts,
+
+                failed_cast_retry_ids: list[str] = []
+                failed_media_retry_ids: list[str] = []
+                text_overlay_progress_lock = Lock()
+                cast_progress = {"current": 0, "total": 0}
+                media_progress = {"current": 0, "total": 0}
+
+                def _update_cast_progress(current: int, total: int) -> None:
+                    with text_overlay_progress_lock:
+                        cast_progress["current"] = max(0, int(current))
+                        cast_progress["total"] = max(0, int(total))
+
+                def _update_media_progress(current: int, total: int) -> None:
+                    with text_overlay_progress_lock:
+                        media_progress["current"] = max(0, int(current))
+                        media_progress["total"] = max(0, int(total))
+
+                cast_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        _detect_text_overlay_cast_photos,
+                        db,
+                        person_id_str,
+                        sources,
+                        photo_ids=cast_candidate_ids,
+                        progress_cb=_update_cast_progress,
+                        reason_counts=text_overlay_reason_counts,
+                        stage_stats=None,
+                        failed_photo_ids=failed_cast_retry_ids,
+                    )
                 )
-                to_media, ts_media, tu_media, tf_media = await asyncio.to_thread(
-                    _detect_text_overlay_media_links,
-                    db,
-                    person_id_str,
-                    asset_ids=media_candidate_ids,
-                    reason_counts=text_overlay_reason_counts,
+                while not cast_task.done():
+                    await asyncio.sleep(2)
+                    if cast_task.done():
+                        break
+                    if await _client_disconnected("word_id"):
+                        cast_task.cancel()
+                        return
+                    with text_overlay_progress_lock:
+                        cast_current = int(cast_progress.get("current", 0))
+                        cast_total = int(cast_progress.get("total", 0))
+                    yield progress(
+                        {
+                            "stage": "word_id",
+                            "message": "Detecting words/text overlays...",
+                            "current": cast_current,
+                            "total": cast_total,
+                            "reviewed_rows": cast_current,
+                            "changed_rows": text_overlay_succeeded + text_overlay_unknown,
+                            "total_rows": cast_total,
+                            "failed_rows": text_overlay_failed,
+                            "heartbeat": True,
+                            "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                            "skipped_existing_rows": int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
+                        }
+                    )
+                to_cast, ts_cast, tu_cast, tf_cast = await cast_task
+
+                media_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        _detect_text_overlay_media_links,
+                        db,
+                        person_id_str,
+                        asset_ids=media_candidate_ids,
+                        progress_cb=_update_media_progress,
+                        reason_counts=text_overlay_reason_counts,
+                        stage_stats=None,
+                        failed_asset_ids=failed_media_retry_ids,
+                    )
                 )
+                while not media_task.done():
+                    await asyncio.sleep(2)
+                    if media_task.done():
+                        break
+                    if await _client_disconnected("word_id"):
+                        media_task.cancel()
+                        return
+                    with text_overlay_progress_lock:
+                        cast_total = int(cast_progress.get("total", 0))
+                        media_current = int(media_progress.get("current", 0))
+                        media_total = int(media_progress.get("total", 0))
+                    reviewed_rows = cast_total + media_current
+                    total_rows = cast_total + media_total
+                    yield progress(
+                        {
+                            "stage": "word_id",
+                            "message": "Detecting words/text overlays...",
+                            "current": reviewed_rows,
+                            "total": total_rows,
+                            "reviewed_rows": reviewed_rows,
+                            "changed_rows": text_overlay_succeeded + text_overlay_unknown + ts_cast + tu_cast,
+                            "total_rows": total_rows,
+                            "failed_rows": text_overlay_failed + tf_cast,
+                            "heartbeat": True,
+                            "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                            "skipped_existing_rows": int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
+                        }
+                    )
+                to_media, ts_media, tu_media, tf_media = await media_task
                 text_overlay_attempted = to_cast + to_media
                 text_overlay_succeeded = ts_cast + ts_media
                 text_overlay_unknown = tu_cast + tu_media
                 text_overlay_failed = tf_cast + tf_media
-    
+
+                if text_overlay_failed > 0:
+                    retry_attempts["word_id"] = 2
+                    yield progress(
+                        {
+                            "stage": "word_id",
+                            "message": f"Retrying failed text overlay rows ({text_overlay_failed} remaining)...",
+                            "current": text_overlay_succeeded + text_overlay_unknown,
+                            "total": text_overlay_candidates,
+                            "retrying": True,
+                            "attempt": retry_attempts["word_id"],
+                            "max_attempts": 2,
+                            "reviewed_rows": text_overlay_succeeded + text_overlay_unknown,
+                            "changed_rows": text_overlay_succeeded + text_overlay_unknown,
+                            "total_rows": text_overlay_candidates,
+                            "failed_rows": text_overlay_failed,
+                            "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                            "skipped_existing_rows": int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
+                        }
+                    )
+                    retry_failed_cast_ids: list[str] = []
+                    retry_failed_media_ids: list[str] = []
+                    to_cast_retry, ts_cast_retry, tu_cast_retry, tf_cast_retry = await asyncio.to_thread(
+                        _detect_text_overlay_cast_photos,
+                        db,
+                        person_id_str,
+                        sources,
+                        photo_ids=failed_cast_retry_ids or None,
+                        reason_counts=text_overlay_reason_counts,
+                        stage_stats=None,
+                        failed_photo_ids=retry_failed_cast_ids,
+                    )
+                    to_media_retry, ts_media_retry, tu_media_retry, tf_media_retry = await asyncio.to_thread(
+                        _detect_text_overlay_media_links,
+                        db,
+                        person_id_str,
+                        asset_ids=failed_media_retry_ids or None,
+                        reason_counts=text_overlay_reason_counts,
+                        stage_stats=None,
+                        failed_asset_ids=retry_failed_media_ids,
+                    )
+                    _record_stage_row_stats(
+                        text_overlay_stage_stats,
+                        retry_attempted_rows=to_cast_retry + to_media_retry,
+                        retry_succeeded_rows=ts_cast_retry + ts_media_retry,
+                    )
+                    text_overlay_attempted += to_cast_retry + to_media_retry
+                    text_overlay_succeeded += ts_cast_retry + ts_media_retry
+                    text_overlay_unknown += tu_cast_retry + tu_media_retry
+                    text_overlay_failed = tf_cast_retry + tf_media_retry
+
                 yield progress(
                     {
                         "stage": "word_id",
@@ -4952,6 +7358,14 @@ async def reprocess_person_images_stream(
                         ),
                         "current": text_overlay_attempted,
                         "total": text_overlay_candidates,
+                        "reviewed_rows": text_overlay_attempted,
+                        "changed_rows": text_overlay_succeeded + text_overlay_unknown,
+                        "total_rows": text_overlay_candidates,
+                        "failed_rows": text_overlay_failed,
+                        "attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+                        "skipped_existing_rows": int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
+                        "retry_attempted_rows": int(text_overlay_stage_stats.get("retry_attempted_rows", 0)),
+                        "retry_succeeded_rows": int(text_overlay_stage_stats.get("retry_succeeded_rows", 0)),
                     }
                 )
         elif request.run_id_text:
@@ -4962,27 +7376,104 @@ async def reprocess_person_images_stream(
                     "message": "Skipping word detection (not configured).",
                     "current": 0,
                     "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
                 }
             )
 
         # ---------- Centering / cropping ----------
         if request.run_crop:
+            if await _client_disconnected("centering_cropping"):
+                return
+            centering_progress_lock = Lock()
+            centering_progress = {"current": 0, "total": 0}
+
+            def _update_centering_progress(current: int, total: int) -> None:
+                with centering_progress_lock:
+                    centering_progress["current"] = max(0, int(current))
+                    centering_progress["total"] = max(0, int(total))
+
             yield progress(
                 {
                     "stage": "centering_cropping",
                     "message": "Centering/cropping thumbnails...",
-                    "current": None,
-                    "total": None,
+                    "current": 0,
+                    "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
+                    "skipped_manual_rows": 0,
                 }
             )
 
-            c_attempted, c_succeeded, c_failed, c_skipped = await asyncio.to_thread(
-                _recenter_person_gallery_images,
-                db,
-                person_id_str,
-                sources,
-                force=True,
+            centering_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _recenter_person_gallery_images,
+                    db,
+                    person_id_str,
+                    sources,
+                    progress_cb=_update_centering_progress,
+                    force=True,
+                )
             )
+            while not centering_task.done():
+                await asyncio.sleep(2)
+                if centering_task.done():
+                    break
+                if await _client_disconnected("centering_cropping"):
+                    centering_task.cancel()
+                    return
+                with centering_progress_lock:
+                    centering_current = int(centering_progress.get("current", 0))
+                    centering_total = int(centering_progress.get("total", 0))
+                yield progress(
+                    {
+                        "stage": "centering_cropping",
+                        "message": "Centering/cropping thumbnails...",
+                        "current": centering_current,
+                        "total": centering_total,
+                        "reviewed_rows": centering_current,
+                        "changed_rows": c_succeeded,
+                        "total_rows": centering_total,
+                        "failed_rows": c_failed,
+                        "skipped_manual_rows": c_skipped,
+                        "heartbeat": True,
+                    }
+                )
+
+            c_attempted, c_succeeded, c_failed, c_skipped = await centering_task
+            if c_failed > 0:
+                retry_attempts["centering_cropping"] = 2
+                yield progress(
+                    {
+                        "stage": "centering_cropping",
+                        "message": f"Retrying failed centering rows ({c_failed} remaining)...",
+                        "current": c_succeeded,
+                        "total": c_attempted,
+                        "retrying": True,
+                        "attempt": retry_attempts["centering_cropping"],
+                        "max_attempts": 2,
+                        "reviewed_rows": c_attempted,
+                        "changed_rows": c_succeeded,
+                        "total_rows": c_attempted,
+                        "failed_rows": c_failed,
+                        "skipped_manual_rows": c_skipped,
+                    }
+                )
+                c_attempted_retry, c_succeeded_retry, c_failed_retry, c_skipped_retry = await asyncio.to_thread(
+                    _recenter_person_gallery_images,
+                    db,
+                    person_id_str,
+                    sources,
+                    force=False,
+                )
+                c_attempted += c_attempted_retry
+                c_succeeded += c_succeeded_retry
+                c_skipped += c_skipped_retry
+                c_failed = c_failed_retry
 
             yield progress(
                 {
@@ -4990,6 +7481,11 @@ async def reprocess_person_images_stream(
                     "message": f"Centered {c_succeeded} thumbnails ({c_failed} failed, {c_skipped} manual skipped).",
                     "current": c_attempted,
                     "total": c_attempted,
+                    "reviewed_rows": c_attempted,
+                    "changed_rows": c_succeeded,
+                    "total_rows": c_attempted,
+                    "failed_rows": c_failed,
+                    "skipped_manual_rows": c_skipped,
                 }
             )
         else:
@@ -4999,11 +7495,18 @@ async def reprocess_person_images_stream(
                     "message": "Skipping centering/cropping stage.",
                     "current": 0,
                     "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
+                    "skipped_manual_rows": 0,
                 }
             )
 
         # ---------- Resize / variants ----------
         if request.run_resize:
+            if await _client_disconnected("resizing"):
+                return
             resize_started_at = time.perf_counter()
             resize_progress_lock = Lock()
             resize_progress_current = 0
@@ -5023,6 +7526,10 @@ async def reprocess_person_images_stream(
                     "message": "Generating resized variants...",
                     "current": 0,
                     "total": 1,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 1,
+                    "failed_rows": 0,
                 }
             )
             resize_task = asyncio.create_task(
@@ -5039,6 +7546,9 @@ async def reprocess_person_images_stream(
                 await asyncio.sleep(2)
                 if resize_task.done():
                     break
+                if await _client_disconnected("resizing"):
+                    resize_task.cancel()
+                    return
                 with resize_progress_lock:
                     progress_current = resize_progress_current
                     progress_total = resize_progress_total
@@ -5048,6 +7558,10 @@ async def reprocess_person_images_stream(
                         "message": "Generating resized variants...",
                         "current": progress_current,
                         "total": progress_total,
+                        "reviewed_rows": progress_current,
+                        "changed_rows": 0,
+                        "total_rows": progress_total,
+                        "failed_rows": 0,
                         "heartbeat": True,
                         "elapsed_ms": int((time.perf_counter() - resize_started_at) * 1000),
                     }
@@ -5060,6 +7574,46 @@ async def reprocess_person_images_stream(
                 resize_crop_succeeded,
                 resize_crop_failed,
             ) = await resize_task
+            if resize_failed > 0 or resize_crop_failed > 0:
+                retry_attempts["resizing"] = 2
+                yield progress(
+                    {
+                        "stage": "resizing",
+                        "message": (
+                            "Retrying failed resize operations "
+                            f"({resize_failed + resize_crop_failed} remaining)..."
+                        ),
+                        "current": resize_succeeded + resize_crop_succeeded,
+                        "total": resize_attempted + resize_crop_attempted,
+                        "retrying": True,
+                        "attempt": retry_attempts["resizing"],
+                        "max_attempts": 2,
+                        "reviewed_rows": resize_succeeded + resize_crop_succeeded,
+                        "changed_rows": resize_succeeded + resize_crop_succeeded,
+                        "total_rows": resize_attempted + resize_crop_attempted,
+                        "failed_rows": resize_failed + resize_crop_failed,
+                    }
+                )
+                (
+                    resize_attempted_retry,
+                    resize_succeeded_retry,
+                    resize_failed_retry,
+                    resize_crop_attempted_retry,
+                    resize_crop_succeeded_retry,
+                    resize_crop_failed_retry,
+                ) = await asyncio.to_thread(
+                    _resize_person_gallery_images,
+                    db,
+                    person_id_str,
+                    sources,
+                    force=False,
+                )
+                resize_attempted += resize_attempted_retry
+                resize_succeeded += resize_succeeded_retry
+                resize_failed = resize_failed_retry
+                resize_crop_attempted += resize_crop_attempted_retry
+                resize_crop_succeeded += resize_crop_succeeded_retry
+                resize_crop_failed = resize_crop_failed_retry
             resize_total_ops = max(0, resize_attempted + resize_crop_attempted)
             resize_processed_ops = max(
                 0,
@@ -5075,6 +7629,10 @@ async def reprocess_person_images_stream(
                     ),
                     "current": min(resize_processed_ops, resize_total_ops),
                     "total": resize_total_ops,
+                    "reviewed_rows": min(resize_processed_ops, resize_total_ops),
+                    "changed_rows": resize_succeeded + resize_crop_succeeded,
+                    "total_rows": resize_total_ops,
+                    "failed_rows": resize_failed + resize_crop_failed,
                 }
             )
         else:
@@ -5084,20 +7642,62 @@ async def reprocess_person_images_stream(
                     "message": "Skipping resize stage.",
                     "current": 0,
                     "total": 0,
+                    "reviewed_rows": 0,
+                    "changed_rows": 0,
+                    "total_rows": 0,
+                    "failed_rows": 0,
                 }
             )
 
         # ---------- Complete ----------
+        row_error_counts = _build_auto_count_row_error_counts(auto_count_diagnostics)
+        failed_parts = _build_failed_parts_summary(
+            metadata_enrichment_failed=metadata_enrichment_failed,
+            auto_counts_failed=auto_counts_failed,
+            row_error_counts=row_error_counts,
+            text_overlay_failed=text_overlay_failed,
+            text_overlay_failure_reasons=text_overlay_reason_counts,
+            centering_failed=c_failed,
+            resize_failed=resize_failed,
+            resize_crop_failed=resize_crop_failed,
+        )
         complete_data = {
             "person_id": person_id_str,
             "run_id": run_id,
+            "metadata_repair_attempted": 1 if request.run_metadata else 0,
+            "existing_imdb_rows_repaired": existing_imdb_rows_repaired,
+            "metadata_enrichment_failed": metadata_enrichment_failed,
             "auto_counts_attempted": auto_counts_attempted,
             "auto_counts_succeeded": auto_counts_succeeded,
             "auto_counts_failed": auto_counts_failed,
+            "auto_count_attempted_rows": int(auto_count_stage_stats.get("attempted_rows", 0)),
+            "auto_count_skipped_existing_rows": int(auto_count_stage_stats.get("skipped_existing_rows", 0)),
+            "auto_count_retry_attempted_rows": int(auto_count_stage_stats.get("retry_attempted_rows", 0)),
+            "auto_count_retry_succeeded_rows": int(auto_count_stage_stats.get("retry_succeeded_rows", 0)),
+            "auto_faces_detected": int(auto_count_diagnostics.get("auto_faces_detected", 0)),
+            "auto_face_crops_generated": int(auto_count_diagnostics.get("auto_face_crops_generated", 0)),
+            "auto_person_fallback_crops_generated": int(
+                auto_count_diagnostics.get("auto_person_fallback_crops_generated", 0)
+            ),
+            "auto_no_face_rows": int(auto_count_diagnostics.get("auto_no_face_rows", 0)),
+            "auto_identity_skipped_non_trr_show": int(
+                auto_count_diagnostics.get("auto_identity_skipped_non_trr_show", 0)
+            ),
+            "auto_detect_success_rows": int(auto_count_diagnostics.get("auto_detect_success_rows", 0)),
+            "auto_detect_failed_rows": int(auto_count_diagnostics.get("auto_detect_failed_rows", 0)),
+            "auto_persist_success_rows": int(auto_count_diagnostics.get("auto_persist_success_rows", 0)),
+            "auto_persist_failed_rows": int(auto_count_diagnostics.get("auto_persist_failed_rows", 0)),
+            "auto_crop_cache_success_rows": int(auto_count_diagnostics.get("auto_crop_cache_success_rows", 0)),
+            "auto_crop_cache_failed_rows": int(auto_count_diagnostics.get("auto_crop_cache_failed_rows", 0)),
+            "row_error_counts": row_error_counts,
             "text_overlay_attempted": text_overlay_attempted,
             "text_overlay_succeeded": text_overlay_succeeded,
             "text_overlay_unknown": text_overlay_unknown,
             "text_overlay_failed": text_overlay_failed,
+            "text_overlay_attempted_rows": int(text_overlay_stage_stats.get("attempted_rows", 0)),
+            "text_overlay_skipped_existing_rows": int(text_overlay_stage_stats.get("skipped_existing_rows", 0)),
+            "text_overlay_retry_attempted_rows": int(text_overlay_stage_stats.get("retry_attempted_rows", 0)),
+            "text_overlay_retry_succeeded_rows": int(text_overlay_stage_stats.get("retry_succeeded_rows", 0)),
             "text_overlay_failure_reasons": text_overlay_reason_counts,
             "text_overlay_configured": text_overlay_configured,
             "text_overlay_candidates": text_overlay_candidates,
@@ -5112,6 +7712,8 @@ async def reprocess_person_images_stream(
             "resize_crop_attempted": resize_crop_attempted,
             "resize_crop_succeeded": resize_crop_succeeded,
             "resize_crop_failed": resize_crop_failed,
+            "retry_attempts": retry_attempts,
+            "failed_parts": failed_parts,
             "live_counts": build_live_counts(),
             "errors": errors,
         }
@@ -5128,6 +7730,11 @@ async def reprocess_person_images_stream(
                 "stage": "stream",
                 "error": "Reprocess stream failed",
                 "detail": str(exc),
+                "stage_error_code": "STREAM_RUNTIME_FAILED",
+                "stage_error_detail": str(exc),
+                "checkpoint": "stream_runtime_failed",
+                "stream_state": "failed",
+                "is_terminal": True,
             }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n"
 

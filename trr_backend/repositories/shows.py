@@ -225,6 +225,8 @@ def insert_show(db: DbSession, show: ShowUpsert) -> dict[str, Any]:
     if show.wikidata_id is not None:
         payload["wikidata_id"] = show.wikidata_id
 
+    payload = _prepare_payload_arrays(payload)
+
     for attempt in range(_PGRST204_MAX_RETRIES + 1):
         try:
             response = db.schema("core").table("shows").insert(payload).execute()
@@ -234,6 +236,7 @@ def insert_show(db: DbSession, show: ShowUpsert) -> dict[str, Any]:
             missing = _missing_column_from_error(str(exc))
             if missing and missing in payload:
                 payload.pop(missing, None)
+                payload = _prepare_payload_arrays(payload)
                 response = db.schema("core").table("shows").insert(payload).execute()
                 break
 

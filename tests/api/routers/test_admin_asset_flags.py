@@ -38,8 +38,8 @@ def test_archive_returns_401_without_auth(client):
 
 
 def test_archive_marks_archived_and_deletes_s3_best_effort(client, monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     asset_id = str(uuid4())
     mock_db = MagicMock()
@@ -88,8 +88,8 @@ def test_archive_marks_archived_and_deletes_s3_best_effort(client, monkeypatch):
 
 
 def test_star_updates_metadata(client, monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     asset_id = str(uuid4())
     mock_db = MagicMock()
@@ -124,8 +124,8 @@ def test_star_updates_metadata(client, monkeypatch):
 
 
 def test_content_type_updates_cast_photo_context_type(client, monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     asset_id = str(uuid4())
     mock_db = MagicMock()
@@ -167,8 +167,8 @@ def test_content_type_updates_cast_photo_context_type(client, monkeypatch):
 
 
 def test_content_type_rejects_unsupported_value(client, monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     mock_db = MagicMock()
 
     with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -186,8 +186,8 @@ def test_content_type_rejects_unsupported_value(client, monkeypatch):
 
 
 def test_content_type_accepts_profile_picture_alias_and_sets_profile_context(client, monkeypatch):
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     asset_id = str(uuid4())
     mock_db = MagicMock()

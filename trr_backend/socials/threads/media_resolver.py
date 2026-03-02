@@ -26,6 +26,7 @@ class ThreadsMediaResolution:
     media_urls: list[str] = field(default_factory=list)
     thumbnail_url: str | None = None
     media_type: str = "unknown"
+    media_asset_meta: dict[str, Any] = field(default_factory=dict)
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -74,6 +75,61 @@ def _pick_best_video(versions: list[dict[str, Any]]) -> str | None:
         if url:
             return url
     return None
+
+
+def _pick_best_image_meta(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    best: dict[str, Any] | None = None
+    best_score = -1
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        width = int(item.get("width") or 0)
+        height = int(item.get("height") or 0)
+        score = width * height
+        if score >= best_score:
+            best_score = score
+            best = {
+                "url": url,
+                "type": "image",
+                "width": width or None,
+                "height": height or None,
+                "resolution": f"{width}x{height}" if width > 0 and height > 0 else None,
+            }
+    return best
+
+
+def _pick_best_video_meta(versions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not versions:
+        return None
+    best: dict[str, Any] | None = None
+    best_score = -1
+    for item in versions:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        width = int(item.get("width") or 0)
+        height = int(item.get("height") or 0)
+        score = width * height
+        if score >= best_score:
+            best_score = score
+            best = {
+                "url": url,
+                "type": "video",
+                "width": width or None,
+                "height": height or None,
+                "resolution": f"{width}x{height}" if width > 0 and height > 0 else None,
+                "fps": None,
+                "bitrate": None,
+                "duration_seconds": None,
+            }
+    return best
 
 
 def resolve_threads_media(
@@ -136,27 +192,42 @@ def resolve_threads_media(
 
         # Video URLs
         best_video = _pick_best_video(post_data.get("video_versions") or [])
+        best_video_meta = _pick_best_video_meta(post_data.get("video_versions") or [])
         if best_video:
             _add(best_video)
 
         # Image URLs (also serves as video thumbnail)
         image_candidates = (post_data.get("image_versions2") or {}).get("candidates") or []
         best_image = _pick_best_image(image_candidates)
+        best_image_meta = _pick_best_image_meta(image_candidates)
         if best_image:
             _add(best_image)
             if not resolution.thumbnail_url:
                 resolution.thumbnail_url = best_image
 
         # Carousel items
+        source_assets: list[dict[str, Any]] = []
+        if best_video_meta:
+            source_assets.append(best_video_meta)
+        if best_image_meta and (not best_video_meta or best_image_meta.get("url") != best_video_meta.get("url")):
+            source_assets.append(best_image_meta)
         for carousel_item in post_data.get("carousel_media") or []:
             item_video = _pick_best_video(carousel_item.get("video_versions") or [])
+            item_video_meta = _pick_best_video_meta(carousel_item.get("video_versions") or [])
             if item_video:
                 _add(item_video)
+                if item_video_meta:
+                    source_assets.append(item_video_meta)
             item_image = _pick_best_image(
+                (carousel_item.get("image_versions2") or {}).get("candidates") or []
+            )
+            item_image_meta = _pick_best_image_meta(
                 (carousel_item.get("image_versions2") or {}).get("candidates") or []
             )
             if item_image:
                 _add(item_image)
+                if item_image_meta:
+                    source_assets.append(item_image_meta)
 
         if urls:
             # Optionally validate URLs
@@ -172,6 +243,21 @@ def resolve_threads_media(
             if urls:
                 resolution.media_urls = urls
                 resolution.source = "threads_graphql_post_data"
+                resolution.media_asset_meta = {
+                    "selection_policy": "best_per_asset",
+                    "source_assets": source_assets,
+                    "thumbnail_source": (
+                        {
+                            "url": resolution.thumbnail_url,
+                            "type": "thumbnail",
+                            "width": None,
+                            "height": None,
+                            "resolution": None,
+                        }
+                        if resolution.thumbnail_url
+                        else None
+                    ),
+                }
                 attempt["success"] = True
                 attempt["selected_url_count"] = len(urls)
             else:
@@ -206,6 +292,25 @@ def resolve_threads_media(
             resolution.media_urls = [thumbnail]
             resolution.thumbnail_url = resolution.thumbnail_url or thumbnail
             resolution.source = "threads_raw_data_fallback"
+            resolution.media_asset_meta = {
+                "selection_policy": "best_per_asset",
+                "source_assets": [
+                    {
+                        "url": thumbnail,
+                        "type": "image",
+                        "width": None,
+                        "height": None,
+                        "resolution": None,
+                    }
+                ],
+                "thumbnail_source": {
+                    "url": resolution.thumbnail_url,
+                    "type": "thumbnail",
+                    "width": None,
+                    "height": None,
+                    "resolution": None,
+                },
+            }
             og_attempt["success"] = True
             og_attempt["selected_url_count"] = 1
         else:

@@ -52,6 +52,7 @@ WIKIDATA_SEARCH_URL = "https://www.wikidata.org/w/api.php"
 WIKIDATA_ENTITY_URL = "https://www.wikidata.org/wiki/Special:EntityData/{item_id}.json"
 WIKIDATA_ITEM_RE = re.compile(r"^Q\d+$", re.IGNORECASE)
 LOGO_CLAIM_IDS = ("P154", "P2910")
+OWNER_CLAIM_IDS = ("P127", "P749")
 DEFAULT_SOURCE_PRIORITY = ["override", "tmdb", "wikimedia", "official", "catalog"]
 LOGO_SOURCE_CAPS: dict[str, int] = {
     "override": 12,
@@ -749,6 +750,50 @@ def _extract_enwiki_url(entity: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_owner_wikidata_id(entity: dict[str, Any]) -> str | None:
+    claims = entity.get("claims")
+    if not isinstance(claims, dict):
+        return None
+    for claim_id in OWNER_CLAIM_IDS:
+        claim_rows = claims.get(claim_id)
+        if not isinstance(claim_rows, list):
+            continue
+        for claim in claim_rows:
+            if not isinstance(claim, dict):
+                continue
+            mainsnak = claim.get("mainsnak")
+            if not isinstance(mainsnak, dict):
+                continue
+            datavalue = mainsnak.get("datavalue")
+            if not isinstance(datavalue, dict):
+                continue
+            value = datavalue.get("value")
+            if not isinstance(value, dict):
+                continue
+            entity_id = _normalize_text(value.get("id")).upper()
+            if WIKIDATA_ITEM_RE.match(entity_id):
+                return entity_id
+    return None
+
+
+def _extract_entity_label(entity: dict[str, Any]) -> str | None:
+    labels = entity.get("labels")
+    if not isinstance(labels, dict):
+        return None
+    en = labels.get("en")
+    if isinstance(en, dict):
+        value = _normalize_text(en.get("value"))
+        if value:
+            return value
+    for row in labels.values():
+        if not isinstance(row, dict):
+            continue
+        value = _normalize_text(row.get("value"))
+        if value:
+            return value
+    return None
+
+
 def _derive_metadata_aliases(entity_type: str, display_name: str) -> list[str]:
     aliases: list[str] = []
     seen: set[str] = set()
@@ -853,6 +898,8 @@ def _resolve_entity_metadata(
             "wikidata_id": None,
             "wikipedia_url": None,
             "wikimedia_logo_file": None,
+            "owner_wikidata_id": None,
+            "owner_label": None,
         }
 
     if not isinstance(entity, dict):
@@ -860,12 +907,26 @@ def _resolve_entity_metadata(
             "wikidata_id": wikidata_id,
             "wikipedia_url": None,
             "wikimedia_logo_file": None,
+            "owner_wikidata_id": None,
+            "owner_label": None,
         }
+
+    owner_wikidata_id = _extract_owner_wikidata_id(entity)
+    owner_label = None
+    if owner_wikidata_id:
+        try:
+            owner_entity = _fetch_wikidata_entity(owner_wikidata_id)
+        except requests.RequestException:
+            owner_entity = None
+        if isinstance(owner_entity, dict):
+            owner_label = _extract_entity_label(owner_entity)
 
     return {
         "wikidata_id": wikidata_id,
         "wikipedia_url": _extract_enwiki_url(entity),
         "wikimedia_logo_file": _extract_commons_logo_file(entity),
+        "owner_wikidata_id": owner_wikidata_id,
+        "owner_label": owner_label,
     }
 
 
@@ -2455,6 +2516,8 @@ def _process_entity(
             *[alias for alias in (tmdb_hints.get("aliases") or []) if isinstance(alias, str)],
         ]
         metadata = _resolve_entity_metadata(display_name, core_row.get("wikidata_id"), aliases)
+        owner_wikidata_id = _normalize_text(metadata.get("owner_wikidata_id")).upper()
+        owner_label = _normalize_text(metadata.get("owner_label"))
 
         wikidata_id = _normalize_text(override.wikidata_id_override if override else "") or _normalize_text(
             metadata.get("wikidata_id")
@@ -3064,6 +3127,8 @@ def _process_entity(
             "added_show_count": int(entity.added_show_count),
             "wikidata_id": final_wikidata or None,
             "wikipedia_url": final_wikipedia or None,
+            "owner_wikidata_id": owner_wikidata_id or None,
+            "owner_label": owner_label or None,
             "hosted_logo_url": final_logo_url or None,
             "hosted_logo_black_url": final_logo_black or None,
             "hosted_logo_white_url": final_logo_white or None,

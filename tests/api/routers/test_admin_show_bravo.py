@@ -111,8 +111,8 @@ def test_stable_show_image_candidate_id_uses_url_hash() -> None:
 
 
 def test_preview_bravo_import_returns_expected_shape(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -152,8 +152,8 @@ def test_preview_bravo_import_includes_fandom_probe_fields(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -216,8 +216,8 @@ def test_preview_bravo_import_includes_cast_candidate_urls(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -260,8 +260,8 @@ def test_preview_bravo_import_skips_existing_and_na_bravo_profiles(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     lisa_id = str(uuid4())
@@ -320,8 +320,8 @@ def test_preview_bravo_import_cast_only_probes_all_cast_profiles_even_if_existin
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     lisa_id = str(uuid4())
@@ -381,8 +381,8 @@ def test_preview_bravo_import_returns_probe_counters_from_candidate_results(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -429,8 +429,8 @@ def test_preview_bravo_import_stream_emits_start_progress_and_complete(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     andy_url = "https://www.bravotv.com/people/andy-cohen"
@@ -579,8 +579,8 @@ def test_preview_bravo_import_stream_emits_heartbeat_for_slow_cast_only_probe(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -640,8 +640,8 @@ def test_preview_bravo_import_stream_cast_only_probes_all_cast_profiles_even_if_
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     lisa_id = str(uuid4())
@@ -706,8 +706,8 @@ def test_preview_bravo_import_stream_emits_error_event_on_fatal_failure(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -748,8 +748,8 @@ def test_preview_bravo_import_sets_max_people_to_candidate_count_over_default(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -788,8 +788,8 @@ def test_preview_bravo_import_sets_max_people_to_candidate_count_over_default(
 
 
 def test_commit_bravo_import_returns_snapshot_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     person_id = str(uuid4())
@@ -871,8 +871,8 @@ def test_commit_bravo_import_rejects_stale_preview_signature(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -907,8 +907,8 @@ def test_commit_bravo_import_requires_preview_signature_for_cast_only(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -978,8 +978,8 @@ def test_commit_bravo_import_promotes_hosted_profile_media_for_people(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     person_id = str(uuid4())
@@ -1073,8 +1073,8 @@ def test_commit_bravo_import_cast_only_skips_show_side_effects(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -1145,8 +1145,8 @@ def test_commit_bravo_import_cast_only_reuses_preview_result_without_reprobe(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     andy_id = str(uuid4())
@@ -1247,8 +1247,8 @@ def test_commit_bravo_import_cast_only_reports_fandom_counts_from_preview_result
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     andy_id = str(uuid4())
@@ -1358,8 +1358,8 @@ def test_commit_bravo_import_cast_only_rejects_stale_preview_result(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -1411,8 +1411,8 @@ def test_commit_bravo_import_cast_only_probes_all_cast_profiles_even_if_existing
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     lisa_id = str(uuid4())
@@ -1501,8 +1501,8 @@ def test_commit_bravo_import_marks_missing_candidates_as_na(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     andy_id = str(uuid4())
@@ -1684,8 +1684,8 @@ def test_commit_bravo_import_persists_season_overview_for_season_scoped_sync(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     season_id = str(uuid4())
@@ -1774,8 +1774,8 @@ def test_commit_bravo_import_uses_selected_show_image_kinds(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     person_id = str(uuid4())
@@ -1877,8 +1877,8 @@ def test_commit_bravo_import_invokes_cast_matrix_sync_when_enabled(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     person_id = str(uuid4())
@@ -1969,8 +1969,8 @@ def test_preview_bravo_import_filters_videos_by_season(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -2008,8 +2008,8 @@ def test_preview_bravo_import_requires_synced_seasons_episodes_and_cast(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     show_id = str(uuid4())
     mock_db = MagicMock()
 
@@ -2114,8 +2114,8 @@ def test_commit_bravo_import_runs_video_thumbnail_sync_and_persists_summary(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()
@@ -2198,8 +2198,8 @@ def test_sync_bravo_video_thumbnails_endpoint_updates_snapshot(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     show_id = str(uuid4())
     mock_db = MagicMock()

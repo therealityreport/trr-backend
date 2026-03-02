@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -50,6 +50,7 @@ class YouTubeScrapeConfig:
     delay_seconds: float = 2.0
     max_results: int | None = None  # None = no limit
     max_pages: int | None = None  # continuation page limit
+    enforce_keyword_filter: bool = True
 
     # Metadata for tracking
     show_id: int | None = None
@@ -69,6 +70,8 @@ class YouTubeScrapeConfig:
 
     def matches_keywords(self, text: str) -> bool:
         """Check if text contains any of the configured keywords."""
+        if not self.enforce_keyword_filter:
+            return True
         if not self.keywords:
             return True  # No filter = match all
         text_lower = text.lower()
@@ -138,6 +141,7 @@ class YouTubeVideo:
     thumbnail_url: str
     tags: list[str]
     keywords_matched: list[str]
+    user_avatar_url: str | None = None
     is_short: bool = False
     source_surface: str = "videos"
     published_text: str = ""
@@ -165,6 +169,57 @@ class YouTubeScraper:
     CHANNEL_VIDEOS_URL = "https://www.youtube.com/@{handle}/videos"
     CHANNEL_SHORTS_URL = "https://www.youtube.com/@{handle}/shorts"
     VIDEO_WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
+
+    @staticmethod
+    def _pick_largest_thumbnail_url(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        thumbnails = payload.get("thumbnails")
+        if not isinstance(thumbnails, list):
+            return None
+        best_url: str | None = None
+        best_size = -1
+        for item in thumbnails:
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get("url") or "").strip()
+            if not candidate:
+                continue
+            width = int(item.get("width") or 0)
+            height = int(item.get("height") or 0)
+            size = max(width, height)
+            if size >= best_size:
+                best_size = size
+                best_url = candidate
+        return best_url
+
+    def _extract_channel_avatar_from_renderer(self, renderer: dict[str, Any]) -> str | None:
+        candidates: list[str] = []
+        byline_runs = renderer.get("shortBylineText", {}).get("runs", [])
+        if isinstance(byline_runs, list) and byline_runs:
+            endpoint = byline_runs[0].get("navigationEndpoint", {})
+            browse = endpoint.get("browseEndpoint", {}) if isinstance(endpoint, dict) else {}
+            thumbnails = browse.get("thumbnail") if isinstance(browse, dict) else {}
+            candidate = self._pick_largest_thumbnail_url(thumbnails)
+            if candidate:
+                candidates.append(candidate)
+        channel_thumbs = renderer.get("channelThumbnailSupportedRenderers", {})
+        if isinstance(channel_thumbs, dict):
+            for key in (
+                "channelThumbnailWithLinkRenderer",
+                "channelThumbnailRenderer",
+            ):
+                sub = channel_thumbs.get(key, {})
+                if not isinstance(sub, dict):
+                    continue
+                candidate = self._pick_largest_thumbnail_url(sub.get("thumbnail"))
+                if candidate:
+                    candidates.append(candidate)
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value:
+                return value
+        return None
     COMMENT_API_URL = "https://www.youtube.com/youtubei/v1/next"
     YTINITAL_DATA_PATTERN = re.compile(r"var ytInitialData = ({.*?});", re.DOTALL)
     PUBLISHED_DATE_PATTERNS = (
@@ -188,6 +243,12 @@ class YouTubeScraper:
     REQUEST_TIMEOUT_SECONDS = (10, 45)
     PRE_WINDOW_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_PRE_WINDOW_PAGE_CAP", 12)
     YTDLP_SEARCH_TIMEOUT_SECONDS = _env_int("SOCIAL_YOUTUBE_YTDLP_TIMEOUT_SECONDS", 120)
+    COMMENT_CONTINUATION_RETRY_ATTEMPTS = _env_int("SOCIAL_YOUTUBE_COMMENT_CONTINUATION_RETRY_ATTEMPTS", 3)
+    COMMENT_CONTINUATION_RETRY_BACKOFF_SECONDS = _env_int(
+        "SOCIAL_YOUTUBE_COMMENT_CONTINUATION_RETRY_BACKOFF_SECONDS",
+        1,
+    )
+    TRANSCRIPT_FETCH_TIMEOUT_SECONDS = _env_int("SOCIAL_YOUTUBE_TRANSCRIPT_FETCH_TIMEOUT_SECONDS", 45)
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
@@ -223,6 +284,17 @@ class YouTubeScraper:
         self.last_comment_fetch_reason = normalized
         if self._is_auth_related_failure(normalized):
             self.comments_auth_failed = True
+
+    @staticmethod
+    def _is_retryable_comment_failure(reason: str | None) -> bool:
+        value = str(reason or "").strip().lower()
+        if not value:
+            return False
+        if value in {"request_error", "continuation_fetch_failed"}:
+            return True
+        if value.startswith("http_429") or value.startswith("http_5"):
+            return True
+        return False
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -601,6 +673,7 @@ class YouTubeScraper:
             short_byline = renderer.get("shortBylineText", {}).get("runs", [])
             if isinstance(short_byline, list) and short_byline:
                 channel_title = str(short_byline[0].get("text") or "")
+        channel_avatar_url = self._extract_channel_avatar_from_renderer(renderer)
 
         # Find matched keywords
         combined_text = f"{title} {description}".lower()
@@ -631,6 +704,7 @@ class YouTubeScraper:
             thumbnail_url=thumbnail_url,
             tags=[],  # Not available in search results
             keywords_matched=keywords_matched,
+            user_avatar_url=channel_avatar_url,
             is_short=is_short,
             source_surface=surface,
             published_text=published_text,
@@ -970,6 +1044,73 @@ class YouTubeScraper:
         except Exception:
             logger.debug("YouTube scrape progress callback raised", exc_info=True)
 
+    @staticmethod
+    def _video_surface(video: YouTubeVideo) -> str:
+        surface = str(getattr(video, "source_surface", "") or "").strip().lower()
+        if surface in {"videos", "shorts"}:
+            return surface
+        if bool(getattr(video, "is_short", False)):
+            return "shorts"
+        url = str(getattr(video, "url", "") or "").lower()
+        return "shorts" if "/shorts/" in url else "videos"
+
+    def _apply_surface_guaranteed_limit(
+        self,
+        videos: list[YouTubeVideo],
+        *,
+        max_results: int | None,
+    ) -> tuple[list[YouTubeVideo], bool, int | None]:
+        if max_results is None:
+            return videos, False, None
+        requested_limit = max(0, int(max_results))
+        if requested_limit <= 0:
+            return [], False, 0
+
+        surfaces_present = {self._video_surface(video) for video in videos}
+        both_surfaces_present = {"videos", "shorts"} <= surfaces_present
+        effective_limit = max(requested_limit, 2) if both_surfaces_present else requested_limit
+        if len(videos) <= effective_limit:
+            return videos, effective_limit != requested_limit, effective_limit
+
+        indexed_videos = list(enumerate(videos))
+
+        def _sort_key(item: tuple[int, YouTubeVideo]) -> tuple[int, str, int]:
+            idx, candidate = item
+            published_at = int(getattr(candidate, "published_at", 0) or 0)
+            video_id = str(getattr(candidate, "video_id", "") or "")
+            return (-published_at, video_id, idx)
+
+        sorted_items = sorted(indexed_videos, key=_sort_key)
+        if not both_surfaces_present:
+            limited = [video for _, video in sorted_items[:effective_limit]]
+            return limited, False, effective_limit
+
+        selected_indices: set[int] = set()
+        selected_items: list[tuple[int, YouTubeVideo]] = []
+        for surface in ("videos", "shorts"):
+            for item in sorted_items:
+                idx, candidate = item
+                if idx in selected_indices:
+                    continue
+                if self._video_surface(candidate) != surface:
+                    continue
+                selected_indices.add(idx)
+                selected_items.append(item)
+                break
+
+        for item in sorted_items:
+            idx, _candidate = item
+            if len(selected_items) >= effective_limit:
+                break
+            if idx in selected_indices:
+                continue
+            selected_indices.add(idx)
+            selected_items.append(item)
+
+        selected_items = sorted(selected_items, key=_sort_key)
+        limited = [video for _, video in selected_items[:effective_limit]]
+        return limited, effective_limit != requested_limit, effective_limit
+
     def scrape(
         self,
         config: YouTubeScrapeConfig,
@@ -996,11 +1137,14 @@ class YouTubeScraper:
             logger.info(f"Date range: {config.date_start} to {config.date_end}")
 
         videos = []
-        continuation_pages = 0
+        continuation_pages_by_surface: dict[str, int] = {"videos": 0, "shorts": 0}
+        surface_pages_scanned: dict[str, int] = {"videos": 0, "shorts": 0}
+        checked_renderers = 0
         timestamp_unknown_count = 0
         in_range_hits = 0
         no_hit_pages = 0
         pre_window_pages = 0
+        after_window_pages = 0
         ownership_filtered = 0
         scan_capped_reason: str | None = None
         first_page_counts: dict[str, int] = {"videos": 0, "shorts": 0}
@@ -1009,12 +1153,18 @@ class YouTubeScraper:
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
+        surface_cap_override_applied = False
+        effective_result_cap: int | None = None
+
+        def _total_pages_scanned() -> int:
+            return int(surface_pages_scanned.get("videos", 0) + surface_pages_scanned.get("shorts", 0))
 
         for surface in ("videos", "shorts"):
             logger.info("Fetching %s from @%s channel page...", surface, handle)
             surface_no_hit_pages = 0
             surface_pre_window_pages = 0
-            ownership_counter = [0]
+            surface_after_window_pages = 0
+            initial_ownership_counter = [0]
             data = self.fetch_channel_videos(handle, config.delay_seconds, surface=surface)
             if not data:
                 logger.warning("Failed to fetch channel page for @%s (surface=%s)", handle, surface)
@@ -1025,21 +1175,55 @@ class YouTubeScraper:
             if resolved_channel_id:
                 canonical_channel_id = resolved_channel_id
 
-            initial_page_videos = self._process_video_data(
+            initial_result = self._process_video_data(
                 data,
                 config,
                 surface=surface,
                 target_handle=canonical_handle or handle,
-                ownership_filtered_counter=ownership_counter,
+                ownership_filtered_counter=initial_ownership_counter,
+                return_stats=True,
             )
-            ownership_filtered += ownership_counter[0]
+            if isinstance(initial_result, tuple):
+                initial_page_videos, initial_stats = initial_result
+            else:
+                initial_page_videos = initial_result
+                initial_stats = {
+                    "checked_renderers": len(initial_page_videos),
+                    "before_window_items": 0,
+                    "after_window_items": 0,
+                    "window_candidate_items": len(initial_page_videos),
+                    "timestamp_unknown": 0,
+                    "in_range_hits": 0,
+                }
+            ownership_filtered += initial_ownership_counter[0]
+            checked_renderers += int(initial_stats.get("checked_renderers") or 0)
+            timestamp_unknown_count += int(initial_stats.get("timestamp_unknown") or 0)
+            in_range_hits += int(initial_stats.get("in_range_hits") or 0)
+            if config.date_start or config.date_end:
+                before_only = bool(initial_stats.get("before_window_items")) and not bool(
+                    initial_stats.get("window_candidate_items")
+                ) and not bool(initial_stats.get("after_window_items"))
+                after_only = bool(initial_stats.get("after_window_items")) and not bool(
+                    initial_stats.get("window_candidate_items")
+                ) and not bool(initial_stats.get("before_window_items"))
+                if before_only:
+                    pre_window_pages += 1
+                    surface_pre_window_pages += 1
+                else:
+                    surface_pre_window_pages = 0
+                if after_only:
+                    after_window_pages += 1
+                    surface_after_window_pages += 1
+                else:
+                    surface_after_window_pages = 0
+            surface_pages_scanned[surface] = max(1, int(surface_pages_scanned.get(surface, 0) or 0))
             first_page_counts[surface] = len(initial_page_videos)
             videos.extend(initial_page_videos)
             self._emit_progress(
                 progress_cb,
                 phase="scrape_initial_page" if surface == "videos" else "scrape_initial_page_shorts",
-                pages_scanned=1 if surface == "videos" else 0,
-                posts_checked=len(videos),
+                pages_scanned=_total_pages_scanned(),
+                posts_checked=checked_renderers,
                 matched_posts=len(videos),
             )
 
@@ -1047,14 +1231,16 @@ class YouTubeScraper:
             page_num = 1
 
             while continuation_token:
-                if config.max_pages and continuation_pages >= config.max_pages:
+                if config.max_pages and continuation_pages_by_surface[surface] >= config.max_pages:
                     logger.info("Reached max continuation pages limit (%s)", config.max_pages)
-                    break
-                if config.max_results and len(videos) >= config.max_results:
                     break
 
                 page_num += 1
-                continuation_pages += 1
+                continuation_pages_by_surface[surface] += 1
+                surface_pages_scanned[surface] = max(
+                    int(surface_pages_scanned.get(surface, 0) or 0),
+                    page_num,
+                )
                 logger.info(f"Fetching {surface} page {page_num}...")
                 cont_data = self._fetch_continuation(continuation_token, config.delay_seconds)
                 if not cont_data:
@@ -1065,80 +1251,81 @@ class YouTubeScraper:
                     logger.info("No more videos in continuation")
                     break
 
-                page_videos = []
-                page_hits = 0
-                page_window_candidates = False
-                for renderer in renderers:
-                    if not self._renderer_matches_owner(renderer, canonical_handle or handle):
-                        ownership_filtered += 1
-                        continue
-                    video = self._parse_video_renderer(renderer, config, surface=surface)
-                    if not video:
-                        continue
+                page_ownership_counter = [0]
+                page_videos, page_stats = self._process_renderer_batch(
+                    renderers,
+                    config,
+                    surface=surface,
+                    target_handle=canonical_handle or handle,
+                    ownership_filtered_counter=page_ownership_counter,
+                )
+                page_hits = len(page_videos)
+                ownership_filtered += page_ownership_counter[0]
+                checked_renderers += int(page_stats.get("checked_renderers") or 0)
+                in_range_hits += int(page_stats.get("in_range_hits") or 0)
+                timestamp_unknown_count += int(page_stats.get("timestamp_unknown") or 0)
 
-                    in_range: bool | None = None
-                    if video.published_at > 0:
-                        in_range = config.is_in_date_range(video.published_at)
-                    in_range = self._refine_video_publish_timestamp_if_needed(video, config, in_range)
+                page_before_only = bool(page_stats.get("before_window_items")) and not bool(
+                    page_stats.get("window_candidate_items")
+                ) and not bool(page_stats.get("after_window_items"))
+                page_after_only = bool(page_stats.get("after_window_items")) and not bool(
+                    page_stats.get("window_candidate_items")
+                ) and not bool(page_stats.get("before_window_items"))
 
-                    if video.published_at > 0:
-                        if in_range is None:  # Before range - keep scanning; channel ordering is not always strict.
-                            page_window_candidates = True
-                            continue
-                        if in_range is False:  # After range - skip
-                            continue
-                        page_window_candidates = True
-                        in_range_hits += 1
-                    elif config.date_start or config.date_end:
-                        # Unknown timestamps are increasingly common for dynamic renderers.
-                        # Still allow keyword matching but track the count.
-                        timestamp_unknown_count += 1
-                        page_window_candidates = True
-
-                    combined_text = f"{video.title} {video.description}"
-                    if config.matches_keywords(combined_text):
-                        page_videos.append(video)
-                        page_hits += 1
-                        title_short = video.title[:50] + "..." if len(video.title) > 50 else video.title
-                        logger.info(f"Found: {video.video_id} - {title_short} ({video.date_time})")
+                if page_before_only:
+                    surface_pre_window_pages += 1
+                    pre_window_pages += 1
+                else:
+                    surface_pre_window_pages = 0
+                if page_after_only:
+                    surface_after_window_pages += 1
+                    after_window_pages += 1
+                else:
+                    surface_after_window_pages = 0
 
                 videos.extend(page_videos)
                 self._emit_progress(
                     progress_cb,
                     phase="scrape_continuation_page",
-                    pages_scanned=page_num,
-                    posts_checked=len(videos),
+                    pages_scanned=_total_pages_scanned(),
+                    posts_checked=checked_renderers,
                     matched_posts=len(videos),
                 )
                 logger.info(f"Page {page_num}: {len(page_videos)} matches, {len(videos)} total")
                 if page_hits == 0:
-                    if (config.date_start or config.date_end) and not page_window_candidates:
-                        surface_pre_window_pages += 1
-                        pre_window_pages += 1
-                        if surface_pre_window_pages >= self.PRE_WINDOW_PAGE_CAP:
-                            scan_capped_reason = "pre_window_cap"
-                            self._emit_progress(
-                                progress_cb,
-                                phase="scrape_pre_window_cap",
-                                pages_scanned=page_num,
-                                posts_checked=len(videos),
-                                matched_posts=len(videos),
-                            )
-                            logger.info(
-                                "Stopping %s continuation crawl after pre-window cap (%d pages)",
-                                surface,
-                                self.PRE_WINDOW_PAGE_CAP,
-                            )
-                            break
-                    else:
-                        surface_no_hit_pages += 1
-                        no_hit_pages += 1
-                        # Before/after-window pages can be noisy.
-                        # Give a wider no-hit runway until we get an in-range hit.
-                        no_hit_threshold = 25 if (config.date_start or config.date_end) and in_range_hits == 0 else 5
-                        if surface_no_hit_pages >= no_hit_threshold and (config.date_start or config.date_end):
-                            logger.info("Stopping %s continuation crawl after %d no-hit pages", surface, surface_no_hit_pages)
-                            break
+                    if config.date_start or config.date_end:
+                        if page_before_only:
+                            if surface_pre_window_pages >= self.PRE_WINDOW_PAGE_CAP:
+                                scan_capped_reason = "pre_window_cap"
+                                self._emit_progress(
+                                    progress_cb,
+                                    phase="scrape_pre_window_cap",
+                                    pages_scanned=_total_pages_scanned(),
+                                    posts_checked=checked_renderers,
+                                    matched_posts=len(videos),
+                                )
+                                logger.info(
+                                    "Stopping %s continuation crawl after pre-window cap (%d pages)",
+                                    surface,
+                                    self.PRE_WINDOW_PAGE_CAP,
+                                )
+                                break
+                            continue
+                        if page_after_only:
+                            # Keep paging: still traversing newer content toward the requested window.
+                            continue
+                    surface_no_hit_pages += 1
+                    no_hit_pages += 1
+                    # Before/after-window pages can be noisy.
+                    # Give a wider no-hit runway until we get an in-range hit.
+                    no_hit_threshold = 25 if (config.date_start or config.date_end) and in_range_hits == 0 else 5
+                    if surface_no_hit_pages >= no_hit_threshold and (config.date_start or config.date_end):
+                        logger.info(
+                            "Stopping %s continuation crawl after %d no-hit pages",
+                            surface,
+                            surface_no_hit_pages,
+                        )
+                        break
                 else:
                     surface_no_hit_pages = 0
 
@@ -1171,36 +1358,52 @@ class YouTubeScraper:
                     added += 1
             if added:
                 logger.info(f"yt-dlp search added {added} additional videos (total: {len(unique_videos)})")
+                checked_renderers = max(checked_renderers, len(unique_videos))
                 self._emit_progress(
                     progress_cb,
                     phase="scrape_ytdlp_fallback",
-                    pages_scanned=continuation_pages + 1,
-                    posts_checked=len(unique_videos),
+                    pages_scanned=max(1, _total_pages_scanned()),
+                    posts_checked=checked_renderers,
                     matched_posts=len(unique_videos),
                 )
 
         if config.max_results:
-            unique_videos = unique_videos[: config.max_results]
+            unique_videos, surface_cap_override_applied, effective_result_cap = self._apply_surface_guaranteed_limit(
+                unique_videos,
+                max_results=config.max_results,
+            )
 
         logger.info(f"Scrape complete: found {len(unique_videos)} videos")
         self._emit_progress(
             progress_cb,
             phase="scrape_complete",
-            pages_scanned=max(1, continuation_pages + 1),
-            posts_checked=len(unique_videos),
+            pages_scanned=max(1, _total_pages_scanned()),
+            posts_checked=checked_renderers,
             matched_posts=len(unique_videos),
+        )
+        continuation_pages_total = int(
+            continuation_pages_by_surface.get("videos", 0) + continuation_pages_by_surface.get("shorts", 0)
         )
         self.last_retrieval_meta = {
             "retrieval_mode": "channel_continuation",
-            "continuation_pages": continuation_pages,
+            "continuation_pages": continuation_pages_total,
+            "continuation_pages_by_surface": dict(continuation_pages_by_surface),
+            "checked_renderers": checked_renderers,
             "timestamp_unknown_count": timestamp_unknown_count,
             "in_range_hits": in_range_hits,
             "pre_window_pages": pre_window_pages,
+            "before_window_pages": pre_window_pages,
+            "after_window_pages": after_window_pages,
             "pre_window_page_cap": self.PRE_WINDOW_PAGE_CAP,
             "first_page_count": int(first_page_counts.get("videos", 0)),
             "first_page_counts": first_page_counts,
             "ownership_filtered": ownership_filtered,
             "scan_capped_reason": scan_capped_reason,
+            "videos_pages_scanned": int(surface_pages_scanned.get("videos", 0)),
+            "shorts_pages_scanned": int(surface_pages_scanned.get("shorts", 0)),
+            "surface_cap_override_applied": bool(surface_cap_override_applied),
+            "requested_max_results": int(config.max_results) if config.max_results is not None else None,
+            "effective_max_results": effective_result_cap,
             "precise_publish_attempts": self._precise_publish_attempts,
             "precise_publish_successes": self._precise_publish_successes,
             "precise_publish_failures": self._precise_publish_failures,
@@ -1214,9 +1417,9 @@ class YouTubeScraper:
         videos: list[YouTubeVideo],
         delay: float = 1.0,
     ) -> None:
-        """Enrich videos with likes, comments, tags via yt-dlp --dump-single-json.
+        """Enrich videos with likes, comments, tags, and duration via yt-dlp.
 
-        Only enriches videos that are missing metrics (likes == 0 and comments == 0).
+        Enriches videos missing core metrics and/or duration metadata.
         Mutates videos in place.
         """
         if not shutil.which("yt-dlp"):
@@ -1225,7 +1428,11 @@ class YouTubeScraper:
 
         needs_enrichment = [
             v for v in videos
-            if isinstance(v, YouTubeVideo) and v.likes == 0 and v.comments == 0
+            if isinstance(v, YouTubeVideo)
+            and (
+                (v.likes == 0 and v.comments == 0)
+                or int(getattr(v, "duration_seconds", 0) or 0) <= 0
+            )
         ]
         if not needs_enrichment:
             return
@@ -1264,6 +1471,11 @@ class YouTubeScraper:
             video.likes = data.get("like_count", 0) or 0
             video.comments = data.get("comment_count", 0) or 0
             video.views = data.get("view_count", video.views) or video.views
+            resolved_duration_seconds = int(data.get("duration", 0) or 0)
+            if resolved_duration_seconds > 0:
+                video.duration_seconds = resolved_duration_seconds
+                if not str(video.duration or "").strip():
+                    video.duration = f"PT{resolved_duration_seconds}S"
             if not video.channel_id:
                 video.channel_id = data.get("channel_id", "") or ""
             if not video.tags:
@@ -1428,6 +1640,16 @@ class YouTubeScraper:
                     thumbnail_url=(data.get("thumbnails") or [{}])[0].get("url", ""),
                     tags=data.get("tags", []) or [],
                     keywords_matched=[query],
+                    user_avatar_url=(
+                        str(
+                            data.get("uploader_avatar")
+                            or data.get("channel_thumbnail")
+                            or data.get("channelAvatarUrl")
+                            or data.get("author_avatar_url")
+                            or ""
+                        ).strip()
+                        or None
+                    ),
                     is_short=is_short,
                     source_surface="search",
                     show_id=config.show_id,
@@ -1439,6 +1661,60 @@ class YouTubeScraper:
         logger.info(f"yt-dlp search total: {len(all_videos)} videos from channel @{target_handle}")
         return all_videos
 
+    def _process_renderer_batch(
+        self,
+        renderers: Iterable[dict[str, Any]],
+        config: YouTubeScrapeConfig,
+        *,
+        surface: str = "videos",
+        target_handle: str | None = None,
+        ownership_filtered_counter: list[int] | None = None,
+    ) -> tuple[list[YouTubeVideo], dict[str, int]]:
+        videos: list[YouTubeVideo] = []
+        stats: dict[str, int] = {
+            "checked_renderers": 0,
+            "before_window_items": 0,
+            "after_window_items": 0,
+            "window_candidate_items": 0,
+            "timestamp_unknown": 0,
+            "in_range_hits": 0,
+        }
+        for renderer in renderers:
+            if target_handle and not self._renderer_matches_owner(renderer, target_handle):
+                if ownership_filtered_counter is not None:
+                    ownership_filtered_counter[0] += 1
+                continue
+            stats["checked_renderers"] += 1
+            video = self._parse_video_renderer(renderer, config, surface=surface)
+            if not video:
+                continue
+            in_range: bool | None = None
+            if video.published_at > 0:
+                in_range = config.is_in_date_range(video.published_at)
+            in_range = self._refine_video_publish_timestamp_if_needed(video, config, in_range)
+            if video.published_at > 0:
+                if in_range is None:  # Before range
+                    stats["before_window_items"] += 1
+                    continue
+                if in_range is False:  # After range
+                    stats["after_window_items"] += 1
+                    continue
+                stats["window_candidate_items"] += 1
+                stats["in_range_hits"] += 1
+            elif config.date_start or config.date_end:
+                # Unknown timestamps are increasingly common for dynamic renderers.
+                # Still allow keyword matching but track the count.
+                stats["timestamp_unknown"] += 1
+                stats["window_candidate_items"] += 1
+
+            combined_text = f"{video.title} {video.description}"
+            if config.matches_keywords(combined_text):
+                videos.append(video)
+                title_short = video.title[:50] + "..." if len(video.title) > 50 else video.title
+                logger.info(f"Found: {video.video_id} - {title_short} ({video.date_time})")
+
+        return videos, stats
+
     def _process_video_data(
         self,
         data: dict,
@@ -1447,36 +1723,18 @@ class YouTubeScraper:
         surface: str = "videos",
         target_handle: str | None = None,
         ownership_filtered_counter: list[int] | None = None,
-    ) -> list[YouTubeVideo]:
+        return_stats: bool = False,
+    ) -> list[YouTubeVideo] | tuple[list[YouTubeVideo], dict[str, int]]:
         """Process video data and apply filters."""
-        videos = []
-        for renderer in self._iter_video_renderers(data):
-            if target_handle and not self._renderer_matches_owner(renderer, target_handle):
-                if ownership_filtered_counter is not None:
-                    ownership_filtered_counter[0] += 1
-                continue
-            video = self._parse_video_renderer(renderer, config, surface=surface)
-            if not video:
-                continue
-
-            # Check date range if publish date is known
-            in_range: bool | None = None
-            if video.published_at > 0:
-                in_range = config.is_in_date_range(video.published_at)
-            in_range = self._refine_video_publish_timestamp_if_needed(video, config, in_range)
-            if video.published_at > 0:
-                if in_range is None:  # Before range
-                    continue
-                if in_range is False:  # After range
-                    continue
-
-            # Check keyword filter
-            combined_text = f"{video.title} {video.description}"
-            if config.matches_keywords(combined_text):
-                videos.append(video)
-                title_short = video.title[:50] + "..." if len(video.title) > 50 else video.title
-                logger.info(f"Found: {video.video_id} - {title_short} ({video.date_time})")
-
+        videos, stats = self._process_renderer_batch(
+            self._iter_video_renderers(data),
+            config,
+            surface=surface,
+            target_handle=target_handle,
+            ownership_filtered_counter=ownership_filtered_counter,
+        )
+        if return_stats:
+            return videos, stats
         return videos
 
     def fetch_comments(
@@ -1500,38 +1758,52 @@ class YouTubeScraper:
         """
         self.last_comment_fetch_reason = None
         self.comments_auth_failed = False
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        watch_video_url = f"https://www.youtube.com/watch?v={video_id}"
+        shorts_video_url = f"https://www.youtube.com/shorts/{video_id}"
+        video_url = watch_video_url
         logger.info(f"Fetching comments for video {video_id}")
 
-        # First, get the video page to extract the comment continuation token
-        self._rate_limit(delay)
-        try:
-            response = self.session.get(
-                video_url,
-                headers=self._get_headers(),
-                timeout=self.REQUEST_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
+        continuation_token = None
+        bootstrap_failures: list[str] = []
+        for bootstrap_url in (watch_video_url, shorts_video_url):
+            self._rate_limit(delay)
+            try:
+                response = self.session.get(
+                    bootstrap_url,
+                    headers=self._get_headers(),
+                    timeout=self.REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+            except requests.exceptions.RequestException as exc:
+                bootstrap_failures.append("request_error")
+                logger.warning("Failed to fetch YouTube comment bootstrap page (%s): %s", bootstrap_url, exc)
+                continue
+
             yt_data = self._extract_ytinital_data(response.text)
-        except requests.exceptions.RequestException as e:
-            self._set_comment_failure_reason("request_error")
-            logger.error(f"Failed to fetch video page: {e}")
-            return []
+            if not yt_data:
+                bootstrap_failures.append("parse_error")
+                logger.warning("Could not extract ytInitialData from %s", bootstrap_url)
+                continue
 
-        if not yt_data:
-            self._set_comment_failure_reason("parse_error")
-            logger.error("Could not extract ytInitialData from video page")
-            return []
+            continuation_token = self._extract_comment_continuation(yt_data)
+            if continuation_token:
+                video_url = bootstrap_url
+                break
+            bootstrap_failures.append("comments_unavailable")
 
-        # Extract comment section continuation token
-        continuation_token = self._extract_comment_continuation(yt_data)
         if not continuation_token:
-            self._set_comment_failure_reason("comments_unavailable")
+            if "request_error" in bootstrap_failures:
+                self._set_comment_failure_reason("request_error")
+            elif "parse_error" in bootstrap_failures:
+                self._set_comment_failure_reason("parse_error")
+            else:
+                self._set_comment_failure_reason("comments_unavailable")
             logger.warning("No comment continuation token found - video may have comments disabled")
             return []
 
         comments = []
         comments_fetched = 0
+        continuation_retry_count = 0
 
         while continuation_token:
             self._rate_limit(delay)
@@ -1539,9 +1811,27 @@ class YouTubeScraper:
             # Fetch comments using continuation
             comment_data = self._fetch_comment_continuation(continuation_token, delay)
             if not comment_data:
+                retry_reason = str(self.last_comment_fetch_reason or "").strip()
+                if self._is_retryable_comment_failure(retry_reason):
+                    if continuation_retry_count < self.COMMENT_CONTINUATION_RETRY_ATTEMPTS:
+                        continuation_retry_count += 1
+                        backoff_seconds = float(
+                            self.COMMENT_CONTINUATION_RETRY_BACKOFF_SECONDS * continuation_retry_count
+                        )
+                        logger.info(
+                            "Retrying comment continuation for %s (%d/%d, reason=%s, backoff=%ss)",
+                            video_id,
+                            continuation_retry_count,
+                            self.COMMENT_CONTINUATION_RETRY_ATTEMPTS,
+                            retry_reason,
+                            int(backoff_seconds),
+                        )
+                        time.sleep(backoff_seconds)
+                        continue
                 if not self.last_comment_fetch_reason:
                     self._set_comment_failure_reason("continuation_fetch_failed")
                 break
+            continuation_retry_count = 0
 
             # Parse comments from response
             entity_index = self._build_comment_entity_index(comment_data)
@@ -1583,6 +1873,290 @@ class YouTubeScraper:
         logger.info(f"Total: {len(comments)} comments fetched for video {video_id}")
         return comments
 
+    @staticmethod
+    def _parse_vtt_timestamp(value: str) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        parts = text.split(":")
+        if len(parts) == 3:
+            hours = int(parts[0] or 0)
+            minutes = int(parts[1] or 0)
+            seconds = float(parts[2] or 0)
+            return float(hours * 3600 + minutes * 60 + seconds)
+        if len(parts) == 2:
+            minutes = int(parts[0] or 0)
+            seconds = float(parts[1] or 0)
+            return float(minutes * 60 + seconds)
+        return float(text)
+
+    @classmethod
+    def _parse_vtt_transcript_segments(cls, vtt_text: str) -> list[dict[str, Any]]:
+        segments: list[dict[str, Any]] = []
+        blocks = re.split(r"\n\s*\n", str(vtt_text or "").replace("\r", "\n"))
+        for block in blocks:
+            lines = [line.strip() for line in block.split("\n") if line.strip()]
+            if not lines:
+                continue
+            time_line = ""
+            text_lines: list[str] = []
+            for line in lines:
+                if "-->" in line and not time_line:
+                    time_line = line
+                elif time_line:
+                    text_lines.append(line)
+            if not time_line:
+                continue
+            parts = [part.strip() for part in time_line.split("-->")]
+            if len(parts) != 2:
+                continue
+            start_seconds = cls._parse_vtt_timestamp(parts[0].replace(",", "."))
+            end_seconds = cls._parse_vtt_timestamp(parts[1].replace(",", ".").split(" ", 1)[0])
+            text = " ".join(text_lines).strip()
+            text = re.sub(r"<[^>]+>", "", text).strip()
+            if not text:
+                continue
+            segments.append(
+                {
+                    "start_seconds": round(max(0.0, start_seconds), 3),
+                    "end_seconds": round(max(start_seconds, end_seconds), 3),
+                    "text": text,
+                }
+            )
+        return segments
+
+    @staticmethod
+    def _parse_json3_transcript_segments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        segments: list[dict[str, Any]] = []
+        events = payload.get("events")
+        if not isinstance(events, list):
+            return segments
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            start_ms = int(event.get("tStartMs") or 0)
+            duration_ms = int(event.get("dDurationMs") or 0)
+            segs = event.get("segs")
+            if not isinstance(segs, list):
+                continue
+            parts: list[str] = []
+            for seg in segs:
+                if not isinstance(seg, dict):
+                    continue
+                text = str(seg.get("utf8") or "").replace("\n", " ").strip()
+                if text:
+                    parts.append(text)
+            text_value = " ".join(parts).strip()
+            if not text_value:
+                continue
+            start_seconds = max(0.0, float(start_ms) / 1000.0)
+            end_seconds = max(start_seconds, start_seconds + max(0.0, float(duration_ms) / 1000.0))
+            segments.append(
+                {
+                    "start_seconds": round(start_seconds, 3),
+                    "end_seconds": round(end_seconds, 3),
+                    "text": text_value,
+                }
+            )
+        return segments
+
+    @staticmethod
+    def _caption_track_score(
+        *,
+        language: str,
+        ext: str,
+        is_auto: bool,
+        preferred_languages: list[str],
+    ) -> tuple[int, int, int]:
+        language_value = str(language or "").strip().lower()
+        ext_value = str(ext or "").strip().lower()
+        pref_score = 0
+        for idx, pref in enumerate(preferred_languages):
+            pref_value = str(pref or "").strip().lower()
+            if not pref_value:
+                continue
+            if language_value == pref_value:
+                pref_score = max(pref_score, 100 - idx)
+                break
+            if language_value.startswith(pref_value):
+                pref_score = max(pref_score, 80 - idx)
+                break
+        ext_score_map = {"json3": 30, "srv3": 25, "vtt": 20, "ttml": 15}
+        ext_score = ext_score_map.get(ext_value, 5)
+        manual_score = 20 if not is_auto else 0
+        return pref_score, manual_score, ext_score
+
+    def fetch_transcript(
+        self,
+        video_id: str,
+        *,
+        preferred_languages: list[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_video_id = str(video_id or "").strip()
+        if not normalized_video_id:
+            return {
+                "text": "",
+                "segments": [],
+                "language": None,
+                "source": None,
+                "error": "missing_video_id",
+            }
+        if not shutil.which("yt-dlp"):
+            return {
+                "text": "",
+                "segments": [],
+                "language": None,
+                "source": None,
+                "error": "yt_dlp_unavailable",
+            }
+
+        languages = [str(item).strip() for item in (preferred_languages or ["en-US", "en"]) if str(item).strip()]
+        if not languages:
+            languages = ["en-US", "en"]
+        watch_url = f"https://www.youtube.com/watch?v={normalized_video_id}"
+
+        try:
+            proc = subprocess.run(
+                [
+                    "yt-dlp",
+                    "--dump-single-json",
+                    "--no-playlist",
+                    "--skip-download",
+                    watch_url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=max(10, int(self.YTDLP_SEARCH_TIMEOUT_SECONDS)),
+                check=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "text": "",
+                "segments": [],
+                "language": None,
+                "source": None,
+                "error": f"yt_dlp_exception:{exc.__class__.__name__}",
+            }
+
+        if proc.returncode != 0:
+            return {
+                "text": "",
+                "segments": [],
+                "language": None,
+                "source": None,
+                "error": "yt_dlp_failed",
+            }
+
+        try:
+            payload = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            return {
+                "text": "",
+                "segments": [],
+                "language": None,
+                "source": None,
+                "error": "yt_dlp_parse_failed",
+            }
+
+        subtitles = payload.get("subtitles") if isinstance(payload.get("subtitles"), dict) else {}
+        auto_captions = payload.get("automatic_captions") if isinstance(payload.get("automatic_captions"), dict) else {}
+
+        candidates: list[dict[str, Any]] = []
+        for source_name, source_payload, is_auto in (
+            ("manual_captions", subtitles, False),
+            ("auto_captions", auto_captions, True),
+        ):
+            if not isinstance(source_payload, dict):
+                continue
+            for language, tracks in source_payload.items():
+                if not isinstance(tracks, list):
+                    continue
+                for track in tracks:
+                    if not isinstance(track, dict):
+                        continue
+                    url = str(track.get("url") or "").strip()
+                    ext = str(track.get("ext") or "").strip().lower()
+                    if not url:
+                        continue
+                    if ext and ext not in {"json3", "srv3", "vtt", "ttml"}:
+                        continue
+                    score = self._caption_track_score(
+                        language=str(language or ""),
+                        ext=ext or "",
+                        is_auto=is_auto,
+                        preferred_languages=languages,
+                    )
+                    candidates.append(
+                        {
+                            "url": url,
+                            "ext": ext or "vtt",
+                            "language": str(language or ""),
+                            "source": source_name,
+                            "score": score,
+                        }
+                    )
+        if not candidates:
+            return {
+                "text": "",
+                "segments": [],
+                "language": None,
+                "source": None,
+                "error": "captions_unavailable",
+            }
+
+        candidates.sort(key=lambda item: item["score"], reverse=True)
+        selected = candidates[0]
+        try:
+            response = self.session.get(
+                str(selected["url"]),
+                headers=self._get_headers(),
+                timeout=(10, max(10, int(self.TRANSCRIPT_FETCH_TIMEOUT_SECONDS))),
+            )
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "text": "",
+                "segments": [],
+                "language": selected.get("language"),
+                "source": selected.get("source"),
+                "error": f"caption_download_failed:{exc.__class__.__name__}",
+            }
+
+        segments: list[dict[str, Any]] = []
+        try:
+            if str(selected.get("ext") or "").lower() in {"json3", "srv3"}:
+                transcript_payload = response.json()
+                if isinstance(transcript_payload, dict):
+                    segments = self._parse_json3_transcript_segments(transcript_payload)
+            else:
+                segments = self._parse_vtt_transcript_segments(str(response.text or ""))
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "text": "",
+                "segments": [],
+                "language": selected.get("language"),
+                "source": selected.get("source"),
+                "error": f"caption_parse_failed:{exc.__class__.__name__}",
+            }
+
+        if not segments:
+            return {
+                "text": "",
+                "segments": [],
+                "language": selected.get("language"),
+                "source": selected.get("source"),
+                "error": "caption_empty",
+            }
+
+        transcript_text = " ".join(str(item.get("text") or "").strip() for item in segments if item.get("text")).strip()
+        return {
+            "text": transcript_text,
+            "segments": segments,
+            "language": selected.get("language"),
+            "source": selected.get("source"),
+            "error": None,
+        }
+
     def _build_comment_entity_index(self, data: dict) -> dict[str, dict]:
         """Build an index of commentId -> commentEntityPayload from framework updates."""
         index: dict[str, dict] = {}
@@ -1595,6 +2169,80 @@ class YouTubeScraper:
             if isinstance(comment_id, str) and comment_id:
                 index[comment_id] = entity
         return index
+
+    @staticmethod
+    def _extract_token_from_continuation_item(item: dict[str, Any]) -> str | None:
+        continuation_renderer = item.get("continuationItemRenderer", {})
+        if isinstance(continuation_renderer, dict):
+            endpoint = continuation_renderer.get("continuationEndpoint", {})
+            if isinstance(endpoint, dict):
+                command = endpoint.get("continuationCommand", {})
+                if isinstance(command, dict):
+                    token = str(command.get("token") or "").strip()
+                    if token:
+                        return token
+        return None
+
+    def _find_continuation_token(self, node: Any, *, comment_biased: bool = False) -> str | None:
+        best: tuple[int, int, str] | None = None
+        visit_index = 0
+
+        def _score(path_text: str) -> int:
+            score = 0
+            lowered = path_text.lower()
+            if "comment" in lowered:
+                score += 6
+            if "engagement" in lowered:
+                score += 2
+            if "continuationitemrenderer" in lowered:
+                score += 1
+            return score
+
+        def _consider(token_value: str | None, *, path_parts: list[str]) -> None:
+            nonlocal best, visit_index
+            token = str(token_value or "").strip()
+            if not token:
+                return
+            path_text = ".".join(path_parts)
+            score = _score(path_text)
+            if comment_biased and score <= 0:
+                return
+            visit_index += 1
+            candidate = (score, -visit_index, token)
+            if best is None or candidate > best:
+                best = candidate
+
+        def _walk(value: Any, path_parts: list[str]) -> None:
+            if isinstance(value, dict):
+                command = value.get("continuationCommand", {})
+                if isinstance(command, dict):
+                    _consider(command.get("token"), path_parts=path_parts + ["continuationCommand", "token"])
+                next_data = value.get("nextContinuationData", {})
+                if isinstance(next_data, dict):
+                    _consider(
+                        next_data.get("continuation"),
+                        path_parts=path_parts + ["nextContinuationData", "continuation"],
+                    )
+                for key, child in value.items():
+                    _walk(child, path_parts + [str(key)])
+            elif isinstance(value, list):
+                for idx, child in enumerate(value):
+                    _walk(child, path_parts + [str(idx)])
+
+        _walk(node, [])
+        return best[2] if best else None
+
+    @staticmethod
+    def _comment_response_containers(data: dict[str, Any]) -> list[dict[str, Any]]:
+        containers: list[dict[str, Any]] = []
+        for key in ("onResponseReceivedEndpoints", "onResponseReceivedActions"):
+            payload = data.get(key, [])
+            if not isinstance(payload, list):
+                continue
+            for item in payload:
+                if isinstance(item, dict):
+                    containers.append(item)
+        return containers
 
     def _extract_comment_continuation(self, yt_data: dict) -> str | None:
         """Extract the continuation token for comments from ytInitialData."""
@@ -1624,6 +2272,16 @@ class YouTubeScraper:
                             return None
         except (KeyError, TypeError, IndexError):
             pass
+
+        engagement_panels = yt_data.get("engagementPanels", [])
+        token = self._find_continuation_token(engagement_panels, comment_biased=True)
+        if token:
+            return token
+
+        # Fallback for modern watch/shorts layouts that move continuation under different branches.
+        token = self._find_continuation_token(yt_data, comment_biased=True)
+        if token:
+            return token
 
         return None
 
@@ -1670,29 +2328,25 @@ class YouTubeScraper:
 
         try:
             # Look for continuation contents
-            on_response = data.get("onResponseReceivedEndpoints", [])
+            on_response = self._comment_response_containers(data)
             for endpoint in on_response:
                 # Reload continuation (initial load)
                 reload_items = endpoint.get("reloadContinuationItemsCommand", {})
                 if reload_items:
                     for item in reload_items.get("continuationItems", []):
-                        if "commentThreadRenderer" in item:
+                        if "commentThreadRenderer" in item or "commentViewModel" in item:
                             items.append(item)
                         elif "continuationItemRenderer" in item:
-                            cont = item.get("continuationItemRenderer", {})
-                            endpoint_data = cont.get("continuationEndpoint", {})
-                            next_continuation = endpoint_data.get("continuationCommand", {}).get("token")
+                            next_continuation = self._extract_token_from_continuation_item(item) or next_continuation
 
                 # Append continuation (subsequent loads)
                 append_items = endpoint.get("appendContinuationItemsAction", {})
                 if append_items:
                     for item in append_items.get("continuationItems", []):
-                        if "commentThreadRenderer" in item:
+                        if "commentThreadRenderer" in item or "commentViewModel" in item:
                             items.append(item)
                         elif "continuationItemRenderer" in item:
-                            cont = item.get("continuationItemRenderer", {})
-                            endpoint_data = cont.get("continuationEndpoint", {})
-                            next_continuation = endpoint_data.get("continuationCommand", {}).get("token")
+                            next_continuation = self._extract_token_from_continuation_item(item) or next_continuation
         except (KeyError, TypeError):
             pass
 
@@ -1714,7 +2368,11 @@ class YouTubeScraper:
             if comment_renderer:
                 comment = self._parse_comment_renderer(comment_renderer, video_id, video_url)
             else:
-                comment_vm = thread.get("commentViewModel", {}).get("commentViewModel", {})
+                comment_vm_container = thread.get("commentViewModel", {})
+                if isinstance(comment_vm_container, dict):
+                    comment_vm = comment_vm_container.get("commentViewModel", comment_vm_container)
+                else:
+                    comment_vm = {}
                 comment = self._parse_comment_view_model(
                     comment_vm,
                     entity_index or {},
@@ -1880,7 +2538,7 @@ class YouTubeScraper:
             next_continuation = None
             entity_index = self._build_comment_entity_index(data)
             try:
-                on_response = data.get("onResponseReceivedEndpoints", [])
+                on_response = self._comment_response_containers(data)
                 for endpoint in on_response:
                     append_items = endpoint.get("appendContinuationItemsAction", {}).get("continuationItems", [])
                     reload_items = endpoint.get("reloadContinuationItemsCommand", {}).get("continuationItems", [])
@@ -1897,7 +2555,11 @@ class YouTubeScraper:
                             if reply:
                                 replies.append(reply)
                         else:
-                            reply_vm = item.get("commentViewModel", {})
+                            reply_vm_container = item.get("commentViewModel", {})
+                            if isinstance(reply_vm_container, dict):
+                                reply_vm = reply_vm_container.get("commentViewModel", reply_vm_container)
+                            else:
+                                reply_vm = {}
                             reply = self._parse_comment_view_model(
                                 reply_vm,
                                 entity_index,
@@ -1910,10 +2572,7 @@ class YouTubeScraper:
                                 replies.append(reply)
 
                         # Check for more replies
-                        cont_renderer = item.get("continuationItemRenderer", {})
-                        if cont_renderer:
-                            ep = cont_renderer.get("continuationEndpoint", {})
-                            next_continuation = ep.get("continuationCommand", {}).get("token")
+                        next_continuation = self._extract_token_from_continuation_item(item) or next_continuation
             except (KeyError, TypeError):
                 break
 

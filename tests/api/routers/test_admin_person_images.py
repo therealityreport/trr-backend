@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -175,6 +176,89 @@ def test_resolve_imdb_traitors_strict_context_disabled_for_non_traitors(monkeypa
     assert context["allowed_cast_names"] == {"Alan Cumming"}
 
 
+def test_build_detection_boxes_omits_identity_when_assignment_not_allowed() -> None:
+    result = SimpleNamespace(
+        people_count=1,
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.92,
+                kind="face",
+                person_id=str(uuid4()),
+                person_name="Alan Cumming",
+                label="Alan Cumming",
+                match_similarity=0.95,
+                match_status="matched",
+            )
+        ],
+    )
+    face_boxes, diagnostics = admin_person_images._build_detection_boxes(result, allow_identity_assignment=False)
+    assert diagnostics["auto_faces_detected"] == 1
+    assert len(face_boxes) == 1
+    assert face_boxes[0]["label_source"] == "generic"
+    assert "person_id" not in face_boxes[0]
+    assert "person_name" not in face_boxes[0]
+    assert "match_similarity" not in face_boxes[0]
+
+
+def test_build_detection_boxes_applies_best_effort_tag_assignment_when_tags_fewer_than_boxes() -> None:
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.92,
+                kind="face",
+            ),
+            SimpleNamespace(
+                x1=0.6,
+                y1=0.2,
+                x2=0.8,
+                y2=0.5,
+                confidence=0.91,
+                kind="face",
+            ),
+        ],
+    )
+    face_boxes, _ = admin_person_images._build_detection_boxes(
+        result,
+        allow_identity_assignment=True,
+        tagged_people_names=["Alan Cumming"],
+    )
+    assert len(face_boxes) == 2
+    assert face_boxes[0]["person_name"] == "Alan Cumming"
+    assert face_boxes[0]["label_source"] == "best_effort_tag_map"
+    assert "person_name" not in face_boxes[1]
+
+
+def test_is_trr_show_eligible_accepts_mapped_fallback_show_name(monkeypatch) -> None:
+    mock_db = MagicMock()
+    show_id = str(uuid4())
+    show_row = {"id": show_id, "name": "Watch What Happens Live with Andy Cohen"}
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(admin_person_images, "_find_show_row_by_alias", lambda by_alias, value: show_row)
+
+    shows_execute = (
+        mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value.execute
+    )
+    shows_response = MagicMock()
+    shows_response.data = [{"id": show_id}]
+    shows_execute.return_value = shows_response
+
+    assert (
+        admin_person_images._is_trr_show_eligible(
+            mock_db,
+            metadata={"imdb_fallback_show_name": "Watch What Happens Live with Andy Cohen"},
+        )
+        is True
+    )
+
+
 def test_enrich_cast_photos_with_episode_metadata_falls_back_to_imdb_title_metadata(monkeypatch) -> None:
     photos = [
         {
@@ -314,6 +398,45 @@ def test_enrich_cast_photos_with_episode_metadata_marks_unresolved_imdb_episode_
     assert metadata["show_short_code"] is None
     assert metadata["imdb_fallback_show_name"] == "Watch What Happens Live with Andy Cohen"
     assert metadata["imdb_fallback_show_imdb_id"] == "tt0318220"
+
+
+def test_enrich_cast_photos_with_episode_metadata_uses_wwhl_credit_episode_ids_when_fallback_missing(
+    monkeypatch,
+) -> None:
+    photos = [
+        {
+            "source": "imdb",
+            "title_imdb_ids": ["tt26755932"],
+            "title_names": ["Milo Ventimiglia & Alan Cumming"],
+            "metadata": {},
+        }
+    ]
+
+    mock_db = MagicMock()
+    episodes_response = MagicMock()
+    episodes_response.error = None
+    episodes_response.data = []
+    episodes_query = mock_db.schema.return_value.table.return_value.select.return_value.in_.return_value
+    episodes_query.execute.return_value = episodes_response
+
+    monkeypatch.setattr(admin_person_images, "_fetch_imdb_title_fallback_metadata", lambda imdb_ids: {})
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+
+    tagged, failed = admin_person_images._enrich_cast_photos_with_episode_metadata(
+        mock_db,
+        photos,
+        person_wwhl_episode_imdb_ids={"tt26755932"},
+    )
+
+    assert tagged == 1
+    assert failed == 0
+    metadata = photos[0]["metadata"]
+    assert metadata["show_context_source"] == "imdb_episode_unresolved"
+    assert metadata["show_name"] is None
+    assert metadata["show_id"] is None
+    assert metadata["imdb_fallback_show_name"] == "Watch What Happens Live with Andy Cohen"
+    assert metadata["imdb_fallback_show_imdb_id"] == "tt2057880"
+    assert metadata["episode_imdb_id"] == "tt26755932"
 
 
 def test_iter_normalized_show_lookup_keys_handles_parenthetical_variants() -> None:
@@ -565,7 +688,7 @@ def test_repair_existing_imdb_cast_photos_rewrites_rows_via_upsert(monkeypatch) 
     monkeypatch.setattr(
         admin_person_images,
         "_enrich_cast_photos_with_episode_metadata",
-        lambda db, rows: (1, 0),
+        lambda db, rows, **kwargs: (1, 0),
     )
     monkeypatch.setattr(
         admin_person_images,
@@ -636,7 +759,7 @@ def test_repair_existing_imdb_cast_photos_backfills_image_type_from_mediaviewer_
     monkeypatch.setattr(
         admin_person_images,
         "_enrich_cast_photos_with_episode_metadata",
-        lambda db, rows: (0, 0),
+        lambda db, rows, **kwargs: (0, 0),
     )
     monkeypatch.setattr(
         admin_person_images,
@@ -707,6 +830,198 @@ def test_repair_existing_imdb_cast_photos_skips_complete_rows(monkeypatch) -> No
     upsert_mock.assert_not_called()
 
 
+def test_needs_imdb_metadata_refresh_when_episode_like_row_missing_fallback_show() -> None:
+    row = {
+        "source": "imdb",
+        "title_imdb_ids": ["tt26755932"],
+        "people_imdb_ids": ["nm0001086"],
+        "context_type": "Episode Still",
+        "metadata": {
+            "imdb_image_type": "still_frame",
+            "imdb_title_type": "TVEpisode",
+            "show_context_source": "request_context",
+            "tags": {
+                "people": [{"imdb_id": "nm0001086", "name": "Alan Cumming"}],
+                "titles": [{"imdb_id": "tt26755932", "title": "Milo Ventimiglia & Alan Cumming"}],
+            },
+        },
+    }
+
+    assert admin_person_images._needs_imdb_metadata_refresh(row) is True
+
+
+def test_needs_imdb_metadata_refresh_when_request_context_inferred_lacks_corroboration() -> None:
+    row = {
+        "source": "imdb",
+        "title_imdb_ids": ["tt99999999"],
+        "people_imdb_ids": ["nm0001086"],
+        "context_type": "Still Frame",
+        "metadata": {
+            "imdb_image_type": "still_frame",
+            "show_context_source": "request_context_inferred",
+            "show_id": "legacy-show-id",
+            "show_name": "The Traitors",
+            "tags": {
+                "people": [{"imdb_id": "nm0001086", "name": "Alan Cumming"}],
+                "titles": [{"imdb_id": "tt99999999", "title": "Some Episode"}],
+            },
+        },
+    }
+
+    assert admin_person_images._needs_imdb_metadata_refresh(row) is True
+
+
+def test_repair_existing_imdb_cast_photos_rejects_stale_request_context_show(monkeypatch) -> None:
+    mock_db = MagicMock()
+    existing_rows = [
+        {
+            "id": "photo-1",
+            "source": "imdb",
+            "source_image_id": "rm_stale",
+            "title_imdb_ids": ["tt26755932"],
+            "title_names": ["Milo Ventimiglia & Alan Cumming"],
+            "people_imdb_ids": ["nm0001086", "nm0000232"],
+            "people_names": ["Alan Cumming", "Milo Ventimiglia"],
+            "metadata": {
+                "show_context_source": "request_context_inferred",
+                "show_id": "show-traitors",
+                "show_name": "The Traitors",
+                "show_imdb_id": "tt1234567",
+                "show_short_code": "TT",
+                "imdb_image_type": "still_frame",
+                "imdb_fallback_show_name": "Watch What Happens Live with Andy Cohen",
+                "imdb_fallback_show_imdb_id": "tt0318220",
+                "episode_title": "Milo Ventimiglia & Alan Cumming",
+                "tags": {
+                    "people": [
+                        {"imdb_id": "nm0001086", "name": "Alan Cumming"},
+                        {"imdb_id": "nm0000232", "name": "Milo Ventimiglia"},
+                    ],
+                    "titles": [{"imdb_id": "tt26755932", "title": "Milo Ventimiglia & Alan Cumming"}],
+                },
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        admin_person_images,
+        "_load_existing_imdb_cast_photos_for_person",
+        lambda db, person_id: existing_rows,
+    )
+    monkeypatch.setattr(admin_person_images, "_load_imdb_viewer_image_types", lambda imdb_person_id, viewer_ids: {})
+    monkeypatch.setattr(
+        admin_person_images,
+        "_enrich_cast_photos_with_episode_metadata",
+        lambda db, rows, **kwargs: (0, 0),
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_apply_show_context_to_photos",
+        lambda db, rows, show_id, show_name: (0, 0),
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_build_show_lookup_maps",
+        lambda db: (
+            {
+                "tt1234567": {"id": "show-traitors", "name": "The Traitors", "imdb_id": "tt1234567"},
+                "tt0318220": {
+                    "id": "show-wwhl",
+                    "name": "Watch What Happens Live with Andy Cohen",
+                    "imdb_id": "tt0318220",
+                },
+            },
+            {
+                "the traitors": {"id": "show-traitors", "name": "The Traitors", "imdb_id": "tt1234567"},
+                "watch what happens live with andy cohen": {
+                    "id": "show-wwhl",
+                    "name": "Watch What Happens Live with Andy Cohen",
+                    "imdb_id": "tt0318220",
+                },
+            },
+            {
+                "show-traitors": {"id": "show-traitors", "name": "The Traitors", "imdb_id": "tt1234567"},
+                "show-wwhl": {
+                    "id": "show-wwhl",
+                    "name": "Watch What Happens Live with Andy Cohen",
+                    "imdb_id": "tt0318220",
+                },
+            },
+        ),
+    )
+
+    upserted_rows: list[dict[str, object]] = []
+
+    def _fake_upsert(db, rows, *, dedupe_on):  # type: ignore[no-untyped-def]
+        upserted_rows.extend(rows)
+        return [{"id": "photo-1"}]
+
+    monkeypatch.setattr("trr_backend.repositories.cast_photos.upsert_cast_photos", _fake_upsert)
+
+    repaired, failed = admin_person_images._repair_existing_imdb_cast_photos(
+        mock_db,
+        "person-1",
+        show_id=None,
+        show_name=None,
+    )
+
+    assert repaired == 1
+    assert failed == 0
+    assert len(upserted_rows) == 1
+    metadata = dict(upserted_rows[0].get("metadata") or {})
+    assert metadata.get("show_id") is None
+    assert metadata.get("show_name") is None
+    assert metadata.get("show_imdb_id") is None
+    assert metadata.get("show_short_code") is None
+    assert metadata.get("show_context_source") == "request_context_rejected"
+    assert metadata.get("show_context_repair_reason") == "stale_request_context_mismatch"
+
+
+def test_repair_existing_imdb_cast_photos_does_not_downgrade_authoritative_rows(monkeypatch) -> None:
+    mock_db = MagicMock()
+    existing_rows = [
+        {
+            "id": "photo-1",
+            "source": "imdb",
+            "source_image_id": "rm_episode_table",
+            "title_imdb_ids": ["tt26755932"],
+            "people_imdb_ids": ["nm0001086"],
+            "people_names": ["Alan Cumming"],
+            "metadata": {
+                "show_context_source": "episode_table",
+                "show_id": "show-traitors",
+                "show_name": "The Traitors",
+                "show_imdb_id": "tt1234567",
+                "imdb_image_type": "still_frame",
+                "episode_imdb_id": "tt26755932",
+                "episode_title": "The Power of the Seer",
+                "tags": {
+                    "people": [{"imdb_id": "nm0001086", "name": "Alan Cumming"}],
+                    "titles": [{"imdb_id": "tt26755932", "title": "The Power of the Seer"}],
+                },
+            },
+        }
+    ]
+    monkeypatch.setattr(
+        admin_person_images,
+        "_load_existing_imdb_cast_photos_for_person",
+        lambda db, person_id: existing_rows,
+    )
+    upsert_mock = MagicMock(return_value=[])
+    monkeypatch.setattr("trr_backend.repositories.cast_photos.upsert_cast_photos", upsert_mock)
+
+    repaired, failed = admin_person_images._repair_existing_imdb_cast_photos(
+        mock_db,
+        "person-1",
+        show_id=None,
+        show_name="The Traitors",
+    )
+
+    assert repaired == 0
+    assert failed == 0
+    upsert_mock.assert_not_called()
+
+
 def test_load_existing_imdb_cast_photos_falls_back_when_source_asset_id_missing() -> None:
     mock_db = MagicMock()
     query = mock_db.schema.return_value.table.return_value
@@ -735,9 +1050,9 @@ def test_load_existing_imdb_cast_photos_falls_back_when_source_asset_id_missing(
 
 
 def test_refresh_stream_emits_terminal_error_for_unhandled_exception(client, monkeypatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     mock_db = MagicMock()
 
     with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -765,9 +1080,9 @@ def test_refresh_stream_emits_terminal_error_for_unhandled_exception(client, mon
 
 
 def test_reprocess_stream_emits_terminal_error_for_unhandled_exception(client, monkeypatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     mock_db = MagicMock()
 
     with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -792,9 +1107,9 @@ def test_reprocess_stream_emits_terminal_error_for_unhandled_exception(client, m
 
 
 def test_refresh_stream_emits_resizing_heartbeat_during_long_variant_generation(client, monkeypatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     person_data = {"id": person_id, "full_name": "Resize Heartbeat Person", "external_ids": {}}
     mock_db = MagicMock()
@@ -842,9 +1157,9 @@ def test_refresh_stream_emits_resizing_heartbeat_during_long_variant_generation(
 
 
 def test_refresh_stream_resizing_heartbeat_includes_operation_progress(client, monkeypatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     person_data = {"id": person_id, "full_name": "Resize Progress Person", "external_ids": {}}
     mock_db = MagicMock()
@@ -902,9 +1217,9 @@ def test_refresh_stream_resizing_heartbeat_includes_operation_progress(client, m
 
 
 def test_refresh_stream_sync_imdb_progress_includes_diagnostics(client, monkeypatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     person_data = {
         "id": person_id,
@@ -985,9 +1300,9 @@ def test_refresh_stream_sync_imdb_progress_includes_diagnostics(client, monkeypa
 
 
 def test_refresh_stream_includes_tmdb_profile_failure_fields_in_complete_payload(client, monkeypatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     person_data = {"id": person_id, "full_name": None, "external_ids": {"tmdb": "123"}}
 
@@ -1050,9 +1365,9 @@ class TestRefreshPersonImages:
 
     def test_returns_404_for_unknown_person(self, client, monkeypatch):
         """Unknown person_id should return 404."""
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         # Mock the database call to return no person
         mock_db = MagicMock()
@@ -1073,9 +1388,9 @@ class TestRefreshPersonImages:
 
     def test_refresh_success_returns_summary(self, client, monkeypatch):
         """Successful refresh returns summary with counts."""
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {
             "id": person_id,
@@ -1154,9 +1469,9 @@ class TestRefreshPersonImages:
         assert "metadata_enrichment_failed" in data
 
     def test_refresh_tmdb_failure_is_non_terminal_and_sets_status_fields(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {
             "id": person_id,
@@ -1202,9 +1517,9 @@ class TestRefreshPersonImages:
         assert any("TMDb profile [CAST_TMDB_UPSERT_FAILED]" in item for item in data["errors"])
 
     def test_refresh_response_includes_imdb_diagnostics(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {
             "id": person_id,
@@ -1269,9 +1584,9 @@ class TestRefreshPersonImages:
 
     def test_skip_mirror_option(self, client, monkeypatch):
         """skip_mirror=True should skip S3 mirroring."""
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {"id": person_id, "full_name": "Test", "external_ids": {}}
 
@@ -1306,9 +1621,9 @@ class TestRefreshPersonImages:
         mock_mirror.assert_not_called()
 
     def test_refresh_runs_existing_imdb_repair_stage(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {
             "id": person_id,
@@ -1347,9 +1662,9 @@ class TestRefreshPersonImages:
 
     def test_bypasses_show_source_policy_when_disabled(self, client, monkeypatch):
         """enforce_show_source_policy=False should preserve requested sources unchanged."""
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {
             "id": person_id,
@@ -1472,9 +1787,9 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
     assert generate_cast_variants.call_args_list[1].kwargs["crop"]["strategy"] == "resize_center_fallback_v1"
 
     def test_stream_emits_resizing_stage_and_complete_counters(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {"id": person_id, "full_name": None, "external_ids": {}}
 
@@ -1543,9 +1858,9 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
         }
 
     def test_stream_honors_skip_flags_for_ingest_only_mode(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {
             "id": person_id,
@@ -1641,9 +1956,9 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
         text_cfg_mock.assert_not_called()
 
     def test_stream_skips_imdb_when_source_already_fully_mirrored(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {
             "id": person_id,
@@ -1680,9 +1995,9 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
         imdb_fetch_mock.assert_not_called()
 
     def test_reprocess_stream_includes_text_overlay_skip_reason_fields(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
 
@@ -1747,17 +2062,144 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
         assert complete_data["resize_succeeded"] == 3
         assert complete_data["resize_crop_attempted"] == 2
 
+    def test_reprocess_stream_runs_metadata_repair_when_enabled(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {"imdb": "nm0001086"}}
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images._load_person_wwhl_episode_imdb_ids_from_credits",
+                return_value=set(),
+            ):
+                with patch(
+                    "api.routers.admin_person_images._resolve_imdb_traitors_strict_context",
+                    return_value={
+                        "strict_mode_enabled": False,
+                        "strict_types": set(),
+                        "target_person_imdb_id": "nm0001086",
+                        "target_person_name": "Test Person",
+                        "allowed_cast_imdb_ids": set(),
+                        "allowed_cast_names": set(),
+                        "allowed_episode_imdb_ids": set(),
+                    },
+                ):
+                    with patch(
+                        "api.routers.admin_person_images._repair_existing_imdb_cast_photos",
+                        return_value=(7, 0),
+                    ) as repair_mock:
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                            json={
+                                "run_metadata": True,
+                                "run_count": False,
+                                "run_id_text": False,
+                                "run_crop": False,
+                                "run_resize": False,
+                            },
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+        assert response.status_code == 200
+        repair_mock.assert_called_once()
+
+        normalized_payload = response.text.replace("\r\n", "\n")
+        complete_index = normalized_payload.rfind("event: complete")
+        assert complete_index >= 0
+        data_index = normalized_payload.find("data:", complete_index)
+        assert data_index >= 0
+        json_start = normalized_payload.find("{", data_index)
+        assert json_start >= 0
+        json_end = normalized_payload.find("\n\n", json_start)
+        if json_end == -1:
+            json_end = len(normalized_payload)
+        complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+
+        assert complete_data["metadata_repair_attempted"] == 1
+        assert complete_data["existing_imdb_rows_repaired"] == 7
+        assert complete_data["metadata_enrichment_failed"] == 0
+
+    def test_reprocess_stream_retries_auto_count_failures_and_reports_failed_parts(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images._auto_count_cast_photos",
+                side_effect=[(10, 7, 3), (3, 2, 1)],
+            ) as cast_retry_mock:
+                with patch(
+                    "api.routers.admin_person_images._auto_count_media_links",
+                    side_effect=[(4, 3, 1), (1, 1, 0)],
+                ) as media_retry_mock:
+                    response = client.post(
+                        f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                        json={
+                            "run_metadata": False,
+                            "run_count": True,
+                            "run_id_text": False,
+                            "run_crop": False,
+                            "run_resize": False,
+                        },
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+        assert response.status_code == 200
+        assert cast_retry_mock.call_count == 2
+        assert media_retry_mock.call_count == 2
+
+        normalized_payload = response.text.replace("\r\n", "\n")
+        complete_index = normalized_payload.rfind("event: complete")
+        assert complete_index >= 0
+        data_index = normalized_payload.find("data:", complete_index)
+        assert data_index >= 0
+        json_start = normalized_payload.find("{", data_index)
+        assert json_start >= 0
+        json_end = normalized_payload.find("\n\n", json_start)
+        if json_end == -1:
+            json_end = len(normalized_payload)
+        complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+
+        assert complete_data["retry_attempts"]["auto_count"] == 2
+        assert complete_data["auto_counts_failed"] == 1
+        failed_parts = complete_data.get("failed_parts") or []
+        assert any(
+            isinstance(part, dict)
+            and part.get("part") == "people_count_face_crops"
+            and int(part.get("failed", 0)) == 1
+            for part in failed_parts
+        )
+
 
 class TestUpdateFacebankSeed:
     """Test PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed."""
 
     def test_allows_allowlist_user(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
         monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
         person_id = str(uuid4())
         link_id = str(uuid4())
-        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+        token = _make_allowlist_user_token("test-secret-32-bytes-minimum-abcdef", "admin@example.com")
 
         mock_db = MagicMock()
         _mock_media_link_lookup(
@@ -1789,12 +2231,12 @@ class TestUpdateFacebankSeed:
         assert data["facebank_seed"] is True
 
     def test_rejects_service_role_without_internal_secret_header(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
         monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
         person_id = str(uuid4())
         link_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -1808,12 +2250,12 @@ class TestUpdateFacebankSeed:
         assert "Allowlist admin access required" in response.json()["detail"]
 
     def test_rejects_service_role_with_invalid_internal_secret_header(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
         monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
         person_id = str(uuid4())
         link_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
@@ -1830,12 +2272,12 @@ class TestUpdateFacebankSeed:
         assert "Allowlist admin access required" in response.json()["detail"]
 
     def test_allows_service_role_with_valid_internal_secret_header(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
         monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
         person_id = str(uuid4())
         link_id = str(uuid4())
-        token = _make_admin_token("test-secret")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
         mock_db = MagicMock()
         _mock_media_link_lookup(
@@ -1870,11 +2312,11 @@ class TestUpdateFacebankSeed:
         assert data["facebank_seed"] is True
 
     def test_returns_404_when_media_link_not_found(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
         person_id = str(uuid4())
         link_id = str(uuid4())
-        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+        token = _make_allowlist_user_token("test-secret-32-bytes-minimum-abcdef", "admin@example.com")
 
         mock_db = MagicMock()
         _mock_media_link_lookup(mock_db, None)
@@ -1890,11 +2332,11 @@ class TestUpdateFacebankSeed:
         assert "Media link not found" in response.json()["detail"]
 
     def test_returns_409_when_media_link_is_not_person_gallery(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
         person_id = str(uuid4())
         link_id = str(uuid4())
-        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+        token = _make_allowlist_user_token("test-secret-32-bytes-minimum-abcdef", "admin@example.com")
 
         mock_db = MagicMock()
         _mock_media_link_lookup(
@@ -1919,12 +2361,12 @@ class TestUpdateFacebankSeed:
         assert "not a person gallery image" in response.json()["detail"]
 
     def test_returns_409_when_media_link_person_mismatch(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
         person_id = str(uuid4())
         other_person_id = str(uuid4())
         link_id = str(uuid4())
-        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+        token = _make_allowlist_user_token("test-secret-32-bytes-minimum-abcdef", "admin@example.com")
 
         mock_db = MagicMock()
         _mock_media_link_lookup(
@@ -1949,11 +2391,11 @@ class TestUpdateFacebankSeed:
         assert "does not belong to this person" in response.json()["detail"]
 
     def test_returns_502_when_update_media_link_fails(self, client, monkeypatch):
-        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
         person_id = str(uuid4())
         link_id = str(uuid4())
-        token = _make_allowlist_user_token("test-secret", "admin@example.com")
+        token = _make_allowlist_user_token("test-secret-32-bytes-minimum-abcdef", "admin@example.com")
 
         mock_db = MagicMock()
         _mock_media_link_lookup(

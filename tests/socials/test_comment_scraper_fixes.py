@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -12,9 +13,11 @@ import requests
 
 from trr_backend.socials.instagram.scraper import InstagramScraper
 from trr_backend.socials.instagram.scraper import ScrapeConfig as InstagramScrapeConfig
+from trr_backend.socials.facebook.scraper import FacebookScraper
 from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
+from trr_backend.socials.threads.scraper import ThreadsScraper
 from trr_backend.socials.twitter.scraper import Tweet, TwitterScrapeConfig, TwitterScraper, mirror_tweet_media
-from trr_backend.socials.youtube.scraper import YouTubeScrapeConfig, YouTubeScraper
+from trr_backend.socials.youtube.scraper import YouTubeScrapeConfig, YouTubeScraper, YouTubeVideo
 
 
 @dataclass
@@ -103,6 +106,22 @@ def test_tiktok_fetch_user_detail_applies_request_timeout(monkeypatch: pytest.Mo
     assert captured_timeout == scraper.REQUEST_TIMEOUT_SECONDS
 
 
+def test_tiktok_parse_ytdlp_metadata_extracts_author_avatar() -> None:
+    scraper = TikTokScraper()
+    config = TikTokScrapeConfig(username="bravotv")
+    post = scraper._parse_ytdlp_metadata(  # noqa: SLF001
+        {
+            "id": "tt-1",
+            "timestamp": 1735689600,
+            "description": "RHOSLC clip",
+            "uploader": "bravotv",
+            "uploader_avatar": "https://images.test/tiktok-avatar.jpg",
+        },
+        config,
+    )
+    assert post.user_avatar_url == "https://images.test/tiktok-avatar.jpg"
+
+
 def test_youtube_parses_comment_view_model_schema() -> None:
     scraper = YouTubeScraper()
     entity_index = {
@@ -183,6 +202,30 @@ def test_youtube_parse_video_renderer_marks_shorts_and_canonical_url() -> None:
     assert parsed.url == "https://www.youtube.com/shorts/short12345"
 
 
+def test_youtube_parse_video_renderer_extracts_channel_avatar() -> None:
+    scraper = YouTubeScraper()
+    config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[])
+    renderer = {
+        "videoId": "vid123",
+        "title": {"runs": [{"text": "RHOSLC clip"}]},
+        "shortBylineText": {"runs": [{"text": "@Bravo"}]},
+        "channelThumbnailSupportedRenderers": {
+            "channelThumbnailWithLinkRenderer": {
+                "thumbnail": {
+                    "thumbnails": [
+                        {"url": "https://images.test/channel-small.jpg", "width": 32, "height": 32},
+                        {"url": "https://images.test/channel-large.jpg", "width": 88, "height": 88},
+                    ]
+                }
+            }
+        },
+    }
+
+    parsed = scraper._parse_video_renderer(renderer, config)  # noqa: SLF001
+    assert parsed is not None
+    assert parsed.user_avatar_url == "https://images.test/channel-large.jpg"
+
+
 def test_youtube_process_video_data_filters_non_matching_owner() -> None:
     scraper = YouTubeScraper()
     config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[])
@@ -226,6 +269,15 @@ def test_youtube_process_video_data_filters_non_matching_owner() -> None:
     assert ownership_filtered[0] == 1
 
 
+def test_youtube_matches_keywords_can_be_disabled() -> None:
+    config = YouTubeScrapeConfig(
+        channel_handle="bravo",
+        keywords=["RHOSLC"],
+        enforce_keyword_filter=False,
+    )
+    assert config.matches_keywords("Generic Bravo trailer with no show terms") is True
+
+
 def test_youtube_fetch_comments_applies_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = YouTubeScraper()
     captured_get: dict[str, object] = {}
@@ -253,6 +305,44 @@ def test_youtube_fetch_comments_applies_request_timeout(monkeypatch: pytest.Monk
     assert comments == []
     assert captured_get["timeout"] == scraper.REQUEST_TIMEOUT_SECONDS
     assert captured_post["timeout"] == scraper.REQUEST_TIMEOUT_SECONDS
+
+
+def test_youtube_enrich_via_ytdlp_backfills_duration_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = YouTubeScraper()
+    video = YouTubeVideo(
+        video_id="qBSM51RWLAw",
+        title="And that's all in one season!",
+        description="#RHOSLC",
+        date_time="2025-08-28 14:28:26",
+        published_at=1756391306,
+        channel_id="",
+        channel_title="Bravo",
+        duration="",
+        duration_seconds=0,
+        views=44600,
+        likes=1200,
+        comments=70,
+        url="https://www.youtube.com/shorts/qBSM51RWLAw",
+        thumbnail_url="https://example.com/thumb.jpg",
+        tags=[],
+        keywords_matched=["RHOSLC"],
+        is_short=True,
+        source_surface="shorts",
+    )
+
+    payload = {"duration": 51, "view_count": 44600, "like_count": 1200, "comment_count": 70}
+
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _name: "/usr/local/bin/yt-dlp")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+    )
+
+    scraper._enrich_videos_via_ytdlp([video], delay=0)  # noqa: SLF001
+
+    assert video.duration_seconds == 51
+    assert video.duration == "PT51S"
 
 
 def test_youtube_estimate_publish_date_parses_absolute_premiere_date() -> None:
@@ -416,6 +506,30 @@ def test_youtube_ytdlp_owner_match_requires_exact_channel_id() -> None:
     )
 
 
+def test_facebook_extract_owner_avatar_url_prefers_owner_fields() -> None:
+    scraper = FacebookScraper()
+    html_text = (
+        '"owner_as_page":{"name":"BravoTV","profile_picture":{"uri":"https:\\/\\/images.test\\/fb-avatar.jpg"}}'
+    )
+    avatar = scraper._extract_owner_avatar_url(html_text)  # noqa: SLF001
+    assert avatar == "https://images.test/fb-avatar.jpg"
+
+
+def test_threads_build_post_from_html_extracts_user_avatar() -> None:
+    scraper = ThreadsScraper()
+    html_text = """
+      <meta property="og:url" content="https://www.threads.com/@bravotv/post/C12345" />
+      <meta property="og:description" content="RHOSLC teaser" />
+      "profile_pic_url":"https:\\/\\/images.test\\/threads-avatar.jpg"
+    """
+    post = scraper._build_post_from_html(  # noqa: SLF001
+        url="https://www.threads.com/@bravotv/post/C12345",
+        html_text=html_text,
+        username="bravotv",
+    )
+    assert post.user_avatar_url == "https://images.test/threads-avatar.jpg"
+
+
 def test_twitter_extract_media_urls_from_link_preview_card() -> None:
     scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
     media_urls, preview_count = scraper._extract_media_urls_from_tweet(  # noqa: SLF001
@@ -567,8 +681,23 @@ def test_twitter_fetch_public_tweet_summary_includes_reply_count_and_media(monke
 
     payload = {
         "id_str": "123",
+        "text": "photo drop https://t.co/media123 details https://t.co/news456",
         "favorite_count": 77,
         "conversation_count": 89,
+        "entities": {
+            "media": [
+                {
+                    "url": "https://t.co/media123",
+                    "expanded_url": "https://twitter.com/BravoTV/status/123/photo/1",
+                }
+            ],
+            "urls": [
+                {
+                    "url": "https://t.co/news456",
+                    "expanded_url": "https://www.bravotv.com/news/story",
+                }
+            ],
+        },
         "user": {
             "id_str": "u-1",
             "name": "Bravo",
@@ -609,6 +738,7 @@ def test_twitter_fetch_public_tweet_summary_includes_reply_count_and_media(monke
     assert summary["user_avatar_url"] == "https://pbs.twimg.com/profile_images/bravo.jpg"
     assert summary["likes"] == 77
     assert summary["replies"] == 89
+    assert summary["text"] == "photo drop details https://t.co/news456"
     assert "https://video.twimg.com/vid/1280x720/b.mp4" in summary["media_urls"]
     assert "https://pbs.twimg.com/media/thumb.jpg" in summary["media_urls"]
 
@@ -649,6 +779,153 @@ def test_twitter_parse_tweet_result_reads_username_from_core_fallback() -> None:
     assert parsed.user_id == "999"
     assert parsed.user_profile_url == "https://x.com/tester"
     assert parsed.user_avatar_url == "https://pbs.twimg.com/profile_images/test.jpg"
+
+
+def test_twitter_fetch_tweet_detail_summary_strips_media_url_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    scraper._detail_hash = "detail-hash"
+    scraper._search_hash = "search-hash"
+
+    payload = {
+        "data": {
+            "threaded_conversation_with_injections_v2": {
+                "instructions": [
+                    {
+                        "type": "TimelineAddEntries",
+                        "entries": [
+                            {
+                                "entryId": "tweet-123",
+                                "content": {
+                                    "itemContent": {
+                                        "tweet_results": {
+                                            "result": {
+                                                "__typename": "Tweet",
+                                                "legacy": {
+                                                    "id_str": "123",
+                                                    "full_text": "clip https://t.co/media123 read https://t.co/news456",
+                                                    "created_at": "Thu Feb 13 12:34:56 +0000 2026",
+                                                    "favorite_count": 1,
+                                                    "reply_count": 2,
+                                                    "retweet_count": 3,
+                                                    "quote_count": 4,
+                                                    "extended_entities": {
+                                                        "media": [
+                                                            {
+                                                                "type": "photo",
+                                                                "url": "https://t.co/media123",
+                                                                "media_url_https": "https://pbs.twimg.com/media/test.jpg",
+                                                            }
+                                                        ]
+                                                    },
+                                                    "entities": {
+                                                        "urls": [
+                                                            {
+                                                                "url": "https://t.co/news456",
+                                                                "expanded_url": "https://www.bravotv.com/news/story",
+                                                            }
+                                                        ]
+                                                    },
+                                                },
+                                                "core": {
+                                                    "user_results": {
+                                                        "result": {
+                                                            "core": {"screen_name": "BravoTV", "name": "Bravo"},
+                                                            "legacy": {"profile_image_url_https": "https://images.test/avatar.jpg"},
+                                                        }
+                                                    }
+                                                },
+                                                "views": {"count": "5"},
+                                            }
+                                        }
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_discover_graphql_hashes", lambda: None)
+    monkeypatch.setattr(scraper, "_get_headers", lambda: {})
+    monkeypatch.setattr(scraper.session, "get", lambda *_args, **_kwargs: _FakeResponse(status_code=200, payload=payload))
+
+    summary = scraper.fetch_tweet_detail_summary("123", delay=0)
+    assert summary is not None
+    assert summary["text"] == "clip read https://t.co/news456"
+
+
+def test_twitter_parse_tweet_result_strips_media_url_tokens_from_text() -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+
+    parsed = scraper._parse_tweet_result(  # noqa: SLF001
+        {
+            "__typename": "Tweet",
+            "legacy": {
+                "id_str": "124",
+                "full_text": "clip https://t.co/media123 and read https://t.co/news456",
+                "favorite_count": 1,
+                "retweet_count": 2,
+                "reply_count": 3,
+                "quote_count": 4,
+                "created_at": "Thu Feb 13 12:34:56 +0000 2026",
+                "extended_entities": {
+                    "media": [
+                        {
+                            "type": "photo",
+                            "url": "https://t.co/media123",
+                            "media_url_https": "https://pbs.twimg.com/media/test.jpg",
+                        }
+                    ]
+                },
+                "entities": {
+                    "urls": [
+                        {"url": "https://t.co/news456", "expanded_url": "https://www.bravotv.com/news/story"}
+                    ]
+                },
+            },
+            "core": {
+                "user_results": {
+                    "result": {
+                        "core": {"screen_name": "tester", "name": "Test User"},
+                    }
+                }
+            },
+            "views": {"count": "10"},
+        },
+        TwitterScrapeConfig(query="x", date_start=datetime(2026, 2, 1), date_end=datetime(2026, 2, 14)),
+    )
+    assert parsed is not None
+    assert parsed.text == "clip and read https://t.co/news456"
+
+
+def test_twitter_parse_syndication_tweet_strips_media_tco_from_url_entities() -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    parsed = scraper._parse_syndication_tweet(  # noqa: SLF001
+        {
+            "id_str": "125",
+            "created_at": "Thu Feb 13 12:34:56 +0000 2026",
+            "text": "photo https://t.co/media123 story https://t.co/news456",
+            "entities": {
+                "urls": [
+                    {
+                        "url": "https://t.co/media123",
+                        "expanded_url": "https://x.com/BravoTV/status/125/photo/1",
+                    },
+                    {
+                        "url": "https://t.co/news456",
+                        "expanded_url": "https://www.bravotv.com/news/story",
+                    },
+                ]
+            },
+            "user": {"screen_name": "BravoTV", "name": "Bravo"},
+        },
+        TwitterScrapeConfig(query="x", date_start=datetime(2026, 2, 1), date_end=datetime(2026, 2, 14)),
+    )
+    assert parsed is not None
+    assert parsed.text == "photo story https://t.co/news456"
 
 
 def test_twitter_parse_tweet_result_detects_legacy_quote_fields() -> None:
@@ -792,8 +1069,13 @@ def test_twitter_fetch_tweet_quotes_keeps_legacy_quote_entries(monkeypatch: pyte
 
     captured_queries: list[str] = []
 
-    def _fake_fetch_search(query: str, cursor: str | None = None, delay: float = 2.0) -> dict:
-        del cursor, delay
+    def _fake_fetch_search(
+        query: str,
+        cursor: str | None = None,
+        delay: float = 2.0,
+        **kwargs,
+    ) -> dict:
+        del cursor, delay, kwargs
         captured_queries.append(query)
         return payload
 
@@ -814,8 +1096,8 @@ def test_twitter_fetch_tweet_quotes_sets_failure_reason_on_http_error(monkeypatc
     scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
     search_calls = 0
 
-    def _fake_fetch_search(query: str, cursor: str | None = None, delay: float = 2.0) -> None:
-        del query, cursor, delay
+    def _fake_fetch_search(query: str, cursor: str | None = None, delay: float = 2.0, **kwargs) -> None:
+        del query, cursor, delay, kwargs
         nonlocal search_calls
         search_calls += 1
         scraper._last_graphql_status_code = 404  # noqa: SLF001
@@ -823,6 +1105,7 @@ def test_twitter_fetch_tweet_quotes_sets_failure_reason_on_http_error(monkeypatc
 
     monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
     monkeypatch.setattr(scraper, "_fetch_quotes_via_tweet_detail", lambda *args, **kwargs: [])
+    monkeypatch.setattr(scraper, "_fetch_tweet_quotes_via_playwright", lambda **kwargs: [])
     monkeypatch.setattr(scraper, "_discover_graphql_hashes", lambda: None)
     monkeypatch.setattr(scraper, "_fetch_search", _fake_fetch_search)
 
@@ -837,8 +1120,8 @@ def test_twitter_fetch_tweet_quotes_falls_back_to_twikit(monkeypatch: pytest.Mon
     scraper = TwitterScraper(cookies={"ct0": "csrf-token"}, twikit_credentials={"auth_token": "a", "ct0": "b"})
     search_calls = 0
 
-    def _fake_fetch_search(query: str, cursor: str | None = None, delay: float = 2.0) -> None:
-        del query, cursor, delay
+    def _fake_fetch_search(query: str, cursor: str | None = None, delay: float = 2.0, **kwargs) -> None:
+        del query, cursor, delay, kwargs
         nonlocal search_calls
         search_calls += 1
         scraper._last_graphql_status_code = 404  # noqa: SLF001
@@ -883,6 +1166,46 @@ def test_twitter_fetch_tweet_quotes_falls_back_to_twikit(monkeypatch: pytest.Mon
     assert len(quotes) == 1
     assert quotes[0].tweet_id == "quote-77"
     assert scraper.last_quote_fetch_reason is None
+
+
+def test_twitter_fetch_tweet_quotes_falls_back_to_playwright(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token", "auth_token": "session-token"})
+    quote = Tweet(
+        tweet_id="quote-playwright-1",
+        date_time="",
+        created_at=0,
+        text="quote body",
+        hashtags=[],
+        mentions=[],
+        likes=1,
+        retweets=0,
+        replies=0,
+        quotes=0,
+        views=0,
+        url="https://x.com/viewer/status/quote-playwright-1",
+        username="viewer",
+        display_name="Viewer",
+        user_verified=False,
+        is_reply=False,
+        is_retweet=False,
+        is_quote=True,
+        reply_to_tweet_id=None,
+        quoted_tweet_id="root-123",
+    )
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_tweet_quotes_via_search", lambda **kwargs: [])
+    monkeypatch.setattr(scraper, "_fetch_quotes_via_tweet_detail", lambda *args, **kwargs: [])
+    monkeypatch.setattr(scraper, "_fetch_tweet_quotes_via_playwright", lambda **kwargs: [quote])
+
+    quotes = scraper.fetch_tweet_quotes("root-123", delay=0, max_pages=1)
+
+    assert len(quotes) == 1
+    assert quotes[0].tweet_id == "quote-playwright-1"
+    assert scraper.last_quote_fetch_reason is None
+    assert scraper.last_quote_fetch_meta["source_used"] == "playwright"
+    attempts = scraper.last_quote_fetch_meta["attempts"]
+    assert any(a["source"] == "playwright" and a["count"] == 1 for a in attempts)
 
 
 def test_twitter_fetch_tweet_quotes_prefers_search_before_tweet_detail(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -999,8 +1322,8 @@ def test_twitter_fetch_tweet_quotes_caches_search_404_between_calls(monkeypatch:
         quoted_tweet_id="root-123",
     )
 
-    def _fake_fetch_search(query: str, cursor: str | None = None, delay: float = 2.0) -> None:
-        del query, cursor, delay
+    def _fake_fetch_search(query: str, cursor: str | None = None, delay: float = 2.0, **kwargs) -> None:
+        del query, cursor, delay, kwargs
         nonlocal search_calls
         search_calls += 1
         scraper._last_graphql_status_code = 404  # noqa: SLF001
@@ -1191,6 +1514,148 @@ def test_twitter_fetch_tweet_replies_falls_back_to_twikit(monkeypatch: pytest.Mo
     assert scraper.last_reply_fetch_reason is None
 
 
+def test_twitter_parse_twikit_tweet_uses_safe_fields_and_extracts_media() -> None:
+    scraper = TwitterScraper()
+    config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
+    raw_tweet = SimpleNamespace(
+        id="reply-1",
+        created_at="Thu Aug 14 10:30:00 +0000 2025",
+        full_text="We are so back https://t.co/media123 details https://t.co/news456",
+        text="",
+        favorite_count=10,
+        retweet_count=2,
+        reply_count=3,
+        quote_count=4,
+        view_count=1200,
+        in_reply_to="1956000357282406729",
+        quoted_tweet=None,
+        quoted_tweet_id="",
+        retweeted_tweet_id="1956000357282406728",
+        user=SimpleNamespace(
+            screen_name="tvdeets",
+            name="TV Deets",
+            id="user-1",
+            profile_image_url_https="https://images.test/avatar.jpg",
+        ),
+        _legacy={
+            "quoted_status_id_str": "1956000357282406729",
+            "extended_entities": {
+                "media": [
+                    {
+                        "type": "video",
+                        "url": "https://t.co/media123",
+                        "video_info": {
+                            "variants": [
+                                {"content_type": "video/mp4", "url": "https://video.twimg.com/ext/abc.mp4"},
+                            ]
+                        },
+                    },
+                    {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/abc.jpg"},
+                ]
+            },
+            "entities": {
+                "urls": [{"url": "https://t.co/news456", "expanded_url": "https://www.bravotv.com/news/story"}]
+            }
+        },
+        _data={},
+    )
+
+    tweet = scraper._parse_twikit_tweet(raw_tweet, config)  # noqa: SLF001
+    assert tweet is not None
+    assert tweet.tweet_id == "reply-1"
+    assert tweet.is_retweet is True
+    assert tweet.is_quote is True
+    assert tweet.quoted_tweet_id == "1956000357282406729"
+    assert tweet.text == "We are so back details https://t.co/news456"
+    assert "https://video.twimg.com/ext/abc.mp4" in tweet.media_urls
+    assert "https://pbs.twimg.com/media/abc.jpg" in tweet.media_urls
+
+
+def test_twitter_fetch_tweet_replies_respects_custom_search_and_twikit_page_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"}, twikit_credentials={"auth_token": "a", "ct0": "b"})
+
+    def _raise_request(*_args, **_kwargs):
+        response = requests.Response()
+        response.status_code = 500
+        raise requests.exceptions.HTTPError(response=response)
+
+    search_pages: list[int] = []
+    twikit_pages: list[int] = []
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_discover_graphql_hashes", lambda: None)
+    monkeypatch.setattr(scraper.session, "get", _raise_request)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_tweet_replies_via_search",
+        lambda **kwargs: (search_pages.append(int(kwargs["max_pages"])) or []),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_tweet_replies_via_twikit",
+        lambda **kwargs: (twikit_pages.append(int(kwargs["max_pages"])) or []),
+    )
+
+    replies = scraper.fetch_tweet_replies(
+        "1956000357282406729",
+        delay=0.0,
+        search_max_pages=17,
+        twikit_max_pages=9,
+    )
+    assert replies == []
+    assert search_pages == [17]
+    assert twikit_pages == [9]
+
+
+def test_twitter_fetch_tweet_quotes_passes_max_pages_to_search_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    search_pages: list[int] = []
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_tweet_quotes_via_search",
+        lambda **kwargs: (search_pages.append(int(kwargs["max_pages"])) or []),
+    )
+    monkeypatch.setattr(scraper, "_fetch_quotes_via_tweet_detail", lambda **_kwargs: [])
+    monkeypatch.setattr(scraper, "_fetch_tweet_quotes_via_playwright", lambda **_kwargs: [])
+    monkeypatch.setattr(scraper, "_twikit_credentials", None)
+
+    quotes = scraper.fetch_tweet_quotes("1956000357282406729", delay=0.0, max_pages=27)
+    assert quotes == []
+    assert search_pages == [27]
+
+
+def test_twitter_search_tweets_via_twikit_keeps_partial_results_on_later_page_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = TwitterScraper(twikit_credentials={"auth_token": "a", "ct0": "b"})
+
+    class _FakeCursor(list):
+        async def next(self):
+            raise RuntimeError("429 rate limited")
+
+    class _FakeTwikitClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def set_cookies(self, _cookies: dict[str, str]) -> None:
+            return None
+
+        async def search_tweet(self, _query: str, _mode: str, count: int = 20):
+            assert count == 20
+            return _FakeCursor([SimpleNamespace(id="r1")])
+
+    monkeypatch.setitem(sys.modules, "twikit", SimpleNamespace(Client=_FakeTwikitClient))
+    raw_results = scraper._search_tweets_via_twikit(query="conversation_id:123", max_pages=5, delay=0.0)  # noqa: SLF001
+    assert len(raw_results) == 1
+    assert str(getattr(raw_results[0], "id", "")) == "r1"
+    assert scraper._last_twikit_search_error == "rate_limited"  # noqa: SLF001
+
+
 def test_instagram_parse_post_node_populates_media_urls_and_thumbnail() -> None:
     scraper = InstagramScraper(cookies={})
     config = InstagramScrapeConfig(username="bravotv")
@@ -1270,6 +1735,79 @@ def test_instagram_parse_post_node_supports_actor_style_payload_and_normalizes_m
     assert parsed.mentions == ["@DisneyPlus", "@hulu"]
     assert parsed.profile_tags == ["natgeo", "natgeoanimals"]
     assert parsed.collaborators == ["amivitale", "natgeoanimals"]
+
+
+def test_instagram_parse_post_node_extracts_compact_reel_views_and_reel_url() -> None:
+    scraper = InstagramScraper(cookies={})
+    config = InstagramScrapeConfig(username="fallback-user")
+    node = {
+        "id": "3706348645359165044",
+        "shortCode": "DNvmHS0Yh50",
+        "type": "Video",
+        "productType": "clips",
+        "timestamp": "2025-08-24T16:00:37.000Z",
+        "caption": "Stream next day",
+        "likesCount": 10,
+        "commentsCount": 2,
+        "play_count": "13.7K",
+    }
+
+    parsed = scraper._parse_post_node(node, config)  # noqa: SLF001
+    assert parsed.post_type == "reel"
+    assert parsed.video_views == 13_700
+    assert parsed.video_views_observed == 13_700
+    assert parsed.video_views_source is not None
+    assert parsed.url == "https://www.instagram.com/reel/DNvmHS0Yh50/"
+
+
+def test_instagram_parse_post_node_extracts_nested_gallery_view_metric() -> None:
+    scraper = InstagramScraper(cookies={})
+    config = InstagramScrapeConfig(username="fallback-user")
+    node = {
+        "id": "3706348645359165044",
+        "shortCode": "DNvmHS0Yh50",
+        "type": "Video",
+        "productType": "clips",
+        "timestamp": "2025-08-24T16:00:37.000Z",
+        "caption": "Stream next day",
+        "likesCount": 10,
+        "commentsCount": 2,
+        "clips_metadata": {
+            "view_count": 2151,
+        },
+    }
+
+    parsed = scraper._parse_post_node(node, config)  # noqa: SLF001
+    assert parsed.video_views == 2151
+    assert parsed.video_views_observed == 2151
+    assert parsed.video_views_source is not None
+
+
+def test_instagram_fetch_post_info_falls_back_to_permalink_media_item_on_html(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "ok"})
+    node = {"id": "media-1", "video_view_count": 312}
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(
+        scraper,
+        "_get",
+        lambda *_args, **_kwargs: _FakeResponse(
+            status_code=200,
+            payload={},
+            headers={"content-type": "text/html"},
+            text="<html>challenge</html>",
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.permalink_metadata.fetch_permalink_media_item",
+        lambda *_args, **_kwargs: node,
+    )
+
+    payload = scraper.fetch_post_info("DNvmHS0Yh50", delay=0)
+    assert payload == {"items": [node]}
+    assert scraper.last_post_info_fetch_reason == "fallback_permalink_media_item"
 
 
 def test_instagram_parse_comment_supports_actor_style_payload_with_nested_replies() -> None:
@@ -1508,10 +2046,36 @@ def test_tiktok_parse_post_item_supports_actor_style_payload() -> None:
     assert parsed.saves == 471
     assert parsed.views == 147200000
     assert parsed.url == "https://www.tiktok.com/@chunniuc/video/7553309587378539831"
-    assert parsed.media_urls == ["https://cdn.example.com/video.mp4"]
-    assert parsed.thumbnail_url == "https://cdn.example.com/cover.jpg"
-    assert parsed.hashtags == ["funny", "fyp", "prank"]
-    assert parsed.mentions == ["hulu", "DisneyPlus"]
+
+
+def test_tiktok_parse_post_item_coerces_metric_suffixes_and_commas() -> None:
+    scraper = TikTokScraper()
+    config = TikTokScrapeConfig(
+        username="bravotv",
+        date_start=datetime(2026, 1, 1),
+        date_end=datetime(2026, 1, 2),
+    )
+    item = {
+        "id": "123",
+        "createTime": 1735689600,
+        "desc": "metric post",
+        "stats": {
+            "diggCount": "1,234",
+            "commentCount": "2.5K",
+            "shareCount": "3M",
+            "collectCount": "",
+            "playCount": None,
+        },
+        "statsV2": {"collectCount": "4.2K", "playCount": "7B"},
+        "author": {"uniqueId": "bravotv"},
+    }
+
+    post = scraper._parse_post_item(item, config)  # noqa: SLF001
+    assert post.likes == 1234
+    assert post.comments == 2500
+    assert post.shares == 3_000_000
+    assert post.saves == 4200
+    assert post.views == 7_000_000_000
 
 
 def test_tiktok_parse_comment_supports_actor_style_payload_with_nested_replies() -> None:
@@ -1888,7 +2452,11 @@ def test_youtube_scrape_keeps_paging_through_too_recent_no_hit_pages(monkeypatch
     continuation_tokens = ["token-1", "token-2", "token-3", "token-4", "token-5", None]
     page_idx = 0
 
-    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None)
+    monkeypatch.setattr(
+        scraper,
+        "fetch_channel_videos",
+        lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None,
+    )
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: "token-0")
     monkeypatch.setattr(scraper, "_fetch_continuation", lambda token, delay=0: {"ok": True})
@@ -1929,7 +2497,8 @@ def test_youtube_scrape_keeps_paging_through_too_recent_no_hit_pages(monkeypatch
 
     assert [video.video_id for video in videos] == ["vid-in-range"]
     assert int(scraper.last_retrieval_meta.get("continuation_pages") or 0) == 6
-    assert int(scraper.last_retrieval_meta.get("pre_window_pages") or 0) == 5
+    assert int(scraper.last_retrieval_meta.get("pre_window_pages") or 0) == 0
+    assert int(scraper.last_retrieval_meta.get("after_window_pages") or 0) == 5
 
 
 def test_youtube_scrape_stops_when_pre_window_cap_is_reached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1943,7 +2512,11 @@ def test_youtube_scrape_stops_when_pre_window_cap_is_reached(monkeypatch: pytest
     continuation_tokens = ["token-1", "token-2", "token-3", "token-4", None]
     page_idx = 0
 
-    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None)
+    monkeypatch.setattr(
+        scraper,
+        "fetch_channel_videos",
+        lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None,
+    )
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: "token-0")
     monkeypatch.setattr(scraper, "_fetch_continuation", lambda token, delay=0: {"ok": True})
@@ -1956,13 +2529,13 @@ def test_youtube_scrape_stops_when_pre_window_cap_is_reached(monkeypatch: pytest
 
     def _fake_parse(renderer: dict, cfg: YouTubeScrapeConfig, **_kwargs) -> SimpleNamespace:
         del cfg
-        ts = int(datetime(2025, 12, 1, tzinfo=UTC).timestamp())
+        ts = int(datetime(2025, 9, 1, tzinfo=UTC).timestamp())
         return SimpleNamespace(
             video_id=f"vid-too-recent-{renderer.get('page_index')}",
             title="Generic Bravo post",
             description="",
             published_at=ts,
-            date_time="2025-12-01 00:00:00",
+            date_time="2025-09-01 00:00:00",
             published_text="",
         )
 

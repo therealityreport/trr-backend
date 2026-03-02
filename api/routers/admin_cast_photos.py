@@ -127,7 +127,11 @@ def detect_text_overlay_cast_photo(
             detect_and_update_cast_photo_text_overlay,
         )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Text overlay detection module not available: {exc}") from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Text overlay detection module not available",
+            headers={"x-error-code": "VISION_MODULE_UNAVAILABLE"},
+        ) from exc
 
     try:
         result = detect_and_update_cast_photo_text_overlay(db, photo_id_str, force=force)
@@ -140,7 +144,11 @@ def detect_text_overlay_cast_photo(
     except (TextOverlayTargetFetchError, TextOverlayDatabaseError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Text overlay detection failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail="Text overlay detection failed",
+            headers={"x-error-code": "VISION_DETECTION_FAILED"},
+        ) from exc
 
     status = "unknown" if result.status == "unknown" else ("detected" if force else "ok")
     return DetectTextOverlayResponse(
@@ -176,7 +184,11 @@ def generate_variants_for_cast_photo(
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to generate variants: {exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate variants",
+            headers={"x-error-code": "MEDIA_VARIANTS_FAILED"},
+        ) from exc
 
     crop_signature = variants[0].crop_signature if variants else ("base" if not payload.crop else "custom")
     return GenerateCastPhotoVariantsResponse(

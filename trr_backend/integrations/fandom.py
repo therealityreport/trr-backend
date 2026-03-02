@@ -12,7 +12,7 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 
 try:
     import requests
@@ -35,6 +35,17 @@ _NOT_FOUND_MARKERS = (
     "oops! we can't find this page",
     "page not found",
     "special:badtitle",
+)
+_FANDOM_SPECIAL_PAGE_PREFIXES = (
+    "special:",
+    "file:",
+    "category:",
+    "template:",
+    "user:",
+    "help:",
+    "forum:",
+    "talk:",
+    "message wall:",
 )
 
 _ORDINAL_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)", re.IGNORECASE)
@@ -437,23 +448,168 @@ def fetch_fandom_page(
     return FandomPageFetchResult(url=url, status_code=None, html=None, error=last_error)
 
 
-def search_fandom_community_wiki(
+def _extract_fandom_search_result_candidates_from_html(
+    html: str,
+    *,
+    community_domain: str,
+    limit: int,
+) -> list[str]:
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    base_url = f"https://{community_domain}"
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for anchor in soup.select("a[href]"):
+        href = str(anchor.get("href") or "").strip()
+        if not href:
+            continue
+        candidate = str(urljoin(base_url, href)).strip()
+        parsed = urlparse(candidate)
+        host = str(parsed.hostname or "").strip().lower()
+        if host != community_domain:
+            continue
+        path = unquote(parsed.path or "")
+        if "/wiki/" not in path:
+            continue
+        slug = path.split("/wiki/", 1)[1].split("/", 1)[0].strip()
+        if not slug:
+            continue
+        lower_slug = slug.casefold()
+        if any(lower_slug.startswith(prefix) for prefix in _FANDOM_SPECIAL_PAGE_PREFIXES):
+            continue
+        normalized = f"{parsed.scheme}://{parsed.netloc}/wiki/{quote(slug, safe='()_:-')}"
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(normalized)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _fandom_allpages_prefix_candidates(query: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", str(query or "").strip())
+    if not normalized:
+        return []
+    slug = normalized.replace(" ", "_")
+    compact = re.sub(r"[^A-Za-z0-9_()'-]+", "", slug).strip("_")
+    parts = [part for part in re.split(r"[_\s]+", normalized) if part]
+
+    candidates: list[str] = []
+    for raw in (
+        slug,
+        compact,
+        "_".join(parts[:3]) if parts else "",
+        "_".join(parts[:2]) if parts else "",
+        parts[0] if parts else "",
+    ):
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value not in candidates:
+            candidates.append(value)
+    return candidates[:5]
+
+
+def _search_fandom_allpages_candidates(
+    query: str,
+    *,
+    community_domain: str,
+    timeout_seconds: float,
+    limit: int,
+) -> list[str]:
+    headers = {"accept": "application/json"}
+    domain = _normalize_fandom_community_domain(community_domain)
+    if not domain:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for prefix in _fandom_allpages_prefix_candidates(query):
+        params = {
+            "action": "query",
+            "list": "allpages",
+            "apprefix": prefix,
+            "aplimit": limit,
+            "format": "json",
+        }
+        api_query_url = (
+            f"https://{domain}/api.php?"
+            f"{urlencode(params)}"
+        )
+        status, body, _ = fetch_html(api_query_url, timeout=timeout_seconds, headers=headers)
+        if status != 200 or not body:
+            continue
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            continue
+        query_block = payload.get("query") if isinstance(payload, dict) else None
+        if not isinstance(query_block, dict):
+            continue
+        pages = query_block.get("allpages")
+        if not isinstance(pages, list):
+            continue
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            title = str(page.get("title") or "").strip()
+            if not title:
+                continue
+            lower_title = title.casefold()
+            if any(lower_title.startswith(prefix_value) for prefix_value in _FANDOM_SPECIAL_PAGE_PREFIXES):
+                continue
+            candidate = build_fandom_wiki_url_from_name(title, domain)
+            if not candidate:
+                continue
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                return candidates[:limit]
+    return candidates[:limit]
+
+
+def search_fandom_community_wiki_candidates(
     name: str,
     *,
     community_domain: str,
     timeout_seconds: float = 20.0,
-) -> str | None:
+    max_results: int = 5,
+) -> list[str]:
     headers = {"accept": "application/json"}
 
     query = (name or "").strip()
     domain = _normalize_fandom_community_domain(community_domain)
     if not domain:
-        return None
+        return []
     if not query:
-        return None
+        return []
+
+    limit = max(1, min(int(max_results or 1), 20))
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(raw_url: str | None) -> None:
+        candidate = str(raw_url or "").strip()
+        if not candidate:
+            return
+        key = candidate.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate)
+        if len(candidates) > limit:
+            del candidates[limit:]
 
     rest_url = f"https://{domain}/rest.php/v1/search"
-    rest_query_url = f"{rest_url}?{urlencode({'query': query, 'limit': 1})}"
+    rest_query_url = f"{rest_url}?{urlencode({'query': query, 'limit': limit})}"
     status, body, _ = fetch_html(rest_query_url, timeout=timeout_seconds, headers=headers)
     if status == 200 and body:
         try:
@@ -462,41 +618,92 @@ def search_fandom_community_wiki(
             payload = None
         if isinstance(payload, dict):
             items = payload.get("items") or payload.get("results")
-            if isinstance(items, list) and items:
-                item = items[0]
-                if isinstance(item, dict):
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
                     url = item.get("url")
                     if isinstance(url, str) and url.strip():
-                        return url.strip()
+                        add_candidate(url.strip())
+                        if len(candidates) >= limit:
+                            return candidates[:limit]
+                        continue
                     title = item.get("title")
                     if isinstance(title, str) and title.strip():
-                        return build_fandom_wiki_url_from_name(title, domain)
+                        add_candidate(build_fandom_wiki_url_from_name(title, domain))
+                        if len(candidates) >= limit:
+                            return candidates[:limit]
 
     api_url = f"https://{domain}/api.php"
-    api_query_url = f"{api_url}?{urlencode({'action': 'query', 'list': 'search', 'srsearch': query, 'format': 'json'})}"
+    api_query_url = (
+        f"{api_url}?"
+        f"{urlencode({'action': 'query', 'list': 'search', 'srsearch': query, 'srlimit': limit, 'format': 'json'})}"
+    )
     status, body, _ = fetch_html(api_query_url, timeout=timeout_seconds, headers=headers)
     if status != 200 or not body:
-        return None
+        return candidates[:limit]
     try:
         payload = json.loads(body)
     except ValueError:
-        return None
+        return candidates[:limit]
 
     query_block = payload.get("query") if isinstance(payload, dict) else None
     if not isinstance(query_block, dict):
-        return None
+        return candidates[:limit]
     results = query_block.get("search")
     if not isinstance(results, list) or not results:
-        return None
+        return candidates[:limit]
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        title = result.get("title")
+        if isinstance(title, str) and title.strip():
+            add_candidate(build_fandom_wiki_url_from_name(title, domain))
+            if len(candidates) >= limit:
+                break
 
-    first = results[0]
-    if not isinstance(first, dict):
-        return None
+    if len(candidates) < limit:
+        special_search_url = (
+            f"https://{domain}/wiki/Special:Search?"
+            f"{urlencode({'scope': 'internal', 'navigationSearch': 'true', 'query': query})}"
+        )
+        status, body, _ = fetch_html(special_search_url, timeout=timeout_seconds, headers=headers)
+        if status == 200 and body:
+            for candidate in _extract_fandom_search_result_candidates_from_html(
+                body,
+                community_domain=domain,
+                limit=limit,
+            ):
+                add_candidate(candidate)
+                if len(candidates) >= limit:
+                    break
 
-    title = first.get("title")
-    if isinstance(title, str) and title.strip():
-        return build_fandom_wiki_url_from_name(title, domain)
-    return None
+    if len(candidates) < limit:
+        for candidate in _search_fandom_allpages_candidates(
+            query,
+            community_domain=domain,
+            timeout_seconds=timeout_seconds,
+            limit=limit,
+        ):
+            add_candidate(candidate)
+            if len(candidates) >= limit:
+                break
+    return candidates[:limit]
+
+
+def search_fandom_community_wiki(
+    name: str,
+    *,
+    community_domain: str,
+    timeout_seconds: float = 20.0,
+) -> str | None:
+    candidates = search_fandom_community_wiki_candidates(
+        name,
+        community_domain=community_domain,
+        timeout_seconds=timeout_seconds,
+        max_results=1,
+    )
+    return candidates[0] if candidates else None
 
 
 def search_allowlisted_fandom_wikis(

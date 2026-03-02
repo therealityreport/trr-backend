@@ -247,7 +247,12 @@ def is_screenalytics_configured() -> bool:
     return bool(os.getenv("SCREENALYTICS_API_URL", "").strip())
 
 
-def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> PeopleCountResult:
+def count_people(
+    image_url: str,
+    *,
+    mode: DetectorMode = "faces_then_yolo",
+    candidate_person_ids: list[str] | None = None,
+) -> PeopleCountResult:
     if not image_url:
         raise ScreenalyticsClientError("image_url is required")
 
@@ -261,7 +266,21 @@ def count_people(image_url: str, *, mode: DetectorMode = "faces_then_yolo") -> P
             f"Screenalytics temporarily unavailable{reason_suffix}",
             retry_after_s=retry_after_s,
         )
+    normalized_candidates: list[str] = []
+    if isinstance(candidate_person_ids, list):
+        seen_candidates: set[str] = set()
+        for entry in candidate_person_ids:
+            if not isinstance(entry, str):
+                continue
+            normalized = entry.strip()
+            if not normalized or normalized in seen_candidates:
+                continue
+            seen_candidates.add(normalized)
+            normalized_candidates.append(normalized)
+
     payload = {"image_url": image_url, "mode": mode}
+    if normalized_candidates:
+        payload["candidate_person_ids"] = normalized_candidates
     last_error: str | None = None
 
     response: requests.Response | None = None

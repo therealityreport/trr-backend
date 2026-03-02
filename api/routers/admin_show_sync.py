@@ -59,6 +59,7 @@ from trr_backend.media.s3_mirror import (
     mirror_logo_monochrome_variants_row,
     upload_bytes_to_s3,
 )
+from trr_backend.repositories import brand_families
 from trr_backend.repositories.media_assets import update_asset_with_mirror_result
 from trr_backend.repositories.web_scrape_images import (
     create_media_asset_from_scrape,
@@ -82,6 +83,13 @@ def _split_env_list(var_name: str) -> list[str]:
         if item:
             parts.append(item)
     return parts
+
+
+def _field_provided(model: BaseModel, field_name: str) -> bool:
+    fields_set = getattr(model, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(model, "__fields_set__", set())
+    return field_name in fields_set
 
 
 def _is_real_housewives_show(show_name: str | None) -> bool:
@@ -468,9 +476,9 @@ def sync_from_lists(
     imdb_lists = [s.strip() for s in (payload.imdb_lists or []) if isinstance(s, str) and s.strip()]
     tmdb_lists = [s.strip() for s in (payload.tmdb_lists or []) if isinstance(s, str) and s.strip()]
 
-    if not imdb_lists:
+    if not _field_provided(payload, "imdb_lists"):
         imdb_lists = _split_env_list("IMDB_LIST_URL")
-    if not tmdb_lists:
+    if not _field_provided(payload, "tmdb_lists"):
         tmdb_lists = _split_env_list("TMDB_LIST_ID")
 
     if not imdb_lists and not tmdb_lists:
@@ -489,30 +497,36 @@ def sync_from_lists(
     imdb_extra_headers = parse_imdb_headers_json_env()
 
     started = time.perf_counter()
-    candidates = collect_candidates_from_lists(
-        imdb_list_urls=imdb_lists,
-        tmdb_lists=tmdb_lists,
-        tmdb_api_key=tmdb_api_key,
-        resolve_tmdb_external_ids=True,
-        imdb_use_graphql=True,
-        imdb_extra_headers=imdb_extra_headers,
-    )
-    result = upsert_candidates_into_supabase(
-        candidates,
-        dry_run=False,
-        annotate_imdb_episodic=False,
-        tmdb_fetch_details=True,
-        tmdb_fetch_images=False,
-        tmdb_fetch_seasons=False,
-        imdb_fetch_episodes=False,
-        imdb_fetch_cast=False,
-        enrich_show_metadata=True,
-        enrich_region=str(payload.region or "US").upper(),
-        enrich_concurrency=int(payload.concurrency or 5),
-        enrich_force_refresh=bool(payload.force_refresh),
-        supabase_client=db,
-        imdb_episodic_extra_headers=imdb_extra_headers,
-    )
+    try:
+        candidates = collect_candidates_from_lists(
+            imdb_list_urls=imdb_lists,
+            tmdb_lists=tmdb_lists,
+            tmdb_api_key=tmdb_api_key,
+            resolve_tmdb_external_ids=True,
+            imdb_use_graphql=True,
+            imdb_extra_headers=imdb_extra_headers,
+        )
+        result = upsert_candidates_into_supabase(
+            candidates,
+            dry_run=False,
+            annotate_imdb_episodic=False,
+            tmdb_fetch_details=True,
+            tmdb_fetch_images=False,
+            tmdb_fetch_seasons=False,
+            imdb_fetch_episodes=False,
+            imdb_fetch_cast=False,
+            enrich_show_metadata=True,
+            enrich_region=str(payload.region or "US").upper(),
+            enrich_concurrency=int(payload.concurrency or 5),
+            enrich_force_refresh=bool(payload.force_refresh),
+            supabase_client=db,
+            imdb_episodic_extra_headers=imdb_extra_headers,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Sync from lists failed")
+        raise HTTPException(status_code=500, detail=f"Sync failed: {exc}") from exc
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     return SyncFromListsResponse(
@@ -1239,6 +1253,80 @@ def _run_script_step_with_metrics(
     )
 
 
+def _run_brand_family_wikipedia_import_step(*, dry_run: bool) -> SyncNetworksStreamingStepResult:
+    started = time.perf_counter()
+    try:
+        families = brand_families.list_families(active_only=True).get("rows", [])
+        if dry_run:
+            return SyncNetworksStreamingStepResult(
+                status="success",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                exit_code=0,
+                metrics={
+                    "families_total": len(families),
+                    "families_processed": 0,
+                    "wikipedia_rows_imported": 0,
+                    "wikipedia_rows_matched": 0,
+                    "rules_upserted": 0,
+                    "fetch_errors": 0,
+                    "skipped_dry_run": 1,
+                },
+            )
+
+        families_processed = 0
+        wikipedia_rows_imported = 0
+        wikipedia_rows_matched = 0
+        rules_upserted = 0
+        fetch_errors = 0
+
+        for family in families:
+            family_id = str(family.get("id") or "").strip()
+            if not family_id:
+                continue
+            result = brand_families.import_family_wikipedia_show_links(
+                family_id=family_id,
+                actor="sync_networks_streaming",
+                apply_matched=True,
+                import_source="sync_networks_streaming",
+            )
+            families_processed += 1
+            wikipedia_rows_imported += int(result.get("imported_count") or 0)
+            wikipedia_rows_matched += int(result.get("matched_count") or 0)
+            rules_upserted += int(result.get("rules_upserted") or 0)
+            fetch_errors += len(result.get("fetch_errors") or [])
+
+        return SyncNetworksStreamingStepResult(
+            status="success",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            exit_code=0,
+            metrics={
+                "families_total": len(families),
+                "families_processed": families_processed,
+                "wikipedia_rows_imported": wikipedia_rows_imported,
+                "wikipedia_rows_matched": wikipedia_rows_matched,
+                "rules_upserted": rules_upserted,
+                "fetch_errors": fetch_errors,
+                "skipped_dry_run": 0,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        return SyncNetworksStreamingStepResult(
+            status="success",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            exit_code=None,
+            error=f"non_blocking_wikipedia_import_error: {exc}",
+            metrics={
+                "families_total": 0,
+                "families_processed": 0,
+                "wikipedia_rows_imported": 0,
+                "wikipedia_rows_matched": 0,
+                "rules_upserted": 0,
+                "fetch_errors": 1,
+                "skipped_dry_run": 0,
+            },
+        )
+
+
 @router.post("/sync-networks-streaming", response_model=SyncNetworksStreamingResponse)
 def sync_networks_streaming(
     payload: SyncNetworksStreamingRequest | None = None,
@@ -1386,12 +1474,14 @@ def sync_networks_streaming(
             "failures",
         ],
     )
+    brand_family_wikipedia_import = _run_brand_family_wikipedia_import_step(dry_run=payload.dry_run)
 
     steps = {
         "tmdb_show_entities": tmdb_entities,
         "tmdb_watch_providers": tmdb_watch_providers,
         "network_streaming_links": network_streaming_links,
         "show_logos": show_logos,
+        "brand_family_wikipedia_import": brand_family_wikipedia_import,
     }
 
     entities_synced = tmdb_entities.metrics.get("networks_upserted", 0) + tmdb_entities.metrics.get(

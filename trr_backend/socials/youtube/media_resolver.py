@@ -41,6 +41,7 @@ class YouTubeMediaResolution:
     source: str | None = None
     media_urls: list[str] = field(default_factory=list)
     thumbnail_url: str | None = None
+    media_asset_meta: dict[str, Any] = field(default_factory=dict)
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -143,10 +144,10 @@ def _stream_has_video(fmt: dict[str, Any], mime_type: str) -> bool:
     return mime_type.lower().startswith("video/")
 
 
-def _pick_best_stream_url(player_response: dict[str, Any]) -> tuple[list[str], str | None]:
+def _pick_best_stream_url(player_response: dict[str, Any]) -> tuple[list[str], str | None, dict[str, Any]]:
     streaming_data = player_response.get("streamingData")
     if not isinstance(streaming_data, dict):
-        return [], None
+        return [], None, {}
 
     formats: list[dict[str, Any]] = []
     for key in ("formats", "adaptiveFormats"):
@@ -154,7 +155,7 @@ def _pick_best_stream_url(player_response: dict[str, Any]) -> tuple[list[str], s
         if isinstance(value, list):
             formats.extend(item for item in value if isinstance(item, dict))
 
-    ranked: list[tuple[tuple[int, int, int, int, int], str]] = []
+    ranked: list[tuple[tuple[int, int, int, int, int], str, dict[str, Any]]] = []
     for fmt in formats:
         url = str(fmt.get("url") or "").strip() or _url_from_cipher(
             str(fmt.get("signatureCipher") or fmt.get("cipher") or "")
@@ -170,14 +171,33 @@ def _pick_best_stream_url(player_response: dict[str, Any]) -> tuple[list[str], s
         width = int(fmt.get("width") or 0)
         fps = int(fmt.get("fps") or 0)
         bitrate = int(fmt.get("bitrate") or fmt.get("averageBitrate") or 0)
-        ranked.append(((1 if has_audio else 0, height, width, fps, bitrate), url))
+        ranked.append(
+            (
+                (1 if has_audio else 0, height, width, fps, bitrate),
+                url,
+                {
+                    "url": url,
+                    "type": "video",
+                    "width": width or None,
+                    "height": height or None,
+                    "resolution": f"{width}x{height}" if width > 0 and height > 0 else None,
+                    "fps": fps or None,
+                    "bitrate": bitrate or None,
+                    "duration_seconds": int(player_response.get("videoDetails", {}).get("lengthSeconds") or 0) or None,
+                    "has_audio": bool(has_audio),
+                },
+            )
+        )
 
     ranked.sort(reverse=True)
     media_urls: list[str] = []
+    source_assets: list[dict[str, Any]] = []
     if ranked:
         media_urls = [ranked[0][1]]
+        source_assets = [ranked[0][2]]
 
     thumbnail_url = None
+    thumbnail_meta: dict[str, Any] | None = None
     video_details = player_response.get("videoDetails")
     if isinstance(video_details, dict):
         thumb = video_details.get("thumbnail")
@@ -186,16 +206,31 @@ def _pick_best_stream_url(player_response: dict[str, Any]) -> tuple[list[str], s
             if isinstance(thumbs, list):
                 best = None
                 best_width = -1
+                best_height = 0
                 for item in thumbs:
                     if not isinstance(item, dict):
                         continue
                     width = int(item.get("width") or 0)
                     if width >= best_width:
                         best_width = width
+                        best_height = int(item.get("height") or 0)
                         best = str(item.get("url") or "").strip() or None
                 thumbnail_url = best
+                if best:
+                    thumbnail_meta = {
+                        "url": best,
+                        "type": "thumbnail",
+                        "width": best_width or None,
+                        "height": best_height or None,
+                        "resolution": f"{best_width}x{best_height}" if best_width > 0 and best_height > 0 else None,
+                    }
 
-    return media_urls, thumbnail_url
+    meta = {
+        "selection_policy": "best_per_asset",
+        "source_assets": source_assets,
+        "thumbnail_source": thumbnail_meta,
+    }
+    return media_urls, thumbnail_url, meta
 
 
 def _parse_og_tags(html: str) -> tuple[str | None, str | None]:
@@ -206,7 +241,7 @@ def _parse_og_tags(html: str) -> tuple[str | None, str | None]:
     return og_video or None, og_image or None
 
 
-def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str, Any]]:
+def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str, Any], dict[str, Any]]:
     if not shutil.which("yt-dlp"):
         return (
             [],
@@ -217,6 +252,7 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 reason_code="youtube_ytdlp_unavailable",
                 selected_url_count=0,
             ),
+            {},
         )
 
     try:
@@ -246,6 +282,7 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 selected_url_count=0,
                 error=exc,
             ),
+            {},
         )
 
     if proc.returncode != 0:
@@ -261,6 +298,7 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 selected_url_count=0,
                 error=error,
             ),
+            {},
         )
 
     try:
@@ -276,16 +314,21 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 selected_url_count=0,
                 error=exc,
             ),
+            {},
         )
 
     media_url = str(payload.get("url") or "").strip()
     media_urls = [media_url] if media_url else []
+    selected_asset_meta: dict[str, Any] | None = None
+    duration_seconds = int(payload.get("duration") or 0) or None
+    thumbnail = str(payload.get("thumbnail") or "").strip() or None
 
     if not media_urls:
         requested_formats = payload.get("requested_formats")
         if isinstance(requested_formats, list):
             best_url = ""
             best_score = (-1, -1)
+            best_meta: dict[str, Any] | None = None
             for item in requested_formats:
                 if not isinstance(item, dict):
                     continue
@@ -299,10 +342,54 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 if score > best_score:
                     best_score = score
                     best_url = url
+                    best_meta = {
+                        "url": best_url,
+                        "type": "video",
+                        "width": int(item.get("width") or 0) or None,
+                        "height": height or None,
+                        "resolution": (
+                            f"{int(item.get('width') or 0)}x{height}"
+                            if int(item.get("width") or 0) > 0 and height > 0
+                            else None
+                        ),
+                        "fps": int(item.get("fps") or 0) or None,
+                        "bitrate": int(item.get("tbr") or 0) or None,
+                        "duration_seconds": duration_seconds,
+                        "has_audio": bool(has_audio),
+                    }
             if best_url:
                 media_urls = [best_url]
+                selected_asset_meta = best_meta
 
-    thumbnail = str(payload.get("thumbnail") or "").strip() or None
+    if media_urls and selected_asset_meta is None:
+        selected_asset_meta = {
+            "url": media_urls[0],
+            "type": "video",
+            "width": int(payload.get("width") or 0) or None,
+            "height": int(payload.get("height") or 0) or None,
+            "resolution": (
+                f"{int(payload.get('width') or 0)}x{int(payload.get('height') or 0)}"
+                if int(payload.get("width") or 0) > 0 and int(payload.get("height") or 0) > 0
+                else None
+            ),
+            "fps": int(payload.get("fps") or 0) or None,
+            "bitrate": int(payload.get("tbr") or 0) or None,
+            "duration_seconds": duration_seconds,
+            "has_audio": str(payload.get("acodec") or "").lower() not in {"none", ""},
+        }
+
+    thumbnail_meta = {
+        "url": thumbnail,
+        "type": "thumbnail",
+        "width": int(payload.get("thumbnail_width") or 0) or None,
+        "height": int(payload.get("thumbnail_height") or 0) or None,
+        "resolution": (
+            f"{int(payload.get('thumbnail_width') or 0)}x{int(payload.get('thumbnail_height') or 0)}"
+            if int(payload.get("thumbnail_width") or 0) > 0 and int(payload.get("thumbnail_height") or 0) > 0
+            else None
+        ),
+    } if thumbnail else None
+
     return (
         media_urls,
         thumbnail,
@@ -312,6 +399,11 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
             reason_code=(None if media_urls else "youtube_media_not_found"),
             selected_url_count=len(media_urls),
         ),
+        {
+            "selection_policy": "best_per_asset",
+            "source_assets": [selected_asset_meta] if selected_asset_meta else [],
+            "thumbnail_source": thumbnail_meta,
+        },
     )
 
 
@@ -327,6 +419,7 @@ def resolve_youtube_media(
             source=None,
             media_urls=[],
             thumbnail_url=None,
+            media_asset_meta={},
             attempts=[
                 _build_attempt(
                     source="watch_page_streaming_data",
@@ -338,14 +431,15 @@ def resolve_youtube_media(
         )
 
     watch_url = f"https://www.youtube.com/watch?v={cleaned_video_id}"
-    resolution = YouTubeMediaResolution(source=None, media_urls=[], thumbnail_url=None, attempts=[])
+    resolution = YouTubeMediaResolution(source=None, media_urls=[], thumbnail_url=None, media_asset_meta={}, attempts=[])
 
-    ytdlp_urls, ytdlp_thumbnail, ytdlp_attempt = _resolve_with_ytdlp(watch_url)
+    ytdlp_urls, ytdlp_thumbnail, ytdlp_attempt, ytdlp_meta = _resolve_with_ytdlp(watch_url)
     resolution.attempts.append(ytdlp_attempt)
     if ytdlp_urls:
         resolution.source = "yt_dlp_manifest"
         resolution.media_urls = ytdlp_urls
         resolution.thumbnail_url = ytdlp_thumbnail
+        resolution.media_asset_meta = ytdlp_meta
         return resolution
 
     client = session or requests.Session()
@@ -377,7 +471,7 @@ def resolve_youtube_media(
     html = str(response.text or "")
     player_response = _extract_player_response(html)
     if player_response:
-        media_urls, thumbnail_url = _pick_best_stream_url(player_response)
+        media_urls, thumbnail_url, source_meta = _pick_best_stream_url(player_response)
         resolution.attempts.append(
             _build_attempt(
                 source="watch_page_streaming_data",
@@ -391,6 +485,7 @@ def resolve_youtube_media(
             resolution.source = "watch_page_streaming_data"
             resolution.media_urls = media_urls
             resolution.thumbnail_url = thumbnail_url
+            resolution.media_asset_meta = source_meta
             return resolution
     else:
         resolution.attempts.append(
@@ -408,6 +503,27 @@ def resolve_youtube_media(
         resolution.source = "og_fallback"
         resolution.media_urls = [og_video]
         resolution.thumbnail_url = og_image
+        resolution.media_asset_meta = {
+            "selection_policy": "best_per_asset",
+            "source_assets": [
+                {
+                    "url": og_video,
+                    "type": "video",
+                    "width": None,
+                    "height": None,
+                    "resolution": None,
+                    "fps": None,
+                    "bitrate": None,
+                    "duration_seconds": None,
+                    "has_audio": None,
+                }
+            ],
+            "thumbnail_source": (
+                {"url": og_image, "type": "thumbnail", "width": None, "height": None, "resolution": None}
+                if og_image
+                else None
+            ),
+        }
         resolution.attempts.append(
             _build_attempt(
                 source="og_fallback",

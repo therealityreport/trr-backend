@@ -366,6 +366,23 @@ def _extract_part_of_series(value: Any) -> tuple[str | None, str | None]:
     return None, _extract_imdb_title_id(value)
 
 
+def _extract_series_from_episode_links(soup: BeautifulSoup) -> tuple[str | None, str | None]:
+    candidates = soup.select('a[href*="/title/tt"][href*="tt_ov_srs"]')
+    if not candidates:
+        candidates = soup.select('a[href*="/title/tt"]')
+    for node in candidates:
+        href = node.get("href")
+        if not isinstance(href, str) or "/title/tt" not in href:
+            continue
+        imdb_id = _extract_imdb_title_id(href)
+        if not imdb_id:
+            continue
+        text = _decode_html_text(node.get_text(" ", strip=True))
+        if text:
+            return text, imdb_id
+    return None, None
+
+
 def _normalize_title_segment(value: str | None) -> str | None:
     text = _decode_html_text(_clean_title(value))
     if not text:
@@ -387,6 +404,18 @@ def _extract_series_title_from_html_title(
     cleaned = re.sub(r"\s*\(\d{4}\)\s*$", "", cleaned).strip()
 
     episode = _normalize_title_segment(episode_title)
+    quoted_series = re.match(r'^\s*["“](.+?)["”]\s+(.+?)\s*$', cleaned)
+    if quoted_series:
+        candidate = _normalize_title_segment(quoted_series.group(1))
+        trailing = _normalize_title_segment(quoted_series.group(2))
+        if candidate:
+            if not episode:
+                return candidate
+            if trailing and trailing.casefold() == episode.casefold():
+                return candidate
+            if trailing and episode.casefold() in trailing.casefold():
+                return candidate
+
     if episode:
         escaped_episode = re.escape(episode)
         episode_hyphen = re.match(rf"^\s*{escaped_episode}\s*[-:]\s*(.+)$", cleaned, flags=re.IGNORECASE)
@@ -503,6 +532,12 @@ def parse_imdb_title_html(html: str, *, imdb_id: str) -> dict[str, Any]:
     episode_number = _coerce_int(primary.get("episodeNumber"))
     season_number = _extract_season_number(primary.get("partOfSeason"))
     series_title, series_imdb_id = _extract_part_of_series(primary.get("partOfSeries"))
+    if str(title_type_value or "").strip().upper() == "TVEPISODE":
+        linked_series_title, linked_series_imdb_id = _extract_series_from_episode_links(soup)
+        if not series_title and linked_series_title:
+            series_title = linked_series_title
+        if not series_imdb_id and linked_series_imdb_id:
+            series_imdb_id = linked_series_imdb_id
     if not series_title and str(title_type_value or "").strip().upper() == "TVEPISODE":
         series_title = _extract_series_title_from_html_title(
             html_title=soup.title.get_text(" ", strip=True) if soup.title else None,

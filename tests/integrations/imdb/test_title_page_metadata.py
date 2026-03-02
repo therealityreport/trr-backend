@@ -85,6 +85,39 @@ def test_parse_imdb_episode_metadata_falls_back_to_html_title_for_series_name() 
     assert result["series_imdb_id"] is None
 
 
+def test_parse_imdb_episode_metadata_extracts_series_id_from_anchor_link() -> None:
+    html = """
+    <html>
+      <head>
+        <title>
+          &quot;Watch What Happens Live with Andy Cohen&quot;
+          Milo Ventimiglia &amp; Alan Cumming (TV Episode 2023) - IMDb
+        </title>
+        <script type="application/ld+json">
+          {
+            "@context":"https://schema.org",
+            "@type":"TVEpisode",
+            "name":"Milo Ventimiglia &amp; Alan Cumming",
+            "datePublished":"2023-03-15",
+            "episodeNumber":"37",
+            "partOfSeason":{"@type":"TVSeason","name":"Season 20"}
+          }
+        </script>
+      </head>
+      <body>
+        <a href="/title/tt0318220/?ref_=tt_ov_srs">Watch What Happens Live with Andy Cohen</a>
+      </body>
+    </html>
+    """
+
+    result = parse_imdb_title_html(html, imdb_id="tt26755932")
+
+    assert result["title"] == "Milo Ventimiglia & Alan Cumming"
+    assert result["title_type"] == "TVEpisode"
+    assert result["series_title"] == "Watch What Happens Live with Andy Cohen"
+    assert result["series_imdb_id"] == "tt0318220"
+
+
 def test_parse_imdb_episode_metadata_falls_back_to_html_title_with_year_in_episode_segment() -> None:
     html = """
     <html>

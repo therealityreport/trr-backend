@@ -47,6 +47,7 @@ class TikTokMediaResolution:
     source: str | None = None
     media_urls: list[str] = field(default_factory=list)
     thumbnail_url: str | None = None
+    media_asset_meta: dict[str, Any] = field(default_factory=dict)
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -197,7 +198,7 @@ def _parse_ytdlp_payload(payload: dict[str, Any]) -> tuple[list[str], str | None
     return _dedupe_urls(urls)[:1], thumbnail
 
 
-def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str, Any]]:
+def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str, Any], dict[str, Any]]:
     if not shutil.which("yt-dlp"):
         return (
             [],
@@ -208,6 +209,7 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 reason_code="tiktok_ytdlp_unavailable",
                 selected_url_count=0,
             ),
+            {},
         )
 
     cmd = [
@@ -242,6 +244,7 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 selected_url_count=0,
                 error=exc,
             ),
+            {},
         )
 
     if proc.returncode != 0:
@@ -257,6 +260,7 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 selected_url_count=0,
                 error=error,
             ),
+            {},
         )
 
     try:
@@ -272,9 +276,34 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 selected_url_count=0,
                 error=exc,
             ),
+            {},
         )
 
     media_urls, thumbnail_url = _parse_ytdlp_payload(payload)
+    width = int(payload.get("width") or 0)
+    height = int(payload.get("height") or 0)
+    fps = int(payload.get("fps") or 0)
+    bitrate = int(payload.get("tbr") or 0)
+    duration_seconds = int(payload.get("duration") or 0) or None
+    source_assets = []
+    if media_urls:
+        source_assets.append(
+            {
+                "url": media_urls[0],
+                "type": "video",
+                "width": width or None,
+                "height": height or None,
+                "resolution": f"{width}x{height}" if width > 0 and height > 0 else None,
+                "fps": fps or None,
+                "bitrate": bitrate or None,
+                "duration_seconds": duration_seconds,
+            }
+        )
+    thumbnail_meta = (
+        {"url": thumbnail_url, "type": "thumbnail", "width": None, "height": None, "resolution": None}
+        if thumbnail_url
+        else None
+    )
     return (
         media_urls,
         thumbnail_url,
@@ -284,6 +313,11 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
             reason_code=(None if media_urls else "tiktok_media_not_found"),
             selected_url_count=len(media_urls),
         ),
+        {
+            "selection_policy": "best_per_asset",
+            "source_assets": source_assets,
+            "thumbnail_source": thumbnail_meta,
+        },
     )
 
 
@@ -451,7 +485,7 @@ def resolve_tiktok_media(
     if not candidate_url and cleaned_video_id:
         candidate_url = f"https://www.tiktok.com/@_/video/{cleaned_video_id}"
 
-    resolution = TikTokMediaResolution(source=None, media_urls=[], thumbnail_url=None, attempts=[])
+    resolution = TikTokMediaResolution(source=None, media_urls=[], thumbnail_url=None, media_asset_meta={}, attempts=[])
     if not candidate_url:
         resolution.attempts.append(
             _build_attempt(
@@ -464,19 +498,21 @@ def resolve_tiktok_media(
         return resolution
 
     if allow_ytdlp:
-        ytdlp_urls, ytdlp_thumb, ytdlp_attempt = _resolve_with_ytdlp(candidate_url)
+        ytdlp_urls, ytdlp_thumb, ytdlp_attempt, ytdlp_meta = _resolve_with_ytdlp(candidate_url)
         resolution.attempts.append(ytdlp_attempt)
         if ytdlp_urls:
             if not validate_download_url:
                 resolution.source = "yt_dlp_manifest"
                 resolution.media_urls = ytdlp_urls
                 resolution.thumbnail_url = ytdlp_thumb
+                resolution.media_asset_meta = ytdlp_meta
                 return resolution
             ytdlp_ok, ytdlp_status, ytdlp_error = _probe_media_url(ytdlp_urls[0], timeout=(5, 15))
             if ytdlp_ok:
                 resolution.source = "yt_dlp_manifest"
                 resolution.media_urls = ytdlp_urls
                 resolution.thumbnail_url = ytdlp_thumb
+                resolution.media_asset_meta = ytdlp_meta
                 return resolution
             resolution.attempts.append(
                 _build_attempt(
@@ -556,12 +592,52 @@ def resolve_tiktok_media(
                 resolution.source = "watch_page_json"
                 resolution.media_urls = media_urls
                 resolution.thumbnail_url = thumbnail_url
+                resolution.media_asset_meta = {
+                    "selection_policy": "best_per_asset",
+                    "source_assets": [
+                        {
+                            "url": media_urls[0],
+                            "type": "video",
+                            "width": None,
+                            "height": None,
+                            "resolution": None,
+                            "fps": None,
+                            "bitrate": None,
+                            "duration_seconds": None,
+                        }
+                    ],
+                    "thumbnail_source": (
+                        {"url": thumbnail_url, "type": "thumbnail", "width": None, "height": None, "resolution": None}
+                        if thumbnail_url
+                        else None
+                    ),
+                }
                 return resolution
             watch_ok, watch_status, watch_error = _probe_media_url(media_urls[0], timeout=(5, 15))
             if watch_ok:
                 resolution.source = "watch_page_json"
                 resolution.media_urls = media_urls
                 resolution.thumbnail_url = thumbnail_url
+                resolution.media_asset_meta = {
+                    "selection_policy": "best_per_asset",
+                    "source_assets": [
+                        {
+                            "url": media_urls[0],
+                            "type": "video",
+                            "width": None,
+                            "height": None,
+                            "resolution": None,
+                            "fps": None,
+                            "bitrate": None,
+                            "duration_seconds": None,
+                        }
+                    ],
+                    "thumbnail_source": (
+                        {"url": thumbnail_url, "type": "thumbnail", "width": None, "height": None, "resolution": None}
+                        if thumbnail_url
+                        else None
+                    ),
+                }
                 return resolution
             resolution.attempts.append(
                 _build_attempt(
@@ -594,12 +670,52 @@ def resolve_tiktok_media(
             resolution.source = "unofficial_api"
             resolution.media_urls = unofficial_urls
             resolution.thumbnail_url = unofficial_thumb
+            resolution.media_asset_meta = {
+                "selection_policy": "best_per_asset",
+                "source_assets": [
+                    {
+                        "url": unofficial_urls[0],
+                        "type": "video",
+                        "width": None,
+                        "height": None,
+                        "resolution": None,
+                        "fps": None,
+                        "bitrate": None,
+                        "duration_seconds": None,
+                    }
+                ],
+                "thumbnail_source": (
+                    {"url": unofficial_thumb, "type": "thumbnail", "width": None, "height": None, "resolution": None}
+                    if unofficial_thumb
+                    else None
+                ),
+            }
             return resolution
         unofficial_ok, unofficial_status, unofficial_error = _probe_media_url(unofficial_urls[0], timeout=(5, 15))
         if unofficial_ok:
             resolution.source = "unofficial_api"
             resolution.media_urls = unofficial_urls
             resolution.thumbnail_url = unofficial_thumb
+            resolution.media_asset_meta = {
+                "selection_policy": "best_per_asset",
+                "source_assets": [
+                    {
+                        "url": unofficial_urls[0],
+                        "type": "video",
+                        "width": None,
+                        "height": None,
+                        "resolution": None,
+                        "fps": None,
+                        "bitrate": None,
+                        "duration_seconds": None,
+                    }
+                ],
+                "thumbnail_source": (
+                    {"url": unofficial_thumb, "type": "thumbnail", "width": None, "height": None, "resolution": None}
+                    if unofficial_thumb
+                    else None
+                ),
+            }
             return resolution
         resolution.attempts.append(
             _build_attempt(
@@ -617,6 +733,26 @@ def resolve_tiktok_media(
         resolution.source = "og_fallback"
         resolution.media_urls = [og_video]
         resolution.thumbnail_url = og_image
+        resolution.media_asset_meta = {
+            "selection_policy": "best_per_asset",
+            "source_assets": [
+                {
+                    "url": og_video,
+                    "type": "video",
+                    "width": None,
+                    "height": None,
+                    "resolution": None,
+                    "fps": None,
+                    "bitrate": None,
+                    "duration_seconds": None,
+                }
+            ],
+            "thumbnail_source": (
+                {"url": og_image, "type": "thumbnail", "width": None, "height": None, "resolution": None}
+                if og_image
+                else None
+            ),
+        }
         resolution.attempts.append(
             _build_attempt(
                 source="og_fallback",

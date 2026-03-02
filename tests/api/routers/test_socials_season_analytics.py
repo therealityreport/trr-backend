@@ -31,8 +31,8 @@ def client() -> TestClient:
 
 
 def test_get_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -57,8 +57,8 @@ def test_get_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_put_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -106,8 +106,8 @@ def test_put_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -139,8 +139,8 @@ def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pyte
 
 
 def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -178,8 +178,8 @@ def test_ingest_returns_run_id_and_stage_metadata(client: TestClient, monkeypatc
 
 
 def test_ingest_accepts_comments_only_mode(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -217,8 +217,8 @@ def test_ingest_accepts_comments_only_mode(client: TestClient, monkeypatch: pyte
 
 
 def test_ingest_passes_comment_targeting_options(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -257,28 +257,259 @@ def test_ingest_passes_comment_targeting_options(client: TestClient, monkeypatch
     assert ingest_mock.call_args.kwargs["comment_anchor_source_ids"] == {"instagram": ["abc123", "def456"]}
 
 
+def test_ingest_passes_override_fields_and_details_refresh_mode(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-details-refresh",
+        "status": "queued",
+        "stages": ["posts"],
+        "queued_or_started_jobs": 2,
+        "summary": {"total_jobs": 2},
+    }
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "ingest_mode": "details_refresh",
+        "accounts_override": ["@BravoTV", "https://instagram.com/BRAVOTV/"],
+        "hashtags_override": ["RHOSLC"],
+        "keywords_override": ["Salt Lake City"],
+        "sound_ids": ["7540327234013301517"],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "run-details-refresh"
+    assert body["execution_mode"] == "queued"
+    assert body["execution_mode_canonical"] == "queued"
+    assert body["execution_mode_legacy"] == "queue"
+    assert body["execution_mode_deprecation"]["field"] == "execution_mode_legacy"
+    assert body["job_count"] == 2
+    assert ingest_mock.call_args.kwargs["ingest_mode"] == "details_refresh"
+    assert ingest_mock.call_args.kwargs["accounts_override"] == payload["accounts_override"]
+    assert ingest_mock.call_args.kwargs["hashtags_override"] == payload["hashtags_override"]
+    assert ingest_mock.call_args.kwargs["keywords_override"] == payload["keywords_override"]
+    assert ingest_mock.call_args.kwargs["sound_ids"] == payload["sound_ids"]
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("NO_INGEST_TARGETS", "No executable ingest targets"),
+        ("INVALID_ACCOUNT_HANDLE", "Invalid account handle"),
+    ],
+)
+def test_ingest_maps_structured_validation_errors_to_400(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    message: str,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    payload = {"source_scope": "bravo", "platforms": ["instagram"]}
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.ingest_season",
+        side_effect=SocialIngestValidationError(code, message),
+    ):
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+            response = client.post(
+                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["code"] == code
+    assert message.lower() in str(body["detail"]["message"]).lower()
+
+
+@pytest.mark.parametrize(
+    ("path", "patch_target"),
+    [
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/analytics?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.get_analytics",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.get_week_detail",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/analytics/comments-coverage?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.get_comments_coverage",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/analytics/mirror-coverage?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.get_mirror_coverage",
+        ),
+    ],
+)
+def test_analytics_platform_filter_value_errors_map_to_structured_400(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    patch_target: str,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    endpoint = path.format(season_id=season_id)
+
+    with patch(patch_target, side_effect=ValueError("INVALID_PLATFORM_FILTER: unsupported")):
+        response = client.get(
+            endpoint,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["code"] == "INVALID_PLATFORM_FILTER"
+    assert "unsupported" in str(body["detail"]["message"]).lower()
+
+
+def test_analytics_platform_filter_query_validation_rejects_unknown_platform(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    response = client.get(
+        f"/api/v1/admin/socials/seasons/{season_id}/analytics?source_scope=bravo&platforms=instagram,myspace",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["code"] == "INVALID_PLATFORM_FILTER"
+    assert "myspace" in str(body["detail"]["message"]).lower()
+
+
+def test_instagram_scrape_async_returns_400_when_show_or_season_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    payload = {
+        "username": "bravotv",
+        "hashtags": ["rhoslc"],
+        "date_start": "2026-01-01T00:00:00Z",
+        "date_end": "2026-01-02T00:00:00Z",
+    }
+
+    response = client.post(
+        "/api/v1/admin/socials/instagram/scrape/async",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["detail"]["code"] == "BAD_REQUEST"
+
+
+def test_instagram_scrape_async_creates_trackable_ingest_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    payload = {
+        "username": "BravoTV",
+        "hashtags": ["rhoslc"],
+        "date_start": "2026-01-01T00:00:00Z",
+        "date_end": "2026-01-02T00:00:00Z",
+        "show_id": show_id,
+        "season_number": 6,
+    }
+
+    with patch("trr_backend.db.pg.fetch_one", return_value={"season_id": season_id}):
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                with patch(
+                    "trr_backend.repositories.social_season_analytics.ingest_season",
+                    return_value={"run_id": "run-ig-async"},
+                ) as ingest_mock:
+                    response = client.post(
+                        "/api/v1/admin/socials/instagram/scrape/async",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "run-ig-async"
+    assert body["job_id"] == "run-ig-async"
+    assert body["execution_mode"] == "queued"
+    assert body["execution_mode_canonical"] == "queued"
+    assert body["execution_mode_legacy"] == "queue"
+    assert body["execution_mode_deprecation"]["field"] == "execution_mode_legacy"
+    assert "/ingest/jobs?run_id=run-ig-async" in body["jobs_url"]
+    assert ingest_mock.call_args.kwargs["ingest_mode"] == "posts_only"
+    assert ingest_mock.call_args.kwargs["accounts_override"] == ["BravoTV"]
+    assert ingest_mock.call_args.kwargs["hashtags_override"] == ["rhoslc"]
+
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     run_id = str(uuid4())
 
     with patch("trr_backend.repositories.social_season_analytics.list_jobs", return_value=[]) as mocked:
         response = client.get(
-            f"/api/v1/admin/socials/seasons/{season_id}/ingest/jobs?run_id={run_id}&status=running&platform=instagram",
+            (
+                f"/api/v1/admin/socials/seasons/{season_id}/ingest/jobs"
+                f"?run_id={run_id}&status=running&platform=instagram&limit=75&offset=25"
+            ),
             headers={"Authorization": f"Bearer {token}"},
         )
 
     assert response.status_code == 200
-    assert response.json()["run_id"] == run_id
+    body = response.json()
+    assert body["run_id"] == run_id
+    assert body["pagination"] == {
+        "limit": 75,
+        "offset": 25,
+        "returned": 0,
+        "has_more": False,
+    }
+    assert mocked.call_args.kwargs["limit"] == 75
+    assert mocked.call_args.kwargs["offset"] == 25
     assert mocked.call_args.kwargs["run_id"] == run_id
     assert mocked.call_args.kwargs["status"] == "running"
     assert mocked.call_args.kwargs["platform"] == "instagram"
 
 
 def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     run_id = str(uuid4())
 
@@ -311,8 +542,8 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
 
 
 def test_get_ingest_runs_rejects_invalid_season_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     response = client.get(
         "/api/v1/admin/socials/seasons/not-a-uuid/ingest/runs",
@@ -332,8 +563,8 @@ def test_get_week_detail_endpoint_returns_youtube_comment_totals(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     payload = {
@@ -370,8 +601,8 @@ def test_get_week_detail_endpoint_includes_additive_week_metadata(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     payload = {
@@ -410,8 +641,8 @@ def test_get_week_detail_endpoint_includes_additive_diagnostics(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     payload = {
@@ -459,12 +690,60 @@ def test_get_week_detail_endpoint_includes_additive_diagnostics(
     assert body["diagnostics"]["run_id"] == "run-abc"
 
 
+def test_get_week_detail_endpoint_passes_threads_topic_field(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    payload = {
+        "season_id": season_id,
+        "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
+        "platforms": {
+            "threads": {
+                "posts": [
+                    {
+                        "source_id": "th-1",
+                        "author": "bravotv",
+                        "text": "Post body",
+                        "topic": "bravotv > rhoslc",
+                        "posted_at": "2026-01-01T00:00:00Z",
+                        "replies_count": 3,
+                        "likes": 10,
+                        "reposts": 2,
+                        "quotes": 1,
+                        "views": 20,
+                        "engagement": 36,
+                        "total_comments_available": 3,
+                        "comments": [],
+                    }
+                ],
+                "totals": {"posts": 1, "total_comments": 3, "total_engagement": 36},
+                "total_posts": 1,
+            }
+        },
+        "totals": {"posts": 1, "total_comments": 3, "total_engagement": 36},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["platforms"]["threads"]["posts"][0]["topic"] == "bravotv > rhoslc"
+
+
 def test_get_week_detail_endpoint_defaults_to_25_comments_and_paginated_page(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     posts = [
@@ -518,17 +797,42 @@ def test_get_week_detail_endpoint_defaults_to_25_comments_and_paginated_page(
         "has_more": True,
     }
     assert mocked.call_count == 1
-    assert mocked.call_args.kwargs["max_comments_per_post"] == 25
+    assert mocked.call_args.kwargs["max_comments_per_post"] == 0
     assert mocked.call_args.kwargs["post_limit"] == 20
     assert mocked.call_args.kwargs["post_offset"] == 0
+
+
+def test_get_week_summary_endpoint_forwards_defaults_and_shape(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    payload: dict[str, Any] = {
+        "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
+        "season": {"season_id": season_id, "show_id": str(uuid4()), "show_name": "Test", "show_slug": "test", "season_number": 6},
+        "source_scope": "bravo",
+        "platforms": {"instagram": {"total_posts": 12, "totals": {"posts": 12}}},
+        "totals": {"posts": 12},
+        "meta": {"performance": {"total_duration_ms": 10, "by_platform": {"instagram": 2}}},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail_summary", return_value=payload) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3/summary?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["platforms"]["instagram"]["totals"]["posts"] == 12
+    assert mocked.call_args.kwargs["max_comments_per_post"] == 0
 
 
 def test_get_week_detail_endpoint_supports_page_offset_and_de_duplicated_newest_first_order(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     posts = [
@@ -600,12 +904,95 @@ def test_get_week_detail_endpoint_supports_page_offset_and_de_duplicated_newest_
     assert mocked.call_count == 1
 
 
+def test_get_week_detail_endpoint_forwards_sort_params_to_repository(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    payload: dict[str, Any] = {
+        "season_id": season_id,
+        "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
+        "platforms": {"instagram": {"posts": [], "total_posts": 0, "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0}}},
+        "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+        response = client.get(
+            (
+                f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3"
+                "?source_scope=bravo&sort_field=likes&sort_dir=asc"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_count == 1
+    assert mocked.call_args.kwargs["sort_field"] == "likes"
+    assert mocked.call_args.kwargs["sort_dir"] == "asc"
+
+
+def test_get_week_detail_endpoint_sorts_page_by_requested_metric(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    payload: dict[str, Any] = {
+        "season_id": season_id,
+        "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
+        "platforms": {
+            "instagram": {
+                "posts": [
+                    {"source_id": "ig-1", "posted_at": "2026-01-01T00:00:00Z", "likes": 10},
+                    {"source_id": "ig-2", "posted_at": "2026-01-02T00:00:00Z", "likes": 90},
+                ],
+                "total_posts": 2,
+                "totals": {"posts": 2, "total_comments": 0, "total_engagement": 0},
+            },
+            "tiktok": {
+                "posts": [
+                    {"source_id": "tt-1", "posted_at": "2026-01-03T00:00:00Z", "likes": 50},
+                    {"source_id": "tt-2", "posted_at": "2026-01-04T00:00:00Z", "likes": 70},
+                ],
+                "total_posts": 2,
+                "totals": {"posts": 2, "total_comments": 0, "total_engagement": 0},
+            },
+        },
+        "totals": {"posts": 4, "total_comments": 0, "total_engagement": 0},
+    }
+
+    from api.routers import socials as socials_router
+
+    socials_router.invalidate_week_detail_cache()
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload):
+        response = client.get(
+            (
+                f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3"
+                "?source_scope=bravo&sort_field=likes&sort_dir=desc&post_limit=2"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    flat_posts = [post for platform_payload in body["platforms"].values() for post in platform_payload["posts"]]
+    ordered = sorted(flat_posts, key=lambda post: int(post.get("sort_rank", 0)))
+    assert [post["source_id"] for post in ordered] == ["ig-2", "tt-2"]
+    assert body["pagination"]["returned"] == 2
+    assert body["pagination"]["total"] == 4
+
+
 def test_get_week_detail_endpoint_uses_cached_payload_when_repeating_same_page_request(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     payload: dict[str, Any] = {
@@ -650,12 +1037,65 @@ def test_get_week_detail_endpoint_uses_cached_payload_when_repeating_same_page_r
     assert mocked.call_count == 1
 
 
+def test_get_week_detail_endpoint_cache_key_includes_sort_signature(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    payload: dict[str, Any] = {
+        "season_id": season_id,
+        "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
+        "platforms": {
+            "instagram": {
+                "posts": [{"source_id": "cached-1", "posted_at": "2026-10-01T00:00:00Z", "likes": 1, "views": 100}],
+                "total_posts": 1,
+                "totals": {"posts": 1, "total_comments": 0, "total_engagement": 0},
+            }
+        },
+        "totals": {"posts": 1, "total_comments": 0, "total_engagement": 0},
+    }
+
+    from api.routers import socials as socials_router
+
+    socials_router.invalidate_week_detail_cache()
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+        response_a = client.get(
+            (
+                f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3"
+                "?source_scope=bravo&sort_field=likes&sort_dir=desc"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response_b = client.get(
+            (
+                f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3"
+                "?source_scope=bravo&sort_field=likes&sort_dir=desc"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response_c = client.get(
+            (
+                f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3"
+                "?source_scope=bravo&sort_field=views&sort_dir=desc"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response_a.status_code == 200
+    assert response_b.status_code == 200
+    assert response_c.status_code == 200
+    assert mocked.call_count == 2
+
+
 def test_get_analytics_endpoint_includes_additive_week_metadata(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -740,8 +1180,8 @@ def test_get_post_comments_endpoint_returns_youtube_effective_stats(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     payload = {
@@ -768,8 +1208,8 @@ def test_get_post_comments_endpoint_returns_twitter_quotes_payload(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     payload = {
@@ -802,12 +1242,42 @@ def test_get_post_comments_endpoint_returns_twitter_quotes_payload(
     assert body["quotes"][0]["comment_id"] == "quote-1"
 
 
+def test_get_post_comments_endpoint_passes_threads_topic_field(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    payload = {
+        "platform": "threads",
+        "source_id": "th-1",
+        "author": "bravotv",
+        "text": "Post body",
+        "topic": "bravotv > rhoslc",
+        "stats": {"likes": 10, "replies_count": 3, "reposts": 2, "quotes": 1, "views": 20, "engagement": 36},
+        "total_comments_in_db": 3,
+        "comments": [],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_post_comments", return_value=payload):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/posts/threads/th-1",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["topic"] == "bravotv > rhoslc"
+
+
 def test_refresh_post_comments_endpoint_returns_latest_post_detail(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     refreshed_post = {
@@ -830,7 +1300,7 @@ def test_refresh_post_comments_endpoint_returns_latest_post_detail(
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.refresh_post_comments",
+        "trr_backend.repositories.social_season_analytics.refresh_post",
         return_value=refresh_summary,
     ) as refresh_mock:
         with patch(
@@ -857,8 +1327,8 @@ def test_requeue_instagram_mirror_jobs_endpoint(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     expected = {
         "season_id": season_id,
@@ -894,8 +1364,8 @@ def test_requeue_platform_mirror_jobs_endpoint(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     expected = {
         "season_id": season_id,
@@ -930,8 +1400,8 @@ def test_requeue_platform_mirror_jobs_endpoint(
 
 
 def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     run_id = str(uuid4())
     expected = {"run_id": run_id, "status": "cancelled", "cancelled_jobs": 2}
@@ -948,8 +1418,8 @@ def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.Monk
 
 
 def test_ingest_returns_400_when_queue_schema_missing(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
 
@@ -973,8 +1443,8 @@ def test_ingest_returns_503_when_queue_enabled_and_worker_missing(
 ) -> None:
     from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
 
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
 
@@ -1011,9 +1481,9 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
 ) -> None:
     from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
 
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("APP_ENV", "development")
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {
         "source_scope": "bravo",
@@ -1056,7 +1526,10 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
     assert response.status_code == 200
     body = response.json()
     assert body["run_id"] == "run-inline-fallback"
-    assert body["execution_mode"] == "inline_fallback"
+    assert body["execution_mode"] == "inline"
+    assert body["execution_mode_canonical"] == "inline_fallback"
+    assert body["execution_mode_legacy"] == "inline_fallback"
+    assert body["execution_mode_deprecation"]["field"] == "execution_mode_legacy"
     assert body["status"] == "started"
     assert body["worker_health"]["healthy"] is False
     assert isinstance(body.get("warnings"), list)
@@ -1068,8 +1541,8 @@ def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {
         "source_scope": "bravo",
@@ -1119,13 +1592,13 @@ def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers(
     assert worker_counts == [1]
 
 
-def test_ingest_comments_only_queue_mode_fans_out_parallel_runners(
+def test_ingest_comments_only_queue_mode_does_not_spawn_inline_runners(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SOCIAL_COMMENTS_RUN_WORKERS", "3")
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {
         "source_scope": "bravo",
@@ -1189,29 +1662,18 @@ def test_ingest_comments_only_queue_mode_fans_out_parallel_runners(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["execution_mode"] == "queue"
+    assert body["execution_mode"] == "queued"
+    assert body["execution_mode_canonical"] == "queued"
+    assert body["execution_mode_legacy"] == "queue"
+    assert body["execution_mode_deprecation"]["field"] == "execution_mode_legacy"
     assert body["status"] == "queued"
-    assert worker_counts == [3]
-    assert len(execute_calls) == 4
-    assert all(call["run_id"] == "run-queue-comments-only" for call in execute_calls)
-    assert all(call["stage"] == "comments" for call in execute_calls)
-    assert {call["worker_id"] for call in execute_calls} == {
-        "api-background:comments:instagram",
-        "api-background:comments:youtube",
-        "api-background:comments:tiktok",
-        "api-background:comments:twitter",
-    }
-    assert {call["platform"] for call in execute_calls} == {
-        "instagram",
-        "youtube",
-        "tiktok",
-        "twitter",
-    }
+    assert worker_counts == []
+    assert execute_calls == []
 
 
 def test_get_mirror_coverage_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     expected = {
         "season_id": season_id,
@@ -1248,11 +1710,11 @@ def test_ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_fla
 ) -> None:
     from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
 
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.delenv("TRR_LOCAL_DEV", raising=False)
     monkeypatch.delenv("SOCIAL_ALLOW_INLINE_DEV_FALLBACK", raising=False)
-    token = _make_admin_token("test-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {
         "source_scope": "bravo",
@@ -1291,8 +1753,8 @@ def test_ingest_with_queue_enabled_and_worker_present_succeeds(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
     expected = {
@@ -1318,7 +1780,10 @@ def test_ingest_with_queue_enabled_and_worker_present_succeeds(
 
     assert response.status_code == 200
     assert response.json()["run_id"] == "run-healthy"
-    assert response.json()["execution_mode"] == "queue"
+    assert response.json()["execution_mode"] == "queued"
+    assert response.json()["execution_mode_canonical"] == "queued"
+    assert response.json()["execution_mode_legacy"] == "queue"
+    assert response.json()["execution_mode_deprecation"]["field"] == "execution_mode_legacy"
     worker_guard.assert_called_once_with()
 
 
@@ -1326,8 +1791,8 @@ def test_get_worker_health_endpoint_returns_health_payload(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {
         "healthy": True,
         "healthy_workers": 2,
@@ -1356,8 +1821,8 @@ def test_get_queue_status_endpoint_returns_payload(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {
         "queue_enabled": True,
         "workers": {
@@ -1399,8 +1864,8 @@ def test_get_queue_status_endpoint_returns_500_on_unhandled_error(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     with patch(
         "trr_backend.repositories.social_season_analytics.get_queue_status",
@@ -1415,9 +1880,82 @@ def test_get_queue_status_endpoint_returns_500_on_unhandled_error(
     assert response.json()["detail"] == "queue status failed"
 
 
+def test_get_health_dot_endpoint_returns_lightweight_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "queue_enabled": True,
+        "workers": {
+            "healthy": True,
+            "healthy_workers": 2,
+        },
+        "queue": {
+            "by_status": {
+                "running": 3,
+                "pending": 4,
+                "queued": 5,
+                "failed": 1,
+            },
+        },
+        "updated_at": "2026-02-28T12:00:00Z",
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_queue_status") as mocked:
+        mocked.return_value = {
+            "queue_enabled": True,
+            "workers": {
+                "healthy": True,
+                "healthy_workers": 2,
+            },
+            "queue": {
+                "by_status": {
+                    "running": 3,
+                    "pending": 4,
+                    "queued": 5,
+                    "failed": 1,
+                },
+            },
+        }
+        response = client.get(
+            "/api/v1/admin/socials/ingest/health-dot",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queue_enabled"] is expected["queue_enabled"]
+    assert body["workers"] == expected["workers"]
+    assert body["queue"] == expected["queue"]
+    assert isinstance(body.get("updated_at"), str)
+    mocked.assert_called_once_with(include_recent_failures=False)
+
+
+def test_get_health_dot_endpoint_returns_500_on_unhandled_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_queue_status",
+        side_effect=RuntimeError("health dot failed"),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/ingest/health-dot",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "health dot failed"
+
+
 def test_get_comments_coverage_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     expected = {
         "season_id": season_id,
@@ -1451,8 +1989,8 @@ def test_get_analytics_endpoint_accepts_facebook_threads_platform_filters(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -1478,8 +2016,8 @@ def test_get_week_detail_endpoint_returns_facebook_threads_platform_maps(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     payload = {
@@ -1505,8 +2043,8 @@ def test_get_week_detail_endpoint_returns_facebook_threads_platform_maps(
 
 
 def test_export_csv(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     snapshot = {
@@ -1540,8 +2078,8 @@ def test_export_csv(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     expected = {
@@ -1570,8 +2108,8 @@ def test_get_analytics_allows_week_zero(client: TestClient, monkeypatch: pytest.
 
 
 def test_get_analytics_include_slices_forwarded(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     expected = {
         "window": {"week": None},
@@ -1602,8 +2140,8 @@ def test_get_analytics_include_slices_forwarded(client: TestClient, monkeypatch:
 
 
 def test_get_ingest_run_summary_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     summaries = [
         {
@@ -1630,8 +2168,8 @@ def test_get_ingest_run_summary_endpoint(client: TestClient, monkeypatch: pytest
 
 
 def test_export_pdf(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
     snapshot = {
@@ -1659,3 +2197,86 @@ def test_export_pdf(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None
     assert response.headers["content-type"].startswith("application/pdf")
     assert response.headers["content-disposition"] == 'attachment; filename="social_report_test.pdf"'
     assert response.content.startswith(b"%PDF")
+
+
+def test_get_tiktok_overview_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "kpis": {"post_count": 10, "views": 1000, "likes": 100, "comments": 40, "shares": 20, "saves": 5},
+    }
+    with patch("trr_backend.repositories.social_season_analytics.get_tiktok_overview", return_value=expected) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/tiktok/overview?sound_id=7540327234013301517",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["kpis"]["post_count"] == 10
+    assert mocked.call_args.kwargs["sound_id"] == "7540327234013301517"
+
+
+def test_get_tiktok_sound_posts_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "sound_id": "7540327234013301517",
+        "posts": [{"platform_post_id": "123"}],
+    }
+    with patch("trr_backend.repositories.social_season_analytics.get_tiktok_sound_posts", return_value=expected) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/tiktok/sounds/7540327234013301517/posts?limit=25",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["sound_id"] == "7540327234013301517"
+    assert mocked.call_args.kwargs["sound_id"] == "7540327234013301517"
+    assert mocked.call_args.kwargs["limit"] == 25
+
+
+def test_get_tiktok_sounds_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "sounds": [{"sound_id": "7540327234013301517", "creator_post_count": 3}],
+    }
+    with patch("trr_backend.repositories.social_season_analytics.get_tiktok_sounds", return_value=expected) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/tiktok/sounds?search=lisa&limit=20",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["sounds"][0]["sound_id"] == "7540327234013301517"
+    assert mocked.call_args.kwargs["search"] == "lisa"
+    assert mocked.call_args.kwargs["limit"] == 20
+
+
+def test_get_tiktok_content_health_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "thresholds": {"median_saves": 12},
+        "posts": [{"post_id": "abc", "reason_flags": ["low_saves"]}],
+    }
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_tiktok_content_health",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/tiktok/content-health?hashtag=rhoslc",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["posts"][0]["post_id"] == "abc"
+    assert mocked.call_args.kwargs["hashtag"] == "rhoslc"

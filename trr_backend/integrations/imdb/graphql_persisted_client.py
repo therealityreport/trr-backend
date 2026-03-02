@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import time
 from typing import Any
 
 import requests
+
+from trr_backend.observability import inc_suppressed_path_conversion
+
+logger = logging.getLogger(__name__)
 
 
 class ImdbGraphQLError(RuntimeError):
@@ -88,8 +93,9 @@ class ImdbGraphQLPersistedClient:
         if env_headers:
             try:
                 merged_headers = json.loads(env_headers)
-            except json.JSONDecodeError:
-                pass  # Silently ignore malformed JSON
+            except json.JSONDecodeError as exc:
+                inc_suppressed_path_conversion("imdb_graphql_client", "malformed_env_headers_json")
+                logger.warning("Ignoring malformed IMDB_EXTRA_HEADERS_JSON: %s", exc)
 
         # Override with explicitly provided headers
         if extra_headers:

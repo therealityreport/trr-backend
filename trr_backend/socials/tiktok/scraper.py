@@ -137,6 +137,7 @@ class TikTokPost:
     duration: int  # seconds
     music_title: str
     music_author: str
+    user_avatar_url: str | None = None
 
     # Media URLs
     media_urls: list[str] = field(default_factory=list)
@@ -274,6 +275,29 @@ class TikTokScraper:
                 return 0
             return int(parsed.timestamp())
         return 0
+
+    @staticmethod
+    def _safe_int_metric(value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)):
+            return max(0, int(float(value)))
+        raw = str(value or "").strip()
+        if not raw:
+            return 0
+        compact = raw.replace(",", "").replace("_", "").strip()
+        if not compact:
+            return 0
+        suffix = compact[-1].upper()
+        numeric_portion = compact
+        multiplier = 1.0
+        if suffix in {"K", "M", "B"}:
+            numeric_portion = compact[:-1].strip()
+            multiplier = {"K": 1_000.0, "M": 1_000_000.0, "B": 1_000_000_000.0}[suffix]
+        try:
+            return max(0, int(float(numeric_portion) * multiplier))
+        except ValueError:
+            return 0
 
     @staticmethod
     def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -535,6 +559,16 @@ class TikTokScraper:
         video_id = data.get("id", "")
         media_urls = self._extract_ytdlp_video_urls(data)
         thumbnail_url = self._extract_ytdlp_thumbnail_url(data)
+        user_avatar_url = (
+            str(
+                data.get("uploader_avatar")
+                or data.get("channel_thumbnail")
+                or data.get("channelAvatarUrl")
+                or data.get("author_avatar_url")
+                or ""
+            ).strip()
+            or None
+        )
 
         return TikTokPost(
             video_id=video_id,
@@ -543,17 +577,18 @@ class TikTokScraper:
             description=description,
             hashtags=self._extract_hashtags(description),
             mentions=self._extract_mentions(description),
-            likes=data.get("like_count", 0) or 0,
-            comments=data.get("comment_count", 0) or 0,
-            shares=data.get("repost_count", 0) or 0,
-            saves=data.get("collect_count", 0) or data.get("save_count", 0) or 0,
-            views=data.get("view_count", 0) or 0,
+            likes=self._safe_int_metric(data.get("like_count", 0) or 0),
+            comments=self._safe_int_metric(data.get("comment_count", 0) or 0),
+            shares=self._safe_int_metric(data.get("repost_count", 0) or 0),
+            saves=self._safe_int_metric(data.get("collect_count", 0) or data.get("save_count", 0) or 0),
+            views=self._safe_int_metric(data.get("view_count", 0) or 0),
             url=f"https://www.tiktok.com/@{username}/video/{video_id}" if video_id else "",
             username=username,
             author_nickname=data.get("channel", ""),
             duration=data.get("duration", 0) or 0,
             music_title=data.get("track", ""),
             music_author=data.get("artist", ""),
+            user_avatar_url=user_avatar_url,
             media_urls=media_urls,
             thumbnail_url=thumbnail_url or (media_urls[0] if media_urls else None),
             show_id=config.show_id,
@@ -796,6 +831,25 @@ class TikTokScraper:
             or config.username
         )
         nickname = str(author.get("nickname") or author_meta.get("nickName") or author_meta.get("nickname") or "")
+        user_avatar_url = (
+            str(
+                author.get("avatarUrl")
+                or author.get("avatar")
+                or author.get("originalAvatarUrl")
+                or author.get("avatarLarger")
+                or author.get("avatar_larger")
+                or author.get("avatar_thumb")
+                or author.get("avatar_thumb_url")
+                or author_meta.get("avatarUrl")
+                or author_meta.get("avatar")
+                or author_meta.get("avatarThumb")
+                or author_meta.get("avatar_thumb")
+                or item.get("avatarUrl")
+                or item.get("avatar")
+                or ""
+            ).strip()
+            or None
+        )
 
         # Stats
         stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
@@ -826,21 +880,21 @@ class TikTokScraper:
             description=description,
             hashtags=hashtags,
             mentions=mentions,
-            likes=int(
+            likes=self._safe_int_metric(
                 stats.get("diggCount")
                 or stats.get("digg_count")
                 or item.get("diggCount")
                 or item.get("digg_count")
                 or 0
             ),
-            comments=int(
+            comments=self._safe_int_metric(
                 stats.get("commentCount")
                 or stats.get("comment_count")
                 or item.get("commentCount")
                 or item.get("comment_count")
                 or 0
             ),
-            shares=int(
+            shares=self._safe_int_metric(
                 stats.get("shareCount")
                 or stats.get("share_count")
                 or stats_v2.get("shareCount")
@@ -849,7 +903,7 @@ class TikTokScraper:
                 or item.get("share_count")
                 or 0
             ),
-            saves=int(
+            saves=self._safe_int_metric(
                 stats.get("collectCount")
                 or stats.get("collect_count")
                 or stats.get("favoriteCount")
@@ -864,7 +918,7 @@ class TikTokScraper:
                 or item.get("favorite_count")
                 or 0
             ),
-            views=int(
+            views=self._safe_int_metric(
                 stats.get("playCount")
                 or stats.get("play_count")
                 or stats_v2.get("playCount")
@@ -885,6 +939,7 @@ class TikTokScraper:
                 or music_meta.get("authorName")
                 or ""
             ),
+            user_avatar_url=user_avatar_url,
             media_urls=media_urls,
             thumbnail_url=thumbnail_url or (media_urls[0] if media_urls else None),
             show_id=config.show_id,

@@ -129,6 +129,9 @@ class InstagramPost:
     url: str
     pk: str
     username: str
+    video_views_observed: int | None = None
+    video_views_source: str | None = None
+    video_views_raw_candidates: list[dict[str, Any]] = field(default_factory=list)
 
     # Media URLs
     media_urls: list[str] = field(default_factory=list)
@@ -187,7 +190,38 @@ class InstagramScraper:
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_CONNECT_TIMEOUT_SECONDS = 10
     REQUEST_READ_TIMEOUT_SECONDS = 45
+    METRICS_REQUEST_READ_TIMEOUT_SECONDS = 20
     DEFAULT_NO_MATCH_PAGE_LIMIT = 40
+    DEFAULT_METRICS_MAX_PAGES = 250
+    DEFAULT_METRICS_TIMEOUT_SECONDS = 420
+    _VIEW_COUNT_FIELD_PRIORITY = (
+        "video_view_count",
+        "videoViewCount",
+        "view_count",
+        "play_count",
+        "video_play_count",
+        "videoPlayCount",
+        "playCount",
+        "viewCount",
+    )
+    _VIEW_COUNT_FIELD_PRIORITY_LOWER = {
+        "video_view_count",
+        "videoviewcount",
+        "view_count",
+        "play_count",
+        "video_play_count",
+        "videoplaycount",
+        "playcount",
+        "viewcount",
+    }
+    _VIEW_COUNT_TEXT_FIELDS = (
+        "accessibility_caption",
+        "accessibilityCaption",
+        "caption",
+        "text",
+        "overlayText",
+        "overlay_text",
+    )
 
     def __init__(self, cookies: dict | None = None):
         self.cookies = cookies or {}
@@ -196,6 +230,7 @@ class InstagramScraper:
         self.last_retrieval_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self.last_comment_fetch_reason: str | None = None
+        self.last_post_info_fetch_reason: str | None = None
         self.request_timeout = (
             self.REQUEST_CONNECT_TIMEOUT_SECONDS,
             self.REQUEST_READ_TIMEOUT_SECONDS,
@@ -245,11 +280,48 @@ class InstagramScraper:
             return self.DEFAULT_NO_MATCH_PAGE_LIMIT
         return 0
 
+    def _resolve_metrics_max_pages(self, config: ScrapeConfig) -> int:
+        if config.max_pages is not None:
+            try:
+                return max(1, int(config.max_pages))
+            except (TypeError, ValueError):
+                return self.DEFAULT_METRICS_MAX_PAGES
+        raw = (os.getenv("SOCIAL_INSTAGRAM_METRICS_MAX_PAGES") or "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                return self.DEFAULT_METRICS_MAX_PAGES
+        return self.DEFAULT_METRICS_MAX_PAGES
+
+    def _resolve_metrics_timeout_seconds(self) -> int:
+        raw = (os.getenv("SOCIAL_INSTAGRAM_METRICS_TIMEOUT_SECONDS") or "").strip()
+        if raw:
+            try:
+                return max(30, int(raw))
+            except ValueError:
+                return self.DEFAULT_METRICS_TIMEOUT_SECONDS
+        return self.DEFAULT_METRICS_TIMEOUT_SECONDS
+
     def _get(self, url: str, **kwargs: Any) -> requests.Response:
-        return self.session.get(url, timeout=self.request_timeout, **kwargs)
+        kwargs.setdefault("timeout", self.request_timeout)
+        return self.session.get(url, **kwargs)
 
     def _post(self, url: str, **kwargs: Any) -> requests.Response:
-        return self.session.post(url, timeout=self.request_timeout, **kwargs)
+        kwargs.setdefault("timeout", self.request_timeout)
+        return self.session.post(url, **kwargs)
+
+    def _resolve_metrics_request_timeout(self) -> tuple[int, int]:
+        read_raw = (os.getenv("SOCIAL_INSTAGRAM_METRICS_READ_TIMEOUT_SECONDS") or "").strip()
+        if read_raw:
+            try:
+                read_timeout = max(5, int(read_raw))
+            except ValueError:
+                read_timeout = self.METRICS_REQUEST_READ_TIMEOUT_SECONDS
+        else:
+            read_timeout = self.METRICS_REQUEST_READ_TIMEOUT_SECONDS
+        connect_timeout = max(3, int(self.REQUEST_CONNECT_TIMEOUT_SECONDS))
+        return (connect_timeout, read_timeout)
 
     def _get_headers(self, referer: str | None = None) -> dict:
         """Get request headers."""
@@ -301,6 +373,144 @@ class InstagramScraper:
                 return 0
             return int(parsed.timestamp())
         return 0
+
+    @staticmethod
+    def _parse_compact_count(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            try:
+                return max(0, int(float(value)))
+            except (TypeError, ValueError):
+                return None
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        normalized = raw.replace(",", "").strip()
+        match = re.match(r"^(?P<num>\d+(?:\.\d+)?)\s*(?P<suffix>[KMBkmb])?$", normalized)
+        if not match:
+            return None
+        base = float(match.group("num"))
+        suffix = str(match.group("suffix") or "").lower()
+        multiplier = 1
+        if suffix == "k":
+            multiplier = 1_000
+        elif suffix == "m":
+            multiplier = 1_000_000
+        elif suffix == "b":
+            multiplier = 1_000_000_000
+        return max(0, int(base * multiplier))
+
+    @classmethod
+    def _extract_count_from_text_metric(cls, value: Any) -> int | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        match = re.search(
+            r"(?P<count>\d[\d,]*(?:\.\d+)?)\s*(?P<suffix>[KMBkmb])?\s*(?:views?|plays?)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        compact = f"{match.group('count')}{match.group('suffix') or ''}"
+        return cls._parse_compact_count(compact)
+
+    @classmethod
+    def _is_candidate_view_metric_key(cls, key: str) -> bool:
+        normalized = str(key or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if lowered in cls._VIEW_COUNT_FIELD_PRIORITY_LOWER:
+            return True
+        return lowered.endswith("_view_count") or lowered.endswith("_play_count")
+
+    @staticmethod
+    def _normalize_metric_raw_value(value: Any) -> Any:
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if isinstance(value, str):
+            compact = value.strip()
+            if len(compact) <= 120:
+                return compact
+            return compact[:117] + "..."
+        return str(value)[:120]
+
+    def _collect_view_candidates(
+        self,
+        node: Any,
+        *,
+        prefix: str = "",
+        depth: int = 0,
+        out: list[tuple[str, Any]] | None = None,
+    ) -> list[tuple[str, Any]]:
+        candidates = out if out is not None else []
+        if depth > 5:
+            return candidates
+        if isinstance(node, dict):
+            for key, value in node.items():
+                key_text = str(key or "").strip()
+                path = f"{prefix}.{key_text}" if prefix else key_text
+                if self._is_candidate_view_metric_key(key_text):
+                    candidates.append((path, value))
+                if key_text in self._VIEW_COUNT_TEXT_FIELDS and isinstance(value, str):
+                    text_count = self._extract_count_from_text_metric(value)
+                    if text_count is not None:
+                        candidates.append((f"{path}:text_metric", text_count))
+                if isinstance(value, (dict, list)):
+                    self._collect_view_candidates(
+                        value,
+                        prefix=path,
+                        depth=depth + 1,
+                        out=candidates,
+                    )
+            return candidates
+        if isinstance(node, list):
+            for idx, item in enumerate(node):
+                path = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+                self._collect_view_candidates(item, prefix=path, depth=depth + 1, out=candidates)
+        return candidates
+
+    def _extract_video_views(self, node: dict[str, Any]) -> tuple[int | None, str | None, list[dict[str, Any]]]:
+        raw_candidates: list[dict[str, Any]] = []
+
+        def _record(source: str, raw: Any, parsed: int | None) -> None:
+            raw_candidates.append(
+                {
+                    "source": source,
+                    "raw": self._normalize_metric_raw_value(raw),
+                    "parsed": parsed,
+                }
+            )
+
+        for key in self._VIEW_COUNT_FIELD_PRIORITY:
+            if key not in node:
+                continue
+            raw_value = node.get(key)
+            parsed = self._parse_compact_count(raw_value)
+            _record(f"node.{key}", raw_value, parsed)
+            if parsed is not None:
+                return parsed, f"node.{key}", raw_candidates[:10]
+
+        for text_key in self._VIEW_COUNT_TEXT_FIELDS:
+            if text_key not in node:
+                continue
+            raw_text = node.get(text_key)
+            parsed_text = self._extract_count_from_text_metric(raw_text)
+            _record(f"node.{text_key}:text_metric", raw_text, parsed_text)
+            if parsed_text is not None:
+                return parsed_text, f"node.{text_key}:text_metric", raw_candidates[:10]
+
+        for source_path, raw_value in self._collect_view_candidates(node):
+            parsed = self._parse_compact_count(raw_value)
+            _record(source_path, raw_value, parsed)
+            if parsed is not None:
+                return parsed, source_path, raw_candidates[:10]
+
+        return None, None, raw_candidates[:10]
 
     @staticmethod
     def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -762,10 +972,13 @@ class InstagramScraper:
         media_urls = self._extract_media_urls(node)
         mentions = self._extract_mentions(node, caption)
         extras = self._extract_additional_post_fields(node)
+        post_type = self._determine_post_type(node)
+        video_views_observed, video_views_source, video_views_raw_candidates = self._extract_video_views(node)
+        route = "reel" if post_type == "reel" else "p"
 
         return InstagramPost(
             shortcode=shortcode,
-            post_type=self._determine_post_type(node),
+            post_type=post_type,
             date_time=datetime.fromtimestamp(taken_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if taken_at else "",
             taken_at=taken_at,
             caption=caption,
@@ -773,10 +986,13 @@ class InstagramScraper:
             sponsored=bool(node.get("is_paid_partnership")),
             likes=self._extract_like_count(node),
             comments=self._extract_comment_count(node),
-            video_views=self._coerce_int(node.get("video_view_count") or node.get("videoViewCount"), 0),
-            url=f"https://www.instagram.com/p/{shortcode}/" if shortcode else "",
+            video_views=video_views_observed or 0,
+            url=f"https://www.instagram.com/{route}/{shortcode}/" if shortcode else "",
             pk=str(node.get("pk") or node.get("id", "")),
             username=str(node.get("ownerUsername") or node.get("owner", {}).get("username") or config.username),
+            video_views_observed=video_views_observed,
+            video_views_source=video_views_source,
+            video_views_raw_candidates=video_views_raw_candidates,
             media_urls=media_urls,
             thumbnail_url=media_urls[0] if media_urls else None,
             hashtags=self._extract_hashtags(node, caption),
@@ -799,21 +1015,39 @@ class InstagramScraper:
             child_posts_data=self._extract_child_posts_data(node),
         )
 
-    def fetch_profile_info(self, username: str, delay: float = 2.0) -> dict | None:
+    def fetch_profile_info(
+        self,
+        username: str,
+        delay: float = 2.0,
+        *,
+        request_timeout: tuple[int, int] | float | None = None,
+    ) -> dict | None:
         """Fetch profile info using public API (limited to ~12 posts)."""
         self._rate_limit(delay)
         url = f"{self.PROFILE_INFO_URL}?username={username}"
         headers = self._get_headers(f"https://www.instagram.com/{username}/")
 
         try:
-            response = self._get(url, headers=headers, cookies=self.cookies)
+            response = self._get(
+                url,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=request_timeout or self.request_timeout,
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch profile info for {username}: {e}")
             return None
 
-    def fetch_posts_graphql(self, username: str, cursor: str | None = None, delay: float = 2.0) -> dict | None:
+    def fetch_posts_graphql(
+        self,
+        username: str,
+        cursor: str | None = None,
+        delay: float = 2.0,
+        *,
+        request_timeout: tuple[int, int] | float | None = None,
+    ) -> dict | None:
         """Fetch posts using GraphQL (requires auth for full access)."""
         self._rate_limit(delay)
 
@@ -854,7 +1088,13 @@ class InstagramScraper:
         for doc_id in self._profile_posts_doc_ids():
             data["doc_id"] = doc_id
             try:
-                response = self._post(self.GRAPHQL_URL, data=data, headers=headers, cookies=self.cookies)
+                response = self._post(
+                    self.GRAPHQL_URL,
+                    data=data,
+                    headers=headers,
+                    cookies=self.cookies,
+                    timeout=request_timeout or self.request_timeout,
+                )
                 response.raise_for_status()
                 payload = response.json()
                 connection = payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
@@ -896,21 +1136,52 @@ class InstagramScraper:
     def fetch_post_info(self, shortcode: str, delay: float = 2.0) -> dict | None:
         """Fetch detailed post info including media URLs."""
         self._rate_limit(delay)
+        self.last_post_info_fetch_reason = None
         try:
             media_id = self._shortcode_to_media_id(shortcode)
         except (ValueError, IndexError):
             logger.error(f"Invalid shortcode '{shortcode}' — skipping post info fetch")
+            self.last_post_info_fetch_reason = "invalid_shortcode"
             return None
         url = self.POST_INFO_URL.format(media_id=media_id)
         headers = self._get_headers(f"https://www.instagram.com/p/{shortcode}/")
 
+        def _fallback_from_permalink() -> dict | None:
+            from trr_backend.socials.instagram.permalink_metadata import fetch_permalink_media_item
+
+            try:
+                media_item = fetch_permalink_media_item(
+                    shortcode,
+                    session=self.session,
+                    timeout=self.request_timeout,
+                    headers=headers,
+                    cookies=self.cookies,
+                )
+            except Exception:
+                media_item = None
+            if isinstance(media_item, dict):
+                self.last_post_info_fetch_reason = "fallback_permalink_media_item"
+                return {"items": [media_item]}
+            self.last_post_info_fetch_reason = self.last_post_info_fetch_reason or "node_not_found"
+            return None
+
         try:
             response = self._get(url, headers=headers, cookies=self.cookies)
             response.raise_for_status()
-            return response.json()
+            content_type = str(response.headers.get("content-type") or "").lower()
+            if "text/html" in content_type:
+                self.last_post_info_fetch_reason = "html_challenge_or_auth_required"
+                return _fallback_from_permalink()
+            try:
+                payload = response.json()
+            except ValueError:
+                self.last_post_info_fetch_reason = "non_json_response"
+                return _fallback_from_permalink()
+            return payload
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch post info for {shortcode}: {e}")
-            return None
+            self.last_post_info_fetch_reason = "request_error"
+            return _fallback_from_permalink()
 
     def fetch_comments(
         self,
@@ -1296,6 +1567,163 @@ class InstagramScraper:
         except Exception:
             logger.debug("Instagram scrape progress callback raised", exc_info=True)
 
+    def _metrics_entry_from_node(self, node: dict[str, Any]) -> dict[str, Any]:
+        views_observed, views_source, raw_candidates = self._extract_video_views(node)
+        return {
+            "likes": self._extract_like_count(node),
+            "comments": self._extract_comment_count(node),
+            "views_observed": views_observed,
+            "views_source": views_source,
+            "views_raw_candidates": raw_candidates,
+            "post_type": self._determine_post_type(node),
+        }
+
+    def _merge_metrics_entry(self, existing: dict[str, Any] | None, incoming: dict[str, Any]) -> dict[str, Any]:
+        if not existing:
+            return dict(incoming)
+        merged = dict(existing)
+        merged["likes"] = max(self._coerce_int(existing.get("likes"), 0), self._coerce_int(incoming.get("likes"), 0))
+        merged["comments"] = max(
+            self._coerce_int(existing.get("comments"), 0),
+            self._coerce_int(incoming.get("comments"), 0),
+        )
+        existing_views = existing.get("views_observed")
+        incoming_views = incoming.get("views_observed")
+        if incoming_views is not None:
+            if existing_views is None:
+                merged["views_observed"] = incoming_views
+                merged["views_source"] = incoming.get("views_source")
+                merged["views_raw_candidates"] = incoming.get("views_raw_candidates") or []
+            else:
+                merged["views_observed"] = max(self._coerce_int(existing_views, 0), self._coerce_int(incoming_views, 0))
+                if self._coerce_int(incoming_views, 0) >= self._coerce_int(existing_views, 0):
+                    merged["views_source"] = incoming.get("views_source")
+                    merged["views_raw_candidates"] = incoming.get("views_raw_candidates") or []
+        return merged
+
+    def scrape_metrics_index(
+        self,
+        config: ScrapeConfig,
+        *,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        metrics_index: dict[str, dict[str, Any]] = {}
+        posts_checked = 0
+        pages_scanned = 0
+        no_match_pages = 0
+        no_match_page_limit = self._resolve_no_match_page_limit(config)
+        max_pages_limit = self._resolve_metrics_max_pages(config)
+        timeout_deadline = time.monotonic() + float(self._resolve_metrics_timeout_seconds())
+        seen_cursors: set[str] = set()
+        metrics_request_timeout = self._resolve_metrics_request_timeout()
+
+        def _process_node(node: dict[str, Any]) -> bool:
+            nonlocal posts_checked
+            posts_checked += 1
+            timestamp = self._extract_timestamp(node)
+            in_range = config.is_in_date_range(timestamp)
+            if in_range is None:
+                return False
+            if in_range is False:
+                return True
+            caption = self._extract_caption(node)
+            if not config.matches_hashtags(caption):
+                return True
+            shortcode = self._extract_shortcode(node)
+            if not shortcode:
+                return True
+            entry = self._metrics_entry_from_node(node)
+            metrics_index[shortcode] = self._merge_metrics_entry(metrics_index.get(shortcode), entry)
+            return True
+
+        has_auth = bool(self.cookies.get("sessionid"))
+        if not has_auth:
+            data = self.fetch_profile_info(
+                config.username,
+                config.delay_seconds,
+                request_timeout=metrics_request_timeout,
+            )
+            if not data:
+                return metrics_index
+            pages_scanned = 1
+            for node, _ in self._iter_posts_from_profile_info(data):
+                keep_going = _process_node(node)
+                if not keep_going:
+                    break
+            self._emit_progress(
+                progress_cb,
+                phase="metrics_profile_page",
+                pages_scanned=pages_scanned,
+                posts_checked=posts_checked,
+                matched_posts=len(metrics_index),
+            )
+            return metrics_index
+
+        cursor: str | None = None
+        while True:
+            pages_scanned += 1
+            if pages_scanned > max_pages_limit:
+                break
+            if time.monotonic() >= timeout_deadline:
+                logger.warning(
+                    "Instagram metrics index timeout reached for @%s after %d pages",
+                    config.username,
+                    pages_scanned - 1,
+                )
+                break
+            data = self.fetch_posts_graphql(
+                config.username,
+                cursor,
+                config.delay_seconds,
+                request_timeout=metrics_request_timeout,
+            )
+            if not data:
+                break
+            page_info: dict[str, Any] = {}
+            page_matches = 0
+            for node, pi in self._iter_posts_from_graphql(data):
+                page_info = pi
+                keep_going = _process_node(node)
+                if not keep_going:
+                    self._emit_progress(
+                        progress_cb,
+                        phase="metrics_graphql_page",
+                        pages_scanned=pages_scanned,
+                        posts_checked=posts_checked,
+                        matched_posts=len(metrics_index),
+                    )
+                    return metrics_index
+                shortcode = self._extract_shortcode(node)
+                if shortcode and shortcode in metrics_index:
+                    page_matches += 1
+            if no_match_page_limit > 0 and page_matches == 0 and (config.date_start or config.date_end):
+                no_match_pages += 1
+                if no_match_pages >= no_match_page_limit:
+                    break
+            elif page_matches > 0:
+                no_match_pages = 0
+            self._emit_progress(
+                progress_cb,
+                phase="metrics_graphql_page",
+                pages_scanned=pages_scanned,
+                posts_checked=posts_checked,
+                matched_posts=len(metrics_index),
+            )
+            has_next = bool(page_info.get("has_next_page"))
+            next_cursor = str(page_info.get("end_cursor") or "").strip() or None
+            if next_cursor and next_cursor in seen_cursors:
+                logger.warning(
+                    "Instagram metrics index detected repeating cursor for @%s; stopping pagination",
+                    config.username,
+                )
+                break
+            cursor = next_cursor
+            if cursor:
+                seen_cursors.add(cursor)
+            if not has_next or not cursor:
+                break
+        return metrics_index
+
     def scrape(
         self,
         config: ScrapeConfig,
@@ -1403,6 +1831,7 @@ class InstagramScraper:
         stop_reason: str | None = None
         no_match_pages = 0
         no_match_page_limit = self._resolve_no_match_page_limit(config)
+        seen_cursors: set[str] = set()
 
         while not reached_date_limit:
             page_num += 1
@@ -1479,7 +1908,17 @@ class InstagramScraper:
 
             # Get next page
             has_next = page_info.get("has_next_page", False)
-            cursor = page_info.get("end_cursor")
+            next_cursor = str(page_info.get("end_cursor") or "").strip() or None
+            if next_cursor and next_cursor in seen_cursors:
+                logger.warning(
+                    "Instagram GraphQL pagination detected repeating cursor for @%s; stopping pagination",
+                    config.username,
+                )
+                stop_reason = "repeating_cursor"
+                break
+            cursor = next_cursor
+            if cursor:
+                seen_cursors.add(cursor)
             if not has_next or not cursor:
                 logger.info("No more pages available")
                 stop_reason = "no_more_pages"

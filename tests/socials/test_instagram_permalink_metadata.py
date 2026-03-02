@@ -6,6 +6,9 @@ from urllib.parse import quote
 import pytest
 
 from trr_backend.socials.instagram.permalink_metadata import (
+    _graphql_extract_collaborators,
+    _graphql_extract_collaborators_detail,
+    _metadata_from_graphql_node,
     fetch_permalink_media_item,
     parse_permalink_metadata,
     resolve_instagram_media,
@@ -269,3 +272,234 @@ def test_resolve_instagram_media_falls_back_to_og_when_other_sources_fail() -> N
     assert resolution.media_urls == ["https://cdn.test/og-image.jpg"]
     assert resolution.attempts[-1]["source"] == "og_fallback"
     assert resolution.attempts[-1]["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tags vs. collaborators extraction tests
+# ---------------------------------------------------------------------------
+
+
+def test_graphql_node_extracts_profile_tags_and_collaborators() -> None:
+    """_metadata_from_graphql_node should extract tags and collaborators from
+    GraphQL response format (Bug 1 fix)."""
+    node = {
+        "__typename": "GraphImage",
+        "display_url": "https://cdn.test/image.jpg",
+        "taken_at_timestamp": 1739481600,
+        "edge_media_to_caption": {"edges": [{"node": {"text": "Test post"}}]},
+        "edge_media_to_tagged_user": {
+            "edges": [
+                {
+                    "node": {
+                        "user": {
+                            "username": "tagged_user_1",
+                            "id": "111",
+                            "full_name": "Tagged One",
+                            "is_verified": True,
+                            "profile_pic_url": "https://pic/1.jpg",
+                        }
+                    }
+                },
+                {"node": {"user": {"username": "tagged_user_2", "id": "222"}}},
+            ]
+        },
+        "coauthor_producers": [
+            {"username": "collab_a", "id": "333", "full_name": "Collab A", "is_verified": False},
+        ],
+        "invited_coauthor_producers": [
+            {"username": "collab_b", "id": "444"},
+        ],
+    }
+    metadata = _metadata_from_graphql_node(node)
+    assert metadata is not None
+
+    # String-level tags and collaborators
+    assert metadata.profile_tags == ["tagged_user_1", "tagged_user_2"]
+    assert metadata.collaborators == ["collab_a", "collab_b"]
+
+    # Rich detail objects
+    assert metadata.tagged_users_detail is not None
+    assert len(metadata.tagged_users_detail) == 2
+    assert metadata.tagged_users_detail[0]["username"] == "tagged_user_1"
+    assert metadata.tagged_users_detail[0]["full_name"] == "Tagged One"
+    assert metadata.tagged_users_detail[0]["is_verified"] is True
+
+    assert metadata.collaborators_detail is not None
+    assert len(metadata.collaborators_detail) == 2
+    assert metadata.collaborators_detail[0]["username"] == "collab_a"
+
+
+def test_graphql_node_with_zero_tags_returns_empty_lists() -> None:
+    """When a GraphQL node has no tags or collaborators, the metadata should
+    have empty lists (not None)."""
+    node = {
+        "__typename": "GraphImage",
+        "display_url": "https://cdn.test/image.jpg",
+        "taken_at_timestamp": 1739481600,
+    }
+    metadata = _metadata_from_graphql_node(node)
+    assert metadata is not None
+    assert metadata.profile_tags == []
+    assert metadata.collaborators == []
+    assert metadata.tagged_users_detail == []
+    assert metadata.collaborators_detail == []
+
+
+def test_graphql_extract_collaborators_handles_camelcase_key() -> None:
+    """GraphQL extraction should handle coauthorProducers (camelCase) for
+    parity with scraper.py."""
+    node = {
+        "coauthorProducers": [
+            {"username": "camel_collab", "id": "555"},
+        ],
+    }
+    assert _graphql_extract_collaborators(node) == ["camel_collab"]
+    details = _graphql_extract_collaborators_detail(node)
+    assert len(details) == 1
+    assert details[0]["username"] == "camel_collab"
+
+
+def test_parse_permalink_metadata_extracts_detail_objects() -> None:
+    """parse_permalink_metadata should populate tagged_users_detail and
+    collaborators_detail from REST API format (Bug 2 fix)."""
+    metadata = parse_permalink_metadata(
+        {
+            "taken_at": 1739481600,
+            "media_type": 1,
+            "usertags": {
+                "in": [
+                    {
+                        "user": {
+                            "username": "tag1",
+                            "pk": "100",
+                            "full_name": "Tag One",
+                            "is_verified": True,
+                            "profile_pic_url": "https://pic/tag1.jpg",
+                        }
+                    },
+                    {"user": {"username": "tag2", "pk": "200"}},
+                ]
+            },
+            "coauthor_producers": [
+                {"username": "coauth1", "pk": "300", "full_name": "Coauth One"},
+            ],
+            "image_versions2": {"candidates": [{"url": "https://cdn.test/img.jpg"}]},
+        }
+    )
+    assert metadata.tagged_users_detail is not None
+    assert len(metadata.tagged_users_detail) == 2
+    assert metadata.tagged_users_detail[0]["username"] == "tag1"
+    assert metadata.tagged_users_detail[0]["profile_pic_url"] == "https://pic/tag1.jpg"
+
+    assert metadata.collaborators_detail is not None
+    assert len(metadata.collaborators_detail) == 1
+    assert metadata.collaborators_detail[0]["username"] == "coauth1"
+
+
+def test_empty_tags_from_metadata_are_not_none() -> None:
+    """When metadata extraction finds 0 tags, it should return [] (not None),
+    so `is not None` checks will use the authoritative empty list (Bug 3 fix)."""
+    metadata = parse_permalink_metadata(
+        {
+            "taken_at": 1739481600,
+            "media_type": 1,
+            # No usertags, no coauthor_producers
+            "image_versions2": {"candidates": [{"url": "https://cdn.test/img.jpg"}]},
+        }
+    )
+    assert metadata.profile_tags == []
+    assert metadata.profile_tags is not None  # Critical: not None so enrichment uses it
+    assert metadata.collaborators == []
+    assert metadata.collaborators is not None
+
+
+def test_graphql_fallback_preserves_tags_and_collaborators() -> None:
+    """When API path fails and GraphQL fallback succeeds, tags and collaborators
+    should still be extracted (Bug 1 regression)."""
+
+    class _FakeResponse:
+        def __init__(self, payload: dict[str, object]):
+            self._payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class _FakeSession:
+        def post(self, *_args, **_kwargs):
+            return _FakeResponse(
+                {
+                    "data": {
+                        "xdt_shortcode_media": {
+                            "__typename": "GraphImage",
+                            "display_url": "https://cdn.test/img.jpg",
+                            "taken_at_timestamp": 1739481600,
+                            "edge_media_to_tagged_user": {
+                                "edges": [
+                                    {"node": {"user": {"username": "tagged1"}}},
+                                    {"node": {"user": {"username": "tagged2"}}},
+                                ]
+                            },
+                            "coauthor_producers": [{"username": "collab1"}],
+                        }
+                    }
+                }
+            )
+
+    resolution = resolve_instagram_media(
+        "DUHvBbEDhfw",
+        session=_FakeSession(),  # type: ignore[arg-type]
+        fetch_post_info=lambda _: (_ for _ in ()).throw(RuntimeError("api unavailable")),
+    )
+    assert resolution.source == "graphql_shortcode"
+    assert resolution.metadata is not None
+    assert resolution.metadata.profile_tags == ["tagged1", "tagged2"]
+    assert resolution.metadata.collaborators == ["collab1"]
+    assert resolution.metadata.tagged_users_detail is not None
+    assert len(resolution.metadata.tagged_users_detail) == 2
+    assert resolution.metadata.collaborators_detail is not None
+    assert len(resolution.metadata.collaborators_detail) == 1
+
+
+def test_og_fallback_has_none_detail_objects() -> None:
+    """When resolution falls through to OG fallback, detail objects should be
+    None (not extracted), so enrichment preserves scraper data."""
+    html = """
+    <html>
+      <head>
+        <meta property="og:image" content="https://cdn.test/og-image.jpg" />
+      </head>
+    </html>
+    """
+
+    class _FakeGetResponse:
+        status_code = 200
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeSession:
+        def post(self, *_args, **_kwargs):
+            raise RuntimeError("graphql failed")
+
+        def get(self, *_args, **_kwargs):
+            return _FakeGetResponse()
+
+    resolution = resolve_instagram_media(
+        "DUHvBbEDhfw",
+        session=_FakeSession(),  # type: ignore[arg-type]
+        fetch_post_info=lambda _: (_ for _ in ()).throw(RuntimeError("api failed")),
+    )
+
+    assert resolution.source == "og_fallback"
+    assert resolution.metadata is not None
+    # OG fallback cannot extract tags/collaborators — detail should be None
+    assert resolution.metadata.tagged_users_detail is None
+    assert resolution.metadata.collaborators_detail is None
+    # String lists are empty (not None) — this is correct for OG path
+    assert resolution.metadata.profile_tags == []
+    assert resolution.metadata.collaborators == []

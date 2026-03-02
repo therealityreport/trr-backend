@@ -115,6 +115,8 @@ class ShowImportResult:
 IMDB_CAST_DEFAULT_MIN_EPISODES = 4
 _IMDB_NAME_ID_RE = re.compile(r"(nm[0-9]+)", re.IGNORECASE)
 _IMDB_TITLE_ID_RE = re.compile(r"^tt[0-9]+$", re.IGNORECASE)
+_SHOW_TYPED_EXTERNAL_ID_KEYS = ("tvdb_id", "tvrage_id", "wikidata_id")
+_SHOW_SOCIAL_EXTERNAL_ID_KEYS = ("facebook_id", "instagram_id", "twitter_id")
 
 
 def _dedupe_preserve_order(values: Sequence[str]) -> list[str]:
@@ -145,6 +147,19 @@ def _merge_external_ids(existing: Any, updates: Mapping[str, Any]) -> dict[str, 
             merged[key] = value
             changed = True
     return merged if changed else None
+
+
+def _build_show_external_ids_updates(
+    *,
+    resolved_imdb_id: str | None,
+    tmdb_id: int | None,
+    tmdb_external_ids: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    updates: dict[str, Any] = {"imdb": resolved_imdb_id, "tmdb": tmdb_id}
+    if tmdb_external_ids:
+        for key in (*_SHOW_TYPED_EXTERNAL_ID_KEYS, *_SHOW_SOCIAL_EXTERNAL_ID_KEYS):
+            updates[key] = tmdb_external_ids.get(key)
+    return updates
 
 
 def _fetch_tmdb_find_payload(
@@ -1374,16 +1389,21 @@ def upsert_candidates_into_supabase(
             if tmdb_show_patch:
                 _apply_patch_if_changed(patch, existing=existing, updates=tmdb_show_patch)
 
-            # Add external IDs from TMDb if available and existing is missing them
+            # Add typed external IDs from TMDb if available and existing is missing them.
+            # Social IDs are no longer top-level columns on core.shows.
             if tmdb_external_ids:
-                for ext_key in ("tvdb_id", "tvrage_id", "wikidata_id", "facebook_id", "instagram_id", "twitter_id"):
+                for ext_key in _SHOW_TYPED_EXTERNAL_ID_KEYS:
                     ext_val = tmdb_external_ids.get(ext_key)
                     if ext_val is not None and existing.get(ext_key) is None:
                         patch[ext_key] = ext_val
 
             merged_external_ids = _merge_external_ids(
                 existing.get("external_ids"),
-                {"imdb": resolved_imdb_id, "tmdb": tmdb_id},
+                _build_show_external_ids_updates(
+                    resolved_imdb_id=resolved_imdb_id,
+                    tmdb_id=tmdb_id,
+                    tmdb_external_ids=tmdb_external_ids,
+                ),
             )
             if merged_external_ids is not None:
                 patch["external_ids"] = merged_external_ids
@@ -1428,7 +1448,11 @@ def upsert_candidates_into_supabase(
 
             merged_external_ids = _merge_external_ids(
                 existing.get("external_ids"),
-                {"imdb": resolved_imdb_id, "tmdb": tmdb_id},
+                _build_show_external_ids_updates(
+                    resolved_imdb_id=resolved_imdb_id,
+                    tmdb_id=tmdb_id,
+                    tmdb_external_ids=tmdb_external_ids,
+                ),
             )
             if merged_external_ids is not None:
                 post_patch["external_ids"] = merged_external_ids

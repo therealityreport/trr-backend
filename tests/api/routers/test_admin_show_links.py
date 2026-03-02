@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -16,6 +18,7 @@ from api.routers.admin_show_links import (
     _canonicalize_url,
     _classify_submitted_link_input,
     _cleanup_invalid_person_knowledge_links,
+    _cleanup_invalid_person_social_links,
     _cleanup_invalid_show_knowledge_links,
     _discover_people_links,
     _discover_season_links,
@@ -25,6 +28,7 @@ from api.routers.admin_show_links import (
     _source_timeout_seconds,
     _sync_show_wikipedia_links,
     _validate_person_knowledge_url,
+    _validate_person_social_url,
     _validated_person_knowledge_url,
 )
 
@@ -115,6 +119,116 @@ def test_discover_show_links_prefers_existing_show_level_fandom_links() -> None:
     assert len(fandom_links) == 1
     assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
     assert fandom_links[0]["source"] == "core.entity_links"
+
+
+def test_discover_show_links_prefers_core_entity_links_source_for_duplicate_fandom_url() -> None:
+    show_id = str(uuid4())
+    duplicate_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[{"url": duplicate_url}]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Real Housewives of Salt Lake City",
+                    "networks": ["bravo"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=duplicate_url):
+                with patch(
+                    "api.routers.admin_show_links._fetch_html_with_status",
+                    return_value=(
+                        200,
+                        "<html><body><h1>The Real Housewives of Salt Lake City</h1></body></html>",
+                        duplicate_url,
+                        None,
+                    ),
+                ):
+                    links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    assert len(fandom_links) == 1
+    assert fandom_links[0]["source"] == "core.entity_links"
+
+
+def test_discover_show_links_expands_root_fandom_seed_to_show_page_candidates() -> None:
+    show_id = str(uuid4())
+
+    def _fetch_html(url: str, *, timeout: float = 20.0):
+        if url == "https://thetraitors.fandom.com/":
+            return (
+                200,
+                "<html><body><h1>The Traitors Wiki</h1></body></html>",
+                "https://thetraitors.fandom.com/",
+                None,
+            )
+        if url == "https://thetraitors.fandom.com/wiki/The_Traitors":
+            return (
+                404,
+                "<html><body>There is currently no text in this page.</body></html>",
+                url,
+                None,
+            )
+        if url == "https://thetraitors.fandom.com/wiki/The_Traitors_(US)":
+            return (
+                200,
+                "<html><body><h1>The Traitors (US)</h1></body></html>",
+                "https://thetraitors.fandom.com/wiki/The_Traitors_(US)",
+                None,
+            )
+        return (404, "<html><body>Missing</body></html>", url, None)
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch(
+            "api.routers.admin_show_links.pg.fetch_all",
+            return_value=[{"url": "https://thetraitors.fandom.com/"}],
+        ):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Traitors",
+                    "networks": ["peacock"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=(None, None, "missing"),
+            ):
+                    with patch(
+                        "api.routers.admin_show_links._curated_show_fandom_base_urls",
+                        return_value=(),
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.load_fandom_community_allowlist",
+                            return_value=("thetraitors.fandom.com", "thetraitorsuk.fandom.com"),
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                                return_value=[],
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
+                                    return_value=["https://thetraitors.fandom.com/wiki/The_Traitors_(US)"],
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._fetch_html_with_status",
+                                        side_effect=_fetch_html,
+                                    ):
+                                        links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    fandom_urls = {str(link.get("url") or "") for link in fandom_links}
+    assert "https://thetraitors.fandom.com/" in fandom_urls
+    assert "https://thetraitors.fandom.com/wiki/The_Traitors_(US)" in fandom_urls
+    assert any(str(link.get("source") or "").endswith(":derived_show_page") for link in fandom_links)
 
 
 def test_discover_show_links_skips_missing_fandom_pages() -> None:
@@ -237,6 +351,8 @@ def test_discover_show_links_derives_external_ids_from_wikidata_when_missing() -
                         "tvmaze_show_id": "58177",
                         "tvmaze_season_id": "",
                         "ratinggraph_tv_show_id": "the-traitors-ratings-103483",
+                        "trakt_id": "shows/the-traitors-us",
+                        "x_topic_id": "1742326119434545480",
                     },
                     False,
                 ),
@@ -271,6 +387,18 @@ def test_discover_show_links_derives_external_ids_from_wikidata_when_missing() -
         link.get("entity_type") == "show"
         and link.get("link_kind") == "ratinggraph"
         and link.get("url") == "https://www.ratingraph.com/tv-shows/the-traitors-ratings-103483"
+        for link in links
+    )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "trakt"
+        and link.get("url") == "https://trakt.tv/shows/the-traitors-us"
+        for link in links
+    )
+    assert any(
+        link.get("entity_type") == "show"
+        and link.get("link_kind") == "x_topic"
+        and link.get("url") == "https://x.com/i/topics/1742326119434545480"
         for link in links
     )
 
@@ -570,6 +698,72 @@ def test_classify_submitted_link_input_accepts_traitors_fandom_base_urls() -> No
     assert rows[0]["link_kind"] == "fandom"
 
 
+def test_classify_submitted_link_input_accepts_traitors_fandom_root_domain_seed_without_scheme() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Traitors",
+        "show_name_norm": "the traitors",
+        "show_imdb_id": "tt15218000",
+        "show_tmdb_id": "204761",
+        "show_wikidata_id": None,
+        "show_networks": ["peacock"],
+        "is_bravo_show": False,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    rows, error = _classify_submitted_link_input("thetraitorsuk.fandom.com", context)
+    assert error is None
+    assert rows[0]["entity_type"] == "show"
+    assert rows[0]["link_kind"] == "fandom"
+    assert rows[0]["url"] == "https://thetraitorsuk.fandom.com/"
+    assert rows[0]["metadata"]["fandom_seed_domain"] == "thetraitorsuk.fandom.com"
+
+
+def test_search_fandom_allpages_html_candidates_uses_from_query_prefix_and_extracts_pages() -> None:
+    requested_urls: list[str] = []
+
+    def _fetch_html(url: str, *, timeout: float = 20.0):
+        requested_urls.append(url)
+        if "from=Alan" in url:
+            return (
+                200,
+                """
+                <html>
+                  <body>
+                    <a href="/wiki/Alan_Cumming">Alan Cumming</a>
+                    <a href="/wiki/Special:AllPages">Special</a>
+                  </body>
+                </html>
+                """,
+                "https://thetraitors.fandom.com/wiki/Special:AllPages?from=Alan&to=&namespace=0",
+                None,
+            )
+        return (
+            404,
+            "<html><body>Missing</body></html>",
+            url,
+            None,
+        )
+
+    with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
+        candidates = admin_show_links._search_fandom_allpages_html_candidates(
+            community_domain="thetraitors.fandom.com",
+            query="Alan Cumming",
+            max_results=10,
+        )
+
+    assert any("from=Alan" in url for url in requested_urls)
+    assert "https://thetraitors.fandom.com/wiki/Alan_Cumming" in candidates
+
+
 def test_classify_submitted_link_input_rejects_traitors_fandom_url_on_wrong_domain() -> None:
     show_id = str(uuid4())
     context = {
@@ -717,6 +911,8 @@ def test_classify_submitted_link_input_adds_connected_external_ids_from_wikidata
                 "tmdb_person_id": "",
                 "tvdb_id": "428163",
                 "ratinggraph_tv_show_id": "the-traitors-ratings-103483",
+                "trakt_id": "shows/the-traitors-us",
+                "x_topic_id": "1742326119434545480",
             },
             False,
         ),
@@ -731,6 +927,8 @@ def test_classify_submitted_link_input_adds_connected_external_ids_from_wikidata
     assert by_kind["tmdb"] == "https://www.themoviedb.org/tv/215943"
     assert by_kind["tvdb"] == "https://www.thetvdb.com/series/428163"
     assert by_kind["ratinggraph"] == "https://www.ratingraph.com/tv-shows/the-traitors-ratings-103483"
+    assert by_kind["trakt"] == "https://trakt.tv/shows/the-traitors-us"
+    assert by_kind["x_topic"] == "https://x.com/i/topics/1742326119434545480"
 
 
 def test_fetch_wikidata_summary_includes_presenter_in_cast_item_ids() -> None:
@@ -773,6 +971,39 @@ def test_fetch_wikidata_summary_includes_presenter_in_cast_item_ids() -> None:
                             }
                         }
                     ],
+                    "P646": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "/m/01qwz"}}},
+                    ],
+                    "P11194": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "alan-cumming"}}},
+                    ],
+                    "P2671": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "/g/11c5s8ty6j"}}},
+                    ],
+                    "P8013": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "shows/the-traitors-us"}}},
+                    ],
+                    "P8672": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "1742326119434545480"}}},
+                    ],
+                    "P2002": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "alan_cumming"}}},
+                    ],
+                    "P2003": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "alancummingreally"}}},
+                    ],
+                    "P2013": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "alancumming"}}},
+                    ],
+                    "P2397": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "UC12345"}}},
+                    ],
+                    "P7085": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "alancumming"}}},
+                    ],
+                    "P4265": [
+                        {"mainsnak": {"snaktype": "value", "datavalue": {"value": "alan_cumming"}}},
+                    ],
                 },
             }
         }
@@ -798,6 +1029,17 @@ def test_fetch_wikidata_summary_includes_presenter_in_cast_item_ids() -> None:
     assert summary.get("cast_item_ids") == ["Q123", "Q456"]
     assert summary.get("part_of_series_item_ids") == ["Q789"]
     assert summary.get("tvdb_season_id") == "2033944"
+    assert summary.get("freebase_id") == "/m/01qwz"
+    assert summary.get("famous_birthdays_id") == "alan-cumming"
+    assert summary.get("google_kg_id") == "/g/11c5s8ty6j"
+    assert summary.get("trakt_id") == "shows/the-traitors-us"
+    assert summary.get("x_topic_id") == "1742326119434545480"
+    assert summary.get("twitter_usernames") == ["alan_cumming"]
+    assert summary.get("instagram_usernames") == ["alancummingreally"]
+    assert summary.get("facebook_usernames") == ["alancumming"]
+    assert summary.get("youtube_channel_ids") == ["UC12345"]
+    assert summary.get("tiktok_usernames") == ["alancumming"]
+    assert summary.get("reddit_usernames") == ["alan_cumming"]
 
 
 def test_curated_show_fandom_domains_match_traitors_us_name_variants() -> None:
@@ -955,7 +1197,7 @@ def test_sync_show_wikipedia_links_updates_auto_derived_season_links() -> None:
     season_update_params = execute_returning.call_args_list[1].args[1]
     assert (
         season_update_params[0]
-        == "https://en.wikipedia.org/wiki/The_Traitors_%28American_TV_series%29_season_2"
+        == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)_season_2"
     )
     assert season_update_params[3] == auto_season_link_id
     assert season_update_params[4] == show_id
@@ -1071,6 +1313,10 @@ def test_canonicalize_url_normalizes_host_scheme_port_fragment_and_trailing_slas
         == "https://www.imdb.com/name/nm1234567"
     )
     assert _canonicalize_url("http://example.com:80/path/") == "http://example.com/path"
+    assert (
+        _canonicalize_url("https://en.wikipedia.org/wiki/The_Traitors_%28American_TV_series%29")
+        == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
+    )
 
 
 def test_normalize_link_kind_maps_wikia_to_fandom() -> None:
@@ -1123,8 +1369,8 @@ def test_get_fandom_allowlist_returns_domains_with_source(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     with patch(
         "api.routers.admin_show_links.load_fandom_community_allowlist_with_source",
         return_value=(("real-housewives.fandom.com", "starwars.fandom.com"), "database"),
@@ -1144,8 +1390,8 @@ def test_put_fandom_allowlist_rejects_invalid_payload(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     response = client.put(
         "/api/v1/admin/fandom/allowlist",
         headers={"Authorization": f"Bearer {token}"},
@@ -1159,8 +1405,8 @@ def test_put_fandom_allowlist_normalizes_dedupes_and_refreshes_cache(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
-    token = _make_admin_token("test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     cursor = MagicMock()
 
     with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
@@ -1295,7 +1541,7 @@ def test_discover_people_links_generates_imdb_tmdb_links_from_person_ids() -> No
     imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
     tmdb_links = [link for link in links if link.get("link_kind") == "tmdb"]
     assert len(imdb_links) == 1
-    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm1234567/"
+    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm1234567"
     assert imdb_links[0]["source"] == "core.people.external_ids"
     assert imdb_links[0]["status"] == "approved"
     assert imdb_links[0]["link_group"] == "knowledge"
@@ -1304,6 +1550,172 @@ def test_discover_people_links_generates_imdb_tmdb_links_from_person_ids() -> No
     assert tmdb_links[0]["source"] == "core.cast_tmdb"
     assert tmdb_links[0]["status"] == "approved"
     assert tmdb_links[0]["link_group"] == "knowledge"
+
+
+def test_discover_people_links_emits_social_links_from_cast_tmdb_fields() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Traitors", "networks": ["peacock"], "wikidata_id": None},
+    ):
+        with patch("api.routers.admin_show_links.load_fandom_community_allowlist", return_value=[]):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.side_effect = [
+                    [
+                        {
+                            "id": person_id,
+                            "full_name": "Alan Cumming",
+                            "external_ids": {"tmdb_id": 5190},
+                            "fandom_url": "",
+                            "cast_tmdb_imdb_id": None,
+                            "cast_tmdb_tmdb_id": 5190,
+                            "cast_tmdb_wikidata_id": None,
+                            "cast_tmdb_facebook_id": "alancumming",
+                            "cast_tmdb_instagram_id": "alancummingreally",
+                            "cast_tmdb_tiktok_id": "alancumming",
+                            "cast_tmdb_twitter_id": "alan_cumming",
+                            "cast_tmdb_youtube_id": "UC12345",
+                            "cast_tmdb_freebase_id": "/m/01qwz",
+                            "cast_tmdb_freebase_mid": None,
+                        }
+                    ],
+                    [],
+                ]
+                with patch(
+                    "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                    side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                            url if kind == "wikipedia" else None
+                        ),
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_social_url",
+                            side_effect=lambda url, kind: url,
+                        ):
+                            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                                with patch(
+                                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                    return_value=[],
+                                ):
+                                    links = _discover_people_links(show_id)
+
+    social_links = [link for link in links if link.get("link_group") == "social"]
+    social_kinds = {str(link.get("link_kind") or "") for link in social_links}
+    assert {"twitter", "instagram", "facebook", "youtube", "tiktok"}.issubset(social_kinds)
+    assert all(str(link.get("source") or "") == "core.cast_tmdb_social_ids" for link in social_links)
+    assert any(link.get("link_kind") == "freebase" for link in links)
+
+
+def test_discover_people_links_fetches_tmdb_external_ids_when_missing_social_fields() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Traitors", "networks": ["peacock"], "wikidata_id": None},
+    ):
+        with patch("api.routers.admin_show_links.load_fandom_community_allowlist", return_value=[]):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.side_effect = [
+                    [
+                        {
+                            "id": person_id,
+                            "full_name": "Alan Cumming",
+                            "external_ids": {"tmdb_id": 5190},
+                            "fandom_url": "",
+                            "cast_tmdb_imdb_id": None,
+                            "cast_tmdb_tmdb_id": 5190,
+                            "cast_tmdb_wikidata_id": None,
+                            "cast_tmdb_facebook_id": None,
+                            "cast_tmdb_instagram_id": None,
+                            "cast_tmdb_tiktok_id": None,
+                            "cast_tmdb_twitter_id": None,
+                            "cast_tmdb_youtube_id": None,
+                            "cast_tmdb_freebase_id": None,
+                            "cast_tmdb_freebase_mid": None,
+                        }
+                    ],
+                    [],
+                ]
+                with patch(
+                    "api.routers.admin_show_links._fetch_tmdb_external_ids_payload",
+                    return_value={
+                        "imdb_id": "nm0001086",
+                        "wikidata_id": "Q316629",
+                        "freebase_id": "",
+                        "freebase_mid": "",
+                        "facebook_id": "",
+                        "instagram_id": "alancummingreally",
+                        "tiktok_id": "",
+                        "twitter_id": "alan_cumming",
+                        "youtube_id": "",
+                    },
+                ):
+                    with patch("api.routers.admin_show_links._persist_tmdb_external_ids_for_person") as persist_tmdb:
+                        with patch(
+                            "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                            side_effect=(
+                                lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url
+                            ),
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._validated_person_knowledge_url",
+                                side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                    url if kind == "wikipedia" else None
+                                ),
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._validated_person_social_url",
+                                    side_effect=lambda url, kind: url,
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._fetch_wikidata_summary",
+                                        return_value=(None, True),
+                                    ):
+                                        with patch(
+                                            "api.routers.admin_show_links.search_real_housewives_wiki",
+                                            return_value=None,
+                                        ):
+                                            with patch(
+                                                "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                                return_value=[],
+                                            ):
+                                                links = _discover_people_links(show_id)
+
+    persist_tmdb.assert_called_once_with(person_id, "5190", {
+        "imdb_id": "nm0001086",
+        "wikidata_id": "Q316629",
+        "freebase_id": "",
+        "freebase_mid": "",
+        "facebook_id": "",
+        "instagram_id": "alancummingreally",
+        "tiktok_id": "",
+        "twitter_id": "alan_cumming",
+        "youtube_id": "",
+    })
+    assert any(
+        link.get("link_kind") == "imdb"
+        and link.get("source") == "tmdb_external_ids"
+        and link.get("url") == "https://www.imdb.com/name/nm0001086"
+        for link in links
+    )
+    assert any(
+        link.get("link_kind") == "twitter"
+        and link.get("source") == "tmdb_external_ids_social"
+        and link.get("url") == "https://x.com/alan_cumming"
+        for link in links
+    )
+    assert any(
+        link.get("link_kind") == "instagram"
+        and link.get("source") == "tmdb_external_ids_social"
+        and link.get("url") == "https://www.instagram.com/alancummingreally"
+        for link in links
+    )
 
 
 def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -> None:
@@ -1347,7 +1759,7 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
     assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
 
 
-def test_discover_people_links_fandom_fallback_prefers_highest_scored_candidate() -> None:
+def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_pages() -> None:
     show_id = str(uuid4())
     person_id = str(uuid4())
 
@@ -1382,8 +1794,9 @@ def test_discover_people_links_fandom_fallback_prefers_highest_scored_candidate(
                         links = _discover_people_links(show_id)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
-    assert len(fandom_links) == 1
-    assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
+    assert len(fandom_links) == 2
+    assert any(link.get("url") == "https://real-housewives.fandom.com/wiki/Lisa_Barlow" for link in fandom_links)
+    assert any(link.get("url") == "https://real-housewives.fandom.com/wiki/Lisa" for link in fandom_links)
 
 
 def test_discover_people_links_discovers_fandom_profiles_across_show_fandom_domains() -> None:
@@ -1416,14 +1829,23 @@ def test_discover_people_links_discovers_fandom_profiles_across_show_fandom_doma
                     [],
                 ]
 
-                def _search(name: str, *, community_domain: str, timeout_seconds: float = 20.0) -> str | None:
+                def _search(
+                    name: str,
+                    *,
+                    community_domain: str,
+                    timeout_seconds: float = 20.0,
+                    max_results: int = 5,
+                ) -> list[str]:
                     if community_domain == "thetraitors.fandom.com":
-                        return "https://thetraitors.fandom.com/wiki/Alan_Cumming"
+                        return ["https://thetraitors.fandom.com/wiki/Alan_Cumming"]
                     if community_domain == "thetraitorsuk.fandom.com":
-                        return "https://thetraitorsuk.fandom.com/wiki/Alan_Cumming"
-                    return None
+                        return ["https://thetraitorsuk.fandom.com/wiki/Alan_Cumming"]
+                    return []
 
-                with patch("api.routers.admin_show_links.search_fandom_community_wiki", side_effect=_search):
+                with patch(
+                    "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                    side_effect=_search,
+                ):
                     with patch(
                         "api.routers.admin_show_links._validated_person_knowledge_url",
                         side_effect=lambda url, kind, expected_name=None, **kwargs: (
@@ -1469,7 +1891,7 @@ def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_searc
                     ],
                     [],
                 ]
-                with patch("api.routers.admin_show_links.search_fandom_community_wiki", return_value=None):
+                with patch("api.routers.admin_show_links.search_fandom_community_wiki_candidates", return_value=[]):
                     with patch(
                         "api.routers.admin_show_links._validated_person_knowledge_url",
                         side_effect=lambda url, kind, expected_name=None, **kwargs: (
@@ -1482,6 +1904,14 @@ def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_searc
     assert len(fandom_links) == 2
     assert any(link.get("url") == "https://thetraitors.fandom.com/wiki/Alan_Cumming" for link in fandom_links)
     assert any(link.get("url") == "https://thetraitorsuk.fandom.com/wiki/Alan_Cumming" for link in fandom_links)
+
+
+def test_score_fandom_candidate_url_rejects_weak_token_overlap_person_match() -> None:
+    score = admin_show_links._score_fandom_candidate_url(
+        "https://thetraitors.fandom.com/wiki/Alan_Carr",
+        expected_name="Alan Cumming",
+    )
+    assert score == 0
 
 
 def test_discover_season_links_prefers_wikidata_enwiki_sitelink() -> None:
@@ -1695,16 +2125,25 @@ def test_discover_season_links_discovers_fandom_pages_per_domain_and_skips_missi
                     return_value=(None, None, "missing"),
                 ):
 
-                    def _search(query: str, *, community_domain: str, timeout_seconds: float = 20.0) -> str | None:
+                    def _search(
+                        query: str,
+                        *,
+                        community_domain: str,
+                        timeout_seconds: float = 20.0,
+                        max_results: int = 5,
+                    ) -> list[str]:
                         if "season 1" not in query.lower():
-                            return None
+                            return []
                         if community_domain == "thetraitors.fandom.com":
-                            return "https://thetraitors.fandom.com/wiki/The_Traitors_(US)_season_1"
+                            return ["https://thetraitors.fandom.com/wiki/The_Traitors_(US)_season_1"]
                         if community_domain == "thetraitorsuk.fandom.com":
-                            return "https://thetraitorsuk.fandom.com/wiki/The_Traitors_US_season_1"
-                        return None
+                            return ["https://thetraitorsuk.fandom.com/wiki/The_Traitors_US_season_1"]
+                        return []
 
-                    with patch("api.routers.admin_show_links.search_fandom_community_wiki", side_effect=_search):
+                    with patch(
+                        "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                        side_effect=_search,
+                    ):
 
                         def _fetch_html(url: str, timeout: float = 20.0):
                             if "thetraitors.fandom.com" in url:
@@ -1765,7 +2204,7 @@ def test_discover_season_links_uses_seed_derived_fandom_urls_when_search_misses(
                     "api.routers.admin_show_links._resolve_wikipedia_url",
                     return_value=(None, None, "missing"),
                 ):
-                    with patch("api.routers.admin_show_links.search_fandom_community_wiki", return_value=None):
+                    with patch("api.routers.admin_show_links.search_fandom_community_wiki_candidates", return_value=[]):
 
                         def _fetch_html(url: str, timeout: float = 20.0):
                             if "The_Traitors_(US)_season_2" in url:
@@ -1789,6 +2228,76 @@ def test_discover_season_links_uses_seed_derived_fandom_urls_when_search_misses(
     assert len(season_fandom_links) == 1
     assert season_fandom_links[0]["url"] == "https://thetraitors.fandom.com/wiki/The_Traitors_(US)_season_2"
     assert season_fandom_links[0]["source"] == "fandom_domain_seed:thetraitors.fandom.com"
+
+
+def test_discover_season_links_uses_later_valid_fandom_candidate_when_first_is_missing() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.load_fandom_community_allowlist",
+        return_value=("real-housewives.fandom.com",),
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [
+                    {
+                        "id": season_id,
+                        "season_number": 4,
+                        "external_wikidata_id": "",
+                        "external_ids": {},
+                        "tmdb_season_id": None,
+                    }
+                ],
+                [],
+            ]
+            with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+                fetch_one.side_effect = [
+                    {"name": "The Real Housewives of Salt Lake City", "wikidata_id": None, "tmdb_id": None},
+                    {"url": ""},
+                    {"url": ""},
+                ]
+                with patch(
+                    "api.routers.admin_show_links._resolve_wikipedia_url",
+                    return_value=(None, None, "missing"),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                        return_value=[
+                            "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_season_4_draft",
+                            "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_season_4",
+                        ],
+                    ):
+
+                        def _fetch_html(url: str, timeout: float = 20.0):
+                            if url.endswith("_draft"):
+                                return (
+                                    200,
+                                    "There is currently no text in this page.",
+                                    url,
+                                    None,
+                                )
+                            return (
+                                200,
+                                "<html><body><h1>The Real Housewives of Salt Lake City Season 4</h1></body></html>",
+                                "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_season_4",
+                                None,
+                            )
+
+                        with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
+                            links = _discover_season_links(
+                                show_id,
+                                show_fandom_seed_urls=[
+                                    "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                ],
+                            )
+
+    season_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(season_fandom_links) == 1
+    assert (
+        season_fandom_links[0]["url"]
+        == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_season_4"
+    )
 
 
 def test_discover_people_links_uses_show_wikidata_cast_claims_when_missing_on_person() -> None:
@@ -2265,6 +2774,44 @@ def test_validate_person_knowledge_url_returns_fetch_error_for_tmdb_fetch_failur
     assert outcome == "fetch_error"
 
 
+def test_validate_person_social_url_rejects_missing_instagram_profile() -> None:
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(
+            200,
+            "<html><body>Sorry, this page isn't available.</body></html>",
+            "https://www.instagram.com/alancummingsnaps/",
+            None,
+        ),
+    ):
+        resolved, outcome = _validate_person_social_url(
+            "https://www.instagram.com/alancummingsnaps",
+            kind="instagram",
+        )
+
+    assert resolved is None
+    assert outcome == "invalid"
+
+
+def test_validate_person_social_url_accepts_valid_instagram_profile() -> None:
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(
+            200,
+            "<html><head><title>Alan Cumming (@alancummingreally) • Instagram photos and videos</title></head></html>",
+            "https://www.instagram.com/alancummingreally/",
+            None,
+        ),
+    ):
+        resolved, outcome = _validate_person_social_url(
+            "https://www.instagram.com/alancummingreally",
+            kind="instagram",
+        )
+
+    assert resolved == "https://www.instagram.com/alancummingreally"
+    assert outcome == "valid"
+
+
 def test_validated_person_knowledge_url_rejects_mismatched_fandom_page() -> None:
     _validated_person_knowledge_url.cache_clear()
     html = """
@@ -2466,7 +3013,7 @@ def test_discover_people_links_carries_forward_imdb_when_validation_fetch_errors
 
     imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
     assert len(imdb_links) == 1
-    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm0169212/"
+    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm0169212"
 
 
 def test_load_preapproved_person_source_url_matches_by_url_key() -> None:
@@ -2598,6 +3145,48 @@ def test_cleanup_invalid_person_knowledge_links_deletes_pending_rows_on_fetch_er
     assert result["validation_failures"] == 1
 
 
+def test_cleanup_invalid_person_social_links_deletes_invalid_and_promotes_valid_pending_rows() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    invalid_link_id = str(uuid4())
+    pending_link_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links._load_show_cast_names_by_person_id") as cast_lookup:
+        cast_lookup.return_value = {person_id: "Alan Cumming"}
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": invalid_link_id,
+                    "person_id": person_id,
+                    "link_kind": "instagram",
+                    "status": "approved",
+                    "url": "https://www.instagram.com/alancummingsnaps",
+                },
+                {
+                    "id": pending_link_id,
+                    "person_id": person_id,
+                    "link_kind": "twitter",
+                    "status": "pending",
+                    "url": "https://x.com/alan_cumming",
+                },
+            ]
+            with patch("api.routers.admin_show_links._validate_person_social_url") as validate_url:
+                validate_url.side_effect = [
+                    (None, "invalid"),
+                    ("https://x.com/alan_cumming", "valid"),
+                ]
+                with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                    with patch("api.routers.admin_show_links._promote_pending_person_source_links", return_value=1):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1):
+                            result = _cleanup_invalid_person_social_links(show_id)
+
+    assert result["scanned"] == 2
+    assert result["invalid"] == 1
+    assert result["promoted"] == 1
+    assert result["deleted"] == 1
+    assert result["validation_failures"] == 0
+
+
 def test_cleanup_invalid_show_knowledge_links_deletes_non_manual_invalid_rows() -> None:
     show_id = str(uuid4())
     invalid_link_id = str(uuid4())
@@ -2626,7 +3215,80 @@ def test_cleanup_invalid_show_knowledge_links_deletes_non_manual_invalid_rows() 
     assert result["validation_failures"] == 0
 
 
-def test_cleanup_invalid_show_knowledge_links_keeps_manual_invalid_rows() -> None:
+def test_cleanup_invalid_show_knowledge_links_keeps_show_level_fandom_seed_domains() -> None:
+    show_id = str(uuid4())
+    seed_link_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Traitors", "wikidata_id": None},
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": seed_link_id,
+                    "entity_type": "show",
+                    "link_kind": "fandom",
+                    "status": "approved",
+                    "url": "https://thetraitors.fandom.com/",
+                    "source": "manual_classifier",
+                    "discovered_by": "manual_classifier",
+                }
+            ]
+            with patch(
+                "api.routers.admin_show_links.load_fandom_community_allowlist",
+                return_value=("thetraitors.fandom.com", "thetraitorsuk.fandom.com"),
+            ):
+                with patch("api.routers.admin_show_links._fetch_html_with_status") as fetch_html:
+                    with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
+                            result = _cleanup_invalid_show_knowledge_links(show_id)
+
+    assert result["scanned"] == 1
+    assert result["invalid"] == 0
+    assert result["deleted"] == 0
+    assert result["validation_failures"] == 0
+    fetch_html.assert_not_called()
+
+
+def test_cleanup_invalid_show_knowledge_links_keeps_bravo_fandom_domains_without_global_allowlist() -> None:
+    show_id = str(uuid4())
+    seed_link_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={
+            "name": "The Real Housewives of Salt Lake City",
+            "wikidata_id": None,
+            "networks": ["Bravo TV"],
+        },
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": seed_link_id,
+                    "entity_type": "show",
+                    "link_kind": "fandom",
+                    "status": "approved",
+                    "url": "https://real-housewives.fandom.com/",
+                    "source": "manual_classifier",
+                    "discovered_by": "manual_classifier",
+                }
+            ]
+            with patch("api.routers.admin_show_links.load_fandom_community_allowlist", return_value=()):
+                with patch("api.routers.admin_show_links._fetch_html_with_status") as fetch_html:
+                    with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
+                            result = _cleanup_invalid_show_knowledge_links(show_id)
+
+    assert result["scanned"] == 1
+    assert result["invalid"] == 0
+    assert result["deleted"] == 0
+    assert result["validation_failures"] == 0
+    fetch_html.assert_not_called()
+
+
+def test_cleanup_invalid_show_knowledge_links_deletes_manual_invalid_rows() -> None:
     show_id = str(uuid4())
     invalid_manual_link_id = str(uuid4())
 
@@ -2644,17 +3306,18 @@ def test_cleanup_invalid_show_knowledge_links_keeps_manual_invalid_rows() -> Non
                 }
             ]
             with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
-                with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0) as delete_links:
+                with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1) as delete_links:
                     result = _cleanup_invalid_show_knowledge_links(show_id)
 
     delete_links.assert_called_once()
     call_args = delete_links.call_args
-    assert call_args.args[0] == []
+    assert call_args.args[0] == [invalid_manual_link_id]
     assert "conn" in call_args.kwargs
     assert result["scanned"] == 1
     assert result["invalid"] == 1
-    assert result["deleted"] == 0
-    assert result["manual_skipped"] == 1
+    assert result["deleted"] == 1
+    assert result["manual_skipped"] == 0
+    assert result["deleted_by_reason"]["fandom_domain_mismatch"] == 1
     assert result["validation_failures"] == 0
 
 
@@ -2687,6 +3350,7 @@ def test_cleanup_invalid_show_knowledge_links_deletes_manual_pending_rows() -> N
     assert result["invalid"] == 1
     assert result["deleted"] == 1
     assert result["manual_skipped"] == 0
+    assert result["deleted_by_reason"]["fandom_domain_mismatch"] == 1
     assert result["validation_failures"] == 0
 
 
@@ -2733,6 +3397,7 @@ def test_cleanup_invalid_show_knowledge_links_rejects_season_wikipedia_variant_m
     assert result["invalid"] == 1
     assert result["deleted"] == 1
     assert result["manual_skipped"] == 0
+    assert result["deleted_by_reason"]["wikipedia_variant_mismatch"] == 1
     assert result["validation_failures"] == 0
 
 
@@ -2752,6 +3417,53 @@ def test_promote_pending_links_to_approved_promotes_knowledge_and_network_blog()
     assert "lower(link_kind) = 'network_blog'" in sql
     assert params[0] == show_id
     assert params[1] == ["show", "season", "person"]
+
+
+def test_list_show_links_active_view_returns_approved_deduped_rows() -> None:
+    show_id = UUID(str(uuid4()))
+    duplicate_id_1 = str(uuid4())
+    duplicate_id_2 = str(uuid4())
+    with patch("api.routers.admin_show_links._show_exists", return_value=True):
+        with patch(
+            "api.routers.admin_show_links._normalize_legacy_knowledge_link_kinds",
+            return_value=2,
+        ) as normalize_legacy:
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.return_value = [
+                    {
+                        "id": duplicate_id_1,
+                        "entity_type": "show",
+                        "entity_id": str(show_id),
+                        "season_number": 0,
+                        "link_group": "knowledge",
+                        "link_kind": "wikipedia",
+                        "status": "approved",
+                        "url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                    },
+                    {
+                        "id": duplicate_id_2,
+                        "entity_type": "show",
+                        "entity_id": str(show_id),
+                        "season_number": 0,
+                        "link_group": "knowledge",
+                        "link_kind": "wikipedia",
+                        "status": "approved",
+                        "url": "https://en.wikipedia.org/wiki/The_Traitors_%28American_TV_series%29",
+                    },
+                ]
+                rows = admin_show_links.list_show_links(
+                    show_id=show_id,
+                    _={"email": "admin@example.com"},
+                    status="all",
+                    entity_type="all",
+                    view="active",
+                )
+
+    normalize_legacy.assert_called_once_with(str(show_id))
+    sql = fetch_all.call_args.args[0]
+    assert "lower(status) = 'approved'" in sql
+    assert len(rows) == 1
+    assert rows[0]["url"] == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
 
 
 def test_resolve_show_wikidata_id_uses_show_link_fallback() -> None:
@@ -2891,7 +3603,7 @@ def test_discover_people_links_derives_imdb_and_tmdb_from_wikidata_summary() -> 
     tmdb_links = [link for link in links if link.get("link_kind") == "tmdb"]
     assert len(imdb_links) == 1
     assert imdb_links[0]["source"] == "wikidata_person_external_ids"
-    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm0001086/"
+    assert imdb_links[0]["url"] == "https://www.imdb.com/name/nm0001086"
     assert len(tmdb_links) == 1
     assert tmdb_links[0]["source"] == "wikidata_person_external_ids"
     assert tmdb_links[0]["url"] == "https://www.themoviedb.org/person/5190"
@@ -2911,11 +3623,47 @@ def test_discover_show_links_defaults_knowledge_rows_to_approved() -> None:
             "label": "IMDb",
             "url": "https://www.imdb.com/title/tt15557874/",
             "source": "core.shows.imdb_id",
-        }
+        },
+        {
+            "entity_type": "person",
+            "entity_id": str(uuid4()),
+            "season_number": 0,
+            "link_group": "knowledge",
+            "link_kind": "freebase",
+            "label": "Alan Cumming Freebase",
+            "url": "https://g.co/kg/m/01qwz",
+            "source": "connected_wikidata_identifiers",
+            "status": "approved",
+        },
+        {
+            "entity_type": "person",
+            "entity_id": str(uuid4()),
+            "season_number": 0,
+            "link_group": "social",
+            "link_kind": "twitter",
+            "label": "Alan Cumming Twitter/X",
+            "url": "https://x.com/alan_cumming",
+            "source": "connected_wikidata_social",
+            "status": "approved",
+        },
+        {
+            "entity_type": "person",
+            "entity_id": str(uuid4()),
+            "season_number": 0,
+            "link_group": "social",
+            "link_kind": "instagram",
+            "label": "Alan Cumming Instagram",
+            "url": "https://www.instagram.com/alancummingreally",
+            "source": "tmdb_external_ids_social",
+            "status": "approved",
+        },
     ]
 
     with patch("api.routers.admin_show_links._show_exists", return_value=True):
-        with patch("api.routers.admin_show_links._discover_show_links", return_value=discovered_rows):
+        with patch(
+            "api.routers.admin_show_links._discover_show_links",
+            side_effect=lambda show_id, stats=None: discovered_rows,
+        ):
             with patch("api.routers.admin_show_links._discover_season_links", return_value=[]):
                 with patch("api.routers.admin_show_links._discover_people_links", return_value=[]):
                     with patch("api.routers.admin_show_links._upsert_link") as upsert:
@@ -2925,6 +3673,7 @@ def test_discover_show_links_defaults_knowledge_rows_to_approved() -> None:
                                 "scanned": 0,
                                 "deleted": 0,
                                 "manual_skipped": 0,
+                                "deleted_by_reason": {},
                                 "validation_failures": 0,
                             },
                         ):
@@ -2950,13 +3699,154 @@ def test_discover_show_links_defaults_knowledge_rows_to_approved() -> None:
                                             admin={"email": "admin@example.com"},
                                         )
 
-    upsert.assert_called_once()
-    assert upsert.call_args.kwargs["status"] == "approved"
-    assert result["discovered"] == 1
+    assert upsert.call_count == 4
+    assert all(call.kwargs["status"] == "approved" for call in upsert.call_args_list)
+    assert result["discovered"] == 4
+    assert isinstance(result["run_id"], str) and len(result["run_id"]) > 0
+    assert isinstance(result["started_at"], str) and result["started_at"]
+    assert isinstance(result["finished_at"], str) and result["finished_at"]
+    assert isinstance(result["duration_ms"], int)
     assert result["pending_links_promoted"] == 0
+    assert result["status_counts"]["approved_added"] == 4
+    assert result["status_counts"]["deleted_invalid"] == 0
+    assert result["status_counts"]["skipped_fetch_error"] == 0
+    assert result["validation_reasons"] == {}
     assert result["stage_counts"]["show_scanned"] == 1
     assert result["stage_counts"]["season_scanned"] == 0
     assert result["stage_counts"]["people_scanned"] == 0
+    assert result["wikidata_identifier_links_added"] == 1
+    assert result["wikidata_social_links_added"] == 1
+    assert result["tmdb_social_links_added"] == 1
+    assert result["fandom_candidates_tested"] == 0
+
+
+def test_run_show_link_discovery_returns_structured_timeout_context() -> None:
+    show_id = str(uuid4())
+    db = MagicMock()
+
+    def _slow_show_discovery(_show_id: str, *, stats: dict[str, object] | None = None) -> list[dict[str, object]]:
+        time.sleep(0.01)
+        return []
+
+    with patch("api.routers.admin_show_links._link_discovery_run_timeout_seconds", return_value=0.001):
+        with patch(
+            "api.routers.admin_show_links._count_discovery_scan_targets",
+            return_value={"show_scanned": 1, "season_scanned": 0, "people_scanned": 0},
+        ):
+            with patch("api.routers.admin_show_links._discover_show_links", side_effect=_slow_show_discovery):
+                with patch("api.routers.admin_show_links._discover_season_links", return_value=[]):
+                    with patch("api.routers.admin_show_links._discover_people_links", return_value=[]):
+                        with patch(
+                            "api.routers.admin_show_links._normalize_legacy_knowledge_link_kinds",
+                            return_value=0,
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._cleanup_invalid_person_knowledge_links",
+                                return_value={
+                                    "scanned": 0,
+                                    "deleted": 0,
+                                    "promoted": 0,
+                                    "deleted_by_reason": {},
+                                    "validation_failures": 0,
+                                },
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._cleanup_invalid_person_social_links",
+                                    return_value={
+                                        "scanned": 0,
+                                        "deleted": 0,
+                                        "promoted": 0,
+                                        "deleted_by_reason": {},
+                                        "validation_failures": 0,
+                                    },
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._cleanup_invalid_show_knowledge_links",
+                                        return_value={
+                                            "scanned": 0,
+                                            "deleted": 0,
+                                            "manual_skipped": 0,
+                                            "deleted_by_reason": {},
+                                            "validation_failures": 0,
+                                        },
+                                    ):
+                                        with patch(
+                                            "api.routers.admin_show_links._promote_pending_links_to_approved",
+                                            return_value=0,
+                                        ):
+                                            result = admin_show_links._run_show_link_discovery(
+                                                show_id_str=show_id,
+                                                payload=admin_show_links.LinkDiscoverRequest(
+                                                    include_seasons=True,
+                                                    include_people=True,
+                                                ),
+                                                db=db,
+                                                actor="admin@example.com",
+                                            )
+
+    assert result["timed_out"] is True
+    assert result["status"] == "timed_out"
+    timeout = result.get("timeout")
+    assert isinstance(timeout, dict)
+    assert timeout.get("reason") == "server_processing_timeout"
+    assert isinstance(timeout.get("stage"), str)
+    assert isinstance(timeout.get("elapsed_ms"), int)
+    assert isinstance(timeout.get("budget_ms"), int)
+
+
+def test_discover_show_links_stream_emits_progress_events_before_complete() -> None:
+    show_id = UUID(str(uuid4()))
+    db = MagicMock()
+
+    def _run_discovery(**kwargs):
+        stage_callback = kwargs.get("stage_callback")
+        assert callable(stage_callback)
+        stage_callback("show_discovery_started", {"rows": 0})
+        stage_callback("show_discovery_completed", {"rows": 2})
+        return {
+            "show_id": str(show_id),
+            "run_id": "run-123",
+            "duration_ms": 1234,
+            "discovered": 2,
+            "stage_counts": {"show_scanned": 1, "season_scanned": 0, "people_scanned": 0},
+            "stage_timings_ms": {"show_stage_ms": 10, "season_stage_ms": 0, "people_stage_ms": 0, "validation_ms": 1},
+            "status_counts": {"approved_added": 2, "deleted_invalid": 0, "skipped_fetch_error": 0},
+            "validation_reasons": {},
+            "status": "ok",
+            "timed_out": False,
+            "timeout": None,
+        }
+
+    with patch("api.routers.admin_show_links._show_exists", return_value=True):
+        with patch("api.routers.admin_show_links._run_show_link_discovery", side_effect=_run_discovery):
+            response = admin_show_links.discover_show_links_stream(
+                show_id=show_id,
+                payload=admin_show_links.LinkDiscoverRequest(include_seasons=True, include_people=True),
+                db=db,
+                admin={"email": "admin@example.com"},
+            )
+            async def _read_chunks() -> list[str]:
+                chunks: list[str] = []
+                async for chunk in response.body_iterator:
+                    if isinstance(chunk, bytes):
+                        chunks.append(chunk.decode("utf-8", errors="ignore"))
+                    else:
+                        chunks.append(str(chunk))
+                return chunks
+
+            body_chunks = asyncio.run(_read_chunks())
+
+    payload = "".join(body_chunks)
+    start_index = payload.find('"stage": "starting"')
+    show_started_index = payload.find('"stage": "show_discovery_started"')
+    show_completed_index = payload.find('"stage": "show_discovery_completed"')
+    complete_index = payload.find("event: complete")
+    assert start_index != -1
+    assert show_started_index != -1
+    assert show_completed_index != -1
+    assert complete_index != -1
+    assert start_index < show_started_index < show_completed_index < complete_index
+    assert '"stage_timings_ms"' in payload
 
 
 def test_validated_or_carried_person_source_url_falls_back_to_candidate_on_fetch_error() -> None:

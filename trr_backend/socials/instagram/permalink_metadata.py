@@ -68,6 +68,9 @@ class InstagramPermalinkMetadata:
     media_urls: list[str]
     thumbnail_url: str | None
     raw_media: dict[str, Any]
+    # Rich user detail objects (None = not extracted; [] = extracted but empty)
+    tagged_users_detail: list[dict[str, Any]] | None = None
+    collaborators_detail: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -324,6 +327,59 @@ def _extract_collaborators(media: dict[str, Any]) -> list[str]:
     return _normalize_unique(collabs)
 
 
+def _extract_tagged_users_detail(media: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract rich tagged-user objects from REST API usertags."""
+    details: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    usertags = media.get("usertags")
+    if not isinstance(usertags, dict):
+        return details
+    for tagged in usertags.get("in", []) if isinstance(usertags.get("in"), list) else []:
+        if not isinstance(tagged, dict):
+            continue
+        user = tagged.get("user")
+        if not isinstance(user, dict):
+            continue
+        username = str(user.get("username") or "").strip()
+        if not username or username.lower() in seen:
+            continue
+        seen.add(username.lower())
+        details.append({
+            "username": username,
+            "user_id": str(user.get("pk") or user.get("id") or "") or None,
+            "full_name": str(user.get("full_name") or "").strip() or None,
+            "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
+            "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
+        })
+    return details
+
+
+def _extract_collaborators_detail(media: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract rich collaborator-user objects from REST API coauthor fields."""
+    details: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in ("coauthor_producers", "invited_coauthor_producers"):
+        values = media.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            user = item if "username" in item else (item.get("user") if isinstance(item.get("user"), dict) else {})
+            username = str(user.get("username") or "").strip()
+            if not username or username.lower() in seen:
+                continue
+            seen.add(username.lower())
+            details.append({
+                "username": username,
+                "user_id": str(user.get("pk") or user.get("id") or "") or None,
+                "full_name": str(user.get("full_name") or "").strip() or None,
+                "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
+                "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
+            })
+    return details
+
+
 def _extract_hashtags_mentions(text: str) -> tuple[list[str], list[str]]:
     hashtags = _normalize_unique([str(tag) for tag in _HASHTAG_RE.findall(text or "")])
     mentions = _normalize_unique([f"@{mention}" for mention in _MENTION_RE.findall(text or "")])
@@ -435,6 +491,8 @@ def parse_permalink_metadata(media: dict[str, Any]) -> InstagramPermalinkMetadat
         media_urls=media_urls,
         thumbnail_url=_extract_thumbnail_url(media, media_urls),
         raw_media=dict(media),
+        tagged_users_detail=_extract_tagged_users_detail(media),
+        collaborators_detail=_extract_collaborators_detail(media),
     )
 
 
@@ -551,6 +609,122 @@ def _graphql_node_media_urls(node: dict[str, Any]) -> list[str]:
     return [single] if single else []
 
 
+def _graphql_extract_profile_tags(node: dict[str, Any]) -> list[str]:
+    """Extract tagged usernames from a GraphQL node."""
+    tags: list[str] = []
+    edge_tags = node.get("edge_media_to_tagged_user")
+    if isinstance(edge_tags, dict):
+        for edge in edge_tags.get("edges", []):
+            if not isinstance(edge, dict):
+                continue
+            user = (edge.get("node") or {}).get("user") or {}
+            if isinstance(user, dict):
+                username = str(user.get("username") or "").strip()
+                if username:
+                    tags.append(username)
+    # Also check REST-style usertags (some GraphQL responses include both)
+    usertags = node.get("usertags")
+    if isinstance(usertags, dict):
+        for tagged in usertags.get("in", []) if isinstance(usertags.get("in"), list) else []:
+            if isinstance(tagged, dict):
+                user = tagged.get("user") or {}
+                if isinstance(user, dict):
+                    username = str(user.get("username") or "").strip()
+                    if username:
+                        tags.append(username)
+    return _normalize_unique(tags)
+
+
+def _graphql_extract_collaborators(node: dict[str, Any]) -> list[str]:
+    """Extract collaborator usernames from a GraphQL node."""
+    collabs: list[str] = []
+    for key in ("coauthor_producers", "invited_coauthor_producers", "coauthorProducers"):
+        values = node.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            username = item.get("username")
+            if not username and isinstance(item.get("user"), dict):
+                username = item["user"].get("username")
+            if username:
+                collabs.append(str(username))
+    return _normalize_unique(collabs)
+
+
+def _graphql_extract_tagged_users_detail(node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract rich tagged-user objects from a GraphQL node."""
+    details: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    edge_tags = node.get("edge_media_to_tagged_user")
+    if isinstance(edge_tags, dict):
+        for edge in edge_tags.get("edges", []):
+            if not isinstance(edge, dict):
+                continue
+            user = (edge.get("node") or {}).get("user") or {}
+            if not isinstance(user, dict):
+                continue
+            username = str(user.get("username") or "").strip()
+            if not username or username.lower() in seen:
+                continue
+            seen.add(username.lower())
+            details.append({
+                "username": username,
+                "user_id": str(user.get("id") or user.get("pk") or "") or None,
+                "full_name": str(user.get("full_name") or "").strip() or None,
+                "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
+                "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
+            })
+    # Also check REST-style usertags
+    usertags = node.get("usertags")
+    if isinstance(usertags, dict):
+        for tagged in usertags.get("in", []) if isinstance(usertags.get("in"), list) else []:
+            if not isinstance(tagged, dict):
+                continue
+            user = tagged.get("user")
+            if not isinstance(user, dict):
+                continue
+            username = str(user.get("username") or "").strip()
+            if not username or username.lower() in seen:
+                continue
+            seen.add(username.lower())
+            details.append({
+                "username": username,
+                "user_id": str(user.get("pk") or user.get("id") or "") or None,
+                "full_name": str(user.get("full_name") or "").strip() or None,
+                "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
+                "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
+            })
+    return details
+
+
+def _graphql_extract_collaborators_detail(node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract rich collaborator objects from a GraphQL node."""
+    details: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in ("coauthor_producers", "invited_coauthor_producers", "coauthorProducers"):
+        values = node.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            user = item if "username" in item else (item.get("user") if isinstance(item.get("user"), dict) else {})
+            username = str(user.get("username") or "").strip()
+            if not username or username.lower() in seen:
+                continue
+            seen.add(username.lower())
+            details.append({
+                "username": username,
+                "user_id": str(user.get("id") or user.get("pk") or "") or None,
+                "full_name": str(user.get("full_name") or "").strip() or None,
+                "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
+                "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
+            })
+    return details
+
+
 def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetadata | None:
     if not isinstance(node, dict):
         return None
@@ -565,8 +739,8 @@ def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetad
     return InstagramPermalinkMetadata(
         taken_at=taken_at,
         post_format=_graphql_node_post_format(node),
-        profile_tags=[],
-        collaborators=[],
+        profile_tags=_graphql_extract_profile_tags(node),
+        collaborators=_graphql_extract_collaborators(node),
         hashtags=hashtags,
         mentions=mentions,
         duration_seconds=None,
@@ -574,6 +748,8 @@ def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetad
         media_urls=media_urls,
         thumbnail_url=thumbnail,
         raw_media=dict(node),
+        tagged_users_detail=_graphql_extract_tagged_users_detail(node),
+        collaborators_detail=_graphql_extract_collaborators_detail(node),
     )
 
 
