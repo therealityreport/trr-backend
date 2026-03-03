@@ -800,10 +800,14 @@ def update_worker_heartbeat(
     run_id: str | None = None,
     current_job_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    supported_platforms: list[str] | None = None,
 ) -> dict[str, Any] | None:
     global _worker_health_cache, _queue_status_cache
     if not _worker_heartbeat_schema_ready():
         return None
+
+    _cleaned = sorted(set(p.strip().lower() for p in (supported_platforms or []) if p.strip()))
+    normalized_platforms = _cleaned if _cleaned else None
 
     row = pg.fetch_one(
         """
@@ -816,7 +820,8 @@ def update_worker_heartbeat(
           metadata,
           started_at,
           last_seen_at,
-          updated_at
+          updated_at,
+          supported_platforms
         )
         values (
           %s,
@@ -827,7 +832,8 @@ def update_worker_heartbeat(
           %s::jsonb,
           now(),
           now(),
-          now()
+          now(),
+          %s
         )
         on conflict (worker_id)
         do update set
@@ -837,7 +843,11 @@ def update_worker_heartbeat(
           current_job_id = excluded.current_job_id,
           metadata = excluded.metadata,
           last_seen_at = now(),
-          updated_at = now()
+          updated_at = now(),
+          supported_platforms = CASE
+            WHEN excluded.supported_platforms IS NOT NULL THEN excluded.supported_platforms
+            ELSE social.scrape_workers.supported_platforms
+          END
         returning
           worker_id,
           stage,
@@ -847,7 +857,8 @@ def update_worker_heartbeat(
           metadata,
           started_at,
           last_seen_at,
-          updated_at
+          updated_at,
+          supported_platforms
         """,
         [
             worker_id,
@@ -856,6 +867,7 @@ def update_worker_heartbeat(
             run_id,
             current_job_id,
             json.dumps(metadata or {}),
+            normalized_platforms,
         ],
     )
     with _worker_health_cache_lock:
@@ -878,6 +890,7 @@ def mark_worker_stopped(
         run_id=None,
         current_job_id=None,
         metadata=metadata,
+        supported_platforms=None,
     )
 
 
@@ -15673,11 +15686,22 @@ def _claim_next_jobs(
     platform: str | None = None,
     limit: int = 1,
 ) -> list[dict[str, Any]]:
+    if not worker_id:
+        logger.warning("_claim_next_jobs called without worker_id; capability filter requires worker registration")
+        return []
     safe_limit = max(1, min(int(limit), SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX))
     run_in_flight_cap = _resolve_run_in_flight_cap()
     return pg.fetch_all(
         """
-        with run_in_flight as (
+        with worker_caps as (
+          select coalesce(
+            supported_platforms,
+            array['instagram', 'tiktok', 'twitter', 'youtube']
+          ) as platforms
+          from social.scrape_workers
+          where worker_id = %s
+        ),
+        run_in_flight as (
           select run_id::text as run_id, count(*)::int as in_flight
           from social.scrape_jobs
           where status = 'running'
@@ -15704,6 +15728,7 @@ def _claim_next_jobs(
               or coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s::text
             )
             and (%s::text is null or j.platform = %s::text)
+            and j.platform = any((select platforms from worker_caps))
             and (
               j.worker_id is null
               or j.worker_id = %s::text
@@ -15743,6 +15768,7 @@ def _claim_next_jobs(
           j.last_error_code
         """,
         [
+            worker_id,
             run_id,
             run_id,
             stage,
@@ -16320,6 +16346,8 @@ def ingest_season(
     runner_b_start_offset_hours: int | None = None,
     day_weight_profile: str | None = None,
     priority_mode: str | None = None,
+    client_session_id: str | None = None,
+    client_workflow_id: str | None = None,
     initiated_by: str | None,
     inline_worker_id: str | None = None,
 ) -> dict[str, Any]:
@@ -16557,6 +16585,8 @@ def ingest_season(
         "runner_b_start_offset_hours": schedule.runner_b_offset_hours,
         "day_weight_profile": schedule.day_weight_profile,
         "priority_mode": schedule.priority_mode,
+        "client_session_id": str(client_session_id or "").strip() or None,
+        "client_workflow_id": str(client_workflow_id or "").strip() or None,
     }
     run_id = _create_run(
         context,
@@ -16645,6 +16675,8 @@ def ingest_season(
                     "runner_b_start_offset_hours": schedule.runner_b_offset_hours,
                     "day_weight_profile": schedule.day_weight_profile,
                     "priority_mode": schedule.priority_mode,
+                    "client_session_id": str(client_session_id or "").strip() or None,
+                    "client_workflow_id": str(client_workflow_id or "").strip() or None,
                 }
                 if platform_has_explicit_targets:
                     base_config["comment_anchor_source_ids"] = platform_source_ids_list
@@ -17292,6 +17324,7 @@ def list_runs(
     status: str | None = None,
     source_scope: str | None = None,
     run_id: str | None = None,
+    client_session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 250))
     sql = """
@@ -17321,6 +17354,9 @@ def list_runs(
     if run_id:
         sql += " and id = %s::uuid"
         params.append(run_id)
+    if client_session_id:
+        sql += " and coalesce(config->>'client_session_id', '') = %s"
+        params.append(client_session_id)
     sql += " order by created_at desc limit %s"
     params.append(safe_limit)
     return pg.fetch_all(sql, params)
@@ -17331,8 +17367,9 @@ def list_run_summaries(
     *,
     limit: int = 20,
     source_scope: str | None = None,
+    client_session_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    runs = list_runs(season_id, limit=limit, source_scope=source_scope)
+    runs = list_runs(season_id, limit=limit, source_scope=source_scope, client_session_id=client_session_id)
     if not runs:
         return []
 

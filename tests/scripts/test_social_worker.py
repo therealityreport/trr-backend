@@ -188,3 +188,72 @@ def test_main_queue_once_uses_claim_batch_and_processes_claimed_job(monkeypatch)
     assert len(reconcile_calls) == 1
     assert claim_calls
     assert claim_calls[0] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Worker supported_platforms tests
+# ---------------------------------------------------------------------------
+
+
+def test_worker_passes_supported_platforms_from_platform_flag(monkeypatch) -> None:
+    """When --platform tiktok is set, WorkerHeartbeat gets supported_platforms=['tiktok']."""
+    captured: dict[str, object] = {}
+
+    class _FakeHeartbeat:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            pass
+
+        def stop(self, **kwargs):
+            pass
+
+        def set_state(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(worker, "WorkerHeartbeat", _FakeHeartbeat)
+    monkeypatch.setattr(worker, "recover_stale_running_jobs", lambda **kw: [])
+    monkeypatch.setattr(worker, "claim_next_queued_jobs", lambda **kw: [])
+    monkeypatch.setattr(worker, "reconcile_run_summaries", lambda **kw: {})
+    monkeypatch.setattr(worker, "load_env", lambda: None)
+    monkeypatch.setattr(worker, "ensure_media_mirror_s3_ready", lambda: None)
+    monkeypatch.setattr(worker.logging, "basicConfig", lambda **_kwargs: None)
+    monkeypatch.setattr("sys.argv", ["worker.py", "--platform", "tiktok", "--once"])
+
+    worker.main()
+
+    assert captured["supported_platforms"] == ["tiktok"]
+
+
+def test_worker_passes_all_platforms_when_no_flag(monkeypatch) -> None:
+    """Without --platform flag, WorkerHeartbeat gets all SOCIAL_SUPPORTED_PLATFORMS."""
+    captured: dict[str, object] = {}
+
+    class _FakeHeartbeat:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            pass
+
+        def stop(self, **kwargs):
+            pass
+
+        def set_state(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(worker, "WorkerHeartbeat", _FakeHeartbeat)
+    monkeypatch.setattr(worker, "recover_stale_running_jobs", lambda **kw: [])
+    monkeypatch.setattr(worker, "claim_next_queued_jobs", lambda **kw: [])
+    monkeypatch.setattr(worker, "reconcile_run_summaries", lambda **kw: {})
+    monkeypatch.setattr(worker, "load_env", lambda: None)
+    monkeypatch.setattr(worker, "ensure_media_mirror_s3_ready", lambda: None)
+    monkeypatch.setattr(worker.logging, "basicConfig", lambda **_kwargs: None)
+    monkeypatch.setattr("sys.argv", ["worker.py", "--once"])
+
+    worker.main()
+
+    from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+
+    assert captured["supported_platforms"] == list(SOCIAL_SUPPORTED_PLATFORMS)

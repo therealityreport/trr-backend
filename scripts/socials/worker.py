@@ -31,8 +31,9 @@ _UNSET = object()
 
 
 class WorkerHeartbeat:
-    def __init__(self, *, worker_id: str, stage: str | None, run_id: str | None):
+    def __init__(self, *, worker_id: str, stage: str | None, run_id: str | None, supported_platforms: list[str] | None = None):
         self._worker_id = worker_id
+        self._supported_platforms = supported_platforms
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -102,6 +103,7 @@ class WorkerHeartbeat:
                 run_id=(str(state.get("run_id")) if state.get("run_id") else None),
                 current_job_id=(str(state.get("current_job_id")) if state.get("current_job_id") else None),
                 metadata=dict(state.get("metadata") or {}),
+                supported_platforms=self._supported_platforms,
             )
             self._last_written_status = current_status
             self._last_written_at = now
@@ -265,7 +267,17 @@ def main() -> int:
                 exit_code = rc
         return exit_code
 
-    heartbeat = WorkerHeartbeat(worker_id=worker_id, stage=stage_filter, run_id=args.run_id)
+    if platform_filter:
+        worker_supported_platforms = [platform_filter]
+    else:
+        worker_supported_platforms = list(SOCIAL_SUPPORTED_PLATFORMS)
+
+    heartbeat = WorkerHeartbeat(
+        worker_id=worker_id,
+        stage=stage_filter,
+        run_id=args.run_id,
+        supported_platforms=worker_supported_platforms,
+    )
     heartbeat.start()
 
     try:

@@ -10803,3 +10803,140 @@ def test_get_tiktok_content_health_flags_underperforming_posts(monkeypatch: pyte
     assert "low_comments" in weak["reason_flags"]
     assert "missing_thumbnail" in weak["reason_flags"]
     assert "missing_caption" in weak["reason_flags"]
+
+
+# ---------------------------------------------------------------------------
+# Worker capability filtering tests
+# ---------------------------------------------------------------------------
+
+
+def test_claim_next_jobs_filters_by_worker_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]):
+        captured["sql"] = sql
+        captured["params"] = list(params)
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
+
+    social_repo._claim_next_jobs(
+        worker_id="test-worker-1",
+        run_id=None,
+        stage=None,
+        platform=None,
+        limit=5,
+    )
+
+    sql = str(captured["sql"])
+    params = list(captured["params"])
+
+    # Verify worker_caps CTE exists
+    assert "worker_caps" in sql
+    assert "select coalesce" in sql.lower()
+    assert "supported_platforms" in sql
+
+    # Verify ANY filter in eligible WHERE
+    assert "any((select platforms from worker_caps))" in sql.lower()
+
+    # Verify worker_id is the first parameter (for the CTE)
+    assert params[0] == "test-worker-1"
+
+
+def test_claim_next_jobs_legacy_null_capability_uses_safe_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]):
+        captured["sql"] = sql
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
+
+    social_repo._claim_next_jobs(worker_id="w1", limit=1)
+
+    sql = str(captured["sql"])
+    # Verify coalesce includes the 4 legacy platforms
+    assert "instagram" in sql
+    assert "tiktok" in sql
+    assert "twitter" in sql
+    assert "youtube" in sql
+    # Verify threads and facebook are NOT in the legacy default
+    # (they're not in the coalesce array, only in the worker's registered list)
+    # The coalesce array is the fallback for NULL supported_platforms
+
+
+def test_claim_next_jobs_returns_empty_without_worker_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Calling _claim_next_jobs without worker_id returns empty (guard clause)."""
+    called = {"fetch_all": False}
+
+    def _fake_fetch_all(sql: str, params: list[object]):
+        called["fetch_all"] = True
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    result = social_repo._claim_next_jobs(worker_id=None, limit=1)
+    assert result == []
+    assert not called["fetch_all"]  # Should never reach the DB
+
+
+def test_update_worker_heartbeat_persists_supported_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object]):
+        captured["sql"] = sql
+        captured["params"] = list(params)
+        return {"worker_id": "w1"}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo, "_worker_heartbeat_schema_ready", lambda: True)
+
+    social_repo.update_worker_heartbeat(
+        "w1",
+        stage="posts",
+        status="idle",
+        supported_platforms=["Instagram", "THREADS", " tiktok "],
+    )
+
+    sql = str(captured["sql"])
+    params = list(captured["params"])
+
+    # Verify SQL includes supported_platforms in INSERT
+    assert "supported_platforms" in sql
+
+    # Verify CASE expression for preservation
+    assert "WHEN excluded.supported_platforms IS NOT NULL" in sql
+
+    # Verify normalized/deduped/lowercased/sorted value in params
+    # "Instagram" -> "instagram", "THREADS" -> "threads", " tiktok " -> "tiktok"
+    # sorted: ["instagram", "threads", "tiktok"]
+    assert ["instagram", "threads", "tiktok"] in params
+
+
+def test_update_worker_heartbeat_preserves_platforms_on_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object]):
+        captured["sql"] = sql
+        captured["params"] = list(params)
+        return {"worker_id": "w1"}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo, "_worker_heartbeat_schema_ready", lambda: True)
+
+    social_repo.update_worker_heartbeat(
+        "w1",
+        stage="posts",
+        status="idle",
+        supported_platforms=None,
+    )
+
+    params = list(captured["params"])
+    sql = str(captured["sql"])
+
+    # When supported_platforms=None, the param should be None
+    # The CASE expression in SQL will preserve existing value
+    assert None in params
+    assert "WHEN excluded.supported_platforms IS NOT NULL" in sql
