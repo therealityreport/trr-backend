@@ -2,7 +2,47 @@
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
 
-## Latest Update (2026-03-03) — Person gallery 3:4 thumbnail framing + owner crop v2 + tiny-face defensive skips
+## Latest Update (2026-03-03) — Worker platform capability filtering + Cloud Run race fix
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-fullstack`
+  - `code-reviewer`
+- risk_class: `medium` (claim query behavior changed; migration adds column)
+- files_changed:
+  - `supabase/migrations/0171_social_worker_supported_platforms.sql` (new migration)
+  - `trr_backend/repositories/social_season_analytics.py` (heartbeat, claim query, execute_claimed_job)
+  - `scripts/socials/worker.py` (WorkerHeartbeat platform declaration)
+  - `tests/repositories/test_social_season_analytics.py` (5 new tests)
+  - `tests/scripts/test_social_worker.py` (2 new tests)
+  - `trr_backend/socials/tiktok/scraper.py` (oembed thumbnail backfill)
+  - `docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added `supported_platforms text[]` column to `social.scrape_workers` table
+  - Workers self-declare platform capabilities via heartbeat registration
+  - `_claim_next_jobs()` now filters by worker capability using a `worker_caps` CTE
+  - NULL `supported_platforms` treated as legacy (restricted to instagram/tiktok/twitter/youtube)
+  - Guard clause: `_claim_next_jobs(worker_id=None)` returns [] immediately
+  - Defense-in-depth: `_execute_claimed_job()` releases unsupported platform jobs back to queue
+  - Recovered 89 previously-failed threads/facebook jobs caused by Cloud Run worker mismatch
+  - TikTok scraper: added oembed thumbnail backfill at end of `scrape()` method
+- validation_evidence:
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py` (pass)
+  - `python -m py_compile scripts/socials/worker.py` (pass)
+  - `pytest tests/ -k "capability or supported_platforms or without_worker_id or passes_supported or passes_all_platforms"` (7 passed)
+- pending_actions:
+  - **Cloud Run redeployment required** for full fix (old worker still has stale code)
+  - Deploy: `gcloud run deploy trr-backend --source . --region us-east1 --timeout 3600`
+  - After deploy, verify Cloud Run worker registers with all 6 platforms
+  - Check if worker runs as separate Cloud Run service: `gcloud run services list --region us-east1`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+
+---
+
+## Previous Update (2026-03-03) — Person gallery 3:4 thumbnail framing + owner crop v2 + tiny-face defensive skips
 
 - primary_skill: `orchestrate-plan-execution`
 - supporting_skills:
@@ -38,6 +78,43 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
   - `TRR-Backend`: `yes`
   - `screenalytics`: `yes` (new optional filtered face-count diagnostics consumed)
   - `TRR-APP`: `yes` (3:4 framing + mirror metadata UI consumers)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Sticky episode-window assignments for Reddit period matches
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (changes period-match persistence semantics during season/container refresh)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py`
+- behavior_summary:
+  - Added `preserve_existing_assignments` control to `_replace_period_matches` and threaded it from refresh payload handling (default `true`).
+  - When enabled, empty refresh rows no longer clear previously assigned period matches.
+  - Added cross-period guard so a post already attached to another period in the same community+season is skipped instead of reassigned automatically.
+  - Retained legacy prune/replace behavior behind `preserve_existing_assignments=false`.
+  - Added diagnostics emission for `preserve_existing_assignments` in run comments.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_reddit_refresh.py -k "replace_period_matches"` (pass; `4 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check --extend-ignore E501 trr_backend/repositories/reddit_refresh.py tests/repositories/test_reddit_refresh.py` (pass)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
 - default_skill_chain_applied: `true`
 - default_skill_chain_used:
   - `orchestrate-plan-execution`
@@ -11874,6 +11951,45 @@ Continuation (2026-03-02) — queue-status run summary (run-based health popup c
 - downstream_repos_impacted:
   - `TRR-Backend`: `yes`
   - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Person gallery metadata normalization + face-filter diagnostics persistence
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (person image tagging + metadata repair paths)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_image_counts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/clients/screenalytics.py`
+- behavior_summary:
+  - Added IMDb metadata text normalization in episode enrichment (`html.unescape` + whitespace cleanup) for `episode_title`, `show_name`, and fallback title merges.
+  - Hardened episode enrichment to include `metadata.imdb_title_id` in lookup candidates when `title_imdb_ids` is incomplete.
+  - Coerced `season_number`/`episode_number` consistently via `_to_int` and ensured `row["season"]` is set from normalized season values.
+  - Added `face_detection_diagnostics` persistence on auto-tagging writes (cast photos + media link contexts), including raw/filtered face counts and threshold payload when returned.
+  - Extended Screenalytics client result parsing to include optional `face_filter_thresholds`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_person_images.py api/routers/admin_image_counts.py trr_backend/clients/screenalytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_person_images.py -k "episode or metadata or auto_count"` (pass; `14 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_image_counts_fallback.py -k "auto_count or media_asset"` (pass; `14 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes`
   - `TRR-APP`: `yes`
 - default_skill_chain_applied: `true`
 - default_skill_chain_used:
