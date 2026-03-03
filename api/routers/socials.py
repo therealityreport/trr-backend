@@ -17,7 +17,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from threading import Lock
+from threading import Lock, Thread
 from time import monotonic, perf_counter
 from typing import Any, Literal
 from uuid import UUID
@@ -38,6 +38,12 @@ _WEEK_DETAIL_CACHE_TTL_SECONDS = int(os.getenv("WEEK_DETAIL_CACHE_TTL_SECONDS", 
 _WEEK_DETAIL_CACHE_MAX_ENTRIES = int(os.getenv("WEEK_DETAIL_CACHE_MAX_ENTRIES", "256"))
 _WEEK_DETAIL_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _WEEK_DETAIL_CACHE_LOCK = Lock()
+_WEEK_SUMMARY_CACHE_TTL_SECONDS = int(
+    os.getenv("WEEK_SUMMARY_CACHE_TTL_SECONDS", str(_WEEK_DETAIL_CACHE_TTL_SECONDS))
+)
+_WEEK_SUMMARY_CACHE_MAX_ENTRIES = int(os.getenv("WEEK_SUMMARY_CACHE_MAX_ENTRIES", "256"))
+_WEEK_SUMMARY_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_WEEK_SUMMARY_CACHE_LOCK = Lock()
 _WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST = 0
 _WEEK_DETAIL_DEFAULT_POST_LIMIT = 20
 _WEEK_DETAIL_DEFAULT_POST_OFFSET = 0
@@ -47,6 +53,7 @@ _INGEST_JOBS_DEFAULT_OFFSET = 0
 _INGEST_JOBS_MAX_OFFSET = 5000
 WeekDetailSortField = Literal["engagement", "likes", "views", "comments_count", "shares", "retweets", "posted_at"]
 WeekDetailSortDir = Literal["asc", "desc"]
+WeekSummaryInclude = Literal["totals_only", "full"]
 
 
 def _env_truthy(name: str) -> bool:
@@ -68,6 +75,54 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
 def _comments_run_workers_cap() -> int:
     legacy_default = _env_int("SOCIAL_INLINE_COMMENTS_WORKERS", 4, minimum=1, maximum=8)
     return _env_int("SOCIAL_COMMENTS_RUN_WORKERS", legacy_default, minimum=1, maximum=8)
+
+
+# Default timeout (seconds) for inline dev-fallback execution.
+# Configurable via SOCIAL_INLINE_EXECUTION_TIMEOUT_SECONDS env var.
+_INLINE_EXECUTION_TIMEOUT_SECONDS_DEFAULT = 600
+
+
+def _inline_execution_timeout_seconds() -> int:
+    return _env_int(
+        "SOCIAL_INLINE_EXECUTION_TIMEOUT_SECONDS",
+        _INLINE_EXECUTION_TIMEOUT_SECONDS_DEFAULT,
+        minimum=30,
+        maximum=7200,
+    )
+
+
+def _execute_with_timeout(
+    func: Any,
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+    timeout_seconds: int = 600,
+) -> Any:
+    """Execute *func* in a daemon thread with a hard timeout.
+
+    Raises ``TimeoutError`` if the function does not complete within
+    *timeout_seconds*.  Any exception raised by *func* is re-raised in the
+    calling thread.
+    """
+    kwargs = kwargs or {}
+    result: list[Any] = [None]
+    exception: list[BaseException | None] = [None]
+
+    def _target() -> None:
+        try:
+            result[0] = func(*args, **kwargs)
+        except BaseException as exc:  # noqa: BLE001
+            exception[0] = exc
+
+    thread = Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        raise TimeoutError(
+            f"Inline execution exceeded {timeout_seconds}s timeout"
+        )
+    if exception[0] is not None:
+        raise exception[0]
+    return result[0]
 
 
 SocialExecutionMode = Literal["queued", "inline"]
@@ -134,6 +189,32 @@ def _week_detail_cache_key(
     )
 
 
+def _week_summary_cache_key(
+    *,
+    season_id: str,
+    week_index: int,
+    source_scope: str,
+    platforms: list[str] | None,
+    timezone: str,
+    include: WeekSummaryInclude,
+    max_comments_per_post: int,
+    sort_field: WeekDetailSortField,
+    sort_dir: WeekDetailSortDir,
+) -> tuple[Any, ...]:
+    platform_key = ",".join(_normalize_target_platforms(platforms))
+    return (
+        season_id,
+        week_index,
+        source_scope.strip().lower(),
+        platform_key,
+        timezone,
+        include,
+        int(max_comments_per_post),
+        sort_field,
+        sort_dir,
+    )
+
+
 def _coerce_week_detail_numeric(value: Any) -> float:
     if isinstance(value, bool):
         return float(int(value))
@@ -193,10 +274,42 @@ def _set_week_detail_cached_payload(cache_key: tuple[Any, ...], payload: dict[st
             _WEEK_DETAIL_CACHE.pop(key, None)
 
 
+def _get_week_summary_cached_payload(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
+    now = monotonic()
+    with _WEEK_SUMMARY_CACHE_LOCK:
+        cached = _WEEK_SUMMARY_CACHE.get(cache_key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at <= now:
+            _WEEK_SUMMARY_CACHE.pop(cache_key, None)
+            return None
+        return copy.deepcopy(payload)
+
+
+def _set_week_summary_cached_payload(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> None:
+    with _WEEK_SUMMARY_CACHE_LOCK:
+        _WEEK_SUMMARY_CACHE[cache_key] = (monotonic() + _WEEK_SUMMARY_CACHE_TTL_SECONDS, copy.deepcopy(payload))
+        if len(_WEEK_SUMMARY_CACHE) <= _WEEK_SUMMARY_CACHE_MAX_ENTRIES:
+            return
+        items_by_expiry = sorted(
+            _WEEK_SUMMARY_CACHE.items(),
+            key=lambda item: item[1][0],
+        )
+        for key, _ in items_by_expiry[: - _WEEK_SUMMARY_CACHE_MAX_ENTRIES]:
+            _WEEK_SUMMARY_CACHE.pop(key, None)
+
+
+def invalidate_week_summary_cache() -> None:
+    with _WEEK_SUMMARY_CACHE_LOCK:
+        _WEEK_SUMMARY_CACHE.clear()
+
+
 def invalidate_week_detail_cache() -> None:
-    """Clear in-memory week-detail cache (placeholder for future mutation hook integration)."""
+    """Clear in-memory week-detail and week-summary caches after ingest mutations."""
     with _WEEK_DETAIL_CACHE_LOCK:
         _WEEK_DETAIL_CACHE.clear()
+    invalidate_week_summary_cache()
 
 
 def _register_week_detail_cache_invalidator() -> None:
@@ -1584,12 +1697,32 @@ class SeasonSocialIngestRequest(BaseModel):
     )
     date_start: datetime | None = None
     date_end: datetime | None = None
+    runner_strategy: Literal["single_runner", "adaptive_dual_runner"] | None = Field(default=None)
+    runner_count: int | None = Field(default=None, ge=1, le=2)
+    window_shard_hours: int | None = Field(default=None, ge=1, le=24)
+    runner_b_start_offset_hours: int | None = Field(default=None, ge=0, le=168)
+    day_weight_profile: Literal["default", "rhoslc_default"] | None = Field(default=None)
+    priority_mode: Literal["default", "episode_peak_weighted"] | None = Field(default=None)
     allow_inline_dev_fallback: bool = Field(default=False)
 
 
 class PostCommentRefreshRequest(BaseModel):
     max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
     fetch_replies: bool = Field(default=True)
+
+
+class CancelStuckJobsRequest(BaseModel):
+    job_ids: list[UUID] | None = Field(default=None, max_length=500)
+
+
+class PurgeInactiveWorkersRequest(BaseModel):
+    stale_after_seconds: int | None = Field(default=None, ge=5, le=86_400)
+
+
+class JobDebugRequest(BaseModel):
+    apply_patch: bool = Field(default=False)
+    confirm_apply: bool = Field(default=False)
+    include_context: bool = Field(default=True)
 
 
 class RedditRefreshRunRequest(BaseModel):
@@ -1602,9 +1735,9 @@ class RedditRefreshRunRequest(BaseModel):
     show_aliases: list[str] = Field(default_factory=list)
     cast_names: list[str] = Field(default_factory=list)
     is_show_focused: bool = Field(default=False)
-    analysis_flares: list[str] = Field(default_factory=list)
-    analysis_all_flares: list[str] = Field(default_factory=list)
-    force_include_flares: list[str] = Field(default_factory=list)
+    analysis_flairs: list[str] = Field(default_factory=list)
+    analysis_all_flairs: list[str] = Field(default_factory=list)
+    force_include_flairs: list[str] = Field(default_factory=list)
     sort_modes: list[Literal["new", "hot", "top"]] | None = Field(default=None)
     limit_per_mode: int = Field(default=35, ge=1, le=100)
     period_start: datetime | None = None
@@ -1619,7 +1752,8 @@ class RedditRefreshRunRequest(BaseModel):
     run_config_hash: str | None = Field(default=None, min_length=8, max_length=64)
     fetch_comments: bool = Field(default=False)
     comment_delta_only: bool = Field(default=True)
-    max_pages: int = Field(default=500, ge=10, le=1000)
+    max_pages: int = Field(default=10_000, ge=1, le=10_000)
+    mode: Literal["sync_posts", "sync_details"] = Field(default="sync_posts")
 
 
 class RedditCacheBulkRequest(BaseModel):
@@ -1718,6 +1852,7 @@ async def ingest_season_social(
         execute_run,
         ingest_season,
         is_queue_enabled,
+        recover_stale_running_jobs,
     )
 
     sid = str(season_id)
@@ -1770,6 +1905,12 @@ async def ingest_season_social(
             comment_refresh_policy=payload.comment_refresh_policy,
             comment_anchor_source_ids=payload.comment_anchor_source_ids,
             sound_ids=payload.sound_ids,
+            runner_strategy=payload.runner_strategy,
+            runner_count=payload.runner_count,
+            window_shard_hours=payload.window_shard_hours,
+            runner_b_start_offset_hours=payload.runner_b_start_offset_hours,
+            day_weight_profile=payload.day_weight_profile,
+            priority_mode=payload.priority_mode,
             date_start=payload.date_start,
             date_end=payload.date_end,
             initiated_by=email,
@@ -1779,47 +1920,94 @@ async def ingest_season_social(
         run_id = str(run_payload.get("run_id") or "")
         if run_id and not queue_enabled:
 
-            def _run_sync() -> None:
-                try:
-                    if payload.ingest_mode == "comments_only":
-                        target_platforms = _normalize_target_platforms(payload.platforms)
-                        max_workers = min(_comments_run_workers_cap(), max(1, len(target_platforms)))
-                        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                            futures = [
-                                pool.submit(
-                                    execute_run,
-                                    run_id,
-                                    worker_id=f"api-background:comments:{plat}",
-                                    stage="comments",
-                                    platform=plat,
-                                )
-                                for plat in target_platforms
-                            ]
-                            for future in futures:
-                                future.result()
-                    else:
-                        target_platforms = _normalize_target_platforms(payload.platforms)
-                        if len(target_platforms) > 1:
-                            with ThreadPoolExecutor(max_workers=len(target_platforms)) as pool:
-                                futures = [
-                                    pool.submit(
-                                        execute_run,
-                                        run_id,
-                                        worker_id=f"api-background:{plat}",
-                                        platform=plat,
-                                    )
-                                    for plat in target_platforms
-                                ]
-                                for future in futures:
-                                    future.result()
-                        else:
-                            execute_run(
+            def _run_inline_execution(*, worker_prefix: str) -> None:
+                target_platforms = _normalize_target_platforms(payload.platforms)
+                if payload.ingest_mode == "comments_only":
+                    max_workers = min(_comments_run_workers_cap(), max(1, len(target_platforms)))
+                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                        futures = [
+                            pool.submit(
+                                execute_run,
                                 run_id,
-                                worker_id="api-background",
-                                platform=target_platforms[0] if target_platforms else None,
+                                worker_id=f"{worker_prefix}:comments:{plat}",
+                                stage="comments",
+                                platform=plat,
                             )
+                            for plat in target_platforms
+                        ]
+                        for future in futures:
+                            future.result()
+                    return
+                if len(target_platforms) > 1:
+                    with ThreadPoolExecutor(max_workers=len(target_platforms)) as pool:
+                        futures = [
+                            pool.submit(
+                                execute_run,
+                                run_id,
+                                worker_id=f"{worker_prefix}:{plat}",
+                                platform=plat,
+                            )
+                            for plat in target_platforms
+                        ]
+                        for future in futures:
+                            future.result()
+                    return
+                execute_run(
+                    run_id,
+                    worker_id=worker_prefix,
+                    platform=target_platforms[0] if target_platforms else None,
+                )
+
+            def _run_sync() -> None:
+                timeout = _inline_execution_timeout_seconds()
+                logger.info(
+                    "Starting inline dev-fallback execution with %ds timeout: season=%s run_id=%s",
+                    timeout,
+                    sid,
+                    run_id,
+                )
+                try:
+                    _execute_with_timeout(
+                        _run_inline_execution,
+                        kwargs={"worker_prefix": "api-background"},
+                        timeout_seconds=timeout,
+                    )
+                except TimeoutError:
+                    logger.error(
+                        "Inline execution timed out after %ds: season=%s run_id=%s",
+                        timeout,
+                        sid,
+                        run_id,
+                    )
                 except Exception:  # noqa: BLE001
                     logger.exception("Background social ingest run failed: season=%s run_id=%s", sid, run_id)
+                    try:
+                        recovered = recover_stale_running_jobs(run_id=run_id, limit=250)
+                        if recovered:
+                            logger.warning(
+                                "Recovered stale inline ingest jobs after failure: season=%s run_id=%s recovered=%s",
+                                sid,
+                                run_id,
+                                len(recovered),
+                            )
+                        _execute_with_timeout(
+                            _run_inline_execution,
+                            kwargs={"worker_prefix": "api-background:recovery"},
+                            timeout_seconds=timeout,
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            "Inline recovery execution timed out after %ds: season=%s run_id=%s",
+                            timeout,
+                            sid,
+                            run_id,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Background social ingest inline recovery failed: season=%s run_id=%s",
+                            sid,
+                            run_id,
+                        )
 
             background_tasks.add_task(_run_sync)
         # Week-detail analytics should not serve stale in-memory snapshots after ingest kickoff.
@@ -1873,6 +2061,54 @@ async def ingest_season_social(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/seasons/{season_id}/ingest/schedule-preview")
+async def get_season_ingest_schedule_preview(
+    season_id: UUID,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    platforms: str | None = Query(default=None, description="Comma-separated platform list"),
+    accounts_override: str | None = Query(default=None, description="Comma-separated account overrides"),
+    ingest_mode: Literal["posts_only", "posts_and_comments", "comments_only", "details_refresh"] = Query(
+        default="posts_and_comments",
+    ),
+    max_comments_per_post: int = Query(default=100000, ge=0, le=1000000),
+    date_start: datetime | None = Query(default=None),
+    date_end: datetime | None = Query(default=None),
+    runner_strategy: Literal["single_runner", "adaptive_dual_runner"] = Query(default="single_runner"),
+    runner_count: int = Query(default=1, ge=1, le=2),
+    window_shard_hours: int = Query(default=2, ge=1, le=24),
+    runner_b_start_offset_hours: int | None = Query(default=None, ge=0, le=168),
+    day_weight_profile: Literal["default", "rhoslc_default"] = Query(default="default"),
+    priority_mode: Literal["default", "episode_peak_weighted"] = Query(default="default"),
+    _: AdminUser = None,
+) -> dict:
+    from trr_backend.repositories.social_season_analytics import preview_ingest_schedule
+
+    parsed_platforms = _parse_platform_query(platforms)
+    account_overrides = [item.strip() for item in (accounts_override or "").split(",") if item.strip()] or None
+    try:
+        return preview_ingest_schedule(
+            str(season_id),
+            platforms=parsed_platforms,
+            source_scope=source_scope,
+            accounts_override=account_overrides,
+            ingest_mode=ingest_mode,
+            max_comments_per_post=max_comments_per_post,
+            date_start=date_start,
+            date_end=date_end,
+            runner_strategy=runner_strategy,
+            runner_count=runner_count,
+            window_shard_hours=window_shard_hours,
+            runner_b_start_offset_hours=runner_b_start_offset_hours,
+            day_weight_profile=day_weight_profile,
+            priority_mode=priority_mode,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to build social ingest schedule preview: season=%s", season_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/ingest/worker-health")
 def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
     from trr_backend.repositories.social_season_analytics import get_worker_health, is_queue_enabled
@@ -1882,6 +2118,37 @@ def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
         return {"queue_enabled": is_queue_enabled(), **health}
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest worker health")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/ingest/workers/{worker_id}/detail")
+def get_social_ingest_worker_detail(worker_id: str, _: AdminUser = None) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_worker_detail
+
+    try:
+        return get_worker_detail(worker_id)
+    except ValueError as exc:
+        if str(exc) == "worker_not_found":
+            raise HTTPException(status_code=404, detail="Worker not found") from exc
+        if str(exc) == "worker_heartbeat_schema_missing":
+            raise HTTPException(status_code=503, detail="Worker heartbeat schema is not available") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch social ingest worker detail: worker_id=%s", worker_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/ingest/workers/purge-inactive")
+def purge_social_ingest_inactive_workers(
+    payload: PurgeInactiveWorkersRequest | None = None,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import purge_inactive_workers
+
+    try:
+        return purge_inactive_workers(stale_after_seconds=(payload.stale_after_seconds if payload else None))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to purge inactive social ingest workers")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1896,12 +2163,64 @@ def get_social_ingest_queue_status(_: AdminUser = None) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/ingest/stuck-jobs/cancel")
+def cancel_social_ingest_stuck_jobs(
+    payload: CancelStuckJobsRequest | None = None,
+    user: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import cancel_stuck_jobs
+
+    try:
+        job_ids = [str(job_id) for job_id in (payload.job_ids if payload and payload.job_ids else [])]
+        return cancel_stuck_jobs(
+            job_ids=job_ids or None,
+            cancelled_by=(user or {}).get("email"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to cancel stuck social ingest jobs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/ingest/jobs/{job_id}/debug")
+def debug_social_ingest_job(
+    job_id: UUID,
+    payload: JobDebugRequest | None = None,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import debug_ingest_job_with_openai
+
+    try:
+        request_payload = payload or JobDebugRequest()
+        return debug_ingest_job_with_openai(
+            str(job_id),
+            apply_patch=request_payload.apply_patch,
+            confirm_apply=request_payload.confirm_apply,
+            include_context=request_payload.include_context,
+        )
+    except ValueError as exc:
+        error_code = str(exc)
+        if error_code == "job_not_found":
+            raise HTTPException(status_code=404, detail="Job not found") from exc
+        if error_code == "openai_api_key_missing":
+            raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured") from exc
+        raise HTTPException(status_code=400, detail=error_code) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to debug social ingest job: job_id=%s", job_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/ingest/health-dot")
 def get_social_ingest_health_dot(_: AdminUser = None) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_queue_status
 
     try:
-        status_payload = get_queue_status(include_recent_failures=False)
+        status_payload = get_queue_status(
+            include_recent_failures=False,
+            include_stuck_jobs=False,
+            include_runs_summary=False,
+        )
         workers_payload = status_payload.get("workers") if isinstance(status_payload, dict) else {}
         queue_payload = status_payload.get("queue") if isinstance(status_payload, dict) else {}
         by_status = queue_payload.get("by_status") if isinstance(queue_payload, dict) else {}
@@ -2272,6 +2591,63 @@ async def get_reddit_community_analytics_posts(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# ---------------------------------------------------------------------------
+# Reddit flair auto-categorization
+# ---------------------------------------------------------------------------
+
+
+class AutoCategorizeFlairsRequest(BaseModel):
+    show_id: UUID
+
+
+class AutoCategorizeFlairsResponse(BaseModel):
+    categories: dict[str, str]
+    matched: int
+    total: int
+
+
+@router.post("/reddit/communities/{community_id}/auto-categorize-flairs")
+async def auto_categorize_community_flairs(
+    community_id: UUID,
+    body: AutoCategorizeFlairsRequest,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    """Auto-categorize a community's post flairs as 'cast' or 'season' using show data."""
+    from trr_backend.repositories.reddit_flair_categorizer import auto_categorize_flairs
+
+    try:
+        return auto_categorize_flairs(
+            community_id=str(community_id),
+            show_id=str(body.show_id),
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to auto-categorize flairs: community_id=%s show_id=%s", community_id, body.show_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/reddit/auto-categorize-flairs-batch")
+async def auto_categorize_flairs_batch(
+    body: AutoCategorizeFlairsRequest,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    """Auto-categorize flairs for ALL communities linked to a show."""
+    from trr_backend.repositories.reddit_flair_categorizer import auto_categorize_flairs_batch
+
+    try:
+        return auto_categorize_flairs_batch(show_id=str(body.show_id))
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to batch auto-categorize flairs: show_id=%s", body.show_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/seasons/{season_id}/ingest/jobs")
 async def get_season_ingest_jobs(
     season_id: UUID,
@@ -2491,38 +2867,64 @@ async def get_season_analytics_week_summary(
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
     timezone: str = Query(default="America/New_York"),
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
+    include: WeekSummaryInclude = Query(default="totals_only"),
     max_comments_per_post: int = Query(default=_WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST, ge=0, le=500),
     sort_field: WeekDetailSortField = Query(default="posted_at"),
     sort_dir: WeekDetailSortDir = Query(default="desc"),
     _: AdminUser = None,
 ) -> dict:
-    from trr_backend.repositories.social_season_analytics import get_week_detail_summary
+    from trr_backend.repositories.social_season_analytics import get_week_detail_summary, get_week_detail_summary_fast
 
     parsed_platforms = _parse_platform_query(platforms)
+    cache_key = _week_summary_cache_key(
+        season_id=str(season_id),
+        week_index=week_index,
+        source_scope=source_scope,
+        platforms=parsed_platforms,
+        timezone=timezone,
+        include=include,
+        max_comments_per_post=max_comments_per_post,
+        sort_field=sort_field,
+        sort_dir=sort_dir,
+    )
+    cached_payload = _get_week_summary_cached_payload(cache_key)
+    if cached_payload is not None:
+        return cached_payload
     started_at = perf_counter()
     trace_id = get_trace_id()
 
     try:
-        payload = get_week_detail_summary(
-            str(season_id),
-            week_index=week_index,
-            platforms=parsed_platforms,
-            timezone=timezone,
-            source_scope=source_scope,
-            max_comments_per_post=max_comments_per_post,
-            sort_field=sort_field,
-            sort_dir=sort_dir,
-        )
+        if include == "full":
+            payload = get_week_detail_summary(
+                str(season_id),
+                week_index=week_index,
+                platforms=parsed_platforms,
+                timezone=timezone,
+                source_scope=source_scope,
+                max_comments_per_post=max_comments_per_post,
+                sort_field=sort_field,
+                sort_dir=sort_dir,
+            )
+        else:
+            payload = get_week_detail_summary_fast(
+                str(season_id),
+                week_index=week_index,
+                platforms=parsed_platforms,
+                timezone=timezone,
+                source_scope=source_scope,
+            )
+        _set_week_summary_cached_payload(cache_key, payload)
         duration_ms = int((perf_counter() - started_at) * 1000)
         logger.info(
             (
                 "Social week detail summary completed: season=%s week=%s source_scope=%s platforms=%s "
-                "max_comments_per_post=%s duration_ms=%s trace_id=%s"
+                "include=%s max_comments_per_post=%s duration_ms=%s trace_id=%s"
             ),
             season_id,
             week_index,
             source_scope,
             ",".join(parsed_platforms) if parsed_platforms else "all",
+            include,
             max_comments_per_post,
             duration_ms,
             trace_id,
@@ -2535,12 +2937,13 @@ async def get_season_analytics_week_summary(
         logger.exception(
             (
                 "Failed to compute week detail summary: season=%s week=%s source_scope=%s platforms=%s "
-                "max_comments_per_post=%s duration_ms=%s trace_id=%s"
+                "include=%s max_comments_per_post=%s duration_ms=%s trace_id=%s"
             ),
             season_id,
             week_index,
             source_scope,
             ",".join(parsed_platforms) if parsed_platforms else "all",
+            include,
             max_comments_per_post,
             duration_ms,
             trace_id,

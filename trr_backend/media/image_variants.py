@@ -22,8 +22,8 @@ _BASE_VARIANT_WIDTHS: tuple[tuple[str, int], ...] = (
 )
 
 _CROP_VARIANTS: tuple[tuple[str, int, int], ...] = (
-    ("crop_card", 720, 900),
-    ("crop_detail", 1440, 1800),
+    ("crop_card", 720, 960),
+    ("crop_detail", 1440, 1920),
 )
 
 

@@ -20,12 +20,46 @@ if ! [[ "$GRACEFUL_SHUTDOWN_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   GRACEFUL_SHUTDOWN_SECONDS="10"
 fi
 
+TRR_BACKEND_WORKERS="${TRR_BACKEND_WORKERS:-1}"
+if ! [[ "$TRR_BACKEND_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[trr-backend] WARNING: invalid TRR_BACKEND_WORKERS='${TRR_BACKEND_WORKERS}', using default 1." >&2
+  TRR_BACKEND_WORKERS="1"
+fi
+
+TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER="${TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER:-1}"
+if ! [[ "$TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER" =~ ^[01]$ ]]; then
+  echo "[trr-backend] WARNING: invalid TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER='${TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER}', using 1." >&2
+  TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER="1"
+fi
+
+BACKEND_RELOAD_MODE="${TRR_BACKEND_RELOAD:-1}"
+
+EFFECTIVE_TRR_BACKEND_WORKERS="$TRR_BACKEND_WORKERS"
+if [[ "$TRR_BACKEND_WORKERS" -gt 1 && "$TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER" == "1" ]]; then
+  if [[ -z "${REDIS_URL:-}" ]]; then
+    echo "[trr-backend] WARNING: TRR_BACKEND_WORKERS=${TRR_BACKEND_WORKERS} requested, but REDIS_URL is not set."
+    echo "[trr-backend] WARNING: forcing single-worker mode (TRR_BACKEND_WORKERS=1) to preserve realtime safety."
+    EFFECTIVE_TRR_BACKEND_WORKERS="1"
+  fi
+fi
+if [[ "$BACKEND_RELOAD_MODE" != "0" && "$EFFECTIVE_TRR_BACKEND_WORKERS" -gt 1 ]]; then
+  echo "[trr-backend] WARNING: reload mode does not support multi-worker in this launcher."
+  echo "[trr-backend] WARNING: forcing single-worker mode (TRR_BACKEND_WORKERS=1)."
+  EFFECTIVE_TRR_BACKEND_WORKERS="1"
+fi
+
 UVICORN_ARGS=(
   api.main:app
   --port "${TRR_BACKEND_PORT:-8000}"
   --timeout-graceful-shutdown "$GRACEFUL_SHUTDOWN_SECONDS"
 )
-BACKEND_RELOAD_MODE="${TRR_BACKEND_RELOAD:-1}"
+
+if [[ "$EFFECTIVE_TRR_BACKEND_WORKERS" -gt 1 ]]; then
+  UVICORN_ARGS+=(
+    --workers "$EFFECTIVE_TRR_BACKEND_WORKERS"
+  )
+fi
+
 if [[ "$BACKEND_RELOAD_MODE" != "0" ]]; then
   UVICORN_ARGS+=(
     --reload

@@ -297,7 +297,9 @@ def test_graphql_node_extracts_profile_tags_and_collaborators() -> None:
                             "full_name": "Tagged One",
                             "is_verified": True,
                             "profile_pic_url": "https://pic/1.jpg",
-                        }
+                        },
+                        "x": 0.31,
+                        "y": 0.72,
                     }
                 },
                 {"node": {"user": {"username": "tagged_user_2", "id": "222"}}},
@@ -323,6 +325,9 @@ def test_graphql_node_extracts_profile_tags_and_collaborators() -> None:
     assert metadata.tagged_users_detail[0]["username"] == "tagged_user_1"
     assert metadata.tagged_users_detail[0]["full_name"] == "Tagged One"
     assert metadata.tagged_users_detail[0]["is_verified"] is True
+    assert metadata.tagged_users_detail[0]["tag_x"] == 0.31
+    assert metadata.tagged_users_detail[0]["tag_y"] == 0.72
+    assert metadata.tagged_users_detail[0]["tag_position_source"] == "graphql_node.xy"
 
     assert metadata.collaborators_detail is not None
     assert len(metadata.collaborators_detail) == 2
@@ -375,9 +380,10 @@ def test_parse_permalink_metadata_extracts_detail_objects() -> None:
                             "full_name": "Tag One",
                             "is_verified": True,
                             "profile_pic_url": "https://pic/tag1.jpg",
-                        }
+                        },
+                        "position": [0.2, 0.9],
                     },
-                    {"user": {"username": "tag2", "pk": "200"}},
+                    {"user": {"username": "tag2", "pk": "200"}, "position": {"x": 0.8, "y": 0.1}},
                 ]
             },
             "coauthor_producers": [
@@ -390,10 +396,83 @@ def test_parse_permalink_metadata_extracts_detail_objects() -> None:
     assert len(metadata.tagged_users_detail) == 2
     assert metadata.tagged_users_detail[0]["username"] == "tag1"
     assert metadata.tagged_users_detail[0]["profile_pic_url"] == "https://pic/tag1.jpg"
+    assert metadata.tagged_users_detail[0]["tag_x"] == 0.2
+    assert metadata.tagged_users_detail[0]["tag_y"] == 0.9
+    assert metadata.tagged_users_detail[0]["tag_position_source"] == "rest_usertags.position_array"
+    assert metadata.tagged_users_detail[1]["tag_x"] == 0.8
+    assert metadata.tagged_users_detail[1]["tag_y"] == 0.1
+    assert metadata.tagged_users_detail[1]["tag_position_source"] == "rest_usertags.position_object"
 
     assert metadata.collaborators_detail is not None
     assert len(metadata.collaborators_detail) == 1
     assert metadata.collaborators_detail[0]["username"] == "coauth1"
+
+
+def test_parse_permalink_metadata_extracts_child_posts_with_slide_tags() -> None:
+    metadata = parse_permalink_metadata(
+        {
+            "taken_at": 1739481600,
+            "media_type": 8,
+            "carousel_media": [
+                {
+                    "image_versions2": {"candidates": [{"url": "https://cdn.test/slide-1.jpg"}]},
+                    "original_width": 1080,
+                    "original_height": 1350,
+                    "usertags": {
+                        "in": [
+                            {
+                                "user": {"username": "slide_tag", "pk": "100"},
+                                "position": [0.2, 0.8],
+                            }
+                        ]
+                    },
+                },
+                {
+                    "image_versions2": {"candidates": [{"url": "https://cdn.test/slide-2.jpg"}]},
+                    "original_width": 1080,
+                    "original_height": 1350,
+                },
+            ],
+        }
+    )
+
+    assert metadata.child_posts_data is not None
+    assert len(metadata.child_posts_data) == 2
+    assert metadata.child_posts_data[0]["slide_index"] == 0
+    assert metadata.child_posts_data[0]["display_url"] == "https://cdn.test/slide-1.jpg"
+    assert metadata.child_posts_data[0]["tagged_users_detail"][0]["username"] == "slide_tag"
+    assert metadata.child_posts_data[0]["tagged_users_detail"][0]["tag_x"] == 0.2
+    assert metadata.child_posts_data[0]["tagged_users_detail"][0]["tag_y"] == 0.8
+    assert metadata.child_posts_data[1]["slide_index"] == 1
+    assert metadata.child_posts_data[1]["tagged_users_detail"] == []
+
+
+def test_parse_permalink_metadata_ignores_invalid_tag_positions() -> None:
+    metadata = parse_permalink_metadata(
+        {
+            "taken_at": 1739481600,
+            "media_type": 1,
+            "usertags": {
+                "in": [
+                    {"user": {"username": "bad_coords_1"}, "position": ["left", "top"]},
+                    {"user": {"username": "bad_coords_2"}, "position": [None, 0.5]},
+                    {
+                        "user": {"username": "clamped_coords"},
+                        "position": {"x": 1.5, "y": -0.5},
+                    },
+                ]
+            },
+            "image_versions2": {"candidates": [{"url": "https://cdn.test/img.jpg"}]},
+        }
+    )
+    assert metadata.tagged_users_detail is not None
+    assert len(metadata.tagged_users_detail) == 3
+    assert "tag_x" not in metadata.tagged_users_detail[0]
+    assert "tag_y" not in metadata.tagged_users_detail[0]
+    assert "tag_x" not in metadata.tagged_users_detail[1]
+    assert "tag_y" not in metadata.tagged_users_detail[1]
+    assert metadata.tagged_users_detail[2]["tag_x"] == 1.0
+    assert metadata.tagged_users_detail[2]["tag_y"] == 0.0
 
 
 def test_empty_tags_from_metadata_are_not_none() -> None:

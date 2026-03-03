@@ -445,6 +445,32 @@ def build_instagram_profile_pic_s3_key(
     return "/".join(segments)
 
 
+def build_profile_pic_s3_key(
+    platform: str,
+    username: str,
+    sha256: str,
+    ext: str,
+) -> str:
+    """
+    Build S3 key for profile pictures on any platform.
+
+    Path: social/{platform}/profile-pics/{username}/{sha256}{ext}
+
+    Content-addressed: same image bytes = same key (natural dedup).
+    Old avatars preserved when account changes theirs (new SHA256 = new key).
+    """
+    safe_platform = _sanitize_path_segment(platform)
+    safe_username = _sanitize_path_segment(username)
+    segments = [
+        "social",
+        safe_platform,
+        "profile-pics",
+        safe_username,
+        f"{sha256}{ext}",
+    ]
+    return "/".join(segments)
+
+
 def build_episode_image_s3_key(
     episode_identifier: str,
     source: str,
@@ -1080,6 +1106,106 @@ def mirror_urls_to_s3(
         cache[source_url] = result
         results.append(result)
     return results
+
+
+def mirror_reddit_media(
+    *,
+    source_url: str,
+    reddit_post_id: str,
+    reddit_comment_id: str | None = None,
+    media_type: str = "image",
+    s3_client=None,
+    bucket: str | None = None,
+    max_bytes: int = 50 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Mirror a single Reddit media URL to S3 and return a row dict for reddit_media_mirrors.
+
+    Handles dedup: if the source_url already has a 'mirrored' row for the same
+    post (and optionally comment), the existing record is returned unchanged.
+    """
+    from trr_backend.db import pg  # lazy import to avoid circular deps
+
+    source_url = str(source_url or "").strip()
+    if not _is_http_url(source_url):
+        return {
+            "source_url": source_url,
+            "reddit_post_id": reddit_post_id,
+            "reddit_comment_id": reddit_comment_id,
+            "media_type": media_type,
+            "status": "skipped",
+            "error_message": "invalid_url",
+        }
+
+    # Dedup: check if already mirrored for this post+url
+    existing = pg.fetch_one(
+        """
+        select id, source_url, hosted_key, hosted_url, sha256, size_bytes,
+               content_type, status, error_message
+        from social.reddit_media_mirrors
+        where reddit_post_id = %s
+          and source_url = %s
+          and status = 'mirrored'
+        limit 1
+        """,
+        [reddit_post_id, source_url],
+    )
+    if existing:
+        return dict(existing)
+
+    result = mirror_url_to_s3(
+        source_url,
+        s3_client=s3_client,
+        bucket=bucket,
+        max_bytes=max_bytes,
+    )
+
+    row_data = {
+        "reddit_post_id": reddit_post_id,
+        "reddit_comment_id": reddit_comment_id,
+        "source_url": source_url,
+        "media_type": media_type,
+        "hosted_key": result.hosted_key,
+        "hosted_url": result.hosted_url,
+        "sha256": result.sha256,
+        "size_bytes": result.size_bytes,
+        "content_type": result.content_type,
+        "status": result.status if result.status in ("mirrored", "skipped") else "failed",
+        "error_message": result.error,
+    }
+
+    try:
+        inserted = pg.fetch_one(
+            """
+            insert into social.reddit_media_mirrors (
+              reddit_post_id, reddit_comment_id, source_url, media_type,
+              hosted_key, hosted_url, sha256, size_bytes, content_type,
+              status, error_message
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            on conflict do nothing
+            returning id
+            """,
+            [
+                row_data["reddit_post_id"],
+                row_data["reddit_comment_id"],
+                row_data["source_url"],
+                row_data["media_type"],
+                row_data["hosted_key"],
+                row_data["hosted_url"],
+                row_data["sha256"],
+                row_data["size_bytes"],
+                row_data["content_type"],
+                row_data["status"],
+                row_data["error_message"],
+            ],
+        )
+        if inserted:
+            row_data["id"] = inserted.get("id")
+    except Exception:  # noqa: BLE001
+        # Non-fatal: mirror record insert failed but the S3 upload may have succeeded
+        pass
+
+    return row_data
 
 
 def mirror_cast_photo_row(
@@ -2123,3 +2249,42 @@ def prune_orphaned_episode_image_objects(
             print(f"  Deleted {deleted_count} orphaned objects")
 
     return list(orphaned)
+
+
+def mirror_reddit_media_batch(
+    items: list[dict[str, Any]],
+    *,
+    max_concurrent: int = 5,  # noqa: ARG001 — reserved for future async upgrade
+) -> list[dict[str, Any]]:
+    """
+    Mirror a batch of Reddit media items sequentially.
+
+    Each item in *items* must contain the keyword arguments accepted by
+    :func:`mirror_reddit_media`: ``source_url``, ``reddit_post_id``,
+    and optionally ``reddit_comment_id`` and ``media_type``.
+
+    Returns a list of result dicts (one per input item).
+    """
+    results: list[dict[str, Any]] = []
+    for item in items or []:
+        try:
+            result = mirror_reddit_media(
+                source_url=item.get("source_url", ""),
+                reddit_post_id=item.get("reddit_post_id", ""),
+                reddit_comment_id=item.get("reddit_comment_id"),
+                media_type=item.get("media_type", "image"),
+            )
+        except Exception as exc:
+            result = {
+                "id": None,
+                "source_url": item.get("source_url", ""),
+                "hosted_key": None,
+                "hosted_url": None,
+                "sha256": None,
+                "size_bytes": None,
+                "content_type": None,
+                "status": "failed",
+                "error": f"mirror_exception:{exc.__class__.__name__}",
+            }
+        results.append(result)
+    return results

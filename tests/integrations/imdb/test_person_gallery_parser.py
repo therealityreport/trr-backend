@@ -37,6 +37,8 @@ def test_parse_person_mediaviewer_details_extracts_people_titles() -> None:
     assert details["people_imdb_ids"]
     assert "nm11883948" in details["people_imdb_ids"]
     assert details["title_imdb_ids"] == ["tt36951580"]
+    assert details["imdb_title_id"] == "tt36951580"
+    assert details["imdb_title_url"] == "https://www.imdb.com/title/tt36951580/"
     assert details["url"].endswith("_V1_.jpg")
     assert details["width"] == 640
     assert "Lisa Barlow" in (details["caption"] or "")
@@ -68,6 +70,8 @@ def test_parse_person_mediaviewer_details_uses_caption_links_when_sections_missi
     assert details["people_imdb_ids"] == ["nm0000001", "nm0000002", "nm0000003"]
     assert details["people_names"] == ["Andy Cohen", "Wes O'Dell", "Fraser Olender"]
     assert details["title_imdb_ids"] == ["tt1234567"]
+    assert details["imdb_title_id"] == "tt1234567"
+    assert details["imdb_title_url"] == "https://www.imdb.com/title/tt1234567/"
     assert details["title_names"] == ["Fraser Olender & Wes O'Dell (2022)"]
 
 

@@ -559,15 +559,11 @@ class TikTokScraper:
         video_id = data.get("id", "")
         media_urls = self._extract_ytdlp_video_urls(data)
         thumbnail_url = self._extract_ytdlp_thumbnail_url(data)
-        user_avatar_url = (
-            str(
-                data.get("uploader_avatar")
-                or data.get("channel_thumbnail")
-                or data.get("channelAvatarUrl")
-                or data.get("author_avatar_url")
-                or ""
-            ).strip()
-            or None
+        user_avatar_url = self._pick_best_avatar_url(
+            data.get("uploader_avatar"),
+            data.get("channel_thumbnail"),
+            data.get("channelAvatarUrl"),
+            data.get("author_avatar_url"),
         )
 
         return TikTokPost(
@@ -831,24 +827,22 @@ class TikTokScraper:
             or config.username
         )
         nickname = str(author.get("nickname") or author_meta.get("nickName") or author_meta.get("nickname") or "")
-        user_avatar_url = (
-            str(
-                author.get("avatarUrl")
-                or author.get("avatar")
-                or author.get("originalAvatarUrl")
-                or author.get("avatarLarger")
-                or author.get("avatar_larger")
-                or author.get("avatar_thumb")
-                or author.get("avatar_thumb_url")
-                or author_meta.get("avatarUrl")
-                or author_meta.get("avatar")
-                or author_meta.get("avatarThumb")
-                or author_meta.get("avatar_thumb")
-                or item.get("avatarUrl")
-                or item.get("avatar")
-                or ""
-            ).strip()
-            or None
+        user_avatar_url = self._pick_best_avatar_url(
+            author.get("avatarLarger"),
+            author.get("avatar_larger"),
+            author.get("originalAvatarUrl"),
+            author.get("avatarUrl"),
+            author.get("avatar"),
+            author.get("avatar_thumb"),
+            author.get("avatar_thumb_url"),
+            author_meta.get("avatarLarger"),
+            author_meta.get("avatar_larger"),
+            author_meta.get("avatarUrl"),
+            author_meta.get("avatar"),
+            author_meta.get("avatarThumb"),
+            author_meta.get("avatar_thumb"),
+            item.get("avatarUrl"),
+            item.get("avatar"),
         )
 
         # Stats
@@ -1197,6 +1191,19 @@ class TikTokScraper:
                     matched_posts=len(posts),
                 )
 
+        # Backfill missing thumbnails via oembed API
+        missing_thumb = [p for p in posts if not p.thumbnail_url and p.url]
+        if missing_thumb:
+            logger.info(f"Backfilling thumbnails via oembed for {len(missing_thumb)} posts...")
+            filled = 0
+            for p in missing_thumb:
+                thumb = self._fetch_oembed_thumbnail(p.url)
+                if thumb:
+                    p.thumbnail_url = thumb
+                    filled += 1
+            if filled:
+                logger.info(f"Oembed backfill: {filled}/{len(missing_thumb)} thumbnails resolved")
+
         self.last_retrieval_meta = {
             "retrieval_mode": (
                 "api"
@@ -1475,16 +1482,12 @@ class TikTokScraper:
             parent_source_comment_id=parent_source_comment_id,
             user_url=(str(user.get("url") or user.get("profileUrl") or "").strip() or None),
             user_bio=(str(user.get("bio") or user.get("signature") or "").strip() or None),
-            user_avatar_url=(
-                str(
-                    user.get("avatarUrl")
-                    or user.get("avatar")
-                    or user.get("originalAvatarUrl")
-                    or user.get("avatarLarger")
-                    or user.get("avatar_larger")
-                    or ""
-                ).strip()
-                or None
+            user_avatar_url=self._pick_best_avatar_url(
+                user.get("avatarLarger"),
+                user.get("avatar_larger"),
+                user.get("originalAvatarUrl"),
+                user.get("avatarUrl"),
+                user.get("avatar"),
             ),
             user_region=(str(user.get("region") or "").strip() or None),
             user_language=(str(user.get("language") or user.get("lang") or "").strip() or None),
@@ -1635,6 +1638,39 @@ class TikTokScraper:
         return any(token in path for token in ("avt-", "/avatar", "profile_pic", "profile"))
 
     @staticmethod
+    def _avatar_url_quality_score(url: str) -> tuple[int, int]:
+        normalized = str(url or "").strip().lower()
+        if not normalized:
+            return (-1, -1)
+        score = 0
+        if any(
+            token in normalized
+            for token in ("avatarlarger", "avatar_larger", "originalavatarurl", "cropcenter:1080", "profile_pic")
+        ):
+            score += 40
+        if any(token in normalized for token in ("avatarthumbnail", "avatar_thumb", "thumbnail", "small", "tiny")):
+            score -= 25
+        max_dim = 0
+        for match in re.finditer(r"(?:s)?(\d{2,4})x(\d{2,4})", normalized):
+            max_dim = max(max_dim, int(match.group(1)), int(match.group(2)))
+        for match in re.finditer(r"cropcenter:(\d{2,4}):(\d{2,4})", normalized):
+            max_dim = max(max_dim, int(match.group(1)), int(match.group(2)))
+        return (score + min(max_dim, 4096), len(normalized))
+
+    def _pick_best_avatar_url(self, *candidates: Any) -> str | None:
+        best_url: str | None = None
+        best_score: tuple[int, int] = (-1, -1)
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if not value.startswith(("http://", "https://")):
+                continue
+            score = self._avatar_url_quality_score(value)
+            if score > best_score:
+                best_score = score
+                best_url = value
+        return best_url
+
+    @staticmethod
     def _extract_best_bitrate_video_url(video: dict[str, Any]) -> str | None:
         rows: list[tuple[tuple[int, int, int], str]] = []
         for entry in video.get("bitrateInfo") or []:
@@ -1697,4 +1733,19 @@ class TikTokScraper:
             candidate = TikTokScraper._extract_url_value(item.get(key))
             if candidate:
                 return candidate
+        return None
+
+    def _fetch_oembed_thumbnail(self, video_url: str) -> str | None:
+        """Fetch thumbnail URL from TikTok's public oembed endpoint."""
+        try:
+            resp = self.session.get(
+                "https://www.tiktok.com/oembed",
+                params={"url": video_url},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("thumbnail_url") or None
+        except Exception:
+            pass
         return None

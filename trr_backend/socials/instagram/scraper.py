@@ -10,6 +10,7 @@ Supports:
 
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -78,6 +79,10 @@ class InstagramUserDetail:
     full_name: str | None = None
     is_verified: bool | None = None
     profile_pic_url: str | None = None
+    profile_pic_url_hd: str | None = None
+    tag_x: float | None = None
+    tag_y: float | None = None
+    tag_position_source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -351,6 +356,72 @@ class InstagramScraper:
             logger.debug(f"Rate limiting: waiting {delay}s")
             time.sleep(delay)
         self._request_count += 1
+
+    @staticmethod
+    def _normalize_tag_coord(value: Any) -> float | None:
+        if isinstance(value, bool):
+            return None
+        coord: float | None = None
+        if isinstance(value, (int, float)):
+            coord = float(value)
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                coord = float(text)
+            except ValueError:
+                return None
+        if coord is None or not math.isfinite(coord):
+            return None
+        return round(min(1.0, max(0.0, coord)), 4)
+
+    def _normalized_tag_position(
+        self,
+        x_value: Any,
+        y_value: Any,
+        *,
+        source: str,
+    ) -> tuple[float, float, str] | None:
+        x = self._normalize_tag_coord(x_value)
+        y = self._normalize_tag_coord(y_value)
+        if x is None or y is None:
+            return None
+        return (x, y, source)
+
+    def _tag_position_from_array(self, value: Any, *, source: str) -> tuple[float, float, str] | None:
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            return None
+        return self._normalized_tag_position(value[0], value[1], source=source)
+
+    def _tag_position_from_object(self, value: Any, *, source: str) -> tuple[float, float, str] | None:
+        if not isinstance(value, dict):
+            return None
+        return self._normalized_tag_position(
+            value.get("x", value.get("left")),
+            value.get("y", value.get("top")),
+            source=source,
+        )
+
+    def _extract_rest_tag_position(self, tagged: dict[str, Any]) -> tuple[float, float, str] | None:
+        position = tagged.get("position")
+        return self._tag_position_from_array(
+            position, source="rest_usertags.position_array"
+        ) or self._tag_position_from_object(position, source="rest_usertags.position_object")
+
+    def _extract_graphql_tag_position(
+        self,
+        edge: dict[str, Any],
+        edge_node: dict[str, Any],
+    ) -> tuple[float, float, str] | None:
+        return (
+            self._tag_position_from_array(edge_node.get("position"), source="graphql_node.position_array")
+            or self._tag_position_from_object(edge_node.get("position"), source="graphql_node.position_object")
+            or self._normalized_tag_position(edge_node.get("x"), edge_node.get("y"), source="graphql_node.xy")
+            or self._tag_position_from_array(edge.get("position"), source="graphql_edge.position_array")
+            or self._tag_position_from_object(edge.get("position"), source="graphql_edge.position_object")
+            or self._normalized_tag_position(edge.get("x"), edge.get("y"), source="graphql_edge.xy")
+        )
 
     @staticmethod
     def _coerce_int(value: Any, default: int = 0) -> int:
@@ -656,6 +727,40 @@ class InstagramScraper:
                     collaborators.append(normalized)
         return self._dedupe_preserve_order(collaborators)
 
+    @staticmethod
+    def _profile_pic_quality_score(value: str) -> tuple[int, int]:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return (-1, -1)
+        score = 0
+        if "profile_pic" in normalized:
+            score += 25
+        if "profile_pic_url_hd" in normalized or "profile_pic_hd" in normalized:
+            score += 30
+        if any(
+            token in normalized for token in ("thumb", "thumbnail", "s32x32", "s50x50", "s64x64", "s96x96", "s150x150")
+        ):
+            score -= 20
+        max_dim = 0
+        for match in re.finditer(r"(?:s)?(\d{2,4})x(\d{2,4})", normalized):
+            max_dim = max(max_dim, int(match.group(1)), int(match.group(2)))
+        for match in re.finditer(r"profile_pic[^0-9]{0,8}(\d{2,4})", normalized):
+            max_dim = max(max_dim, int(match.group(1)))
+        return (score + min(max_dim, 4096), len(normalized))
+
+    def _pick_best_profile_pic_url(self, *candidates: Any) -> str | None:
+        best: str | None = None
+        best_score: tuple[int, int] = (-1, -1)
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if not value.startswith(("http://", "https://")):
+                continue
+            score = self._profile_pic_quality_score(value)
+            if score > best_score:
+                best_score = score
+                best = value
+        return best
+
     def _extract_tagged_users_detail(self, node: dict) -> list[InstagramUserDetail]:
         """Extract full tagged user objects from post."""
         details: list[InstagramUserDetail] = []
@@ -667,36 +772,56 @@ class InstagramScraper:
             full_name: str | None = None,
             is_verified: Any = None,
             profile_pic_url: str | None = None,
+            profile_pic_url_hd: str | None = None,
+            tag_position: tuple[float, float, str] | None = None,
         ) -> None:
             normalized = self._normalize_handle_token(username)
             if not normalized or normalized.lower() in seen:
                 return
             seen.add(normalized.lower())
-            details.append(InstagramUserDetail(
-                username=normalized,
-                user_id=str(user_id) if user_id else None,
-                full_name=full_name or None,
-                is_verified=bool(is_verified) if is_verified is not None else None,
-                profile_pic_url=str(profile_pic_url) if profile_pic_url else None,
-            ))
+            tag_x = tag_position[0] if tag_position is not None else None
+            tag_y = tag_position[1] if tag_position is not None else None
+            tag_position_source = tag_position[2] if tag_position is not None else None
+            details.append(
+                InstagramUserDetail(
+                    username=normalized,
+                    user_id=str(user_id) if user_id else None,
+                    full_name=full_name or None,
+                    is_verified=bool(is_verified) if is_verified is not None else None,
+                    profile_pic_url=self._pick_best_profile_pic_url(profile_pic_url_hd, profile_pic_url),
+                    profile_pic_url_hd=str(profile_pic_url_hd or "").strip() or None,
+                    tag_x=tag_x,
+                    tag_y=tag_y,
+                    tag_position_source=tag_position_source,
+                )
+            )
 
         # GraphQL format
         edge_tags = node.get("edge_media_to_tagged_user", {})
         if edge_tags:
             for edge in edge_tags.get("edges", []):
-                user = edge.get("node", {}).get("user", {})
+                if not isinstance(edge, dict):
+                    continue
+                edge_node = edge.get("node", {})
+                if not isinstance(edge_node, dict):
+                    edge_node = {}
+                user = edge_node.get("user", {}) if isinstance(edge_node.get("user"), dict) else {}
                 _add(
                     user.get("username"),
                     user.get("id") or user.get("pk"),
                     user.get("full_name"),
                     user.get("is_verified"),
                     user.get("profile_pic_url"),
+                    user.get("profile_pic_url_hd") or user.get("profilePicUrlHd"),
+                    tag_position=self._extract_graphql_tag_position(edge, edge_node),
                 )
 
         # REST API format
         usertags = node.get("usertags", {})
         if usertags and isinstance(usertags, dict):
             for tag in usertags.get("in", []):
+                if not isinstance(tag, dict):
+                    continue
                 user = tag.get("user", {})
                 _add(
                     user.get("username"),
@@ -704,6 +829,8 @@ class InstagramScraper:
                     user.get("full_name"),
                     user.get("is_verified"),
                     user.get("profile_pic_url"),
+                    user.get("profile_pic_url_hd") or user.get("profilePicUrlHd"),
+                    tag_position=self._extract_rest_tag_position(tag),
                 )
 
         # Actor-style format
@@ -719,6 +846,22 @@ class InstagramScraper:
                     user.get("full_name") or user.get("fullName"),
                     user.get("is_verified") or user.get("isVerified"),
                     user.get("profile_pic_url") or user.get("profilePicUrl"),
+                    user.get("profile_pic_url_hd") or user.get("profilePicUrlHd"),
+                    tag_position=(
+                        self._tag_position_from_array(
+                            tagged.get("position"),
+                            source="actor_tagged_users.position_array",
+                        )
+                        or self._tag_position_from_object(
+                            tagged.get("position"),
+                            source="actor_tagged_users.position_object",
+                        )
+                        or self._normalized_tag_position(
+                            tagged.get("x"),
+                            tagged.get("y"),
+                            source="actor_tagged_users.xy",
+                        )
+                    ),
                 )
 
         return details
@@ -740,42 +883,49 @@ class InstagramScraper:
                 if not normalized or normalized.lower() in seen:
                     continue
                 seen.add(normalized.lower())
-                details.append(InstagramUserDetail(
-                    username=normalized,
-                    user_id=str(user.get("id") or user.get("pk") or "") or None,
-                    full_name=user.get("full_name") or user.get("fullName") or None,
-                    is_verified=bool(user.get("is_verified") or user.get("isVerified"))
-                    if (user.get("is_verified") is not None or user.get("isVerified") is not None)
-                    else None,
-                    profile_pic_url=str(
-                        user.get("profile_pic_url") or user.get("profilePicUrl") or ""
-                    ) or None,
-                ))
+                details.append(
+                    InstagramUserDetail(
+                        username=normalized,
+                        user_id=str(user.get("id") or user.get("pk") or "") or None,
+                        full_name=user.get("full_name") or user.get("fullName") or None,
+                        is_verified=bool(user.get("is_verified") or user.get("isVerified"))
+                        if (user.get("is_verified") is not None or user.get("isVerified") is not None)
+                        else None,
+                        profile_pic_url=self._pick_best_profile_pic_url(
+                            user.get("profile_pic_url_hd") or user.get("profilePicUrlHd"),
+                            user.get("profile_pic_url") or user.get("profilePicUrl"),
+                        ),
+                        profile_pic_url_hd=str(user.get("profile_pic_url_hd") or user.get("profilePicUrlHd") or "")
+                        or None,
+                    )
+                )
 
         return details
 
     def _extract_owner_detail(self, node: dict) -> InstagramUserDetail | None:
         """Extract post owner/author detail."""
         owner = node.get("owner", {}) if isinstance(node.get("owner"), dict) else {}
-        username = str(
-            node.get("ownerUsername") or owner.get("username") or ""
-        ).strip()
+        username = str(node.get("ownerUsername") or owner.get("username") or "").strip()
         if not username:
             return None
         return InstagramUserDetail(
             username=username,
-            user_id=str(
-                owner.get("id") or owner.get("pk") or node.get("ownerId") or ""
-            ) or None,
-            full_name=str(
-                owner.get("full_name") or node.get("ownerFullName") or ""
-            ).strip() or None,
-            is_verified=bool(owner.get("is_verified"))
-            if "is_verified" in owner
-            else None,
-            profile_pic_url=str(
-                owner.get("profile_pic_url") or node.get("ownerProfilePicUrl") or ""
-            ).strip() or None,
+            user_id=str(owner.get("id") or owner.get("pk") or node.get("ownerId") or "") or None,
+            full_name=str(owner.get("full_name") or node.get("ownerFullName") or "").strip() or None,
+            is_verified=bool(owner.get("is_verified")) if "is_verified" in owner else None,
+            profile_pic_url=self._pick_best_profile_pic_url(
+                owner.get("profile_pic_url_hd") or owner.get("profilePicUrlHd"),
+                owner.get("profile_pic_url"),
+                node.get("ownerProfilePicUrlHd"),
+                node.get("ownerProfilePicUrl"),
+            ),
+            profile_pic_url_hd=str(
+                owner.get("profile_pic_url_hd")
+                or owner.get("profilePicUrlHd")
+                or node.get("ownerProfilePicUrlHd")
+                or ""
+            ).strip()
+            or None,
         )
 
     def _extract_child_posts_data(self, node: dict) -> list[dict[str, Any]]:
@@ -785,29 +935,36 @@ class InstagramScraper:
         # Actor-style format (childPosts)
         child_posts = node.get("childPosts")
         if isinstance(child_posts, list):
-            for child in child_posts:
+            for index, child in enumerate(child_posts):
                 if not isinstance(child, dict):
                     continue
                 dims = child.get("dimensions", {})
-                children.append({
-                    "type": child.get("type") or child.get("__typename"),
-                    "display_url": child.get("displayUrl") or child.get("display_url"),
-                    "video_url": child.get("videoUrl") or child.get("video_url"),
-                    "width": self._coerce_int(
-                        dims.get("width") if isinstance(dims, dict) else child.get("original_width"), 0
-                    ) or None,
-                    "height": self._coerce_int(
-                        dims.get("height") if isinstance(dims, dict) else child.get("original_height"), 0
-                    ) or None,
-                    "alt": child.get("alt") or child.get("accessibility_caption"),
-                })
+                child_tagged_users = [detail.to_dict() for detail in self._extract_tagged_users_detail(child)]
+                children.append(
+                    {
+                        "slide_index": index,
+                        "type": child.get("type") or child.get("__typename"),
+                        "display_url": child.get("displayUrl") or child.get("display_url"),
+                        "video_url": child.get("videoUrl") or child.get("video_url"),
+                        "width": self._coerce_int(
+                            dims.get("width") if isinstance(dims, dict) else child.get("original_width"), 0
+                        )
+                        or None,
+                        "height": self._coerce_int(
+                            dims.get("height") if isinstance(dims, dict) else child.get("original_height"), 0
+                        )
+                        or None,
+                        "alt": child.get("alt") or child.get("accessibility_caption"),
+                        "tagged_users_detail": child_tagged_users,
+                    }
+                )
             if children:
                 return children
 
         # REST API format (carousel_media)
         carousel = node.get("carousel_media")
         if isinstance(carousel, list):
-            for item in carousel:
+            for index, item in enumerate(carousel):
                 if not isinstance(item, dict):
                     continue
                 display_url = None
@@ -820,30 +977,40 @@ class InstagramScraper:
                     versions = item["video_versions"]
                     if versions:
                         video_url = versions[0].get("url")
-                children.append({
-                    "type": "Video" if video_url else "Image",
-                    "display_url": display_url,
-                    "video_url": video_url,
-                    "width": self._coerce_int(item.get("original_width"), 0) or None,
-                    "height": self._coerce_int(item.get("original_height"), 0) or None,
-                    "alt": item.get("accessibility_caption"),
-                })
+                child_tagged_users = [detail.to_dict() for detail in self._extract_tagged_users_detail(item)]
+                children.append(
+                    {
+                        "slide_index": index,
+                        "type": "Video" if video_url else "Image",
+                        "display_url": display_url,
+                        "video_url": video_url,
+                        "width": self._coerce_int(item.get("original_width"), 0) or None,
+                        "height": self._coerce_int(item.get("original_height"), 0) or None,
+                        "alt": item.get("accessibility_caption"),
+                        "tagged_users_detail": child_tagged_users,
+                    }
+                )
             if children:
                 return children
 
         # GraphQL format (edge_sidecar_to_children)
         sidecar = node.get("edge_sidecar_to_children") or {}
-        for edge in sidecar.get("edges", []):
+        for index, edge in enumerate(sidecar.get("edges", [])):
             child = edge.get("node", {})
             dims = child.get("dimensions", {})
-            children.append({
-                "type": child.get("__typename", "").replace("Graph", ""),
-                "display_url": child.get("display_url"),
-                "video_url": child.get("video_url"),
-                "width": self._coerce_int(dims.get("width"), 0) or None,
-                "height": self._coerce_int(dims.get("height"), 0) or None,
-                "alt": child.get("accessibility_caption"),
-            })
+            child_tagged_users = [detail.to_dict() for detail in self._extract_tagged_users_detail(child)]
+            children.append(
+                {
+                    "slide_index": index,
+                    "type": child.get("__typename", "").replace("Graph", ""),
+                    "display_url": child.get("display_url"),
+                    "video_url": child.get("video_url"),
+                    "width": self._coerce_int(dims.get("width"), 0) or None,
+                    "height": self._coerce_int(dims.get("height"), 0) or None,
+                    "alt": child.get("accessibility_caption"),
+                    "tagged_users_detail": child_tagged_users,
+                }
+            )
 
         return children
 
@@ -852,9 +1019,7 @@ class InstagramScraper:
         result: dict[str, Any] = {}
 
         # product_type (e.g., "clips" for reels, "feed" for feed posts)
-        result["product_type"] = (
-            str(node.get("productType") or node.get("product_type") or "").strip() or None
-        )
+        result["product_type"] = str(node.get("productType") or node.get("product_type") or "").strip() or None
 
         # video_play_count (distinct from video_view_count)
         vpc = node.get("videoPlayCount") or node.get("video_play_count")
@@ -862,12 +1027,7 @@ class InstagramScraper:
 
         # alt text
         result["alt_text"] = (
-            str(
-                node.get("accessibilityCaption")
-                or node.get("accessibility_caption")
-                or node.get("alt")
-                or ""
-            ).strip()
+            str(node.get("accessibilityCaption") or node.get("accessibility_caption") or node.get("alt") or "").strip()
             or None
         )
 
@@ -1441,10 +1601,14 @@ class InstagramScraper:
             is_reply=is_reply,
             parent_comment_id=parent_id,
             reply_count=self._coerce_int(reply_count, 0),
-            owner_profile_pic_url=str(
-                data.get("ownerProfilePicUrl") or owner.get("profile_pic_url") or user.get("profile_pic_url") or ""
-            )
-            or None,
+            owner_profile_pic_url=self._pick_best_profile_pic_url(
+                data.get("ownerProfilePicUrlHd"),
+                data.get("ownerProfilePicUrl"),
+                owner.get("profile_pic_url_hd") or owner.get("profilePicUrlHd"),
+                owner.get("profile_pic_url"),
+                user.get("profile_pic_url_hd") or user.get("profilePicUrlHd"),
+                user.get("profile_pic_url"),
+            ),
             owner_is_verified=(
                 bool(owner.get("is_verified"))
                 if "is_verified" in owner

@@ -17,6 +17,7 @@ import tempfile
 import time as time_module
 from collections import Counter, defaultdict
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
@@ -24,7 +25,7 @@ from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Callable, Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -50,7 +51,17 @@ SUPPORTED_SCOPES = ("bravo", "creator", "community")
 SUPPORTED_INGEST_MODES = ("posts_only", "posts_and_comments", "comments_only", "details_refresh")
 SUPPORTED_SYNC_STRATEGIES = ("incremental", "full_refresh")
 SUPPORTED_COMMENT_REFRESH_POLICIES = ("balanced", "missing_only")
+SUPPORTED_RUNNER_STRATEGIES = ("single_runner", "adaptive_dual_runner")
+SUPPORTED_DAY_WEIGHT_PROFILES = ("default", "rhoslc_default")
+SUPPORTED_PRIORITY_MODES = ("default", "episode_peak_weighted")
 DEFAULT_COMMENT_REFRESH_POLICY = "balanced"
+DEFAULT_RUNNER_STRATEGY = "single_runner"
+DEFAULT_DAY_WEIGHT_PROFILE = "default"
+DEFAULT_PRIORITY_MODE = "default"
+DEFAULT_RUNNER_COUNT = 1
+DEFAULT_WINDOW_SHARD_HOURS = 2
+MAX_WINDOW_SHARD_HOURS = 24
+MAX_RUNNER_B_START_OFFSET_HOURS = 168
 MAX_COMMENT_ANCHOR_SOURCE_IDS_PER_PLATFORM = 5000
 POSTSEASON_WEEK_COUNT = 3
 JOB_PROGRESS_MIN_DELTA = 5
@@ -60,10 +71,24 @@ QUIET_POST_FORCE_RECHECK_AGE = timedelta(days=14)
 SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT = 180
 SOCIAL_WORKER_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 15
 SOCIAL_JOB_STALE_SECONDS_DEFAULT = 300
+SOCIAL_STALE_RECOVERY_INTERVAL_SECONDS_DEFAULT = 30
+SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SECONDS_DEFAULT = 60
+SOCIAL_JOB_CLAIM_BATCH_SIZE_DEFAULT = 5
+SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX = 25
+SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS_DEFAULT = 200
+SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS_DEFAULT = 50
+SOCIAL_DB_UPSERT_BATCH_SIZE_MAX = 1000
+SOCIAL_RUN_IN_FLIGHT_CAP_DEFAULT = 4
 SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT = 20
 SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS_DEFAULT = 5
 SOCIAL_QUEUE_STATUS_STALE_FALLBACK_SECONDS_DEFAULT = 120
+SOCIAL_QUEUE_STATUS_STUCK_JOBS_LIMIT_DEFAULT = 100
 QUEUE_STATUS_STAGES = ("queued", "pending", "running", "retrying", "failed", "cancelled", "completed")
+SOCIAL_DEBUG_OPENAI_MODEL_DEFAULT = "gpt-5.3-codex"
+SOCIAL_DEBUG_OPENAI_FALLBACK_MODEL_DEFAULT = "gpt-5.2-codex"
+SOCIAL_DEBUG_OPENAI_TIMEOUT_SECONDS_DEFAULT = 45
+SOCIAL_DEBUG_CONTEXT_MAX_BYTES_DEFAULT = 18_000
+SOCIAL_DEBUG_PATCH_MAX_BYTES_DEFAULT = 200_000
 SOCIAL_MEDIA_MIRROR_MAX_BYTES_DEFAULT = 50 * 1024 * 1024
 SOCIAL_MEDIA_MIRROR_CHUNK_SIZE_BYTES = 64 * 1024
 SOCIAL_MEDIA_MIRROR_DOWNLOAD_RETRIES_DEFAULT = 3
@@ -139,6 +164,14 @@ GENERIC_ACCOUNT_HANDLE_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
 INSTAGRAM_ACCOUNT_HANDLE_RE = re.compile(r"^[a-z0-9._]{1,30}$")
 FIELD_UNSET = object()
 ANALYTICS_CACHE_TTL_SECONDS = 15.0
+SOCIAL_DEBUG_ALLOWED_TOP_LEVEL_PATHS = {
+    "api",
+    "trr_backend",
+    "scripts",
+    "tests",
+    "docs",
+    ".env.example",
+}
 
 _week_detail_cache_invalidator: Callable[[], None] | None = None
 
@@ -163,6 +196,7 @@ def _invalidate_week_detail_cache_after_run_terminal_status() -> None:
         _week_detail_cache_invalidator()
     except Exception:  # noqa: BLE001
         logger.debug("Week detail cache invalidation callback failed", exc_info=True)
+
 
 POSITIVE_WORDS = {
     "amazing",
@@ -380,6 +414,261 @@ class IngestOptions:
 
 
 @dataclass(slots=True)
+class IngestTimeShard:
+    shard_index: int
+    window_start: datetime
+    window_end: datetime
+    runner_lane: str
+    priority_score: float
+    day_offset: int
+    day_weight: float
+
+
+@dataclass(slots=True)
+class IngestShardSchedule:
+    strategy: str
+    runner_count: int
+    window_shard_hours: int
+    runner_b_offset_hours: int
+    day_weight_profile: str
+    priority_mode: str
+    run_start: datetime | None
+    shards: list[IngestTimeShard]
+    day_weights: dict[int, float]
+
+
+def _normalize_runner_strategy(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or DEFAULT_RUNNER_STRATEGY
+    if normalized not in SUPPORTED_RUNNER_STRATEGIES:
+        return DEFAULT_RUNNER_STRATEGY
+    return normalized
+
+
+def _normalize_day_weight_profile(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or DEFAULT_DAY_WEIGHT_PROFILE
+    if normalized not in SUPPORTED_DAY_WEIGHT_PROFILES:
+        return DEFAULT_DAY_WEIGHT_PROFILE
+    return normalized
+
+
+def _normalize_priority_mode(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or DEFAULT_PRIORITY_MODE
+    if normalized not in SUPPORTED_PRIORITY_MODES:
+        return DEFAULT_PRIORITY_MODE
+    return normalized
+
+
+def _resolve_runner_count(value: int | None) -> int:
+    if value is None:
+        return DEFAULT_RUNNER_COUNT
+    return max(1, min(int(value), 2))
+
+
+def _resolve_window_shard_hours(value: int | None) -> int:
+    if value is None:
+        return DEFAULT_WINDOW_SHARD_HOURS
+    return max(1, min(int(value), MAX_WINDOW_SHARD_HOURS))
+
+
+def _resolve_runner_b_start_offset_hours(value: int | None) -> int | None:
+    if value is None:
+        return None
+    return max(0, min(int(value), MAX_RUNNER_B_START_OFFSET_HOURS))
+
+
+def _day_weight_profile(profile: str) -> dict[int, float]:
+    if profile == "rhoslc_default":
+        return {
+            0: 0.65,
+            1: 1.00,
+            2: 0.80,
+            3: 0.55,
+            4: 0.40,
+            5: 0.30,
+            6: 0.25,
+        }
+    return {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 1.0}
+
+
+def _build_time_shards(
+    *,
+    date_start: datetime,
+    date_end: datetime,
+    window_shard_hours: int,
+) -> list[tuple[datetime, datetime]]:
+    start_dt = _coerce_dt(date_start)
+    end_dt = _coerce_dt(date_end)
+    if start_dt is None or end_dt is None or end_dt < start_dt:
+        return []
+
+    shard_hours = _resolve_window_shard_hours(window_shard_hours)
+    shard_delta = timedelta(hours=shard_hours)
+    cursor = start_dt
+    shards: list[tuple[datetime, datetime]] = []
+    while cursor <= end_dt:
+        shard_end = min(cursor + shard_delta - timedelta(microseconds=1), end_dt)
+        if shard_end < cursor:
+            shard_end = cursor
+        shards.append((cursor, shard_end))
+        if shard_end >= end_dt:
+            break
+        cursor = shard_end + timedelta(microseconds=1)
+    return shards
+
+
+def _choose_runner_b_offset(
+    *,
+    runner_b_start_offset_hours: int | None,
+    day_weight_profile: str,
+    date_start: datetime | None,
+    date_end: datetime | None,
+) -> int:
+    explicit_offset = _resolve_runner_b_start_offset_hours(runner_b_start_offset_hours)
+    if explicit_offset is not None:
+        return explicit_offset
+
+    start_dt = _coerce_dt(date_start)
+    end_dt = _coerce_dt(date_end)
+    if start_dt is None or end_dt is None:
+        return 24
+    if end_dt - start_dt < timedelta(days=4):
+        return 0
+
+    weights = _day_weight_profile(_normalize_day_weight_profile(day_weight_profile))
+    early_share = float(weights.get(0, 0.0)) + float(weights.get(1, 0.0))
+    total_share = float(sum(weights.values())) or 1.0
+    early_pct = (early_share / total_share) * 100.0
+    return 48 if early_pct < 45.0 else 24
+
+
+def _score_shard_priority(
+    *,
+    day_offset: int,
+    day_weight: float,
+    shard_index: int,
+    priority_mode: str,
+) -> float:
+    normalized_mode = _normalize_priority_mode(priority_mode)
+    if normalized_mode == "episode_peak_weighted":
+        return (100.0 - (day_weight * 100.0)) * 10.0 + max(0, day_offset) + (shard_index * 0.001)
+    return float(shard_index)
+
+
+def _assign_runner_lane(
+    *,
+    shard_start: datetime,
+    run_start: datetime,
+    shard_index: int,
+    runner_count: int,
+    runner_b_offset_hours: int,
+) -> str:
+    if runner_count <= 1:
+        return "A"
+    runner_b_start = run_start + timedelta(hours=max(0, runner_b_offset_hours))
+    if shard_start < runner_b_start:
+        return "A"
+    return "A" if shard_index % 2 == 0 else "B"
+
+
+def _build_ingest_shard_schedule(
+    *,
+    date_start: datetime | None,
+    date_end: datetime | None,
+    runner_strategy: str | None,
+    runner_count: int | None,
+    window_shard_hours: int | None,
+    runner_b_start_offset_hours: int | None,
+    day_weight_profile: str | None,
+    priority_mode: str | None,
+) -> IngestShardSchedule:
+    normalized_strategy = _normalize_runner_strategy(runner_strategy)
+    normalized_day_weight_profile = _normalize_day_weight_profile(day_weight_profile)
+    normalized_priority_mode = _normalize_priority_mode(priority_mode)
+    resolved_runner_count = _resolve_runner_count(runner_count)
+    if normalized_strategy == "single_runner":
+        resolved_runner_count = 1
+    elif resolved_runner_count < 2:
+        resolved_runner_count = 2
+    resolved_window_shard_hours = _resolve_window_shard_hours(window_shard_hours)
+    start_dt = _coerce_dt(date_start)
+    end_dt = _coerce_dt(date_end)
+    run_start = start_dt
+    resolved_runner_b_offset_hours = (
+        _choose_runner_b_offset(
+            runner_b_start_offset_hours=runner_b_start_offset_hours,
+            day_weight_profile=normalized_day_weight_profile,
+            date_start=start_dt,
+            date_end=end_dt,
+        )
+        if normalized_strategy == "adaptive_dual_runner" and resolved_runner_count > 1
+        else 0
+    )
+    weights = _day_weight_profile(normalized_day_weight_profile)
+    if start_dt is None or end_dt is None or end_dt < start_dt:
+        return IngestShardSchedule(
+            strategy=normalized_strategy,
+            runner_count=resolved_runner_count,
+            window_shard_hours=resolved_window_shard_hours,
+            runner_b_offset_hours=resolved_runner_b_offset_hours,
+            day_weight_profile=normalized_day_weight_profile,
+            priority_mode=normalized_priority_mode,
+            run_start=run_start,
+            shards=[],
+            day_weights=weights,
+        )
+
+    raw_shards = (
+        _build_time_shards(
+            date_start=start_dt,
+            date_end=end_dt,
+            window_shard_hours=resolved_window_shard_hours,
+        )
+        if normalized_strategy == "adaptive_dual_runner"
+        else [(start_dt, end_dt)]
+    )
+    default_weight = float(weights.get(6, 1.0))
+    shards: list[IngestTimeShard] = []
+    for shard_index, (window_start, window_end) in enumerate(raw_shards):
+        day_offset = max(0, (window_start.date() - start_dt.date()).days)
+        day_weight = float(weights.get(day_offset, default_weight))
+        priority_score = _score_shard_priority(
+            day_offset=day_offset,
+            day_weight=day_weight,
+            shard_index=shard_index,
+            priority_mode=normalized_priority_mode,
+        )
+        runner_lane = _assign_runner_lane(
+            shard_start=window_start,
+            run_start=run_start or window_start,
+            shard_index=shard_index,
+            runner_count=resolved_runner_count,
+            runner_b_offset_hours=resolved_runner_b_offset_hours,
+        )
+        shards.append(
+            IngestTimeShard(
+                shard_index=shard_index,
+                window_start=window_start,
+                window_end=window_end,
+                runner_lane=runner_lane,
+                priority_score=priority_score,
+                day_offset=day_offset,
+                day_weight=day_weight,
+            )
+        )
+    return IngestShardSchedule(
+        strategy=normalized_strategy,
+        runner_count=resolved_runner_count,
+        window_shard_hours=resolved_window_shard_hours,
+        runner_b_offset_hours=resolved_runner_b_offset_hours,
+        day_weight_profile=normalized_day_weight_profile,
+        priority_mode=normalized_priority_mode,
+        run_start=run_start,
+        shards=shards,
+        day_weights=weights,
+    )
+
+
+@dataclass(slots=True)
 class CommentLifecycleSnapshot:
     active_count: int
     total_count: int
@@ -454,11 +743,26 @@ def _resolve_positive_int_env(name: str, default: int, *, minimum: int = 1) -> i
         return max(minimum, default)
 
 
+def _resolve_int_env_with_bounds(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    value = _resolve_positive_int_env(name, default, minimum=minimum)
+    return max(minimum, min(maximum, value))
+
+
+def _resolve_non_negative_float_env(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return max(0.0, float(default))
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return max(0.0, float(default))
+
+
 def _normalize_worker_stage(stage: str | None) -> str:
     value = (stage or "").strip().lower()
     if not value:
         return "any"
-    if value in {"posts", "comments", "any"}:
+    if value in {"posts", "comments", INSTAGRAM_MEDIA_MIRROR_STAGE, COMMENT_MEDIA_MIRROR_STAGE, "any"}:
         return value
     return "any"
 
@@ -473,7 +777,7 @@ def _normalize_worker_status(status: str | None) -> str:
 _schema_ready_cache: tuple[float, bool] | None = None
 _worker_health_cache: tuple[float, int | None, dict[str, Any]] | None = None
 _worker_health_cache_lock = Lock()
-_queue_status_cache: tuple[float, int, int, bool, dict[str, Any]] | None = None
+_queue_status_cache: tuple[float, int, int, bool, bool, int, bool, dict[str, Any]] | None = None
 _queue_status_cache_lock = Lock()
 _queue_status_last_good_cache: tuple[float, dict[str, Any]] | None = None
 
@@ -666,6 +970,255 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
     return copy.deepcopy(payload)
 
 
+def _metadata_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _compute_currently_scraping(*, worker: dict[str, Any], job: dict[str, Any] | None) -> str | None:
+    if not job:
+        stage = str(worker.get("stage") or "").strip()
+        return stage or None
+    metadata = _metadata_dict(job.get("metadata"))
+    activity = _metadata_dict(metadata.get("activity"))
+    phase = str(activity.get("phase") or "").strip()
+    if phase:
+        return phase
+    stage = str(job.get("stage") or "").strip()
+    platform = str(job.get("platform") or "").strip()
+    account_handle = str(job.get("account_handle") or "").strip().lstrip("@")
+    parts = [part for part in [platform, stage, account_handle] if part]
+    return " · ".join(parts) if parts else None
+
+
+def _compute_progress_made(*, job: dict[str, Any] | None) -> dict[str, Any]:
+    if not job:
+        return {
+            "items_found": 0,
+            "posts_upserted": 0,
+            "comments_upserted": 0,
+            "stage_counters": {},
+            "phase": None,
+        }
+    metadata = _metadata_dict(job.get("metadata"))
+    persist_counters = _metadata_dict(metadata.get("persist_counters"))
+    stage_counters = _metadata_dict(metadata.get("stage_counters"))
+    activity = _metadata_dict(metadata.get("activity"))
+    return {
+        "items_found": _normalize_non_negative_int(job.get("items_found")),
+        "posts_upserted": _normalize_non_negative_int(persist_counters.get("posts_upserted")),
+        "comments_upserted": _normalize_non_negative_int(persist_counters.get("comments_upserted")),
+        "stage_counters": stage_counters,
+        "phase": str(activity.get("phase") or "").strip() or None,
+    }
+
+
+def get_worker_detail(worker_id: str, *, stale_after_seconds: int | None = None) -> dict[str, Any]:
+    normalized_worker_id = str(worker_id or "").strip()
+    if not normalized_worker_id:
+        raise ValueError("worker_not_found")
+    if not _worker_heartbeat_schema_ready():
+        raise ValueError("worker_heartbeat_schema_missing")
+
+    stale_seconds = stale_after_seconds or _resolve_positive_int_env(
+        "SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS",
+        SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT,
+        minimum=5,
+    )
+    worker_row = pg.fetch_one(
+        """
+        select
+          worker_id,
+          stage,
+          status,
+          run_id::text as run_id,
+          current_job_id::text as current_job_id,
+          metadata,
+          started_at,
+          last_seen_at,
+          updated_at,
+          (
+            status in ('starting', 'idle', 'working')
+            and last_seen_at >= now() - (%s * interval '1 second')
+          ) as is_healthy
+        from social.scrape_workers
+        where worker_id = %s
+        limit 1
+        """,
+        [stale_seconds, normalized_worker_id],
+    )
+    if not worker_row:
+        raise ValueError("worker_not_found")
+
+    features = _scrape_jobs_features()
+    has_run_id = bool(features.get("has_run_id"))
+    has_queue_fields = bool(features.get("has_queue_fields"))
+    current_job_id = str(worker_row.get("current_job_id") or "").strip()
+    job_row: dict[str, Any] | None = None
+    if current_job_id and _relation_exists("social.scrape_jobs"):
+        select_run_id = "j.run_id::text as run_id" if has_run_id else "null::text as run_id"
+        select_attempt_count = "j.attempt_count" if has_queue_fields else "0::int as attempt_count"
+        select_max_attempts = "j.max_attempts" if has_queue_fields else "0::int as max_attempts"
+        select_heartbeat_at = "j.heartbeat_at" if has_queue_fields else "null::timestamptz as heartbeat_at"
+        select_last_error_code = "j.last_error_code" if has_queue_fields else "null::text as last_error_code"
+        job_row = pg.fetch_one(
+            f"""
+            select
+              j.id::text as id,
+              {select_run_id},
+              j.platform,
+              j.job_type,
+              j.status,
+              coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) as stage,
+              j.config,
+              j.metadata,
+              j.items_found,
+              {select_attempt_count},
+              {select_max_attempts},
+              j.started_at,
+              {select_heartbeat_at},
+              j.error_message,
+              {select_last_error_code}
+            from social.scrape_jobs j
+            where j.id = %s::uuid
+            limit 1
+            """,
+            [current_job_id],
+        )
+
+    run_id = str((job_row or {}).get("run_id") or worker_row.get("run_id") or "").strip() or None
+    run_row: dict[str, Any] | None = None
+    if run_id and _relation_exists("social.scrape_runs"):
+        run_row = pg.fetch_one(
+            """
+            select
+              id::text as run_id,
+              status,
+              source_scope,
+              created_at,
+              started_at,
+              completed_at,
+              summary
+            from social.scrape_runs
+            where id = %s::uuid
+            limit 1
+            """,
+            [run_id],
+        )
+
+    job_payload: dict[str, Any] | None = None
+    if isinstance(job_row, dict):
+        job_config = _metadata_dict(job_row.get("config"))
+        account_handle = (
+            str(job_config.get("account") or "").strip()
+            or str(job_config.get("username") or "").strip()
+            or str(job_config.get("source_account") or "").strip()
+            or None
+        )
+        job_payload = {
+            "id": str(job_row.get("id") or ""),
+            "run_id": str(job_row.get("run_id") or "").strip() or None,
+            "platform": str(job_row.get("platform") or ""),
+            "job_type": str(job_row.get("job_type") or ""),
+            "status": str(job_row.get("status") or ""),
+            "stage": str(job_row.get("stage") or ""),
+            "account_handle": account_handle,
+            "items_found": _normalize_non_negative_int(job_row.get("items_found")),
+            "attempt_count": _normalize_non_negative_int(job_row.get("attempt_count")),
+            "max_attempts": _normalize_non_negative_int(job_row.get("max_attempts")),
+            "started_at": _iso(_coerce_dt(job_row.get("started_at"))),
+            "heartbeat_at": _iso(_coerce_dt(job_row.get("heartbeat_at"))),
+            "error_message": str(job_row.get("error_message") or "").strip() or None,
+            "last_error_code": str(job_row.get("last_error_code") or "").strip() or None,
+            "metadata": _metadata_dict(job_row.get("metadata")),
+        }
+
+    run_payload: dict[str, Any] | None = None
+    if isinstance(run_row, dict):
+        run_payload = {
+            "run_id": str(run_row.get("run_id") or "").strip() or None,
+            "status": str(run_row.get("status") or "").strip() or None,
+            "source_scope": str(run_row.get("source_scope") or "").strip() or None,
+            "created_at": _iso(_coerce_dt(run_row.get("created_at"))),
+            "started_at": _iso(_coerce_dt(run_row.get("started_at"))),
+            "completed_at": _iso(_coerce_dt(run_row.get("completed_at"))),
+            "summary": _metadata_dict(run_row.get("summary")),
+        }
+
+    worker_payload = {
+        "worker_id": str(worker_row.get("worker_id") or ""),
+        "stage": str(worker_row.get("stage") or ""),
+        "status": str(worker_row.get("status") or ""),
+        "run_id": str(worker_row.get("run_id") or "").strip() or None,
+        "current_job_id": str(worker_row.get("current_job_id") or "").strip() or None,
+        "started_at": _iso(_coerce_dt(worker_row.get("started_at"))),
+        "last_seen_at": _iso(_coerce_dt(worker_row.get("last_seen_at"))),
+        "metadata": _metadata_dict(worker_row.get("metadata")),
+        "is_healthy": bool(worker_row.get("is_healthy")),
+    }
+
+    return {
+        "worker": worker_payload,
+        "current_job": job_payload,
+        "run": run_payload,
+        "currently_scraping": _compute_currently_scraping(worker=worker_payload, job=job_payload),
+        "progress_made": _compute_progress_made(job=job_payload),
+    }
+
+
+def purge_inactive_workers(*, stale_after_seconds: int | None = None) -> dict[str, Any]:
+    global _worker_health_cache
+    stale_seconds = stale_after_seconds or _resolve_positive_int_env(
+        "SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS",
+        SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT,
+        minimum=5,
+    )
+    if not _worker_heartbeat_schema_ready():
+        return {
+            "stale_after_seconds": stale_seconds,
+            "active_workers": 0,
+            "total_workers_before": 0,
+            "total_workers_after": 0,
+            "deleted_workers": 0,
+            "reason": "worker_heartbeat_schema_missing",
+        }
+
+    active_clause = "status in ('starting', 'idle', 'working') and last_seen_at >= now() - (%s * interval '1 second')"
+    snapshot_row = (
+        pg.fetch_one(
+            f"""
+            select
+              count(*) filter (where {active_clause})::int as active_workers,
+              count(*)::int as total_workers
+            from social.scrape_workers
+            """,
+            [stale_seconds],
+        )
+        or {}
+    )
+    deleted_rows = pg.execute_returning(
+        f"""
+        delete from social.scrape_workers
+        where not ({active_clause})
+        returning worker_id
+        """,
+        [stale_seconds],
+    )
+
+    active_workers = int(snapshot_row.get("active_workers") or 0)
+    total_workers_before = int(snapshot_row.get("total_workers") or 0)
+    deleted_workers = len(deleted_rows or [])
+    with _worker_health_cache_lock:
+        _worker_health_cache = None
+    return {
+        "stale_after_seconds": stale_seconds,
+        "active_workers": active_workers,
+        "total_workers_before": total_workers_before,
+        "total_workers_after": max(0, total_workers_before - deleted_workers),
+        "deleted_workers": deleted_workers,
+        "reason": None,
+    }
+
+
 def assert_worker_available_when_queue_enabled() -> dict[str, Any]:
     if not is_queue_enabled():
         return {
@@ -693,16 +1246,202 @@ def _empty_queue_status_counts() -> dict[str, int]:
     return dict.fromkeys(QUEUE_STATUS_STAGES, 0)
 
 
+def _stuck_jobs_filter_clause(
+    *,
+    has_queue_fields: bool,
+    table_alias: str = "j",
+) -> tuple[str, list[Any]]:
+    stale_seconds = max(30, _resolve_social_job_stale_seconds())
+    running_reference_with_queue = (
+        f"coalesce({table_alias}.heartbeat_at, {table_alias}.started_at, "
+        f"{table_alias}.claimed_at, {table_alias}.created_at)"
+    )
+    running_reference = (
+        running_reference_with_queue
+        if has_queue_fields
+        else f"coalesce({table_alias}.started_at, {table_alias}.created_at)"
+    )
+    retrying_reference_with_queue = (
+        f"coalesce({table_alias}.available_at, {table_alias}.heartbeat_at, "
+        f"{table_alias}.started_at, {table_alias}.claimed_at, {table_alias}.created_at)"
+    )
+    retrying_reference = retrying_reference_with_queue if has_queue_fields else f"{table_alias}.created_at"
+    stale_timeout_signal_clause = (
+        f"""
+        (
+          coalesce({table_alias}.last_error_code, '') = 'stale_heartbeat_timeout'
+          or lower(coalesce({table_alias}.metadata->>'error_code', '')) = 'stale_heartbeat_timeout'
+          or coalesce({table_alias}.error_message, '') ilike 'stale_heartbeat_timeout:%%'
+        )
+        """
+        if has_queue_fields
+        else f"""
+        (
+          lower(coalesce({table_alias}.metadata->>'error_code', '')) = 'stale_heartbeat_timeout'
+          or coalesce({table_alias}.error_message, '') ilike 'stale_heartbeat_timeout:%%'
+        )
+        """
+    )
+    return (
+        f"""
+        (
+          (
+            {table_alias}.status = 'running'
+            and {running_reference} < now() - (%s * interval '1 second')
+          )
+          or (
+            {table_alias}.status = 'retrying'
+            and {retrying_reference} < now() - (%s * interval '1 second')
+            and {stale_timeout_signal_clause}
+          )
+        )
+        """,
+        [stale_seconds, stale_seconds],
+    )
+
+
+def _list_stuck_jobs(
+    *,
+    limit: int = SOCIAL_QUEUE_STATUS_STUCK_JOBS_LIMIT_DEFAULT,
+) -> tuple[list[dict[str, Any]], int]:
+    safe_limit = max(1, min(int(limit), 500))
+    features = _scrape_jobs_features()
+    has_queue_fields = bool(features.get("has_queue_fields"))
+    has_run_id = bool(features.get("has_run_id"))
+    where_clause, where_params = _stuck_jobs_filter_clause(
+        has_queue_fields=has_queue_fields,
+        table_alias="j",
+    )
+
+    select_run_id = "j.run_id::text as run_id" if has_run_id else "null::text as run_id"
+    select_worker_id = "j.worker_id as worker_id" if has_queue_fields else "null::text as worker_id"
+    select_heartbeat_at = "j.heartbeat_at as heartbeat_at" if has_queue_fields else "null::timestamptz as heartbeat_at"
+    select_available_at = "j.available_at as available_at" if has_queue_fields else "null::timestamptz as available_at"
+    select_last_error_code = (
+        "j.last_error_code as last_error_code" if has_queue_fields else "null::text as last_error_code"
+    )
+    stuck_for_reference = (
+        "coalesce(j.available_at, j.heartbeat_at, j.started_at, j.claimed_at, j.created_at)"
+        if has_queue_fields
+        else "coalesce(j.started_at, j.created_at)"
+    )
+    rows = pg.fetch_all(
+        f"""
+        with stuck_jobs as (
+          select
+            j.id::text as id,
+            {select_run_id},
+            j.platform,
+            j.job_type,
+            j.status,
+            {select_worker_id},
+            j.created_at,
+            {select_heartbeat_at},
+            {select_available_at},
+            j.error_message,
+            {select_last_error_code},
+            case
+              when j.status = 'running' then 'running_stale_heartbeat'
+              else 'retrying_stale_timeout'
+            end as stuck_reason,
+            greatest(0, floor(extract(epoch from (now() - {stuck_for_reference}))))::int as stuck_for_seconds
+          from social.scrape_jobs j
+          where {where_clause}
+          order by stuck_for_seconds desc, j.created_at asc
+          limit %s
+        )
+        select
+          id,
+          run_id,
+          platform,
+          job_type,
+          status,
+          worker_id,
+          created_at,
+          heartbeat_at,
+          available_at,
+          error_message,
+          last_error_code,
+          stuck_reason,
+          stuck_for_seconds
+        from stuck_jobs
+        """,
+        [*where_params, safe_limit],
+    )
+    total_row = (
+        pg.fetch_one(
+            f"""
+        select count(*)::int as total
+        from social.scrape_jobs j
+        where {where_clause}
+        """,
+            where_params,
+        )
+        or {}
+    )
+    entries = [
+        {
+            "id": str(row.get("id") or ""),
+            "run_id": str(row.get("run_id") or "") or None,
+            "platform": str(row.get("platform") or ""),
+            "job_type": str(row.get("job_type") or ""),
+            "status": str(row.get("status") or ""),
+            "worker_id": str(row.get("worker_id") or "") or None,
+            "created_at": _iso(_coerce_dt(row.get("created_at"))),
+            "heartbeat_at": _iso(_coerce_dt(row.get("heartbeat_at"))),
+            "available_at": _iso(_coerce_dt(row.get("available_at"))),
+            "error_message": str(row.get("error_message") or "") or None,
+            "last_error_code": str(row.get("last_error_code") or "") or None,
+            "stuck_reason": str(row.get("stuck_reason") or ""),
+            "stuck_for_seconds": int(row.get("stuck_for_seconds") or 0),
+        }
+        for row in rows
+        if str(row.get("id") or "").strip()
+    ]
+    return entries, int(total_row.get("total") or 0)
+
+
+def _count_stuck_jobs() -> int:
+    features = _scrape_jobs_features()
+    has_queue_fields = bool(features.get("has_queue_fields"))
+    where_clause, where_params = _stuck_jobs_filter_clause(has_queue_fields=has_queue_fields, table_alias="j")
+    row = (
+        pg.fetch_one(
+            f"""
+        select count(*)::int as total
+        from social.scrape_jobs j
+        where {where_clause}
+        """,
+            where_params,
+        )
+        or {}
+    )
+    return int(row.get("total") or 0)
+
+
+def _invalidate_queue_status_cache() -> None:
+    global _queue_status_cache, _queue_status_last_good_cache
+    with _queue_status_cache_lock:
+        _queue_status_cache = None
+        _queue_status_last_good_cache = None
+
+
 def get_queue_status(
     *,
     recent_failures_limit: int = 20,
     statement_timeout_ms: int = 5000,
     include_recent_failures: bool = True,
+    include_stuck_jobs: bool = True,
+    stuck_jobs_limit: int = SOCIAL_QUEUE_STATUS_STUCK_JOBS_LIMIT_DEFAULT,
+    include_runs_summary: bool = True,
 ) -> dict[str, Any]:
     global _queue_status_cache, _queue_status_last_good_cache
     safe_recent_failures_limit = max(1, min(int(recent_failures_limit), 100))
     safe_statement_timeout_ms = max(1000, min(int(statement_timeout_ms), 30000))
     safe_include_recent_failures = bool(include_recent_failures)
+    safe_include_stuck_jobs = bool(include_stuck_jobs)
+    safe_stuck_jobs_limit = max(1, min(int(stuck_jobs_limit), 500))
+    safe_include_runs_summary = bool(include_runs_summary)
     cache_ttl_seconds = _resolve_positive_int_env(
         "SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS",
         SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT,
@@ -713,11 +1452,23 @@ def get_queue_status(
         now = time_module.monotonic()
         with _queue_status_cache_lock:
             if _queue_status_cache is not None:
-                cached_at, cached_limit, cached_timeout, cached_include_recent_failures, cached_payload = _queue_status_cache
+                (
+                    cached_at,
+                    cached_limit,
+                    cached_timeout,
+                    cached_include_recent_failures,
+                    cached_include_stuck_jobs,
+                    cached_stuck_jobs_limit,
+                    cached_include_runs_summary,
+                    cached_payload,
+                ) = _queue_status_cache
                 if (
                     cached_limit == safe_recent_failures_limit
                     and cached_timeout == safe_statement_timeout_ms
                     and cached_include_recent_failures == safe_include_recent_failures
+                    and cached_include_stuck_jobs == safe_include_stuck_jobs
+                    and cached_stuck_jobs_limit == safe_stuck_jobs_limit
+                    and cached_include_runs_summary == safe_include_runs_summary
                     and (now - cached_at) < cache_ttl_seconds
                 ):
                     return copy.deepcopy(cached_payload)
@@ -730,6 +1481,9 @@ def get_queue_status(
                     safe_recent_failures_limit,
                     safe_statement_timeout_ms,
                     safe_include_recent_failures,
+                    safe_include_stuck_jobs,
+                    safe_stuck_jobs_limit,
+                    safe_include_runs_summary,
                     payload,
                 )
                 if not payload.get("queue", {}).get("error"):
@@ -741,17 +1495,23 @@ def get_queue_status(
         "by_platform": {},
         "by_job_type": {},
         "recent_failures": [],
+        "stuck_jobs": [],
+        "stuck_jobs_total": 0,
+        "runs_by_status": _empty_queue_status_counts(),
+        "runs_total": 0,
     }
     errors: list[str] = []
 
     try:
         if not _relation_exists("social.scrape_jobs"):
             queue_payload["error"] = "scrape_jobs_table_missing"
-            return _finalize({
-                "queue_enabled": is_queue_enabled(),
-                "workers": get_worker_health(),
-                "queue": queue_payload,
-            })
+            return _finalize(
+                {
+                    "queue_enabled": is_queue_enabled(),
+                    "workers": get_worker_health(),
+                    "queue": queue_payload,
+                }
+            )
     except Exception as exc:  # noqa: BLE001
         errors.append(f"scrape_jobs_relation_check_failed: {exc}")
 
@@ -797,6 +1557,7 @@ def get_queue_status(
     if safe_include_recent_failures:
         try:
             features = _scrape_jobs_features()
+            select_run_id = "run_id::text as run_id" if features.get("has_run_id") else "null::text as run_id"
             select_last_error_code = (
                 "last_error_code" if features.get("has_queue_fields") else "null::text as last_error_code"
             )
@@ -812,6 +1573,7 @@ def get_queue_status(
                         f"""
                         select
                           id::text as id,
+                          {select_run_id},
                           platform,
                           job_type,
                           status,
@@ -830,6 +1592,7 @@ def get_queue_status(
             queue_payload["recent_failures"] = [
                 {
                     "id": str(row.get("id") or ""),
+                    "run_id": str(row.get("run_id") or "").strip() or None,
                     "platform": str(row.get("platform") or ""),
                     "job_type": str(row.get("job_type") or ""),
                     "status": str(row.get("status") or ""),
@@ -844,6 +1607,47 @@ def get_queue_status(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Queue status recent-failures query failed: %s", exc)
             errors.append(f"queue_recent_failures_query_failed: {exc}")
+
+    if safe_include_stuck_jobs:
+        try:
+            stuck_jobs, stuck_jobs_total = _list_stuck_jobs(limit=safe_stuck_jobs_limit)
+            queue_payload["stuck_jobs"] = stuck_jobs
+            queue_payload["stuck_jobs_total"] = stuck_jobs_total
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Queue status stuck-jobs query failed: %s", exc)
+            errors.append(f"queue_stuck_jobs_query_failed: {exc}")
+
+    if safe_include_runs_summary:
+        try:
+            if _relation_exists("social.scrape_runs"):
+                with pg.db_connection() as conn:
+                    with pg.db_cursor(conn=conn) as cur:
+                        cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
+                        run_rows = pg.fetch_all_with_cursor(
+                            cur,
+                            """
+                            select
+                              coalesce(status, 'unknown') as status,
+                              count(*)::bigint as total
+                            from social.scrape_runs
+                            group by 1
+                            """,
+                        )
+                runs_by_status = _empty_queue_status_counts()
+                runs_total = 0
+                for row in run_rows:
+                    status = str(row.get("status") or "unknown").strip().lower() or "unknown"
+                    total = int(row.get("total") or 0)
+                    runs_by_status[status] = runs_by_status.get(status, 0) + total
+                    runs_total += total
+                queue_payload["runs_by_status"] = runs_by_status
+                queue_payload["runs_total"] = runs_total
+            else:
+                queue_payload["runs_by_status"] = _empty_queue_status_counts()
+                queue_payload["runs_total"] = 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Queue status runs-summary query failed: %s", exc)
+            errors.append(f"queue_runs_summary_query_failed: {exc}")
 
     workers_payload: dict[str, Any]
     try:
@@ -880,11 +1684,578 @@ def get_queue_status(
                         return copy.deepcopy(cached_payload)
         queue_payload["error"] = "; ".join(errors)
 
-    return _finalize({
-        "queue_enabled": is_queue_enabled(),
-        "workers": workers_payload,
-        "queue": queue_payload,
-    })
+    return _finalize(
+        {
+            "queue_enabled": is_queue_enabled(),
+            "workers": workers_payload,
+            "queue": queue_payload,
+        }
+    )
+
+
+def cancel_stuck_jobs(
+    *,
+    job_ids: list[str] | None = None,
+    cancelled_by: str | None = None,
+) -> dict[str, Any]:
+    _assert_social_queue_schema_ready()
+    if not _relation_exists("social.scrape_jobs"):
+        raise ValueError("scrape_jobs table not found")
+
+    requested_ids = []
+    seen_ids: set[str] = set()
+    for raw in job_ids or []:
+        value = str(raw or "").strip()
+        if not value or value in seen_ids:
+            continue
+        seen_ids.add(value)
+        requested_ids.append(value)
+
+    features = _scrape_jobs_features()
+    has_queue_fields = bool(features.get("has_queue_fields"))
+    where_clause, where_params = _stuck_jobs_filter_clause(has_queue_fields=has_queue_fields, table_alias="j")
+    metadata_payload = {
+        "cancel_reason": "stuck_job_cancelled_by_admin",
+        "cancelled_by": cancelled_by,
+        "cancelled_at": _iso(_now_utc()),
+    }
+    updated_rows = pg.fetch_all(
+        f"""
+        with candidate_jobs as (
+          select j.id
+          from social.scrape_jobs j
+          where {where_clause}
+            and (%s::uuid[] is null or j.id = any(%s::uuid[]))
+          for update skip locked
+        )
+        update social.scrape_jobs as j
+        set
+          status = 'cancelled',
+          completed_at = now(),
+          error_message = coalesce(j.error_message, 'Cancelled by user request (stuck job)'),
+          metadata = coalesce(j.metadata, '{{}}'::jsonb) || %s::jsonb
+        from candidate_jobs c
+        where j.id = c.id
+        returning j.id::text as id, j.run_id::text as run_id
+        """,
+        [
+            *where_params,
+            requested_ids if requested_ids else None,
+            requested_ids if requested_ids else None,
+            json.dumps(metadata_payload),
+        ],
+    )
+    cancelled_job_ids = [str(row.get("id") or "") for row in updated_rows if str(row.get("id") or "").strip()]
+
+    for cancelled_job_id in cancelled_job_ids:
+        _clear_worker_heartbeat_for_job(
+            job_id=cancelled_job_id,
+            status="idle",
+            metadata={"source": "cancel_stuck_jobs", "job_status": "cancelled"},
+        )
+
+    affected_run_ids = sorted(
+        {str(row.get("run_id") or "").strip() for row in updated_rows if str(row.get("run_id") or "").strip()}
+    )
+    for run_id in affected_run_ids:
+        _finalize_run_status(run_id, force_recompute=True)
+
+    _invalidate_queue_status_cache()
+    return {
+        "requested_job_ids_count": len(requested_ids),
+        "cancelled_jobs": len(cancelled_job_ids),
+        "cancelled_job_ids": cancelled_job_ids,
+        "affected_run_ids": affected_run_ids,
+        "stuck_jobs_remaining": _count_stuck_jobs(),
+    }
+
+
+def _social_debug_repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _social_debug_context_max_bytes() -> int:
+    return _resolve_positive_int_env(
+        "SOCIAL_DEBUG_CONTEXT_MAX_BYTES",
+        SOCIAL_DEBUG_CONTEXT_MAX_BYTES_DEFAULT,
+        minimum=2_000,
+    )
+
+
+def _social_debug_patch_max_bytes() -> int:
+    return _resolve_positive_int_env(
+        "SOCIAL_DEBUG_PATCH_MAX_BYTES",
+        SOCIAL_DEBUG_PATCH_MAX_BYTES_DEFAULT,
+        minimum=10_000,
+    )
+
+
+def _social_debug_patch_apply_enabled() -> bool:
+    return _env_truthy("SOCIAL_DEBUG_PATCH_APPLY_ENABLED", default=False)
+
+
+def _social_debug_model_name() -> str:
+    return (
+        os.getenv("SOCIAL_DEBUG_OPENAI_MODEL") or SOCIAL_DEBUG_OPENAI_MODEL_DEFAULT
+    ).strip() or SOCIAL_DEBUG_OPENAI_MODEL_DEFAULT
+
+
+def _social_debug_fallback_model_name() -> str:
+    fallback = (os.getenv("SOCIAL_DEBUG_OPENAI_FALLBACK_MODEL") or SOCIAL_DEBUG_OPENAI_FALLBACK_MODEL_DEFAULT).strip()
+    return fallback or SOCIAL_DEBUG_OPENAI_FALLBACK_MODEL_DEFAULT
+
+
+def _social_debug_timeout_seconds() -> int:
+    return _resolve_positive_int_env(
+        "SOCIAL_DEBUG_OPENAI_TIMEOUT_SECONDS",
+        SOCIAL_DEBUG_OPENAI_TIMEOUT_SECONDS_DEFAULT,
+        minimum=5,
+    )
+
+
+def _extract_snippet_around_marker(
+    text: str,
+    *,
+    marker: str,
+    before_chars: int = 200,
+    after_chars: int = 2200,
+) -> str | None:
+    idx = text.find(marker)
+    if idx < 0:
+        return None
+    start = max(0, idx - before_chars)
+    end = min(len(text), idx + after_chars)
+    return text[start:end].strip()
+
+
+def _load_social_debug_source_context() -> list[dict[str, str]]:
+    repo_root = _social_debug_repo_root()
+    sources: list[tuple[str, list[str]]] = [
+        (
+            "trr_backend/repositories/social_season_analytics.py",
+            [
+                "def get_queue_status(",
+                "def _claim_next_jobs(",
+                "def _execute_claimed_job(",
+                "def recover_stale_running_jobs(",
+            ],
+        ),
+        (
+            "scripts/socials/worker.py",
+            [
+                "class WorkerHeartbeat:",
+                "def main() -> int:",
+            ],
+        ),
+        (
+            "api/routers/socials.py",
+            [
+                "def get_social_ingest_queue_status(",
+                "def ingest_season_social(",
+            ],
+        ),
+    ]
+    snippets: list[dict[str, str]] = []
+    per_file_budget = max(2_000, _social_debug_context_max_bytes() // max(1, len(sources)))
+    for rel_path, markers in sources:
+        abs_path = repo_root / rel_path
+        try:
+            raw = abs_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001
+            continue
+        extracted: list[str] = []
+        for marker in markers:
+            candidate = _extract_snippet_around_marker(raw, marker=marker)
+            if candidate:
+                extracted.append(candidate)
+        joined = "\n\n".join(extracted).strip() if extracted else raw[:per_file_budget].strip()
+        if not joined:
+            continue
+        snippets.append(
+            {
+                "path": rel_path,
+                "content": joined[:per_file_budget],
+            }
+        )
+    return snippets
+
+
+def _fetch_job_debug_context(job_id: str) -> dict[str, Any]:
+    _assert_social_queue_schema_ready()
+    features = _scrape_jobs_features()
+    has_run_id = bool(features.get("has_run_id"))
+    has_queue_fields = bool(features.get("has_queue_fields"))
+
+    select_run_id = "j.run_id::text as run_id" if has_run_id else "null::text as run_id"
+    select_attempt_count = "j.attempt_count" if has_queue_fields else "0::int as attempt_count"
+    select_max_attempts = "j.max_attempts" if has_queue_fields else "0::int as max_attempts"
+    select_worker_id = "j.worker_id" if has_queue_fields else "null::text as worker_id"
+    select_heartbeat_at = "j.heartbeat_at" if has_queue_fields else "null::timestamptz as heartbeat_at"
+    select_last_error_code = "j.last_error_code" if has_queue_fields else "null::text as last_error_code"
+    job_row = pg.fetch_one(
+        f"""
+        select
+          j.id::text as id,
+          {select_run_id},
+          j.platform,
+          j.job_type,
+          j.status,
+          j.config,
+          j.metadata,
+          j.items_found,
+          j.error_message,
+          j.started_at,
+          j.created_at,
+          j.completed_at,
+          {select_attempt_count},
+          {select_max_attempts},
+          {select_worker_id},
+          {select_heartbeat_at},
+          {select_last_error_code}
+        from social.scrape_jobs j
+        where j.id = %s::uuid
+        limit 1
+        """,
+        [job_id],
+    )
+    if not job_row:
+        raise ValueError("job_not_found")
+
+    worker_row: dict[str, Any] | None = None
+    worker_id = str(job_row.get("worker_id") or "").strip()
+    if _worker_heartbeat_schema_ready():
+        if worker_id:
+            worker_row = pg.fetch_one(
+                """
+                select
+                  worker_id,
+                  stage,
+                  status,
+                  run_id::text as run_id,
+                  current_job_id::text as current_job_id,
+                  metadata,
+                  started_at,
+                  last_seen_at
+                from social.scrape_workers
+                where worker_id = %s
+                limit 1
+                """,
+                [worker_id],
+            )
+        if not worker_row:
+            worker_row = pg.fetch_one(
+                """
+                select
+                  worker_id,
+                  stage,
+                  status,
+                  run_id::text as run_id,
+                  current_job_id::text as current_job_id,
+                  metadata,
+                  started_at,
+                  last_seen_at
+                from social.scrape_workers
+                where current_job_id = %s::uuid
+                order by last_seen_at desc
+                limit 1
+                """,
+                [job_id],
+            )
+
+    run_row: dict[str, Any] | None = None
+    run_id = str(job_row.get("run_id") or "").strip()
+    if run_id and _relation_exists("social.scrape_runs"):
+        run_row = pg.fetch_one(
+            """
+            select
+              id::text as run_id,
+              status,
+              source_scope,
+              created_at,
+              started_at,
+              completed_at,
+              summary
+            from social.scrape_runs
+            where id = %s::uuid
+            limit 1
+            """,
+            [run_id],
+        )
+
+    return {
+        "job": {
+            "id": str(job_row.get("id") or ""),
+            "run_id": run_id or None,
+            "platform": str(job_row.get("platform") or ""),
+            "job_type": str(job_row.get("job_type") or ""),
+            "status": str(job_row.get("status") or ""),
+            "items_found": _normalize_non_negative_int(job_row.get("items_found")),
+            "error_message": str(job_row.get("error_message") or "").strip() or None,
+            "started_at": _iso(_coerce_dt(job_row.get("started_at"))),
+            "created_at": _iso(_coerce_dt(job_row.get("created_at"))),
+            "completed_at": _iso(_coerce_dt(job_row.get("completed_at"))),
+            "attempt_count": _normalize_non_negative_int(job_row.get("attempt_count")),
+            "max_attempts": _normalize_non_negative_int(job_row.get("max_attempts")),
+            "worker_id": str(job_row.get("worker_id") or "").strip() or None,
+            "heartbeat_at": _iso(_coerce_dt(job_row.get("heartbeat_at"))),
+            "last_error_code": str(job_row.get("last_error_code") or "").strip() or None,
+            "config": _metadata_dict(job_row.get("config")),
+            "metadata": _metadata_dict(job_row.get("metadata")),
+        },
+        "worker": {
+            "worker_id": str((worker_row or {}).get("worker_id") or "").strip() or None,
+            "stage": str((worker_row or {}).get("stage") or "").strip() or None,
+            "status": str((worker_row or {}).get("status") or "").strip() or None,
+            "run_id": str((worker_row or {}).get("run_id") or "").strip() or None,
+            "current_job_id": str((worker_row or {}).get("current_job_id") or "").strip() or None,
+            "metadata": _metadata_dict((worker_row or {}).get("metadata")),
+            "started_at": _iso(_coerce_dt((worker_row or {}).get("started_at"))),
+            "last_seen_at": _iso(_coerce_dt((worker_row or {}).get("last_seen_at"))),
+        },
+        "run": {
+            "run_id": str((run_row or {}).get("run_id") or "").strip() or None,
+            "status": str((run_row or {}).get("status") or "").strip() or None,
+            "source_scope": str((run_row or {}).get("source_scope") or "").strip() or None,
+            "created_at": _iso(_coerce_dt((run_row or {}).get("created_at"))),
+            "started_at": _iso(_coerce_dt((run_row or {}).get("started_at"))),
+            "completed_at": _iso(_coerce_dt((run_row or {}).get("completed_at"))),
+            "summary": _metadata_dict((run_row or {}).get("summary")),
+        },
+    }
+
+
+def _build_social_debug_prompt(
+    *,
+    job_context: dict[str, Any],
+    source_context: list[dict[str, str]],
+) -> str:
+    prompt_payload = {
+        "job_context": job_context,
+        "source_context": source_context,
+        "task": "Diagnose stuck/failed social ingest job and produce exact unified diff patch.",
+        "required_output_schema": {
+            "root_cause": "string",
+            "confidence": "number between 0 and 1",
+            "patch_unified_diff": "string unified diff",
+            "files_touched": ["string file paths"],
+            "tests_to_run": ["string commands"],
+        },
+        "constraints": [
+            "Return strict JSON object only.",
+            "patch_unified_diff must be valid unified diff with ---/+++ headers.",
+            "Avoid changing unrelated files.",
+            "Focus on root-cause fix with smallest safe patch.",
+        ],
+    }
+    return json.dumps(prompt_payload, separators=(",", ":"), ensure_ascii=True)
+
+
+def _run_social_debug_openai_completion(
+    *,
+    model: str,
+    prompt: str,
+    api_key: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a senior backend engineer. Return strict JSON only.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=max(5, int(timeout_seconds)),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("OpenAI response missing choices")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("OpenAI response missing content")
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("OpenAI response is not a JSON object")
+    return parsed
+
+
+def _extract_unified_diff_paths(patch_unified_diff: str) -> list[str]:
+    paths: list[str] = []
+    for raw_line in patch_unified_diff.splitlines():
+        line = raw_line.strip()
+        if not (line.startswith("+++ ") or line.startswith("--- ")):
+            continue
+        candidate = line[4:].strip()
+        if candidate == "/dev/null":
+            continue
+        if candidate.startswith("a/") or candidate.startswith("b/"):
+            candidate = candidate[2:]
+        if not candidate:
+            continue
+        if candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def _validate_debug_patch_paths(paths: list[str]) -> None:
+    if not paths:
+        raise ValueError("patch_unified_diff did not include file paths")
+    for path in paths:
+        normalized = str(path or "").strip()
+        if not normalized:
+            raise ValueError("patch path is empty")
+        if normalized.startswith("/") or normalized.startswith("~"):
+            raise ValueError(f"patch path is absolute: {normalized}")
+        if ".." in Path(normalized).parts:
+            raise ValueError(f"patch path contains traversal: {normalized}")
+        top_level = normalized.split("/", 1)[0]
+        if top_level not in SOCIAL_DEBUG_ALLOWED_TOP_LEVEL_PATHS:
+            raise ValueError(f"patch path outside allowlist: {normalized}")
+
+
+def _run_git_apply(*, patch_unified_diff: str, check_only: bool) -> subprocess.CompletedProcess[str]:
+    cmd = ["git", "apply", "--whitespace=nowarn"]
+    if check_only:
+        cmd.append("--check")
+    cmd.append("-")
+    return subprocess.run(
+        cmd,
+        cwd=str(_social_debug_repo_root()),
+        input=patch_unified_diff,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def debug_ingest_job_with_openai(
+    job_id: str,
+    *,
+    apply_patch: bool = False,
+    confirm_apply: bool = False,
+    include_context: bool = True,
+) -> dict[str, Any]:
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise ValueError("job_not_found")
+    context_payload = _fetch_job_debug_context(normalized_job_id)
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("openai_api_key_missing")
+
+    source_context = _load_social_debug_source_context() if include_context else []
+    prompt = _build_social_debug_prompt(job_context=context_payload, source_context=source_context)
+    models = [_social_debug_model_name(), _social_debug_fallback_model_name()]
+    models = [model for idx, model in enumerate(models) if model and (idx == 0 or model != models[0])]
+
+    ai_payload: dict[str, Any] | None = None
+    model_used: str | None = None
+    fallback_used = False
+    final_error: Exception | None = None
+    for idx, model in enumerate(models):
+        try:
+            ai_payload = _run_social_debug_openai_completion(
+                model=model,
+                prompt=prompt,
+                api_key=api_key,
+                timeout_seconds=_social_debug_timeout_seconds(),
+            )
+            model_used = model
+            fallback_used = idx > 0
+            break
+        except Exception as exc:  # noqa: BLE001
+            final_error = exc
+            continue
+    if ai_payload is None or model_used is None:
+        raise RuntimeError(f"openai_debug_failed: {final_error}")
+
+    root_cause = str(ai_payload.get("root_cause") or "").strip() or "No root cause provided."
+    raw_confidence = ai_payload.get("confidence")
+    try:
+        confidence = max(0.0, min(1.0, float(raw_confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    files_touched_raw = ai_payload.get("files_touched")
+    files_touched = (
+        [str(item).strip() for item in files_touched_raw if str(item).strip()]
+        if isinstance(files_touched_raw, list)
+        else []
+    )
+    tests_to_run_raw = ai_payload.get("tests_to_run")
+    tests_to_run = (
+        [str(item).strip() for item in tests_to_run_raw if str(item).strip()]
+        if isinstance(tests_to_run_raw, list)
+        else []
+    )
+    patch_unified_diff = str(ai_payload.get("patch_unified_diff") or "")
+    patch_max_bytes = _social_debug_patch_max_bytes()
+    if len(patch_unified_diff.encode("utf-8")) > patch_max_bytes:
+        patch_unified_diff = patch_unified_diff.encode("utf-8")[:patch_max_bytes].decode("utf-8", errors="ignore")
+
+    apply_enabled = _social_debug_patch_apply_enabled()
+    apply_requested = bool(apply_patch)
+    apply_result = {
+        "enabled": apply_enabled,
+        "requested": apply_requested,
+        "applied": False,
+        "check_ok": False,
+        "error": None,
+        "files_changed": [],
+    }
+    if apply_requested:
+        if not apply_enabled:
+            apply_result["error"] = "Patch apply is disabled by server configuration."
+        elif not confirm_apply:
+            apply_result["error"] = "confirm_apply=true is required to apply patch."
+        elif not patch_unified_diff.strip():
+            apply_result["error"] = "No patch_unified_diff returned by debug model."
+        else:
+            paths = _extract_unified_diff_paths(patch_unified_diff)
+            try:
+                _validate_debug_patch_paths(paths)
+                check_proc = _run_git_apply(patch_unified_diff=patch_unified_diff, check_only=True)
+                apply_result["check_ok"] = check_proc.returncode == 0
+                if check_proc.returncode != 0:
+                    apply_result["error"] = (
+                        check_proc.stderr or check_proc.stdout or "git apply --check failed"
+                    ).strip()
+                else:
+                    apply_proc = _run_git_apply(patch_unified_diff=patch_unified_diff, check_only=False)
+                    if apply_proc.returncode != 0:
+                        apply_result["error"] = (apply_proc.stderr or apply_proc.stdout or "git apply failed").strip()
+                    else:
+                        apply_result["applied"] = True
+                        apply_result["files_changed"] = paths
+            except Exception as exc:  # noqa: BLE001
+                apply_result["error"] = str(exc)
+
+    return {
+        "job_id": context_payload["job"]["id"],
+        "run_id": context_payload["job"].get("run_id"),
+        "model_used": model_used,
+        "fallback_used": fallback_used,
+        "analysis": {
+            "root_cause": root_cause,
+            "confidence": confidence,
+            "files_touched": files_touched,
+            "tests_to_run": tests_to_run,
+        },
+        "patch_unified_diff": patch_unified_diff,
+        "apply": apply_result,
+    }
 
 
 def _resolve_depth_defaults(
@@ -1065,6 +2436,7 @@ def _relation_exists(qualified_name: str) -> bool:
 _column_exists_cache: dict[tuple[str, str, str], bool] = {}
 _relation_columns_cache: dict[tuple[str, str], set[str]] = {}
 _scrape_jobs_features_cache: dict[str, bool] | None = None
+_run_counter_columns_cache: bool | None = None
 _analytics_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _analytics_cache_lock = Lock()
 
@@ -1109,9 +2481,7 @@ def _relation_columns(schema: str, relation: str) -> set[str]:
         [schema, relation],
     )
     columns = {
-        str(row.get("column_name") or "").strip().lower()
-        for row in rows
-        if str(row.get("column_name") or "").strip()
+        str(row.get("column_name") or "").strip().lower() for row in rows if str(row.get("column_name") or "").strip()
     }
     _relation_columns_cache[key] = columns
     return columns
@@ -1140,6 +2510,26 @@ def _scrape_jobs_features() -> dict[str, bool]:
         "has_queue_fields": has_queue_fields,
     }
     return _scrape_jobs_features_cache
+
+
+def _run_counter_columns_ready() -> bool:
+    global _run_counter_columns_cache
+    if _run_counter_columns_cache is not None:
+        return _run_counter_columns_cache
+    try:
+        _run_counter_columns_cache = all(
+            [
+                _column_exists("social", "scrape_runs", "total_jobs"),
+                _column_exists("social", "scrape_runs", "completed_jobs"),
+                _column_exists("social", "scrape_runs", "failed_jobs"),
+                _column_exists("social", "scrape_runs", "active_jobs"),
+                _column_exists("social", "scrape_runs", "items_found_total"),
+                _column_exists("social", "scrape_runs", "stage_counts"),
+            ]
+        )
+    except Exception:
+        _run_counter_columns_cache = False
+    return _run_counter_columns_cache
 
 
 def _instagram_posts_has_column(column: str) -> bool:
@@ -1189,8 +2579,8 @@ def _platform_thumbnail_expr(alias: str, platform: str) -> str:
         return (
             "coalesce("
             f"nullif(to_jsonb({alias}) ->> 'hosted_thumbnail_url', ''), "
-            f"nullif(to_jsonb({alias}) -> 'hosted_media_urls' ->> 0, ''), "
-            f"nullif({alias}.thumbnail_url, '')"
+            f"nullif({alias}.thumbnail_url, ''), "
+            f"nullif(to_jsonb({alias}) -> 'hosted_media_urls' ->> 0, '')"
             ")"
         )
     if normalized == "youtube":
@@ -1326,6 +2716,80 @@ def _derive_show_terms(show_name: str | None) -> tuple[list[str], list[str]]:
     return _normalize_unique_terms(hashtags), _normalize_unique_terms(keywords)
 
 
+def _show_name_is_rhoslc(show_name: Any) -> bool:
+    normalized = str(show_name or "").strip().lower()
+    if not normalized:
+        return False
+    return "salt lake city" in normalized or normalized == "rhoslc"
+
+
+def _show_is_rhoslc(context: SeasonContext | None) -> bool:
+    if context is None:
+        return False
+    show_slug = str(context.show_slug or "").strip().lower()
+    if show_slug == "rhoslc":
+        return True
+    return _show_name_is_rhoslc(context.show_name)
+
+
+_BRAVO_CORE_PLATFORM_ACCOUNTS: dict[str, tuple[str, ...]] = {
+    "instagram": ("bravotv", "bravowwhl"),
+    "tiktok": ("bravotv", "bravowwhl"),
+    "twitter": ("bravotv", "bravowwhl"),
+}
+
+
+def _ensure_bravo_core_platform_accounts(
+    *,
+    source_scope: str,
+    platform: str | None,
+    accounts: list[str],
+) -> list[str]:
+    if source_scope != "bravo":
+        return accounts
+    normalized_platform = _normalize_platform_name(platform)
+    required_accounts = _BRAVO_CORE_PLATFORM_ACCOUNTS.get(normalized_platform)
+    if not required_accounts:
+        return accounts
+    merged = _normalize_unique_terms([*accounts, *required_accounts])
+    return [item.lower().lstrip("@") for item in merged if str(item or "").strip()]
+
+
+def _ensure_rhoslc_instagram_accounts(context: SeasonContext | None, accounts: list[str]) -> list[str]:
+    if not _show_is_rhoslc(context):
+        return accounts
+    required_accounts = ("bravotv", "bravowwhl")
+    merged = _normalize_unique_terms([*accounts, *required_accounts])
+    return [item.lower().lstrip("@") for item in merged if str(item or "").strip()]
+
+
+def _ensure_rhoslc_twitter_accounts(context: SeasonContext | None, accounts: list[str]) -> list[str]:
+    if not _show_is_rhoslc(context):
+        return accounts
+    required_accounts = ("bravotv", "bravowwhl")
+    merged = _normalize_unique_terms([*accounts, *required_accounts])
+    return [item.lower().lstrip("@") for item in merged if str(item or "").strip()]
+
+
+def _ensure_rhoslc_instagram_hashtags(context: SeasonContext | None, hashtags: list[str]) -> list[str]:
+    if not _show_is_rhoslc(context):
+        return hashtags
+    return _normalize_unique_terms([*hashtags, "RHOSLC"])
+
+
+def _ensure_rhoslc_twitter_hashtags(context: SeasonContext | None, hashtags: list[str]) -> list[str]:
+    if not _show_is_rhoslc(context):
+        return hashtags
+    return _normalize_unique_terms([*hashtags, "RHOSLC"])
+
+
+def _has_required_rhoslc_hashtag(*, text: str | None, hashtags: list[str] | None = None) -> bool:
+    for tag in hashtags or []:
+        if str(tag or "").strip().lower().lstrip("#") == "rhoslc":
+            return True
+    return bool(re.search(r"(?<![\w.])#rhoslc\b", str(text or ""), flags=re.IGNORECASE))
+
+
 def _text_contains_any_term(*, text: str | None, hashtags: list[str], keywords: list[str]) -> bool:
     term_hashtags = [str(tag).strip().lstrip("#").lower() for tag in hashtags if str(tag).strip()]
     term_keywords = [str(kw).strip().lower() for kw in keywords if str(kw).strip()]
@@ -1343,6 +2807,38 @@ def _text_contains_any_term(*, text: str | None, hashtags: list[str], keywords: 
         if keyword in haystack:
             return True
     return False
+
+
+def _instagram_post_matches_show_terms(
+    *,
+    context: SeasonContext,
+    text: str | None,
+    post_hashtags: list[str],
+    hashtags: list[str],
+    keywords: list[str],
+) -> bool:
+    if _show_is_rhoslc(context):
+        return _has_required_rhoslc_hashtag(text=text, hashtags=post_hashtags)
+
+    return _text_contains_any_term(text=text, hashtags=hashtags, keywords=keywords)
+
+
+def _instagram_row_has_required_rhoslc_hashtag(row: dict[str, Any]) -> bool:
+    row_hashtags = _as_text_list(row.get("hashtags"), strip_prefix="#")
+    return _has_required_rhoslc_hashtag(text=str(row.get("caption") or ""), hashtags=row_hashtags)
+
+
+def _twitter_post_matches_show_terms(
+    *,
+    context: SeasonContext,
+    text: str | None,
+    post_hashtags: list[str],
+    hashtags: list[str],
+    keywords: list[str],
+) -> bool:
+    if _show_is_rhoslc(context):
+        return _has_required_rhoslc_hashtag(text=text, hashtags=post_hashtags)
+    return _text_contains_any_term(text=text, hashtags=hashtags, keywords=keywords)
 
 
 def _build_post_filter_text(
@@ -1442,13 +2938,7 @@ THREADS_TOPIC_VALUE_KEYS: tuple[str, ...] = (
 
 
 def _threads_should_enforce_rhoslc_relevance(*, context: SeasonContext | None) -> bool:
-    if context is None:
-        return False
-    show_slug = str(context.show_slug or "").strip().lower()
-    if show_slug == "rhoslc":
-        return True
-    show_name = str(context.show_name or "").strip().lower()
-    return "salt lake city" in show_name
+    return _show_is_rhoslc(context)
 
 
 def _threads_normalize_match_term(value: str) -> str:
@@ -2461,7 +3951,7 @@ def _default_targets(context: SeasonContext, *, source_scope: str = "bravo") -> 
             "source_scope": source_scope,
             "timezone": "America/New_York",
             "accounts": ["bravo", "wwhl"],
-            "hashtags": [],
+            "hashtags": hashtags,
             "keywords": keywords,
             "is_active": True,
             "config": {"include_comments": True},
@@ -2488,6 +3978,21 @@ def _default_targets(context: SeasonContext, *, source_scope: str = "bravo") -> 
         },
     ]
     return defaults
+
+
+_DEFAULT_PLATFORM_ACCOUNTS: dict[str, list[str]] = {
+    "instagram": ["bravotv", "bravodailydish", "bravowwhl"],
+    "tiktok": ["bravotv", "bravowwhl"],
+    "twitter": ["bravotv", "bravowwhl"],
+    "youtube": ["bravo", "wwhl"],
+    "facebook": ["bravo"],
+    "threads": ["bravotv"],
+}
+
+
+def _default_platform_accounts(platform: str) -> list[str]:
+    """Return default accounts for a platform when none are configured."""
+    return list(_DEFAULT_PLATFORM_ACCOUNTS.get(platform, []))
 
 
 def _season_identity(season_id: str) -> dict[str, Any]:
@@ -2541,9 +4046,30 @@ def get_targets(season_id: str, *, source_scope: str = "bravo") -> dict[str, Any
     if rows:
         season_number = int(rows[0].get("season_number") or 0)
         show_name = rows[0].get("show_name")
-        targets = [
-            {key: value for key, value in row.items() if key not in {"season_number", "show_name"}} for row in rows
-        ]
+        enforce_rhoslc_floor = source_scope == "bravo" and _show_name_is_rhoslc(show_name)
+        targets: list[dict[str, Any]] = []
+        for row in rows:
+            target = {key: value for key, value in row.items() if key not in {"season_number", "show_name"}}
+            platform = _normalize_platform_name(target.get("platform"))
+            normalized_accounts = _normalize_unique_terms(
+                [
+                    normalized
+                    for normalized in (_normalize_account_handle(item) for item in (target.get("accounts") or []))
+                    if normalized
+                ]
+            )
+            normalized_hashtags = _normalize_terms(target.get("hashtags"), strip_prefix="#")
+            if enforce_rhoslc_floor and platform == "instagram":
+                normalized_accounts = _normalize_unique_terms([*normalized_accounts, "bravotv", "bravowwhl"])
+                normalized_hashtags = _normalize_unique_terms([*normalized_hashtags, "RHOSLC"])
+            normalized_accounts = _ensure_bravo_core_platform_accounts(
+                source_scope=source_scope,
+                platform=platform,
+                accounts=normalized_accounts,
+            )
+            target["accounts"] = normalized_accounts
+            target["hashtags"] = normalized_hashtags
+            targets.append(target)
         return {
             "season_id": str(rows[0].get("season_id") or season_id),
             "show_id": str(rows[0].get("show_id") or ""),
@@ -2735,6 +4261,14 @@ def _target_accounts_by_platform(
             if normalized:
                 accounts_by_platform[platform].add(normalized)
 
+    if source_scope == "bravo":
+        for platform, required_accounts in _BRAVO_CORE_PLATFORM_ACCOUNTS.items():
+            accounts_by_platform[platform].update(required_accounts)
+
+    if source_scope == "bravo" and _show_is_rhoslc(resolved_context):
+        accounts_by_platform["instagram"].update({"bravotv", "bravowwhl"})
+        accounts_by_platform["twitter"].update({"bravotv", "bravowwhl"})
+
     return accounts_by_platform
 
 
@@ -2756,9 +4290,21 @@ def put_targets(
         if platform not in {"instagram", "tiktok", "twitter", "youtube", "facebook", "threads", "reddit"}:
             raise ValueError(f"Unsupported platform: {platform}")
 
-        accounts = target.get("accounts") or []
-        hashtags = target.get("hashtags") or []
-        keywords = target.get("keywords") or []
+        accounts = _normalize_unique_terms(
+            [
+                normalized
+                for normalized in (_normalize_account_handle(item) for item in (target.get("accounts") or []))
+                if normalized
+            ]
+        )
+        hashtags = _normalize_terms(target.get("hashtags"), strip_prefix="#")
+        keywords = _normalize_terms(target.get("keywords"))
+        if platform == "instagram":
+            accounts = _ensure_rhoslc_instagram_accounts(context, accounts)
+            hashtags = _ensure_rhoslc_instagram_hashtags(context, hashtags)
+        elif platform == "twitter":
+            accounts = _ensure_rhoslc_twitter_accounts(context, accounts)
+            hashtags = _ensure_rhoslc_twitter_hashtags(context, hashtags)
         timezone = str(target.get("timezone") or "America/New_York")
         is_active = bool(target.get("is_active", True))
         config = target.get("config") or {}
@@ -2921,7 +4467,9 @@ def _create_job(
     priority: int = 100,
     worker_id: str | None = None,
     preclaim: bool = False,
+    available_at: datetime | None = None,
     conn: Any | None = None,
+    track_run_counters: bool = True,
 ) -> str:
     effective_status = status
     if preclaim and worker_id:
@@ -2955,7 +4503,7 @@ def _create_job(
           %s,
           %s::jsonb,
           %s,
-          now(),
+          coalesce(%s::timestamptz, now()),
           %s,
           %s,
           %s,
@@ -2976,6 +4524,7 @@ def _create_job(
                 job_type,
                 json.dumps(config),
                 effective_status,
+                _coerce_dt(available_at),
                 priority,
                 context.show_id,
                 context.season_id,
@@ -2991,7 +4540,10 @@ def _create_job(
         )
     if not row:
         raise RuntimeError("Failed to create scrape job")
-    return str(row["id"])
+    job_id = str(row["id"])
+    if run_id and track_run_counters:
+        _increment_run_counters_on_job_create(run_id=run_id, stage=stage, status=effective_status)
+    return job_id
 
 
 def _set_job_running(job_id: str, *, worker_id: str | None = None) -> None:
@@ -3070,8 +4622,19 @@ def _finish_job(
 ) -> None:
     is_terminal = status in {"completed", "failed", "cancelled"}
     completed_expr = "now()" if is_terminal else "completed_at"
-    pg.fetch_one(
+    row = pg.fetch_one(
         """
+        with prior as (
+          select
+            id,
+            run_id::text as run_id,
+            status as prior_status,
+            items_found as prior_items_found,
+            coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage
+          from social.scrape_jobs
+          where id = %s
+          for update
+        )
         update social.scrape_jobs
         set
           status = %s,
@@ -3084,11 +4647,20 @@ def _finish_job(
           heartbeat_at = now(),
           last_error_code = %s,
           last_error_class = %s,
-          available_at = coalesce(%s, available_at)
-        where id = %s
-        returning id::text
+          available_at = coalesce(%s, available_at),
+          worker_id = case when %s = 'retrying' then null else worker_id end,
+          claimed_at = case when %s = 'retrying' then null else claimed_at end
+        from prior
+        where social.scrape_jobs.id = prior.id
+        returning
+          social.scrape_jobs.id::text as id,
+          prior.run_id as run_id,
+          prior.prior_status,
+          prior.prior_items_found,
+          prior.stage
         """,
         [
+            job_id,
             status,
             items_found,
             error_message,
@@ -3096,9 +4668,19 @@ def _finish_job(
             last_error_code,
             last_error_class,
             next_available_at,
-            job_id,
+            status,
+            status,
         ],
     )
+    if row and row.get("run_id"):
+        _increment_run_counters_on_job_finish(
+            run_id=str(row.get("run_id")),
+            stage=str(row.get("stage") or "unknown"),
+            prior_status=str(row.get("prior_status") or ""),
+            new_status=status,
+            prior_items_found=_normalize_non_negative_int(row.get("prior_items_found")),
+            new_items_found=_normalize_non_negative_int(items_found),
+        )
     if is_terminal:
         _clear_worker_heartbeat_for_job(
             job_id=job_id,
@@ -3121,6 +4703,14 @@ def _create_run(
     config: dict[str, Any],
     status: str,
 ) -> str:
+    initial_summary = {
+        "total_jobs": 0,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "active_jobs": 0,
+        "items_found_total": 0,
+        "stage_counts": {},
+    }
     row = pg.fetch_one(
         """
         insert into social.scrape_runs (
@@ -3130,6 +4720,7 @@ def _create_run(
           status,
           initiated_by,
           config,
+          summary,
           started_at
         )
         values (
@@ -3138,6 +4729,7 @@ def _create_run(
           %s,
           %s,
           %s,
+          %s::jsonb,
           %s::jsonb,
           case when %s = 'running' then now() else null end
         )
@@ -3150,6 +4742,7 @@ def _create_run(
             status,
             initiated_by,
             json.dumps(config),
+            json.dumps(initial_summary),
             status,
         ],
     )
@@ -3185,7 +4778,229 @@ def _set_run_status(run_id: str, status: str) -> None:
         _invalidate_week_detail_cache_after_run_terminal_status()
 
 
-def _update_run_summary(run_id: str) -> dict[str, Any]:
+def _status_is_active(status: str | None) -> bool:
+    return str(status or "").strip().lower() in {"queued", "pending", "retrying", "running"}
+
+
+def _status_is_completed(status: str | None) -> bool:
+    return str(status or "").strip().lower() == "completed"
+
+
+def _status_is_failed(status: str | None) -> bool:
+    return str(status or "").strip().lower() == "failed"
+
+
+def _normalize_stage_counts(stage_counts: Any) -> dict[str, dict[str, int]]:
+    if not isinstance(stage_counts, dict):
+        return {}
+    normalized: dict[str, dict[str, int]] = {}
+    for stage, counters in stage_counts.items():
+        stage_key = str(stage or "").strip() or "unknown"
+        counter_map = dict(counters) if isinstance(counters, dict) else {}
+        normalized[stage_key] = {
+            "total": _normalize_non_negative_int(counter_map.get("total")),
+            "completed": _normalize_non_negative_int(counter_map.get("completed")),
+            "failed": _normalize_non_negative_int(counter_map.get("failed")),
+            "active": _normalize_non_negative_int(counter_map.get("active")),
+        }
+    return normalized
+
+
+def _build_run_summary_payload(
+    *,
+    total_jobs: Any,
+    completed_jobs: Any,
+    failed_jobs: Any,
+    active_jobs: Any,
+    items_found_total: Any,
+    stage_counts: Any,
+) -> dict[str, Any]:
+    return {
+        "total_jobs": _normalize_non_negative_int(total_jobs),
+        "completed_jobs": _normalize_non_negative_int(completed_jobs),
+        "failed_jobs": _normalize_non_negative_int(failed_jobs),
+        "active_jobs": _normalize_non_negative_int(active_jobs),
+        "items_found_total": _normalize_non_negative_int(items_found_total),
+        "stage_counts": _normalize_stage_counts(stage_counts),
+    }
+
+
+def _persist_run_counters_and_summary(
+    *,
+    conn: Any,
+    run_id: str,
+    total_jobs: int,
+    completed_jobs: int,
+    failed_jobs: int,
+    active_jobs: int,
+    items_found_total: int,
+    stage_counts: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    summary = _build_run_summary_payload(
+        total_jobs=total_jobs,
+        completed_jobs=completed_jobs,
+        failed_jobs=failed_jobs,
+        active_jobs=active_jobs,
+        items_found_total=items_found_total,
+        stage_counts=stage_counts,
+    )
+    with pg.db_cursor(conn=conn) as cur:
+        pg.fetch_one_with_cursor(
+            cur,
+            """
+            update social.scrape_runs
+            set
+              total_jobs = %s,
+              completed_jobs = %s,
+              failed_jobs = %s,
+              active_jobs = %s,
+              items_found_total = %s,
+              stage_counts = %s::jsonb,
+              summary = %s::jsonb
+            where id = %s
+            returning id::text
+            """,
+            [
+                int(total_jobs),
+                int(completed_jobs),
+                int(failed_jobs),
+                int(active_jobs),
+                int(items_found_total),
+                json.dumps(stage_counts),
+                json.dumps(summary),
+                run_id,
+            ],
+        )
+    return summary
+
+
+def _increment_stage_counter(
+    stage_counts: dict[str, dict[str, int]],
+    *,
+    stage: str,
+    key: str,
+    delta: int,
+) -> dict[str, dict[str, int]]:
+    if not delta:
+        return stage_counts
+    bucket = dict(stage_counts.get(stage) or {"total": 0, "completed": 0, "failed": 0, "active": 0})
+    bucket[key] = max(0, _normalize_non_negative_int(bucket.get(key)) + int(delta))
+    stage_counts[stage] = bucket
+    return stage_counts
+
+
+def _increment_run_counters_on_job_create(*, run_id: str, stage: str, status: str) -> None:
+    if not run_id or not _run_counter_columns_ready():
+        return
+    stage_key = str(stage or "unknown").strip() or "unknown"
+    with pg.db_connection() as conn:
+        with pg.db_cursor(conn=conn) as cur:
+            row = (
+                pg.fetch_one_with_cursor(
+                    cur,
+                    """
+                select
+                  total_jobs,
+                  completed_jobs,
+                  failed_jobs,
+                  active_jobs,
+                  items_found_total,
+                  stage_counts
+                from social.scrape_runs
+                where id = %s
+                for update
+                """,
+                    [run_id],
+                )
+                or {}
+            )
+            if not row:
+                return
+            total_jobs = _normalize_non_negative_int(row.get("total_jobs")) + 1
+            completed_jobs = _normalize_non_negative_int(row.get("completed_jobs"))
+            failed_jobs = _normalize_non_negative_int(row.get("failed_jobs"))
+            active_jobs = _normalize_non_negative_int(row.get("active_jobs")) + (1 if _status_is_active(status) else 0)
+            items_found_total = _normalize_non_negative_int(row.get("items_found_total"))
+            stage_counts = _normalize_stage_counts(row.get("stage_counts"))
+            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="total", delta=1)
+            if _status_is_active(status):
+                stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=1)
+            _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=run_id,
+                total_jobs=total_jobs,
+                completed_jobs=completed_jobs,
+                failed_jobs=failed_jobs,
+                active_jobs=active_jobs,
+                items_found_total=items_found_total,
+                stage_counts=stage_counts,
+            )
+
+
+def _increment_run_counters_on_job_finish(
+    *,
+    run_id: str,
+    stage: str,
+    prior_status: str,
+    new_status: str,
+    prior_items_found: int,
+    new_items_found: int,
+) -> None:
+    if not run_id or not _run_counter_columns_ready():
+        return
+    stage_key = str(stage or "unknown").strip() or "unknown"
+    active_delta = (1 if _status_is_active(new_status) else 0) - (1 if _status_is_active(prior_status) else 0)
+    completed_delta = (1 if _status_is_completed(new_status) else 0) - (1 if _status_is_completed(prior_status) else 0)
+    failed_delta = (1 if _status_is_failed(new_status) else 0) - (1 if _status_is_failed(prior_status) else 0)
+    items_delta = _normalize_non_negative_int(new_items_found) - _normalize_non_negative_int(prior_items_found)
+
+    with pg.db_connection() as conn:
+        with pg.db_cursor(conn=conn) as cur:
+            row = (
+                pg.fetch_one_with_cursor(
+                    cur,
+                    """
+                select
+                  total_jobs,
+                  completed_jobs,
+                  failed_jobs,
+                  active_jobs,
+                  items_found_total,
+                  stage_counts
+                from social.scrape_runs
+                where id = %s
+                for update
+                """,
+                    [run_id],
+                )
+                or {}
+            )
+            if not row:
+                return
+            total_jobs = _normalize_non_negative_int(row.get("total_jobs"))
+            completed_jobs = max(0, _normalize_non_negative_int(row.get("completed_jobs")) + completed_delta)
+            failed_jobs = max(0, _normalize_non_negative_int(row.get("failed_jobs")) + failed_delta)
+            active_jobs = max(0, _normalize_non_negative_int(row.get("active_jobs")) + active_delta)
+            items_found_total = max(0, _normalize_non_negative_int(row.get("items_found_total")) + items_delta)
+            stage_counts = _normalize_stage_counts(row.get("stage_counts"))
+            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=active_delta)
+            stage_counts = _increment_stage_counter(
+                stage_counts, stage=stage_key, key="completed", delta=completed_delta
+            )
+            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="failed", delta=failed_delta)
+            _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=run_id,
+                total_jobs=total_jobs,
+                completed_jobs=completed_jobs,
+                failed_jobs=failed_jobs,
+                active_jobs=active_jobs,
+                items_found_total=items_found_total,
+                stage_counts=stage_counts,
+            )
+
+
+def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
     summary_row = (
         pg.fetch_one(
             """
@@ -3201,14 +5016,14 @@ def _update_run_summary(run_id: str) -> dict[str, Any]:
         ),
         stage_stats as (
           select
-            coalesce(config->>'stage', 'unknown') as stage,
+            coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage,
             count(*)::int as total,
             count(*) filter (where status = 'completed')::int as completed,
             count(*) filter (where status = 'failed')::int as failed,
             count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active
           from social.scrape_jobs
           where run_id = %s
-          group by coalesce(config->>'stage', 'unknown')
+          group by coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown')
         )
         select
           (select row_to_json(stats) from stats) as stats,
@@ -3223,43 +5038,149 @@ def _update_run_summary(run_id: str) -> dict[str, Any]:
         )
         or {}
     )
-
-    stats = summary_row.get("stats") or {}
-    stage_counts = summary_row.get("stage_counts") or {}
-    summary = {
-        "total_jobs": int(stats.get("total_jobs") or 0),
-        "completed_jobs": int(stats.get("completed_jobs") or 0),
-        "failed_jobs": int(stats.get("failed_jobs") or 0),
-        "active_jobs": int(stats.get("active_jobs") or 0),
-        "items_found_total": int(stats.get("items_found_total") or 0),
-        "stage_counts": stage_counts,
-    }
-    pg.fetch_one(
-        """
-        update social.scrape_runs
-        set summary = %s::jsonb
-        where id = %s
-        returning id::text
-        """,
-        [json.dumps(summary), run_id],
+    stats = dict(summary_row.get("stats") or {})
+    return _build_run_summary_payload(
+        total_jobs=stats.get("total_jobs"),
+        completed_jobs=stats.get("completed_jobs"),
+        failed_jobs=stats.get("failed_jobs"),
+        active_jobs=stats.get("active_jobs"),
+        items_found_total=stats.get("items_found_total"),
+        stage_counts=summary_row.get("stage_counts"),
     )
-    return summary
 
 
-def _finalize_run_status(run_id: str) -> dict[str, Any]:
-    summary = _update_run_summary(run_id)
-    active_jobs = int(summary.get("active_jobs") or 0)
-    failed_jobs = int(summary.get("failed_jobs") or 0)
-    current = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
-    if str(current.get("status")) == "cancelled":
+def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
+    if _run_counter_columns_ready() and not force_recompute:
+        row = (
+            pg.fetch_one(
+                """
+                select
+                  total_jobs,
+                  completed_jobs,
+                  failed_jobs,
+                  active_jobs,
+                  items_found_total,
+                  stage_counts
+                from social.scrape_runs
+                where id = %s
+                """,
+                [run_id],
+            )
+            or {}
+        )
+        summary = _build_run_summary_payload(
+            total_jobs=row.get("total_jobs"),
+            completed_jobs=row.get("completed_jobs"),
+            failed_jobs=row.get("failed_jobs"),
+            active_jobs=row.get("active_jobs"),
+            items_found_total=row.get("items_found_total"),
+            stage_counts=row.get("stage_counts"),
+        )
+        pg.fetch_one(
+            """
+            update social.scrape_runs
+            set summary = %s::jsonb
+            where id = %s
+            returning id::text
+            """,
+            [json.dumps(summary), run_id],
+        )
         return summary
-    if active_jobs > 0:
-        _set_run_status(run_id, "running")
-    elif failed_jobs > 0:
-        _set_run_status(run_id, "failed")
+
+    summary = _recompute_run_summary_from_jobs(run_id)
+    if _run_counter_columns_ready():
+        with pg.db_connection() as conn:
+            _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=run_id,
+                total_jobs=int(summary.get("total_jobs") or 0),
+                completed_jobs=int(summary.get("completed_jobs") or 0),
+                failed_jobs=int(summary.get("failed_jobs") or 0),
+                active_jobs=int(summary.get("active_jobs") or 0),
+                items_found_total=int(summary.get("items_found_total") or 0),
+                stage_counts=dict(summary.get("stage_counts") or {}),
+            )
     else:
-        _set_run_status(run_id, "completed")
+        pg.fetch_one(
+            """
+            update social.scrape_runs
+            set summary = %s::jsonb
+            where id = %s
+            returning id::text
+            """,
+            [json.dumps(summary), run_id],
+        )
     return summary
+
+
+def reconcile_run_summaries(*, run_ids: list[str] | None = None, limit: int = 100) -> dict[str, Any]:
+    if not _run_counter_columns_ready():
+        return {"reconciled_runs": 0, "run_ids": []}
+
+    safe_limit = max(1, min(int(limit), 500))
+    if run_ids:
+        candidate_run_ids = [str(run_id).strip() for run_id in run_ids if str(run_id).strip()][:safe_limit]
+    else:
+        rows = pg.fetch_all(
+            """
+            select id::text as id
+            from social.scrape_runs
+            where status in ('queued', 'running', 'failed')
+            order by created_at desc
+            limit %s
+            """,
+            [safe_limit],
+        )
+        candidate_run_ids = [str(row.get("id") or "").strip() for row in rows if str(row.get("id") or "").strip()]
+
+    reconciled: list[str] = []
+    for candidate_run_id in candidate_run_ids:
+        summary = _recompute_run_summary_from_jobs(candidate_run_id)
+        with pg.db_connection() as conn:
+            _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=candidate_run_id,
+                total_jobs=int(summary.get("total_jobs") or 0),
+                completed_jobs=int(summary.get("completed_jobs") or 0),
+                failed_jobs=int(summary.get("failed_jobs") or 0),
+                active_jobs=int(summary.get("active_jobs") or 0),
+                items_found_total=int(summary.get("items_found_total") or 0),
+                stage_counts=dict(summary.get("stage_counts") or {}),
+            )
+        reconciled.append(candidate_run_id)
+    return {"reconciled_runs": len(reconciled), "run_ids": reconciled}
+
+
+def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
+    # Acquire a session-level advisory lock keyed on the run_id to prevent
+    # concurrent workers from finalising the same run simultaneously.
+    lock_key = int(hashlib.md5(run_id.encode()).hexdigest()[:15], 16) % (2**31)
+    lock_row = pg.fetch_one("SELECT pg_try_advisory_lock(%s) AS locked", [lock_key])
+    got_lock = bool(lock_row and lock_row.get("locked"))
+    if not got_lock:
+        logger.debug("[finalize_run_status] skipped — another worker is finalizing run=%s", run_id[:8])
+        # Return a minimal summary; the winner will write the correct status.
+        current = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
+        return {"status": current.get("status", "running")}
+    try:
+        summary = _update_run_summary(run_id, force_recompute=force_recompute)
+        active_jobs = int(summary.get("active_jobs") or 0)
+        failed_jobs = int(summary.get("failed_jobs") or 0)
+        current = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
+        if str(current.get("status")) == "cancelled":
+            return summary
+        if active_jobs > 0:
+            _set_run_status(run_id, "running")
+        elif failed_jobs > 0:
+            _set_run_status(run_id, "failed")
+        else:
+            _set_run_status(run_id, "completed")
+        return summary
+    finally:
+        try:
+            pg.fetch_one("SELECT pg_advisory_unlock(%s)", [lock_key])
+        except Exception:  # noqa: BLE001
+            logger.debug("[finalize_run_status] advisory unlock failed for run=%s", run_id[:8], exc_info=True)
 
 
 def _normalize_non_negative_int(value: Any) -> int:
@@ -3348,6 +5269,61 @@ def _resolve_social_job_stale_seconds() -> int:
     )
 
 
+def _resolve_stale_recovery_interval_seconds() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_STALE_RECOVERY_INTERVAL_SEC",
+        SOCIAL_STALE_RECOVERY_INTERVAL_SECONDS_DEFAULT,
+        minimum=5,
+        maximum=600,
+    )
+
+
+def _resolve_run_summary_reconcile_interval_seconds() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SEC",
+        SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SECONDS_DEFAULT,
+        minimum=10,
+        maximum=3600,
+    )
+
+
+def _resolve_job_claim_batch_size(default: int | None = None) -> int:
+    fallback = SOCIAL_JOB_CLAIM_BATCH_SIZE_DEFAULT if default is None else int(default)
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_JOB_CLAIM_BATCH_SIZE",
+        fallback,
+        minimum=1,
+        maximum=SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX,
+    )
+
+
+def _resolve_comment_upsert_batch_size() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS",
+        SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS_DEFAULT,
+        minimum=1,
+        maximum=SOCIAL_DB_UPSERT_BATCH_SIZE_MAX,
+    )
+
+
+def _resolve_post_upsert_batch_size() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS",
+        SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS_DEFAULT,
+        minimum=1,
+        maximum=SOCIAL_DB_UPSERT_BATCH_SIZE_MAX,
+    )
+
+
+def _resolve_run_in_flight_cap() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_RUN_IN_FLIGHT_CAP",
+        SOCIAL_RUN_IN_FLIGHT_CAP_DEFAULT,
+        minimum=1,
+        maximum=32,
+    )
+
+
 def recover_stale_running_jobs(
     *,
     run_id: str | None = None,
@@ -3358,6 +5334,25 @@ def recover_stale_running_jobs(
 ) -> list[dict[str, Any]]:
     stale_seconds = max(30, stale_after_seconds or _resolve_social_job_stale_seconds())
     stale_limit = max(1, min(int(limit), 250))
+
+    # Early-exit: cheap EXISTS check avoids the heavier UPDATE+CTE when no
+    # stale jobs exist.  With N workers polling every 30 s this turns N full
+    # scans into N lightweight probes for the common (no-stale) case.
+    has_stale = pg.fetch_one(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM social.scrape_jobs
+            WHERE status = 'running'
+              AND coalesce(heartbeat_at, started_at, claimed_at, created_at)
+                  < now() - (%s * interval '1 second')
+            LIMIT 1
+        ) AS has_stale
+        """,
+        [stale_seconds],
+    )
+    if not (has_stale and has_stale.get("has_stale")):
+        return []
+
     recovered_rows = pg.fetch_all(
         """
         with stale_jobs as (
@@ -3398,6 +5393,8 @@ def recover_stale_running_jobs(
             'stale_heartbeat_timeout: no heartbeat for >= %%s seconds',
             %s
           ),
+          claimed_at = null,
+          worker_id = null,
           heartbeat_at = now(),
           last_error_code = 'stale_heartbeat_timeout',
           last_error_class = 'HeartbeatTimeout',
@@ -3433,7 +5430,7 @@ def recover_stale_running_jobs(
 
     affected_run_ids = sorted({str(row.get("run_id") or "") for row in recovered_rows if row.get("run_id")})
     for stale_run_id in affected_run_ids:
-        _finalize_run_status(stale_run_id)
+        _finalize_run_status(stale_run_id, force_recompute=True)
     return recovered_rows
 
 
@@ -3513,6 +5510,7 @@ def _youtube_fetch_single_video_metadata(video_id: str) -> dict[str, Any] | None
         return None
     return payload if isinstance(payload, dict) else None
 
+
 def _as_text_list(value: Any, *, prefix: str = "", strip_prefix: str | None = None) -> list[str]:
     items: list[Any]
     if isinstance(value, list):
@@ -3591,7 +5589,131 @@ def _first_non_empty_str(*values: Any) -> str | None:
     return None
 
 
-def _extract_avatar_url_from_raw_data(raw_data: Any) -> str | None:
+def _platform_profile_url_for_handle(platform: str, handle: Any) -> str | None:
+    normalized_handle = _normalize_account_handle(handle)
+    if not normalized_handle:
+        return None
+    normalized_platform = _normalize_platform_name(platform)
+    if normalized_platform == "twitter":
+        return f"https://x.com/{normalized_handle}"
+    if normalized_platform == "tiktok":
+        return f"https://www.tiktok.com/@{normalized_handle}"
+    if normalized_platform == "threads":
+        return f"https://www.threads.com/@{normalized_handle}"
+    if normalized_platform == "youtube":
+        return f"https://www.youtube.com/@{normalized_handle}"
+    if normalized_platform == "facebook":
+        return f"https://www.facebook.com/{normalized_handle}"
+    return f"https://www.instagram.com/{normalized_handle}/"
+
+
+def _resolve_platform_profile_url(
+    platform: str,
+    *,
+    handle: Any,
+    explicit_url: Any = None,
+) -> str | None:
+    candidate = str(explicit_url or "").strip()
+    if candidate.startswith(("http://", "https://")):
+        return candidate
+    return _platform_profile_url_for_handle(platform, handle)
+
+
+def _upgrade_profile_avatar_url_variant(value: Any) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate.startswith(("http://", "https://")):
+        return None
+
+    upgraded = candidate
+    # Twitter profile images expose a consistent high-res variant.
+    if "pbs.twimg.com/profile_images/" in upgraded:
+        upgraded = re.sub(r"_(normal|bigger|mini)(\.[A-Za-z0-9]+)$", r"_400x400\2", upgraded, flags=re.IGNORECASE)
+
+    parsed = urlparse(upgraded)
+    host = str(parsed.netloc or "").lower()
+    if host and ("instagram.com" in host or "fbcdn.net" in host or "facebook.com" in host):
+        # Remove platform downsampling hint when present.
+        query_items = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() != "stp"]
+        upgraded = urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(query_items), parsed.fragment)
+        )
+    return upgraded
+
+
+def _profile_avatar_quality_score(value: str) -> tuple[int, int]:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return (-1, -1)
+
+    score = 0
+    if any(
+        token in normalized
+        for token in (
+            "profile_pic",
+            "profile_picture",
+            "profile_images",
+            "profile_image",
+            "profilephoto",
+            "avatarlarger",
+            "originalavatar",
+            "avatarhd",
+            "cropcenter:1080",
+        )
+    ):
+        score += 50
+    if any(
+        token in normalized
+        for token in (
+            "thumb",
+            "thumbnail",
+            "avatar_thumb",
+            "small",
+            "tiny",
+            "_mini",
+            "_normal",
+            "_bigger",
+            "s32x32",
+            "s48x48",
+            "s50x50",
+            "s64x64",
+            "s96x96",
+            "s100x100",
+            "s150x150",
+            "s200x200",
+        )
+    ):
+        score -= 30
+
+    max_dim = 0
+    for match in re.finditer(r"(?:s)?(\d{2,4})x(\d{2,4})", normalized):
+        max_dim = max(max_dim, int(match.group(1)), int(match.group(2)))
+    for match in re.finditer(r"cropcenter:(\d{2,4}):(\d{2,4})", normalized):
+        max_dim = max(max_dim, int(match.group(1)), int(match.group(2)))
+    for match in re.finditer(r"profile_pic[^0-9]{0,8}(\d{2,4})", normalized):
+        max_dim = max(max_dim, int(match.group(1)))
+    return (score + min(max_dim, 4096), len(normalized))
+
+
+def _best_profile_avatar_url(candidates: list[Any]) -> str | None:
+    best_url: str | None = None
+    best_score: tuple[int, int] = (-1, -1)
+    seen: set[str] = set()
+    for candidate in candidates:
+        for variant in (candidate, _upgrade_profile_avatar_url_variant(candidate)):
+            normalized = str(variant or "").strip()
+            if not normalized or not normalized.startswith(("http://", "https://")):
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            score = _profile_avatar_quality_score(normalized)
+            if score > best_score:
+                best_score = score
+                best_url = normalized
+    return best_url
+
+
+def _extract_avatar_url_candidates_from_raw_data(raw_data: Any) -> list[str]:
     root = _as_json_object(raw_data)
     candidates: list[Any] = [root]
     nested = root.get("raw_data")
@@ -3605,43 +5727,155 @@ def _extract_avatar_url_from_raw_data(raw_data: Any) -> str | None:
         "originalavatarurl",
         "avatarlarger",
         "avatar_thumb",
+        "avatarthumbnail",
         "profile_pic_url",
+        "profile_pic_url_hd",
         "profilepicurl",
+        "profilepicurlhd",
         "profile_image_url",
         "profile_image_url_https",
         "owner_profile_pic_url",
+        "owner_profile_pic_url_hd",
         "hosted_owner_profile_pic_url",
     }
+    discovered: list[str] = []
 
-    def _walk(value: Any, *, depth: int = 0) -> str | None:
+    def _walk(value: Any, *, depth: int = 0) -> None:
         if depth > 6:
-            return None
+            return
         if isinstance(value, dict):
             for key, item in value.items():
                 normalized_key = str(key or "").strip().lower()
                 if normalized_key in key_candidates:
                     candidate = str(item or "").strip()
                     if candidate.startswith(("http://", "https://")):
-                        return candidate
-                nested_match = _walk(item, depth=depth + 1)
-                if nested_match:
-                    return nested_match
+                        discovered.append(candidate)
+                _walk(item, depth=depth + 1)
         elif isinstance(value, list):
             for item in value:
-                nested_match = _walk(item, depth=depth + 1)
-                if nested_match:
-                    return nested_match
-        return None
+                _walk(item, depth=depth + 1)
 
     for candidate in candidates:
-        match = _walk(candidate)
-        if match:
-            return match
-    return None
+        _walk(candidate)
+    return discovered
 
 
-def _resolve_post_avatar_url(*, direct_avatar_url: Any, raw_data: Any) -> str | None:
-    return _first_non_empty_str(direct_avatar_url, _extract_avatar_url_from_raw_data(raw_data))
+def _extract_avatar_url_from_raw_data(raw_data: Any) -> str | None:
+    return _best_profile_avatar_url(_extract_avatar_url_candidates_from_raw_data(raw_data))
+
+
+def _resolve_post_avatar_url(
+    *,
+    hosted_avatar_url: Any = None,
+    direct_avatar_url: Any,
+    raw_data: Any,
+) -> str | None:
+    return _best_profile_avatar_url(
+        [
+            hosted_avatar_url,
+            direct_avatar_url,
+            *_extract_avatar_url_candidates_from_raw_data(raw_data),
+        ]
+    )
+
+
+def _detail_handle_from_payload(detail: dict[str, Any]) -> str:
+    handle = _normalize_account_handle(
+        detail.get("username")
+        or detail.get("user_name")
+        or detail.get("userName")
+        or detail.get("screen_name")
+        or detail.get("screenName")
+        or detail.get("handle")
+        or detail.get("author")
+        or detail.get("source_account")
+    )
+    if handle:
+        return handle
+    nested_user = _as_json_object(detail.get("user"))
+    return _normalize_account_handle(
+        nested_user.get("username")
+        or nested_user.get("user_name")
+        or nested_user.get("userName")
+        or nested_user.get("screen_name")
+        or nested_user.get("screenName")
+        or nested_user.get("handle")
+    )
+
+
+def _detail_avatar_from_payload(detail: dict[str, Any], *, hosted_avatar_url: Any = None) -> str | None:
+    nested_user = _as_json_object(detail.get("user"))
+    return _resolve_post_avatar_url(
+        hosted_avatar_url=hosted_avatar_url,
+        direct_avatar_url=_first_non_empty_str(
+            detail.get("avatar_url"),
+            detail.get("profile_pic_url_hd"),
+            detail.get("profile_pic_url"),
+            detail.get("user_avatar_url"),
+            detail.get("profile_image_url"),
+            detail.get("profileImageUrl"),
+            detail.get("profile_picture_url"),
+            nested_user.get("avatar_url"),
+            nested_user.get("profile_pic_url_hd"),
+            nested_user.get("profile_pic_url"),
+            nested_user.get("user_avatar_url"),
+            nested_user.get("profile_image_url"),
+            nested_user.get("profileImageUrl"),
+            nested_user.get("profile_picture_url"),
+        ),
+        raw_data=detail,
+    )
+
+
+def _enrich_handle_details(
+    platform: str,
+    detail_rows: list[dict[str, Any]],
+    *,
+    hosted_avatar_by_handle: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for detail in detail_rows:
+        if not isinstance(detail, dict):
+            continue
+        payload = dict(detail)
+        handle = _detail_handle_from_payload(payload)
+        hosted_avatar = hosted_avatar_by_handle.get(handle) if hosted_avatar_by_handle is not None and handle else None
+        avatar_url = _detail_avatar_from_payload(payload, hosted_avatar_url=hosted_avatar)
+        if handle:
+            payload["username"] = handle
+            payload["url"] = _resolve_platform_profile_url(
+                platform,
+                handle=handle,
+                explicit_url=(
+                    payload.get("url")
+                    or payload.get("profile_url")
+                    or payload.get("user_url")
+                    or _as_json_object(payload.get("user")).get("url")
+                    or _as_json_object(payload.get("user")).get("profile_url")
+                ),
+            )
+        if avatar_url:
+            payload["avatar_url"] = avatar_url
+            payload.setdefault("profile_pic_url", avatar_url)
+        enriched.append(payload)
+    return enriched
+
+
+def _build_handle_details_from_tokens(platform: str, handles: list[str]) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in handles:
+        handle = _normalize_account_handle(value)
+        if not handle or handle in seen:
+            continue
+        seen.add(handle)
+        details.append(
+            {
+                "username": handle,
+                "url": _platform_profile_url_for_handle(platform, handle),
+            }
+        )
+    return details
 
 
 def _normalize_tiktok_sound_id(value: Any) -> str | None:
@@ -4004,6 +6238,8 @@ def _enrich_instagram_post_from_permalink(
             post.tagged_users_detail = metadata.tagged_users_detail
         if getattr(metadata, "collaborators_detail", None) is not None:
             post.collaborators_detail = metadata.collaborators_detail
+        if getattr(metadata, "child_posts_data", None) is not None:
+            post.child_posts_data = metadata.child_posts_data
 
     post.post_format = post_format
     post.profile_tags = profile_tags
@@ -4098,6 +6334,7 @@ def _resolve_tiktok_media_for_video_id(
         "media_type": "video",
         "media_urls": media_urls,
         "thumbnail_url": thumbnail_url or None,
+        "author_avatar_url": str(getattr(resolution, "author_avatar_url", "") or "").strip() or None,
         "media_asset_meta": dict(getattr(resolution, "media_asset_meta", {}) or {}),
         "attempts": list(resolution.attempts or []),
     }
@@ -4323,9 +6560,13 @@ def _resolve_show_slug(context: SeasonContext) -> str:
 def _resolve_post_username(platform: str, post_row: dict[str, Any]) -> str:
     raw = ""
     if (platform or "").strip().lower() == "youtube":
-        raw = str(post_row.get("channel_title") or post_row.get("post_username") or post_row.get("source_account") or "").strip()
+        raw = str(
+            post_row.get("channel_title") or post_row.get("post_username") or post_row.get("source_account") or ""
+        ).strip()
     else:
-        raw = str(post_row.get("username") or post_row.get("post_username") or post_row.get("source_account") or "").strip()
+        raw = str(
+            post_row.get("username") or post_row.get("post_username") or post_row.get("source_account") or ""
+        ).strip()
     raw = raw.lstrip("@")
     sanitized = re.sub(r"[^A-Za-z0-9_]", "", raw)
     return sanitized or "unknown"
@@ -4672,7 +6913,9 @@ def _mirror_platform_media_to_s3_result(
                 if media_url in uploaded_by_source_url and media_url == source_thumbnail_url:
                     del uploaded_by_source_url[media_url]
                 media_obj_name = _build_media_object_name(
-                    display_name, is_thumbnail=False, slide_number=idx + 1 if is_multi else None,
+                    display_name,
+                    is_thumbnail=False,
+                    slide_number=idx + 1 if is_multi else None,
                 )
             else:
                 media_obj_name = f"media-{idx + 1:02d}"
@@ -4906,6 +7149,97 @@ def _update_instagram_profile_pic_mirror_fields(
         cur.execute(sql, params)
 
 
+def _mirror_post_author_avatar_to_s3(
+    *,
+    platform: str,
+    username: str,
+    source_avatar_url: str,
+) -> str | None:
+    """Mirror a single profile picture to S3. Returns hosted URL or None.
+
+    Content-addressed storage: same image bytes → same S3 key → natural dedup.
+    Changing avatar → new SHA256 → new S3 key → old avatar preserved.
+    """
+    import hashlib
+    import io
+
+    import requests as http_requests
+
+    from trr_backend.media.s3_mirror import (
+        build_hosted_url,
+        build_profile_pic_s3_key,
+        get_s3_bucket,
+        get_s3_client,
+        guess_ext_from_content_type,
+    )
+
+    source_url = str(source_avatar_url or "").strip()
+    if not source_url or not source_url.startswith(("http://", "https://")):
+        return None
+
+    try:
+        s3_client = get_s3_client()
+        bucket = get_s3_bucket()
+    except Exception:
+        logger.debug("S3 not available for avatar mirroring (%s/%s)", platform, username)
+        return None
+
+    try:
+        resp = http_requests.get(
+            source_url,
+            timeout=(10, 30),
+            headers={
+                "user-agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "accept": "*/*",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.content
+        if not data:
+            return None
+        sha256 = hashlib.sha256(data).hexdigest()
+        content_type = resp.headers.get("Content-Type", "application/octet-stream")
+        ext = guess_ext_from_content_type(content_type)
+        key = build_profile_pic_s3_key(platform, username, sha256, ext)
+        s3_client.upload_fileobj(
+            io.BytesIO(data),
+            bucket,
+            key,
+            ExtraArgs={
+                "ContentType": content_type.split(";", 1)[0].strip() or "application/octet-stream",
+                "CacheControl": "public, max-age=31536000, immutable",
+            },
+        )
+        return build_hosted_url(key)
+    except Exception as exc:
+        logger.debug("Failed to mirror avatar for %s/%s: %s", platform, username, exc)
+        return None
+
+
+def _update_post_hosted_avatar(
+    *,
+    platform: str,
+    post_id: str,
+    hosted_user_avatar_url: str,
+    conn: Any | None = None,
+) -> None:
+    """Set hosted_user_avatar_url on a platform post row."""
+    table = PLATFORM_POST_TABLES.get(platform)
+    if not table:
+        return
+    if not _platform_posts_has_column(platform, "hosted_user_avatar_url"):
+        return
+    with pg.db_cursor(conn=conn) as cur:
+        cur.execute(
+            f"update social.{table} set hosted_user_avatar_url = %s where id = %s::uuid",
+            [hosted_user_avatar_url, post_id],
+        )
+
+
 def _count_stored_comments(post_ids: list[str], platform: str) -> dict[str, int]:
     """Return {post_db_id: stored_comment_count} for a batch of posts."""
     if not post_ids:
@@ -4937,9 +7271,7 @@ def _count_stored_threads_interactions(post_ids: list[str]) -> dict[str, dict[st
         return {}
     placeholders = ",".join(["%s"] * len(post_ids))
     active_filter = (
-        "and coalesce(c.is_missing, false) = false"
-        if _comment_lifecycle_supported("meta_threads_comments")
-        else ""
+        "and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("meta_threads_comments") else ""
     )
     rows = pg.fetch_all(
         f"""
@@ -5006,7 +7338,9 @@ def _sync_youtube_video_comment_counts(
 
     placeholders = ",".join(["%s"] * len(ids))
     params: list[Any] = [*ids, *ids]
-    active_filter = " and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("youtube_comments") else ""
+    active_filter = (
+        " and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("youtube_comments") else ""
+    )
     sql = f"""
         with comment_counts as (
           select
@@ -5666,9 +8000,7 @@ def _reconcile_post_comment_count(
         comment_table = "meta_threads_comments"
         post_table = "meta_threads_posts"
         active_filter = (
-            "and coalesce(c.is_missing, false) = false"
-            if _comment_lifecycle_supported(comment_table)
-            else ""
+            "and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported(comment_table) else ""
         )
         with pg.db_cursor(conn=conn) as cur:
             counts_row = pg.fetch_one_with_cursor(
@@ -5879,7 +8211,11 @@ def _apply_twitter_public_summary(
     if _platform_posts_has_column("twitter", "user_avatar_url") and user_avatar_url:
         updates.append("user_avatar_url = coalesce(nullif(user_avatar_url, ''), %s)")
         params.append(user_avatar_url)
-    if _platform_posts_has_column("twitter", "media_urls") and merged_media_urls and merged_media_urls != existing_media_urls:
+    if (
+        _platform_posts_has_column("twitter", "media_urls")
+        and merged_media_urls
+        and merged_media_urls != existing_media_urls
+    ):
         updates.append("media_urls = %s::jsonb")
         params.append(json.dumps(merged_media_urls))
     if _platform_posts_has_column("twitter", "raw_data"):
@@ -6115,20 +8451,7 @@ def _pg_upsert(
     This avoids Supabase PostgREST schema-cache (PGRST002) errors that
     occur intermittently with the ``social`` schema.
     """
-    from psycopg2.extras import Json as PgJson
-
-    def _json_serializer(obj: Any) -> Any:
-        """Handle datetime/date objects inside JSONB payloads."""
-        if hasattr(obj, "isoformat"):
-            return obj.isoformat()
-        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
-    adapted: dict[str, Any] = {}
-    for key, value in payload.items():
-        if isinstance(value, (dict, list)):
-            adapted[key] = PgJson(value, dumps=lambda v: json.dumps(v, default=_json_serializer))
-        else:
-            adapted[key] = value
+    adapted = _adapt_payload_json_values(payload)
 
     cols = list(adapted.keys())
     col_list = ", ".join(cols)
@@ -6143,6 +8466,61 @@ def _pg_upsert(
     """
     with pg.db_cursor(conn=conn) as cur:
         return pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
+
+
+def _adapt_payload_json_values(payload: Mapping[str, Any]) -> dict[str, Any]:
+    from psycopg2.extras import Json as PgJson
+
+    def _json_serializer(obj: Any) -> Any:
+        if hasattr(obj, "isoformat"):
+            return obj.isoformat()
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    adapted: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, (dict, list)):
+            adapted[key] = PgJson(value, dumps=lambda v: json.dumps(v, default=_json_serializer))
+        else:
+            adapted[key] = value
+    return adapted
+
+
+def _pg_upsert_many(
+    table: str,
+    payloads: list[dict[str, Any]],
+    *,
+    conflict_col: str,
+    conn: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Batch upsert rows into social.{table} using execute_values."""
+    if not payloads:
+        return []
+
+    first = payloads[0]
+    columns = list(first.keys())
+    if not columns:
+        return []
+    if conflict_col not in columns:
+        raise ValueError(f"conflict column '{conflict_col}' missing in payload for table {table}")
+
+    updates = [column for column in columns if column != conflict_col]
+    if not updates:
+        raise ValueError(f"table {table} upsert payload must include at least one non-conflict column")
+
+    values: list[tuple[Any, ...]] = []
+    for payload in payloads:
+        adapted = _adapt_payload_json_values(payload)
+        values.append(tuple(adapted.get(column) for column in columns))
+
+    col_list = ", ".join(columns)
+    update_sql = ", ".join(f"{column} = EXCLUDED.{column}" for column in updates)
+    sql = f"""
+        INSERT INTO social.{table} ({col_list})
+        VALUES %s
+        ON CONFLICT ({conflict_col}) DO UPDATE SET {update_sql}
+        RETURNING *
+    """
+    return pg.execute_values_returning(sql, values, conn=conn)
 
 
 def _new_comment_persist_stats() -> dict[str, int]:
@@ -6196,6 +8574,32 @@ def _release_savepoint(conn: Any, name: str) -> None:
         cur.execute(f"RELEASE SAVEPOINT {name}")
 
 
+class _SavepointScope:
+    def __init__(self, *, conn: Any | None, prefix: str, index: int) -> None:
+        self._conn = conn
+        self._name = _savepoint_name(prefix=prefix, index=index)
+        self._armed = bool(conn is not None)
+
+    def __enter__(self) -> None:
+        if self._armed:
+            _create_savepoint(self._conn, self._name)
+        return None
+
+    def __exit__(self, exc_type, exc, _tb) -> bool:  # type: ignore[no-untyped-def]
+        if not self._armed:
+            return False
+        if exc_type is not None:
+            try:
+                _rollback_to_savepoint(self._conn, self._name)
+            except Exception:
+                logger.debug("[social] Failed rolling back savepoint %s", self._name, exc_info=True)
+        try:
+            _release_savepoint(self._conn, self._name)
+        except Exception:
+            logger.debug("[social] Failed releasing savepoint %s", self._name, exc_info=True)
+        return False
+
+
 def _upsert_instagram_post(
     context: SeasonContext,
     *,
@@ -6230,11 +8634,14 @@ def _upsert_instagram_post(
     existing_views = 0
     if shortcode:
         with pg.db_cursor(conn=conn) as cur:
-            existing = pg.fetch_one_with_cursor(
-                cur,
-                "select coalesce(views, 0)::bigint as views from social.instagram_posts where shortcode = %s limit 1",
-                [shortcode],
-            ) or {}
+            existing = (
+                pg.fetch_one_with_cursor(
+                    cur,
+                    "select coalesce(views, 0)::bigint as views from social.instagram_posts where shortcode = %s limit 1",
+                    [shortcode],
+                )
+                or {}
+            )
             existing_views = _normalize_non_negative_int(existing.get("views"))
     incoming_views_missing = object()
     incoming_views = getattr(post, "video_views_observed", incoming_views_missing)
@@ -6246,9 +8653,7 @@ def _upsert_instagram_post(
     else:
         normalized_incoming_views = _normalize_non_negative_int(incoming_views)
     resolved_views = (
-        existing_views
-        if normalized_incoming_views is None
-        else max(existing_views, normalized_incoming_views)
+        existing_views if normalized_incoming_views is None else max(existing_views, normalized_incoming_views)
     )
 
     raw_data = dict(raw_data or {})
@@ -6272,9 +8677,7 @@ def _upsert_instagram_post(
                     "source": str(item.get("source") or "").strip() or None,
                     "raw": item.get("raw"),
                     "parsed": (
-                        _normalize_non_negative_int(item.get("parsed"))
-                        if item.get("parsed") is not None
-                        else None
+                        _normalize_non_negative_int(item.get("parsed")) if item.get("parsed") is not None else None
                     ),
                 }
             )
@@ -6515,7 +8918,10 @@ def _platform_post_needs_media_mirror(platform: str, post_row: dict[str, Any]) -
             return True
 
     source_id = _platform_source_id(platform, post_row)
-    if normalized_platform == "youtube":
+    if normalized_platform in {"youtube", "tiktok"}:
+        # TikTok and YouTube posts can be re-resolved from their source_id
+        # (video_id) during the mirror pipeline, so they're eligible even
+        # without pre-existing source URLs.
         if not source_id:
             return False
     elif not source_thumbnail_url and not source_media_urls:
@@ -6561,6 +8967,26 @@ def _tiktok_comment_needs_media_mirror(comment_row: dict[str, Any]) -> bool:
 
 def _twitter_comment_needs_media_mirror(comment_row: dict[str, Any]) -> bool:
     return _platform_comment_media_needs_mirror("twitter", comment_row)
+
+
+def _update_platform_post_field(
+    *,
+    platform: str,
+    post_id: str,
+    field: str,
+    value: Any,
+    conn: Any | None = None,
+) -> None:
+    """Update a single column on a platform post row (safe: checks column existence)."""
+    normalized_platform = (platform or "").strip().lower()
+    table = PLATFORM_POST_TABLES.get(normalized_platform)
+    if not table or not field:
+        return
+    if not _platform_posts_has_column(normalized_platform, field):
+        return
+    sql = f"update social.{table} set {field} = %s where id = %s::uuid"
+    with pg.db_cursor(conn=conn) as cur:
+        cur.execute(sql, [value, post_id])
 
 
 def _update_platform_post_media_mirror_fields(
@@ -6978,11 +9404,17 @@ def _update_twitter_comment_media_mirror_fields(
         _add("media_mirror_status", media_mirror_status)
     if media_mirror_error is not FIELD_UNSET and _platform_posts_has_column("twitter", "media_mirror_error"):
         _add("media_mirror_error", media_mirror_error)
-    if media_mirror_attempt_count is not FIELD_UNSET and _platform_posts_has_column("twitter", "media_mirror_attempt_count"):
+    if media_mirror_attempt_count is not FIELD_UNSET and _platform_posts_has_column(
+        "twitter", "media_mirror_attempt_count"
+    ):
         _add("media_mirror_attempt_count", max(0, int(media_mirror_attempt_count)))
-    if media_mirror_last_attempt_at is not FIELD_UNSET and _platform_posts_has_column("twitter", "media_mirror_last_attempt_at"):
+    if media_mirror_last_attempt_at is not FIELD_UNSET and _platform_posts_has_column(
+        "twitter", "media_mirror_last_attempt_at"
+    ):
         _add("media_mirror_last_attempt_at", media_mirror_last_attempt_at)
-    if media_mirror_last_job_id is not FIELD_UNSET and _platform_posts_has_column("twitter", "media_mirror_last_job_id"):
+    if media_mirror_last_job_id is not FIELD_UNSET and _platform_posts_has_column(
+        "twitter", "media_mirror_last_job_id"
+    ):
         _add("media_mirror_last_job_id", media_mirror_last_job_id)
 
     if not assignments:
@@ -6994,7 +9426,7 @@ def _update_twitter_comment_media_mirror_fields(
             cur,
             f"""
             update social.twitter_tweets
-            set {', '.join(assignments)}
+            set {", ".join(assignments)}
             where tweet_id = %s
               and (is_reply = true or is_quote = true)
             returning id::text
@@ -7227,9 +9659,7 @@ def _refresh_instagram_post_metrics_only(
                         "source": str(item.get("source") or "").strip() or None,
                         "raw": item.get("raw"),
                         "parsed": (
-                            _normalize_non_negative_int(item.get("parsed"))
-                            if item.get("parsed") is not None
-                            else None
+                            _normalize_non_negative_int(item.get("parsed")) if item.get("parsed") is not None else None
                         ),
                     }
                 )
@@ -7336,6 +9766,8 @@ def _ingest_instagram(
             opts.date_end,
             source_ids=target_source_ids,
         )
+        if _show_is_rhoslc(context):
+            existing_posts = [row for row in existing_posts if _instagram_row_has_required_rhoslc_hashtag(row)]
         logger.info(
             "[instagram] Comments stage: %d existing posts from DB for account=%s",
             len(existing_posts),
@@ -7474,6 +9906,8 @@ def _ingest_instagram(
             opts.date_start,
             opts.date_end,
         )
+        if _show_is_rhoslc(context):
+            existing_posts = [row for row in existing_posts if _instagram_row_has_required_rhoslc_hashtag(row)]
         retrieval_meta["source"] = "db_metrics_refresh"
         activity["phase"] = "details_refresh_metrics_index"
         _touch_job_heartbeat(job_id)
@@ -7493,8 +9927,12 @@ def _ingest_instagram(
 
         def _on_metrics_progress(payload: dict[str, Any]) -> None:
             nonlocal metrics_pages_scanned, metrics_posts_checked, scraped_post_count
-            metrics_pages_scanned = max(metrics_pages_scanned, _normalize_non_negative_int(payload.get("pages_scanned")))
-            metrics_posts_checked = max(metrics_posts_checked, _normalize_non_negative_int(payload.get("posts_checked")))
+            metrics_pages_scanned = max(
+                metrics_pages_scanned, _normalize_non_negative_int(payload.get("pages_scanned"))
+            )
+            metrics_posts_checked = max(
+                metrics_posts_checked, _normalize_non_negative_int(payload.get("posts_checked"))
+            )
             activity["phase"] = str(payload.get("phase") or "details_refresh_metrics_index")
             activity["pages_scanned"] = metrics_pages_scanned
             activity["posts_checked"] = max(scraped_post_count, metrics_posts_checked)
@@ -7691,6 +10129,8 @@ def _ingest_instagram(
         snapshots: dict[str, CommentLifecycleSnapshot] = {}
         if opts.sync_strategy == "incremental" and opts.max_comments_per_post > 0:
             existing_rows = _load_existing_posts("instagram", context, account, opts.date_start, opts.date_end)
+            if _show_is_rhoslc(context):
+                existing_rows = [row for row in existing_rows if _instagram_row_has_required_rhoslc_hashtag(row)]
             existing_post_lookup = _build_existing_post_lookup("instagram", existing_rows)
             snapshots = _load_comment_lifecycle_snapshots(
                 [str(row.get("id")) for row in existing_post_lookup.values() if row.get("id")],
@@ -7704,14 +10144,21 @@ def _ingest_instagram(
             activity["phase"] = "posts_filter"
             activity["posts_checked"] = scraped_post_count
             caption = str(getattr(post, "caption", "") or "")
+            post_hashtags = _as_text_list(getattr(post, "hashtags", []), strip_prefix="#")
             filter_text = _build_post_filter_text(
                 primary_text=caption,
-                hashtags=_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"),
+                hashtags=post_hashtags,
                 mentions=_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
                 collaborators=_as_text_list(getattr(post, "collaborators", [])),
                 profile_tags=_as_text_list(getattr(post, "profile_tags", [])),
             )
-            if not _text_contains_any_term(text=filter_text, hashtags=hashtags, keywords=keywords):
+            if not _instagram_post_matches_show_terms(
+                context=context,
+                text=filter_text,
+                post_hashtags=post_hashtags,
+                hashtags=hashtags,
+                keywords=keywords,
+            ):
                 skipped_keyword += 1
                 _flush_progress()
                 continue
@@ -8398,7 +10845,16 @@ def _record_tiktok_anomaly_event(
             values (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s::jsonb)
             returning id::text
             """,
-            [season_id, post_id, account, event_type, severity, event_value, baseline_value, json.dumps(dict(metadata or {}))],
+            [
+                season_id,
+                post_id,
+                account,
+                event_type,
+                severity,
+                event_value,
+                baseline_value,
+                json.dumps(dict(metadata or {})),
+            ],
         )
 
 
@@ -8622,6 +11078,7 @@ def _ingest_tiktok(
     opts: IngestOptions,
     job_id: str,
     stage: str = "posts",
+    job_config: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
@@ -8707,120 +11164,121 @@ def _ingest_tiktok(
             platform="tiktok",
         )
         skipped_synced = 0
-        for row in existing_posts:
-            video_id = str(row.get("video_id") or "")
-            post_db_id = str(row.get("id") or "")
-            if not video_id:
-                continue
-            expected = int(row.get("comments_count") or 0)
-            decision = _decide_comment_refresh(
-                sync_strategy=opts.sync_strategy,
-                expected_count=expected,
-                snapshot=snapshots.get(post_db_id),
-                post_published_at=_coerce_dt(row.get("posted_at")),
-                refresh_policy=opts.comment_refresh_policy,
-            )
-            comment_refresh_reasons[decision.reason] += 1
-            if not decision.should_refresh:
-                skipped_synced += 1
-                continue
-            scraped_post_count += 1
-            activity["phase"] = "comments_fetch"
-            activity["posts_checked"] = scraped_post_count
-            activity["matched_posts"] = matched_post_count
-            if scraped_post_count % 10 == 0:
-                _touch_job_heartbeat(job_id)
-            _flush_progress()
-            fetch_failed = False
-            comments: list[Any] = []
-            fail_reason = ""
-            observed_comment_ids: set[str] = set()
-            local_comment_stats = _new_comment_persist_stats()
-            try:
-                comments = scraper.fetch_comments(
-                    video_id,
-                    username=account,
-                    max_comments=opts.max_comments_per_post,
-                    fetch_replies=opts.fetch_replies,
-                    delay=0.5,
+        with pg.db_connection() as comments_conn:
+            for post_index, row in enumerate(existing_posts, start=1):
+                video_id = str(row.get("video_id") or "")
+                post_db_id = str(row.get("id") or "")
+                if not video_id:
+                    continue
+                expected = int(row.get("comments_count") or 0)
+                decision = _decide_comment_refresh(
+                    sync_strategy=opts.sync_strategy,
+                    expected_count=expected,
+                    snapshot=snapshots.get(post_db_id),
+                    post_published_at=_coerce_dt(row.get("posted_at")),
+                    refresh_policy=opts.comment_refresh_policy,
                 )
-                _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
-                fail_reason = str(
-                    getattr(scraper, "last_comment_fetch_reason", "")
-                    or getattr(scraper, "_last_api_fail_reason", "")
-                    or ""
-                )
-                if fail_reason:
-                    comment_fail_reasons.add(fail_reason)
-                    if not comments:
-                        comment_errors += 1
-            except Exception:
-                fetch_failed = True
-                comment_errors += 1
-                logger.exception(
-                    "[tiktok] Failed to fetch comments for post %s (video_id=%s)",
-                    post_db_id,
-                    video_id,
-                )
-
-            if not fetch_failed:
+                comment_refresh_reasons[decision.reason] += 1
+                if not decision.should_refresh:
+                    skipped_synced += 1
+                    continue
+                scraped_post_count += 1
+                activity["phase"] = "comments_fetch"
+                activity["posts_checked"] = scraped_post_count
+                activity["matched_posts"] = matched_post_count
+                if scraped_post_count % 10 == 0:
+                    _touch_job_heartbeat(job_id)
+                _flush_progress()
+                fetch_failed = False
+                comments: list[Any] = []
+                fail_reason = ""
+                observed_comment_ids: set[str] = set()
+                local_comment_stats = _new_comment_persist_stats()
                 try:
-                    with pg.db_connection() as conn:
-                        for comment in comments:
-                            _upsert_tiktok_comment_tree(
-                                context,
-                                job_id=job_id,
-                                run_id=run_id,
-                                account=account,
-                                post_id=post_db_id,
-                                comment=comment,
-                                source_scope=opts.source_scope,
-                                observed_comment_ids=observed_comment_ids,
-                                persist_stats=local_comment_stats,
-                                conn=conn,
-                            )
-
-                        is_complete = _is_comment_fetch_complete(
-                            fetch_failed=False,
-                            fail_reason=fail_reason,
-                            auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                            fetched_count=len(comments),
-                            max_comments_per_post=opts.max_comments_per_post,
-                        )
-                        if is_complete:
-                            missing_marked += _mark_missing_comments_for_anchor(
-                                platform="tiktok",
-                                anchor_id=post_db_id,
-                                observed_comment_ids=observed_comment_ids,
-                                conn=conn,
-                            )
-                            _reconcile_post_comment_count(
-                                platform="tiktok",
-                                post_db_id=post_db_id,
-                                conn=conn,
-                            )
-                        else:
-                            incomplete_comment_fetches += 1
-                            comments_mark_missing_skipped += 1
+                    comments = scraper.fetch_comments(
+                        video_id,
+                        username=account,
+                        max_comments=opts.max_comments_per_post,
+                        fetch_replies=opts.fetch_replies,
+                        delay=0.5,
+                    )
+                    _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
+                    fail_reason = str(
+                        getattr(scraper, "last_comment_fetch_reason", "")
+                        or getattr(scraper, "_last_api_fail_reason", "")
+                        or ""
+                    )
+                    if fail_reason:
+                        comment_fail_reasons.add(fail_reason)
+                        if not comments:
+                            comment_errors += 1
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
                     logger.exception(
-                        "[tiktok] Failed to persist comments for post %s (video_id=%s)",
+                        "[tiktok] Failed to fetch comments for post %s (video_id=%s)",
                         post_db_id,
                         video_id,
                     )
 
-            if fetch_failed:
-                incomplete_comment_fetches += 1
-                comments_mark_missing_skipped += 1
-                continue
+                if not fetch_failed:
+                    try:
+                        with _SavepointScope(conn=comments_conn, prefix="tiktok_comments_stage", index=post_index):
+                            for comment in comments:
+                                _upsert_tiktok_comment_tree(
+                                    context,
+                                    job_id=job_id,
+                                    run_id=run_id,
+                                    account=account,
+                                    post_id=post_db_id,
+                                    comment=comment,
+                                    source_scope=opts.source_scope,
+                                    observed_comment_ids=observed_comment_ids,
+                                    persist_stats=local_comment_stats,
+                                    conn=comments_conn,
+                                )
 
-            matched_post_count += 1
-            activity["matched_posts"] = matched_post_count
-            _merge_comment_persist_stats(comment_stats, local_comment_stats)
-            scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
-            _flush_progress()
+                            is_complete = _is_comment_fetch_complete(
+                                fetch_failed=False,
+                                fail_reason=fail_reason,
+                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                fetched_count=len(comments),
+                                max_comments_per_post=opts.max_comments_per_post,
+                            )
+                            if is_complete:
+                                missing_marked += _mark_missing_comments_for_anchor(
+                                    platform="tiktok",
+                                    anchor_id=post_db_id,
+                                    observed_comment_ids=observed_comment_ids,
+                                    conn=comments_conn,
+                                )
+                                _reconcile_post_comment_count(
+                                    platform="tiktok",
+                                    post_db_id=post_db_id,
+                                    conn=comments_conn,
+                                )
+                            else:
+                                incomplete_comment_fetches += 1
+                                comments_mark_missing_skipped += 1
+                    except Exception:
+                        fetch_failed = True
+                        comment_errors += 1
+                        logger.exception(
+                            "[tiktok] Failed to persist comments for post %s (video_id=%s)",
+                            post_db_id,
+                            video_id,
+                        )
+
+                if fetch_failed:
+                    incomplete_comment_fetches += 1
+                    comments_mark_missing_skipped += 1
+                    continue
+
+                matched_post_count += 1
+                activity["matched_posts"] = matched_post_count
+                _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                _flush_progress()
         if skipped_synced:
             logger.info("[tiktok] Skipped %d posts whose comments are already synced", skipped_synced)
     else:
@@ -8828,13 +11286,31 @@ def _ingest_tiktok(
         if checkpoint_last_posted_at is not None and (
             effective_date_start is None or checkpoint_last_posted_at > effective_date_start
         ):
-            effective_date_start = checkpoint_last_posted_at
+            # Only use the checkpoint if it falls within the requested date range.
+            # If the checkpoint is beyond opts.date_end (e.g. a newer week was synced
+            # previously), honour the explicit date_start so we actually scrape posts
+            # in the requested window instead of returning nothing.
+            if opts.date_end is None or checkpoint_last_posted_at <= opts.date_end:
+                effective_date_start = checkpoint_last_posted_at
+            else:
+                logger.info(
+                    "[tiktok] Ignoring checkpoint (last_posted_at=%s) because it is "
+                    "beyond the requested date_end=%s; using date_start=%s",
+                    checkpoint_last_posted_at,
+                    opts.date_end,
+                    opts.date_start,
+                )
         config = TikTokScrapeConfig(
             username=account,
             hashtags=hashtags,
             date_start=effective_date_start,
             date_end=opts.date_end,
-            delay_seconds=1.0,
+            delay_seconds=_resolve_platform_delay_seconds(
+                platform="tiktok",
+                attempt_count=int((job_config or {}).get("_attempt_count") or 1),
+                last_error_code=(job_config or {}).get("_last_error_code"),
+                default=0.35,
+            ),
             max_pages=None,
             show_id=context.show_id,
             season_number=context.season_number,
@@ -8866,269 +11342,285 @@ def _ingest_tiktok(
             )
 
         skipped_synced = 0
-        for post in posts:
-            total_scraped += 1
-            scraped_post_count = max(scraped_post_count, total_scraped)
-            activity["phase"] = "posts_filter"
-            activity["posts_checked"] = scraped_post_count
-            post_created_at = _parse_tiktok_time(getattr(post, "create_time", None))
-            if checkpoint_last_posted_at and post_created_at and post_created_at <= checkpoint_last_posted_at:
-                skipped_checkpoint += 1
-                _flush_progress()
-                continue
-            description = str(getattr(post, "description", "") or "")
-            filter_text = _build_post_filter_text(
-                primary_text=description,
-                hashtags=_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"),
-                mentions=_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
-            )
-            if not _text_contains_any_term(text=filter_text, hashtags=hashtags, keywords=keywords):
-                skipped_keyword += 1
-                _flush_progress()
-                continue
-            if post_limit and matched_post_count >= post_limit:
-                break
+        with pg.db_connection() as post_comments_conn:
+            for post_index, post in enumerate(posts, start=1):
+                total_scraped += 1
+                scraped_post_count = max(scraped_post_count, total_scraped)
+                activity["phase"] = "posts_filter"
+                activity["posts_checked"] = scraped_post_count
+                post_created_at = _parse_tiktok_time(getattr(post, "create_time", None))
+                if (
+                    checkpoint_last_posted_at
+                    and post_created_at
+                    and post_created_at <= checkpoint_last_posted_at
+                    and (opts.date_end is None or checkpoint_last_posted_at <= opts.date_end)
+                ):
+                    skipped_checkpoint += 1
+                    _flush_progress()
+                    continue
+                description = str(getattr(post, "description", "") or "")
+                filter_text = _build_post_filter_text(
+                    primary_text=description,
+                    hashtags=_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"),
+                    mentions=_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
+                )
+                if not _text_contains_any_term(text=filter_text, hashtags=hashtags, keywords=keywords):
+                    skipped_keyword += 1
+                    _flush_progress()
+                    continue
+                if post_limit and matched_post_count >= post_limit:
+                    break
 
-            existing_row = existing_post_lookup.get(str(getattr(post, "video_id", "") or ""))
-            if existing_row and opts.max_comments_per_post > 0:
-                expected_comment_count = _expected_comment_count_for_platform(
-                    "tiktok",
-                    {"comments_count": int(getattr(post, "comments", 0) or 0)},
-                )
-                decision = _decide_comment_refresh(
-                    sync_strategy=opts.sync_strategy,
-                    expected_count=expected_comment_count,
-                    snapshot=snapshots.get(str(existing_row.get("id") or "")),
-                    post_published_at=_coerce_dt(existing_row.get("posted_at")),
-                    refresh_policy=opts.comment_refresh_policy,
-                )
-                comment_refresh_reasons[decision.reason] += 1
-                if not decision.should_refresh:
-                    skipped_synced += 1
-                    activity["phase"] = "posts_skip_up_to_date"
+                existing_row = existing_post_lookup.get(str(getattr(post, "video_id", "") or ""))
+                if existing_row and opts.max_comments_per_post > 0:
+                    expected_comment_count = _expected_comment_count_for_platform(
+                        "tiktok",
+                        {"comments_count": int(getattr(post, "comments", 0) or 0)},
+                    )
+                    decision = _decide_comment_refresh(
+                        sync_strategy=opts.sync_strategy,
+                        expected_count=expected_comment_count,
+                        snapshot=snapshots.get(str(existing_row.get("id") or "")),
+                        post_published_at=_coerce_dt(existing_row.get("posted_at")),
+                        refresh_policy=opts.comment_refresh_policy,
+                    )
+                    comment_refresh_reasons[decision.reason] += 1
+                    if not decision.should_refresh:
+                        skipped_synced += 1
+                        activity["phase"] = "posts_skip_up_to_date"
+                        _flush_progress()
+                        continue
+
+                upserted: dict[str, Any] | None = None
+                try:
+                    with pg.db_connection() as conn:
+                        upserted = _upsert_tiktok_post(context, job_id=job_id, account=account, post=post, conn=conn)
+                        if upserted:
+                            hashtag_terms = _as_text_list(getattr(post, "hashtags", []), strip_prefix="#")
+                            mention_terms = _as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@")
+                            cast_mentions = _extract_cast_mentions_from_text(
+                                _build_post_filter_text(
+                                    primary_text=description,
+                                    hashtags=hashtag_terms,
+                                    mentions=mention_terms,
+                                ),
+                                cast_people,
+                            )
+                            quality_score, missing_fields, quality_flags = _compute_tiktok_post_quality(
+                                description=description,
+                                thumbnail_url=str(getattr(post, "thumbnail_url", "") or "").strip() or None,
+                                hashtags=hashtag_terms,
+                                mentions=mention_terms,
+                                media_urls=[
+                                    str(url).strip()
+                                    for url in (getattr(post, "media_urls", []) or [])
+                                    if str(url).strip()
+                                ],
+                                duration_seconds=_normalize_non_negative_int(getattr(post, "duration", 0)),
+                            )
+                            velocity_1h, velocity_24h, velocity_7d = _compute_tiktok_velocity_metrics(
+                                views=_normalize_non_negative_int(getattr(post, "views", 0)),
+                                posted_at=post_created_at,
+                            )
+                            _persist_tiktok_post_enrichment(
+                                context=context,
+                                run_id=run_id,
+                                post_row=upserted,
+                                description=description,
+                                hashtags=hashtag_terms,
+                                mentions=mention_terms,
+                                keywords=keywords,
+                                cast_mentions=cast_mentions,
+                                quality_score=quality_score,
+                                quality_missing_fields=missing_fields,
+                                quality_flags=quality_flags,
+                                velocity_1h=velocity_1h,
+                                velocity_24h=velocity_24h,
+                                velocity_7d=velocity_7d,
+                                conn=conn,
+                            )
+
+                            raw_data = post.to_dict() if hasattr(post, "to_dict") else {}
+                            if not isinstance(raw_data, dict):
+                                raw_data = {}
+                            sound_fields = _extract_tiktok_sound_fields(raw_data, post)
+                            sound_id = str(sound_fields.get("sound_id") or "").strip()
+                            if sound_id:
+                                discovered_sound_ids.add(sound_id)
+                                _persist_tiktok_sound_snapshot(
+                                    sound_id=sound_id,
+                                    snapshot={
+                                        "title": sound_fields.get("sound_title"),
+                                        "artist_name": sound_fields.get("sound_author"),
+                                        "usage_count": _normalize_non_negative_int(
+                                            sound_fields.get("sound_usage_count")
+                                        ),
+                                        "source_url": _build_tiktok_sound_url(sound_id),
+                                        "posts": [
+                                            {
+                                                "platform_post_id": str(getattr(post, "video_id", "") or "").strip(),
+                                                "creator_handle": str(getattr(post, "username", "") or "").strip()
+                                                or None,
+                                                "posted_at": _iso(post_created_at),
+                                                "views": _normalize_non_negative_int(getattr(post, "views", 0)),
+                                                "likes": _normalize_non_negative_int(getattr(post, "likes", 0)),
+                                                "comments": _normalize_non_negative_int(getattr(post, "comments", 0)),
+                                                "shares": _normalize_non_negative_int(getattr(post, "shares", 0)),
+                                                "thumbnail_url": str(getattr(post, "thumbnail_url", "") or "").strip()
+                                                or None,
+                                                "caption": description,
+                                            }
+                                        ],
+                                    },
+                                    conn=conn,
+                                )
+                except Exception:
+                    comment_errors += 1
+                    logger.exception(
+                        "[tiktok] Failed to upsert post for video_id=%s",
+                        getattr(post, "video_id", "?"),
+                    )
                     _flush_progress()
                     continue
 
-            upserted: dict[str, Any] | None = None
-            try:
-                with pg.db_connection() as conn:
-                    upserted = _upsert_tiktok_post(context, job_id=job_id, account=account, post=post, conn=conn)
-                    if upserted:
-                        hashtag_terms = _as_text_list(getattr(post, "hashtags", []), strip_prefix="#")
-                        mention_terms = _as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@")
-                        cast_mentions = _extract_cast_mentions_from_text(
-                            _build_post_filter_text(
-                                primary_text=description,
-                                hashtags=hashtag_terms,
-                                mentions=mention_terms,
-                            ),
-                            cast_people,
-                        )
-                        quality_score, missing_fields, quality_flags = _compute_tiktok_post_quality(
-                            description=description,
-                            thumbnail_url=str(getattr(post, "thumbnail_url", "") or "").strip() or None,
-                            hashtags=hashtag_terms,
-                            mentions=mention_terms,
-                            media_urls=[
-                                str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()
-                            ],
-                            duration_seconds=_normalize_non_negative_int(getattr(post, "duration", 0)),
-                        )
-                        velocity_1h, velocity_24h, velocity_7d = _compute_tiktok_velocity_metrics(
-                            views=_normalize_non_negative_int(getattr(post, "views", 0)),
-                            posted_at=post_created_at,
-                        )
-                        _persist_tiktok_post_enrichment(
-                            context=context,
-                            run_id=run_id,
-                            post_row=upserted,
-                            description=description,
-                            hashtags=hashtag_terms,
-                            mentions=mention_terms,
-                            keywords=keywords,
-                            cast_mentions=cast_mentions,
-                            quality_score=quality_score,
-                            quality_missing_fields=missing_fields,
-                            quality_flags=quality_flags,
-                            velocity_1h=velocity_1h,
-                            velocity_24h=velocity_24h,
-                            velocity_7d=velocity_7d,
-                            conn=conn,
-                        )
-
-                        raw_data = post.to_dict() if hasattr(post, "to_dict") else {}
-                        if not isinstance(raw_data, dict):
-                            raw_data = {}
-                        sound_fields = _extract_tiktok_sound_fields(raw_data, post)
-                        sound_id = str(sound_fields.get("sound_id") or "").strip()
-                        if sound_id:
-                            discovered_sound_ids.add(sound_id)
-                            _persist_tiktok_sound_snapshot(
-                                sound_id=sound_id,
-                                snapshot={
-                                    "title": sound_fields.get("sound_title"),
-                                    "artist_name": sound_fields.get("sound_author"),
-                                    "usage_count": _normalize_non_negative_int(sound_fields.get("sound_usage_count")),
-                                    "source_url": _build_tiktok_sound_url(sound_id),
-                                    "posts": [
-                                        {
-                                            "platform_post_id": str(getattr(post, "video_id", "") or "").strip(),
-                                            "creator_handle": str(getattr(post, "username", "") or "").strip() or None,
-                                            "posted_at": _iso(post_created_at),
-                                            "views": _normalize_non_negative_int(getattr(post, "views", 0)),
-                                            "likes": _normalize_non_negative_int(getattr(post, "likes", 0)),
-                                            "comments": _normalize_non_negative_int(getattr(post, "comments", 0)),
-                                            "shares": _normalize_non_negative_int(getattr(post, "shares", 0)),
-                                            "thumbnail_url": str(getattr(post, "thumbnail_url", "") or "").strip() or None,
-                                            "caption": description,
-                                        }
-                                    ],
-                                },
-                                conn=conn,
-                            )
-            except Exception:
-                comment_errors += 1
-                logger.exception(
-                    "[tiktok] Failed to upsert post for video_id=%s",
-                    getattr(post, "video_id", "?"),
-                )
+                if not upserted:
+                    _flush_progress()
+                    continue
+                matched_post_count += 1
+                if post_created_at and (latest_posted_at_seen is None or post_created_at > latest_posted_at_seen):
+                    latest_posted_at_seen = post_created_at
+                activity["phase"] = "posts_upsert"
+                activity["matched_posts"] = matched_post_count
                 _flush_progress()
-                continue
 
-            if not upserted:
-                _flush_progress()
-                continue
-            matched_post_count += 1
-            if post_created_at and (latest_posted_at_seen is None or post_created_at > latest_posted_at_seen):
-                latest_posted_at_seen = post_created_at
-            activity["phase"] = "posts_upsert"
-            activity["matched_posts"] = matched_post_count
-            _flush_progress()
-
-            if stage == "posts":
-                try:
-                    mirror_job_id = _enqueue_platform_media_mirror_job(
-                        context,
-                        platform="tiktok",
-                        run_id=run_id,
-                        source_scope=opts.source_scope,
-                        account=account,
-                        post_row=upserted,
-                        week_index=None,
-                        parent_job_id=job_id,
-                        conn=None,
-                    )
-                    if mirror_job_id:
-                        mirror_jobs_enqueued += 1
-                except Exception:  # noqa: BLE001
-                    mirror_job_enqueue_errors += 1
-                    logger.exception(
-                        "[tiktok] Failed to enqueue media mirror job for post=%s video_id=%s",
-                        str(upserted.get("id") or ""),
-                        str(getattr(post, "video_id", "") or ""),
-                    )
-
-            if opts.max_comments_per_post > 0:
-                comments: list[Any] = []
-                fail_reason = ""
-                fetch_failed = False
-                observed_comment_ids: set[str] = set()
-                local_comment_stats = _new_comment_persist_stats()
-                try:
-                    comments = scraper.fetch_comments(
-                        getattr(post, "video_id", ""),
-                        username=account,
-                        max_comments=opts.max_comments_per_post,
-                        fetch_replies=opts.fetch_replies,
-                        delay=0.5,
-                    )
-                    _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
-                    fail_reason = str(
-                        getattr(scraper, "last_comment_fetch_reason", "")
-                        or getattr(scraper, "_last_api_fail_reason", "")
-                        or ""
-                    )
-                    if fail_reason:
-                        comment_fail_reasons.add(fail_reason)
-                        if not comments:
-                            comment_errors += 1
-                except Exception:
-                    fetch_failed = True
-                    comment_errors += 1
-                    logger.exception(
-                        "[tiktok] Failed to fetch comments for post %s (video_id=%s)",
-                        upserted.get("id"),
-                        getattr(post, "video_id", "?"),
-                    )
-                    incomplete_comment_fetches += 1
-                    comments_mark_missing_skipped += 1
-
-                if not fetch_failed:
+                if stage == "posts":
                     try:
-                        with pg.db_connection() as conn:
-                            for comment in comments:
-                                _upsert_tiktok_comment_tree(
-                                    context,
-                                    job_id=job_id,
-                                    run_id=run_id,
-                                    account=account,
-                                    post_id=str(upserted["id"]),
-                                    comment=comment,
-                                    source_scope=opts.source_scope,
-                                    observed_comment_ids=observed_comment_ids,
-                                    persist_stats=local_comment_stats,
-                                    conn=conn,
-                                )
+                        mirror_job_id = _enqueue_platform_media_mirror_job(
+                            context,
+                            platform="tiktok",
+                            run_id=run_id,
+                            source_scope=opts.source_scope,
+                            account=account,
+                            post_row=upserted,
+                            week_index=None,
+                            parent_job_id=job_id,
+                            conn=None,
+                        )
+                        if mirror_job_id:
+                            mirror_jobs_enqueued += 1
+                    except Exception:  # noqa: BLE001
+                        mirror_job_enqueue_errors += 1
+                        logger.exception(
+                            "[tiktok] Failed to enqueue media mirror job for post=%s video_id=%s",
+                            str(upserted.get("id") or ""),
+                            str(getattr(post, "video_id", "") or ""),
+                        )
 
-                            is_complete = _is_comment_fetch_complete(
-                                fetch_failed=False,
-                                fail_reason=fail_reason,
-                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                fetched_count=len(comments),
-                                max_comments_per_post=opts.max_comments_per_post,
-                            )
-                            if is_complete:
-                                missing_marked += _mark_missing_comments_for_anchor(
-                                    platform="tiktok",
-                                    anchor_id=str(upserted["id"]),
-                                    observed_comment_ids=observed_comment_ids,
-                                    conn=conn,
-                                )
-                                _reconcile_post_comment_count(
-                                    platform="tiktok",
-                                    post_db_id=str(upserted["id"]),
-                                    conn=conn,
-                                )
-                            else:
-                                incomplete_comment_fetches += 1
-                                comments_mark_missing_skipped += 1
+                if opts.max_comments_per_post > 0:
+                    comments: list[Any] = []
+                    fail_reason = ""
+                    fetch_failed = False
+                    observed_comment_ids: set[str] = set()
+                    local_comment_stats = _new_comment_persist_stats()
+                    try:
+                        comments = scraper.fetch_comments(
+                            getattr(post, "video_id", ""),
+                            username=account,
+                            max_comments=opts.max_comments_per_post,
+                            fetch_replies=opts.fetch_replies,
+                            delay=0.5,
+                        )
+                        _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
+                        fail_reason = str(
+                            getattr(scraper, "last_comment_fetch_reason", "")
+                            or getattr(scraper, "_last_api_fail_reason", "")
+                            or ""
+                        )
+                        if fail_reason:
+                            comment_fail_reasons.add(fail_reason)
+                            if not comments:
+                                comment_errors += 1
                     except Exception:
                         fetch_failed = True
                         comment_errors += 1
                         logger.exception(
-                            "[tiktok] Failed to persist comments for post %s (video_id=%s)",
+                            "[tiktok] Failed to fetch comments for post %s (video_id=%s)",
                             upserted.get("id"),
                             getattr(post, "video_id", "?"),
                         )
                         incomplete_comment_fetches += 1
                         comments_mark_missing_skipped += 1
 
-                if not fetch_failed:
-                    _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                    scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
-                    try:
-                        _persist_tiktok_comment_enrichment(
-                            post_id=str(upserted["id"]),
-                            cast_names=cast_names,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "[tiktok] Failed to persist comment enrichment for post %s",
-                            str(upserted.get("id") or ""),
-                            exc_info=True,
-                        )
-                    activity["phase"] = "comments_fetch"
-                    _flush_progress()
+                    if not fetch_failed:
+                        try:
+                            with _SavepointScope(
+                                conn=post_comments_conn,
+                                prefix="tiktok_post_comments",
+                                index=post_index,
+                            ):
+                                for comment in comments:
+                                    _upsert_tiktok_comment_tree(
+                                        context,
+                                        job_id=job_id,
+                                        run_id=run_id,
+                                        account=account,
+                                        post_id=str(upserted["id"]),
+                                        comment=comment,
+                                        source_scope=opts.source_scope,
+                                        observed_comment_ids=observed_comment_ids,
+                                        persist_stats=local_comment_stats,
+                                        conn=post_comments_conn,
+                                    )
+
+                                is_complete = _is_comment_fetch_complete(
+                                    fetch_failed=False,
+                                    fail_reason=fail_reason,
+                                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                    fetched_count=len(comments),
+                                    max_comments_per_post=opts.max_comments_per_post,
+                                )
+                                if is_complete:
+                                    missing_marked += _mark_missing_comments_for_anchor(
+                                        platform="tiktok",
+                                        anchor_id=str(upserted["id"]),
+                                        observed_comment_ids=observed_comment_ids,
+                                        conn=post_comments_conn,
+                                    )
+                                    _reconcile_post_comment_count(
+                                        platform="tiktok",
+                                        post_db_id=str(upserted["id"]),
+                                        conn=post_comments_conn,
+                                    )
+                                else:
+                                    incomplete_comment_fetches += 1
+                                    comments_mark_missing_skipped += 1
+                        except Exception:
+                            fetch_failed = True
+                            comment_errors += 1
+                            logger.exception(
+                                "[tiktok] Failed to persist comments for post %s (video_id=%s)",
+                                upserted.get("id"),
+                                getattr(post, "video_id", "?"),
+                            )
+                            incomplete_comment_fetches += 1
+                            comments_mark_missing_skipped += 1
+
+                    if not fetch_failed:
+                        _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                        scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                        try:
+                            _persist_tiktok_comment_enrichment(
+                                post_id=str(upserted["id"]),
+                                cast_names=cast_names,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "[tiktok] Failed to persist comment enrichment for post %s",
+                                str(upserted.get("id") or ""),
+                                exc_info=True,
+                            )
+                        activity["phase"] = "comments_fetch"
+                        _flush_progress()
 
         if stage == "posts":
             sound_ids_to_fetch: list[str] = []
@@ -9380,6 +11872,7 @@ def _ingest_youtube(
     opts: IngestOptions,
     job_id: str,
     stage: str = "posts",
+    job_config: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.youtube import YouTubeScrapeConfig, YouTubeScraper
 
@@ -9491,124 +11984,125 @@ def _ingest_youtube(
             platform="youtube",
         )
         skipped_synced = 0
-        for row in existing_posts:
-            vid_id = str(row.get("video_id") or "")
-            post_db_id = str(row.get("id") or "")
-            if not vid_id:
-                continue
-            snapshot = snapshots.get(post_db_id)
-            expected = _expected_comment_count_for_platform("youtube", row, snapshot=snapshot)
-            decision = _decide_comment_refresh(
-                sync_strategy=opts.sync_strategy,
-                expected_count=expected,
-                snapshot=snapshot,
-                post_published_at=_coerce_dt(row.get("published_at")),
-                refresh_policy=opts.comment_refresh_policy,
-            )
-            comment_refresh_reasons[decision.reason] += 1
-            if not decision.should_refresh:
-                skipped_synced += 1
-                videos_skipped_up_to_date += 1
-                _record_filter_sample(
-                    reason="up_to_date",
-                    title=str(row.get("text") or ""),
-                    video_id=vid_id,
+        with pg.db_connection() as comments_conn:
+            for video_index, row in enumerate(existing_posts, start=1):
+                vid_id = str(row.get("video_id") or "")
+                post_db_id = str(row.get("id") or "")
+                if not vid_id:
+                    continue
+                snapshot = snapshots.get(post_db_id)
+                expected = _expected_comment_count_for_platform("youtube", row, snapshot=snapshot)
+                decision = _decide_comment_refresh(
+                    sync_strategy=opts.sync_strategy,
+                    expected_count=expected,
+                    snapshot=snapshot,
+                    post_published_at=_coerce_dt(row.get("published_at")),
+                    refresh_policy=opts.comment_refresh_policy,
                 )
-                continue
-            matched_video_count += 1
-            scraped_video_count += 1
-            youtube_comment_count_sync_targets.add(post_db_id)
-            activity["phase"] = "comments_fetch"
-            activity["posts_checked"] = scraped_video_count
-            activity["matched_posts"] = matched_video_count
-            if matched_video_count % 10 == 0:
-                _touch_job_heartbeat(job_id)
-            _flush_progress()
-            fetch_failed = False
-            comments: list[Any] = []
-            fail_reason = ""
-            observed_comment_ids: set[str] = set()
-            local_comment_stats = _new_comment_persist_stats()
-            try:
-                comments = scraper.fetch_comments(
-                    vid_id,
-                    max_comments=opts.max_comments_per_post,
-                    fetch_replies=opts.fetch_replies,
-                    delay=0.5,
-                )
-                _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
-                fail_reason = str(getattr(scraper, "last_comment_fetch_reason", "") or "")
-                if fail_reason:
-                    comment_fail_reasons.add(fail_reason)
-                    if not comments:
-                        comment_errors += 1
-            except Exception:
-                fetch_failed = True
-                comment_errors += 1
-                comment_fail_reasons.add("fetch_exception")
-                logger.exception(
-                    "[youtube] Failed to fetch comments for video %s (video_id=%s)",
-                    post_db_id,
-                    vid_id,
-                )
-
-            if not fetch_failed:
+                comment_refresh_reasons[decision.reason] += 1
+                if not decision.should_refresh:
+                    skipped_synced += 1
+                    videos_skipped_up_to_date += 1
+                    _record_filter_sample(
+                        reason="up_to_date",
+                        title=str(row.get("text") or ""),
+                        video_id=vid_id,
+                    )
+                    continue
+                matched_video_count += 1
+                scraped_video_count += 1
+                youtube_comment_count_sync_targets.add(post_db_id)
+                activity["phase"] = "comments_fetch"
+                activity["posts_checked"] = scraped_video_count
+                activity["matched_posts"] = matched_video_count
+                if matched_video_count % 10 == 0:
+                    _touch_job_heartbeat(job_id)
+                _flush_progress()
+                fetch_failed = False
+                comments: list[Any] = []
+                fail_reason = ""
+                observed_comment_ids: set[str] = set()
+                local_comment_stats = _new_comment_persist_stats()
                 try:
-                    with pg.db_connection() as conn:
-                        for comment in comments:
-                            _upsert_youtube_comment_tree(
-                                context,
-                                job_id=job_id,
-                                run_id=run_id,
-                                account=account,
-                                video_db_id=post_db_id,
-                                comment=comment,
-                                observed_comment_ids=observed_comment_ids,
-                                persist_stats=local_comment_stats,
-                                conn=conn,
-                            )
-
-                        is_complete = _is_comment_fetch_complete(
-                            fetch_failed=False,
-                            fail_reason=fail_reason,
-                            auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                            fetched_count=len(comments),
-                            max_comments_per_post=opts.max_comments_per_post,
-                            expected_count=expected,
-                        )
-                        if is_complete:
-                            missing_marked += _mark_missing_comments_for_anchor(
-                                platform="youtube",
-                                anchor_id=post_db_id,
-                                observed_comment_ids=observed_comment_ids,
-                                conn=conn,
-                            )
-                            _reconcile_post_comment_count(
-                                platform="youtube",
-                                post_db_id=post_db_id,
-                                conn=conn,
-                            )
-                        else:
-                            incomplete_comment_fetches += 1
-                            comments_mark_missing_skipped += 1
+                    comments = scraper.fetch_comments(
+                        vid_id,
+                        max_comments=opts.max_comments_per_post,
+                        fetch_replies=opts.fetch_replies,
+                        delay=0.5,
+                    )
+                    _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
+                    fail_reason = str(getattr(scraper, "last_comment_fetch_reason", "") or "")
+                    if fail_reason:
+                        comment_fail_reasons.add(fail_reason)
+                        if not comments:
+                            comment_errors += 1
                 except Exception:
                     fetch_failed = True
                     comment_errors += 1
-                    comment_fail_reasons.add("persist_exception")
+                    comment_fail_reasons.add("fetch_exception")
                     logger.exception(
-                        "[youtube] Failed to persist comments for video %s (video_id=%s)",
+                        "[youtube] Failed to fetch comments for video %s (video_id=%s)",
                         post_db_id,
                         vid_id,
                     )
 
-            if fetch_failed:
-                incomplete_comment_fetches += 1
-                comments_mark_missing_skipped += 1
-                continue
+                if not fetch_failed:
+                    try:
+                        with _SavepointScope(conn=comments_conn, prefix="youtube_comments_stage", index=video_index):
+                            for comment in comments:
+                                _upsert_youtube_comment_tree(
+                                    context,
+                                    job_id=job_id,
+                                    run_id=run_id,
+                                    account=account,
+                                    video_db_id=post_db_id,
+                                    comment=comment,
+                                    observed_comment_ids=observed_comment_ids,
+                                    persist_stats=local_comment_stats,
+                                    conn=comments_conn,
+                                )
 
-            _merge_comment_persist_stats(comment_stats, local_comment_stats)
-            scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
-            _flush_progress()
+                            is_complete = _is_comment_fetch_complete(
+                                fetch_failed=False,
+                                fail_reason=fail_reason,
+                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                fetched_count=len(comments),
+                                max_comments_per_post=opts.max_comments_per_post,
+                                expected_count=expected,
+                            )
+                            if is_complete:
+                                missing_marked += _mark_missing_comments_for_anchor(
+                                    platform="youtube",
+                                    anchor_id=post_db_id,
+                                    observed_comment_ids=observed_comment_ids,
+                                    conn=comments_conn,
+                                )
+                                _reconcile_post_comment_count(
+                                    platform="youtube",
+                                    post_db_id=post_db_id,
+                                    conn=comments_conn,
+                                )
+                            else:
+                                incomplete_comment_fetches += 1
+                                comments_mark_missing_skipped += 1
+                    except Exception:
+                        fetch_failed = True
+                        comment_errors += 1
+                        comment_fail_reasons.add("persist_exception")
+                        logger.exception(
+                            "[youtube] Failed to persist comments for video %s (video_id=%s)",
+                            post_db_id,
+                            vid_id,
+                        )
+
+                if fetch_failed:
+                    incomplete_comment_fetches += 1
+                    comments_mark_missing_skipped += 1
+                    continue
+
+                _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                _flush_progress()
 
         if youtube_comment_count_sync_targets:
             with pg.db_connection() as conn:
@@ -9619,6 +12113,7 @@ def _ingest_youtube(
         if skipped_synced:
             logger.info("[youtube] Skipped %d videos whose comments are already synced", skipped_synced)
     else:
+
         def _youtube_video_surface(video_obj: Any) -> str:
             source_surface = str(getattr(video_obj, "source_surface", "") or "").strip().lower()
             if source_surface in {"videos", "shorts"}:
@@ -9633,7 +12128,12 @@ def _ingest_youtube(
             keywords=keywords,
             date_start=opts.date_start,
             date_end=opts.date_end,
-            delay_seconds=1.0,
+            delay_seconds=_resolve_platform_delay_seconds(
+                platform="youtube",
+                attempt_count=int((job_config or {}).get("_attempt_count") or 1),
+                last_error_code=(job_config or {}).get("_last_error_code"),
+                default=0.35,
+            ),
             max_results=None if opts.max_posts_per_target <= 0 else max(1, opts.max_posts_per_target),
             enforce_keyword_filter=False,
             show_id=context.show_id,
@@ -9664,9 +12164,7 @@ def _ingest_youtube(
         videos = scraper.scrape(config, progress_cb=_on_scrape_progress)
         retrieval_meta.update(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
         candidate_surfaces_available = {
-            _youtube_video_surface(video)
-            for video in videos
-            if _youtube_video_surface(video) in {"videos", "shorts"}
+            _youtube_video_surface(video) for video in videos if _youtube_video_surface(video) in {"videos", "shorts"}
         }
         require_both_surfaces = {"videos", "shorts"} <= candidate_surfaces_available
         matched_surfaces_persisted: set[str] = set()
@@ -9683,224 +12181,235 @@ def _ingest_youtube(
             )
 
         skipped_synced = 0
-        for video in videos:
-            total_scraped += 1
-            videos_scanned += 1
-            scraped_video_count = max(scraped_video_count, total_scraped)
-            activity["phase"] = "posts_filter"
-            activity["posts_checked"] = scraped_video_count
-            video_title = str(getattr(video, "title", "") or "")
-            video_id = str(getattr(video, "video_id", "") or "")
-            if not _youtube_video_matches_show_terms(
-                title=video_title,
-                description=getattr(video, "description", ""),
-                tags=getattr(video, "tags", []),
-                hashtags=hashtags,
-                keywords=keywords,
-            ):
-                skipped_keyword += 1
-                videos_filtered_show_terms += 1
-                _record_filter_sample(reason="show_terms_filtered", title=video_title, video_id=video_id)
-                _flush_progress()
-                continue
-            if not _youtube_video_matches_owner_identity(
-                video,
-                expected_handle=canonical_owner_handle or account,
-                expected_channel_id=canonical_channel_id,
-            ):
-                videos_filtered_owner += 1
-                _record_filter_sample(reason="ownership_filtered", title=video_title, video_id=video_id)
-                _flush_progress()
-                continue
-            videos_matched_show_terms += 1
-            if post_limit and matched_video_count >= post_limit:
-                if require_both_surfaces and {"videos", "shorts"} - matched_surfaces_persisted:
-                    surface_cap_override_applied = True
-                else:
-                    break
+        with pg.db_connection() as post_comments_conn:
+            for video_index, video in enumerate(videos, start=1):
+                total_scraped += 1
+                videos_scanned += 1
+                scraped_video_count = max(scraped_video_count, total_scraped)
+                activity["phase"] = "posts_filter"
+                activity["posts_checked"] = scraped_video_count
+                video_title = str(getattr(video, "title", "") or "")
+                video_id = str(getattr(video, "video_id", "") or "")
+                if not _youtube_video_matches_show_terms(
+                    title=video_title,
+                    description=getattr(video, "description", ""),
+                    tags=getattr(video, "tags", []),
+                    hashtags=hashtags,
+                    keywords=keywords,
+                ):
+                    skipped_keyword += 1
+                    videos_filtered_show_terms += 1
+                    _record_filter_sample(reason="show_terms_filtered", title=video_title, video_id=video_id)
+                    _flush_progress()
+                    continue
+                if not _youtube_video_matches_owner_identity(
+                    video,
+                    expected_handle=canonical_owner_handle or account,
+                    expected_channel_id=canonical_channel_id,
+                ):
+                    videos_filtered_owner += 1
+                    _record_filter_sample(reason="ownership_filtered", title=video_title, video_id=video_id)
+                    _flush_progress()
+                    continue
+                videos_matched_show_terms += 1
+                if post_limit and matched_video_count >= post_limit:
+                    if require_both_surfaces and {"videos", "shorts"} - matched_surfaces_persisted:
+                        surface_cap_override_applied = True
+                    else:
+                        break
 
-            existing_row = existing_post_lookup.get(video_id)
-            if existing_row and opts.max_comments_per_post > 0:
-                existing_post_id = str(existing_row.get("id") or "")
-                snapshot = snapshots.get(existing_post_id)
-                expected_comment_count = _expected_comment_count_for_platform(
-                    "youtube",
-                    {"comments_count": int(getattr(video, "comments", 0) or 0)},
-                    snapshot=snapshot,
-                )
-                decision = _decide_comment_refresh(
-                    sync_strategy=opts.sync_strategy,
-                    expected_count=expected_comment_count,
-                    snapshot=snapshot,
-                    post_published_at=_coerce_dt(existing_row.get("published_at")),
-                    refresh_policy=opts.comment_refresh_policy,
-                )
-                comment_refresh_reasons[decision.reason] += 1
-                if not decision.should_refresh:
-                    skipped_synced += 1
-                    videos_skipped_up_to_date += 1
-                    _record_filter_sample(reason="up_to_date", title=video_title, video_id=video_id)
-                    activity["phase"] = "posts_skip_up_to_date"
+                existing_row = existing_post_lookup.get(video_id)
+                if existing_row and opts.max_comments_per_post > 0:
+                    existing_post_id = str(existing_row.get("id") or "")
+                    snapshot = snapshots.get(existing_post_id)
+                    expected_comment_count = _expected_comment_count_for_platform(
+                        "youtube",
+                        {"comments_count": int(getattr(video, "comments", 0) or 0)},
+                        snapshot=snapshot,
+                    )
+                    decision = _decide_comment_refresh(
+                        sync_strategy=opts.sync_strategy,
+                        expected_count=expected_comment_count,
+                        snapshot=snapshot,
+                        post_published_at=_coerce_dt(existing_row.get("published_at")),
+                        refresh_policy=opts.comment_refresh_policy,
+                    )
+                    comment_refresh_reasons[decision.reason] += 1
+                    if not decision.should_refresh:
+                        skipped_synced += 1
+                        videos_skipped_up_to_date += 1
+                        _record_filter_sample(reason="up_to_date", title=video_title, video_id=video_id)
+                        activity["phase"] = "posts_skip_up_to_date"
+                        _flush_progress()
+                        continue
+
+                if _youtube_transcript_ingest_enabled() and _platform_posts_has_column("youtube", "transcript_text"):
+                    try:
+                        transcript_payload = scraper.fetch_transcript(video_id)
+                    except Exception:  # noqa: BLE001
+                        transcript_payload = {
+                            "text": "",
+                            "segments": [],
+                            "language": None,
+                            "source": None,
+                            "error": "fetch_exception",
+                        }
+                    setattr(video, "transcript_text", str(transcript_payload.get("text") or "").strip() or None)
+                    transcript_segments = transcript_payload.get("segments")
+                    setattr(
+                        video,
+                        "transcript_segments",
+                        transcript_segments if isinstance(transcript_segments, list) else [],
+                    )
+                    setattr(video, "transcript_language", transcript_payload.get("language"))
+                    setattr(video, "transcript_source", transcript_payload.get("source"))
+                    setattr(video, "transcript_error", transcript_payload.get("error"))
+                    setattr(video, "transcript_synced_at", _now_utc())
+                    if transcript_payload.get("error"):
+                        transcript_failed += 1
+                    else:
+                        transcript_synced += 1
+
+                upserted: dict[str, Any] | None = None
+                try:
+                    with pg.db_connection() as conn:
+                        upserted = _upsert_youtube_video(
+                            context, job_id=job_id, account=account, video=video, conn=conn
+                        )
+                except Exception:
+                    comment_errors += 1
+                    comment_fail_reasons.add("persist_exception")
+                    logger.exception(
+                        "[youtube] Failed to upsert video video_id=%s",
+                        getattr(video, "video_id", "?"),
+                    )
                     _flush_progress()
                     continue
 
-            if _youtube_transcript_ingest_enabled() and _platform_posts_has_column("youtube", "transcript_text"):
-                try:
-                    transcript_payload = scraper.fetch_transcript(video_id)
-                except Exception:  # noqa: BLE001
-                    transcript_payload = {
-                        "text": "",
-                        "segments": [],
-                        "language": None,
-                        "source": None,
-                        "error": "fetch_exception",
-                    }
-                setattr(video, "transcript_text", str(transcript_payload.get("text") or "").strip() or None)
-                transcript_segments = transcript_payload.get("segments")
-                setattr(video, "transcript_segments", transcript_segments if isinstance(transcript_segments, list) else [])
-                setattr(video, "transcript_language", transcript_payload.get("language"))
-                setattr(video, "transcript_source", transcript_payload.get("source"))
-                setattr(video, "transcript_error", transcript_payload.get("error"))
-                setattr(video, "transcript_synced_at", _now_utc())
-                if transcript_payload.get("error"):
-                    transcript_failed += 1
-                else:
-                    transcript_synced += 1
-
-            upserted: dict[str, Any] | None = None
-            try:
-                with pg.db_connection() as conn:
-                    upserted = _upsert_youtube_video(context, job_id=job_id, account=account, video=video, conn=conn)
-            except Exception:
-                comment_errors += 1
-                comment_fail_reasons.add("persist_exception")
-                logger.exception(
-                    "[youtube] Failed to upsert video video_id=%s",
-                    getattr(video, "video_id", "?"),
-                )
+                if not upserted:
+                    _flush_progress()
+                    continue
+                matched_video_count += 1
+                matched_surfaces_persisted.add(_youtube_video_surface(video))
+                activity["phase"] = "posts_upsert"
+                activity["matched_posts"] = matched_video_count
+                youtube_comment_count_sync_targets.add(str(upserted["id"]))
                 _flush_progress()
-                continue
 
-            if not upserted:
-                _flush_progress()
-                continue
-            matched_video_count += 1
-            matched_surfaces_persisted.add(_youtube_video_surface(video))
-            activity["phase"] = "posts_upsert"
-            activity["matched_posts"] = matched_video_count
-            youtube_comment_count_sync_targets.add(str(upserted["id"]))
-            _flush_progress()
-
-            if stage == "posts":
-                try:
-                    mirror_job_id = _enqueue_platform_media_mirror_job(
-                        context,
-                        platform="youtube",
-                        run_id=run_id,
-                        source_scope=opts.source_scope,
-                        account=account,
-                        post_row=upserted,
-                        week_index=None,
-                        parent_job_id=job_id,
-                        conn=None,
-                    )
-                    if mirror_job_id:
-                        mirror_jobs_enqueued += 1
-                except Exception:  # noqa: BLE001
-                    mirror_job_enqueue_errors += 1
-                    logger.exception(
-                        "[youtube] Failed to enqueue media mirror job for video=%s video_id=%s",
-                        str(upserted.get("id") or ""),
-                        str(getattr(video, "video_id", "") or ""),
-                    )
-
-            if opts.max_comments_per_post > 0:
-                comments: list[Any] = []
-                fail_reason = ""
-                fetch_failed = False
-                observed_comment_ids: set[str] = set()
-                local_comment_stats = _new_comment_persist_stats()
-                try:
-                    comments = scraper.fetch_comments(
-                        getattr(video, "video_id", ""),
-                        max_comments=opts.max_comments_per_post,
-                        fetch_replies=opts.fetch_replies,
-                        delay=0.5,
-                    )
-                    _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
-                    fail_reason = str(getattr(scraper, "last_comment_fetch_reason", "") or "")
-                    if fail_reason:
-                        comment_fail_reasons.add(fail_reason)
-                        if not comments:
-                            comment_errors += 1
-                except Exception:
-                    fetch_failed = True
-                    comment_errors += 1
-                    comment_fail_reasons.add("fetch_exception")
-                    logger.exception(
-                        "[youtube] Failed to fetch comments for video %s (video_id=%s)",
-                        upserted.get("id"),
-                        getattr(video, "video_id", "?"),
-                    )
-                    incomplete_comment_fetches += 1
-                    comments_mark_missing_skipped += 1
-
-                if not fetch_failed:
+                if stage == "posts":
                     try:
-                        with pg.db_connection() as conn:
-                            for comment in comments:
-                                _upsert_youtube_comment_tree(
-                                    context,
-                                    job_id=job_id,
-                                    run_id=run_id,
-                                    account=account,
-                                    video_db_id=str(upserted["id"]),
-                                    comment=comment,
-                                    observed_comment_ids=observed_comment_ids,
-                                    persist_stats=local_comment_stats,
-                                    conn=conn,
-                                )
+                        mirror_job_id = _enqueue_platform_media_mirror_job(
+                            context,
+                            platform="youtube",
+                            run_id=run_id,
+                            source_scope=opts.source_scope,
+                            account=account,
+                            post_row=upserted,
+                            week_index=None,
+                            parent_job_id=job_id,
+                            conn=None,
+                        )
+                        if mirror_job_id:
+                            mirror_jobs_enqueued += 1
+                    except Exception:  # noqa: BLE001
+                        mirror_job_enqueue_errors += 1
+                        logger.exception(
+                            "[youtube] Failed to enqueue media mirror job for video=%s video_id=%s",
+                            str(upserted.get("id") or ""),
+                            str(getattr(video, "video_id", "") or ""),
+                        )
 
-                            is_complete = _is_comment_fetch_complete(
-                                fetch_failed=False,
-                                fail_reason=fail_reason,
-                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                fetched_count=len(comments),
-                                max_comments_per_post=opts.max_comments_per_post,
-                                expected_count=int(getattr(video, "comments", 0) or 0),
-                            )
-                            if is_complete:
-                                missing_marked += _mark_missing_comments_for_anchor(
-                                    platform="youtube",
-                                    anchor_id=str(upserted["id"]),
-                                    observed_comment_ids=observed_comment_ids,
-                                    conn=conn,
-                                )
-                                _reconcile_post_comment_count(
-                                    platform="youtube",
-                                    post_db_id=str(upserted["id"]),
-                                    conn=conn,
-                                )
-                            else:
-                                incomplete_comment_fetches += 1
-                                comments_mark_missing_skipped += 1
+                if opts.max_comments_per_post > 0:
+                    comments: list[Any] = []
+                    fail_reason = ""
+                    fetch_failed = False
+                    observed_comment_ids: set[str] = set()
+                    local_comment_stats = _new_comment_persist_stats()
+                    try:
+                        comments = scraper.fetch_comments(
+                            getattr(video, "video_id", ""),
+                            max_comments=opts.max_comments_per_post,
+                            fetch_replies=opts.fetch_replies,
+                            delay=0.5,
+                        )
+                        _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
+                        fail_reason = str(getattr(scraper, "last_comment_fetch_reason", "") or "")
+                        if fail_reason:
+                            comment_fail_reasons.add(fail_reason)
+                            if not comments:
+                                comment_errors += 1
                     except Exception:
                         fetch_failed = True
                         comment_errors += 1
-                        comment_fail_reasons.add("persist_exception")
+                        comment_fail_reasons.add("fetch_exception")
                         logger.exception(
-                            "[youtube] Failed to persist comments for video %s (video_id=%s)",
+                            "[youtube] Failed to fetch comments for video %s (video_id=%s)",
                             upserted.get("id"),
                             getattr(video, "video_id", "?"),
                         )
                         incomplete_comment_fetches += 1
                         comments_mark_missing_skipped += 1
 
-                if not fetch_failed:
-                    _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                    scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
-                    activity["phase"] = "comments_fetch"
-                    _flush_progress()
+                    if not fetch_failed:
+                        try:
+                            with _SavepointScope(
+                                conn=post_comments_conn,
+                                prefix="youtube_post_comments",
+                                index=video_index,
+                            ):
+                                for comment in comments:
+                                    _upsert_youtube_comment_tree(
+                                        context,
+                                        job_id=job_id,
+                                        run_id=run_id,
+                                        account=account,
+                                        video_db_id=str(upserted["id"]),
+                                        comment=comment,
+                                        observed_comment_ids=observed_comment_ids,
+                                        persist_stats=local_comment_stats,
+                                        conn=post_comments_conn,
+                                    )
+
+                                is_complete = _is_comment_fetch_complete(
+                                    fetch_failed=False,
+                                    fail_reason=fail_reason,
+                                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                    fetched_count=len(comments),
+                                    max_comments_per_post=opts.max_comments_per_post,
+                                    expected_count=int(getattr(video, "comments", 0) or 0),
+                                )
+                                if is_complete:
+                                    missing_marked += _mark_missing_comments_for_anchor(
+                                        platform="youtube",
+                                        anchor_id=str(upserted["id"]),
+                                        observed_comment_ids=observed_comment_ids,
+                                        conn=post_comments_conn,
+                                    )
+                                    _reconcile_post_comment_count(
+                                        platform="youtube",
+                                        post_db_id=str(upserted["id"]),
+                                        conn=post_comments_conn,
+                                    )
+                                else:
+                                    incomplete_comment_fetches += 1
+                                    comments_mark_missing_skipped += 1
+                        except Exception:
+                            fetch_failed = True
+                            comment_errors += 1
+                            comment_fail_reasons.add("persist_exception")
+                            logger.exception(
+                                "[youtube] Failed to persist comments for video %s (video_id=%s)",
+                                upserted.get("id"),
+                                getattr(video, "video_id", "?"),
+                            )
+                            incomplete_comment_fetches += 1
+                            comments_mark_missing_skipped += 1
+
+                    if not fetch_failed:
+                        _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                        scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
+                        activity["phase"] = "comments_fetch"
+                        _flush_progress()
 
         if post_limit and matched_video_count > post_limit:
             surface_cap_override_applied = True
@@ -9985,12 +12494,37 @@ def _upsert_tweet(
     if persist_stats is not None:
         persist_stats["comments_fetched"] = int(persist_stats.get("comments_fetched") or 0) + 1
 
-    tweet_id = str(getattr(tweet, "tweet_id", "") or "")
-    if not tweet_id.strip():
+    prepared = _build_twitter_tweet_payload(
+        context=context,
+        job_id=job_id,
+        run_id=run_id,
+        account=account,
+        tweet=tweet,
+    )
+    if prepared is None:
         if persist_stats is not None:
             persist_stats["comments_skipped_missing_id"] = (
                 int(persist_stats.get("comments_skipped_missing_id") or 0) + 1
             )
+        return None
+
+    _tweet_id, payload = prepared
+    row = _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn)
+    if persist_stats is not None and row:
+        persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
+    return row
+
+
+def _build_twitter_tweet_payload(
+    *,
+    context: SeasonContext,
+    job_id: str | None,
+    run_id: str | None,
+    account: str,
+    tweet: Any,
+) -> tuple[str, dict[str, Any]] | None:
+    tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
+    if not tweet_id:
         return None
 
     created_at = _parse_platform_time(getattr(tweet, "created_at", None))
@@ -9998,7 +12532,7 @@ def _upsert_tweet(
     user_profile_url = str(getattr(tweet, "user_profile_url", "") or "").strip()
     if not user_profile_url and username:
         user_profile_url = f"https://x.com/{username}"
-
+    now = _now_utc()
     payload = {
         "tweet_id": tweet_id,
         "username": username,
@@ -10019,7 +12553,7 @@ def _upsert_tweet(
         "reply_to_tweet_id": getattr(tweet, "reply_to_tweet_id", None),
         "quoted_tweet_id": getattr(tweet, "quoted_tweet_id", None),
         "created_at": created_at,
-        "scraped_at": _now_utc(),
+        "scraped_at": now,
         "raw_data": tweet.to_dict() if hasattr(tweet, "to_dict") else {},
         "show_id": context.show_id,
         "season_id": context.season_id,
@@ -10036,13 +12570,84 @@ def _upsert_tweet(
     if _comment_lifecycle_supported("twitter_tweets"):
         payload["is_missing"] = False
         payload["missing_at"] = None
-        payload["last_seen_at"] = _now_utc()
+        payload["last_seen_at"] = now
         if run_id is not None:
             payload["last_seen_run_id"] = run_id
-    row = _pg_upsert("twitter_tweets", payload, conflict_col="tweet_id", conn=conn)
-    if persist_stats is not None and row:
-        persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
-    return row
+    return tweet_id, payload
+
+
+def _upsert_tweet_batch(
+    context: SeasonContext,
+    *,
+    job_id: str | None,
+    run_id: str | None,
+    account: str,
+    tweets: list[Any],
+    persist_stats: dict[str, int] | None = None,
+    conn: Any | None = None,
+    batch_size: int | None = None,
+) -> dict[str, dict[str, Any]]:
+    if not tweets:
+        return {}
+    if conn is None:
+        persisted_by_tweet_id: dict[str, dict[str, Any]] = {}
+        for tweet in tweets:
+            tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
+            row = _upsert_tweet(
+                context,
+                job_id=job_id,
+                run_id=run_id,
+                account=account,
+                tweet=tweet,
+                persist_stats=persist_stats,
+                conn=conn,
+            )
+            if row and tweet_id:
+                persisted_by_tweet_id[tweet_id] = row
+        return persisted_by_tweet_id
+
+    if persist_stats is not None:
+        persist_stats["comments_fetched"] = int(persist_stats.get("comments_fetched") or 0) + len(tweets)
+
+    payload_by_tweet_id: dict[str, dict[str, Any]] = {}
+    ordered_tweet_ids: list[str] = []
+    for tweet in tweets:
+        prepared = _build_twitter_tweet_payload(
+            context=context,
+            job_id=job_id,
+            run_id=run_id,
+            account=account,
+            tweet=tweet,
+        )
+        if prepared is None:
+            if persist_stats is not None:
+                persist_stats["comments_skipped_missing_id"] = (
+                    int(persist_stats.get("comments_skipped_missing_id") or 0) + 1
+                )
+            continue
+        tweet_id, payload = prepared
+        if tweet_id not in payload_by_tweet_id:
+            ordered_tweet_ids.append(tweet_id)
+        payload_by_tweet_id[tweet_id] = payload
+
+    if not ordered_tweet_ids:
+        return {}
+
+    safe_batch_size = max(1, int(batch_size or _resolve_comment_upsert_batch_size()))
+    persisted_by_tweet_id: dict[str, dict[str, Any]] = {}
+    payload_items = [payload_by_tweet_id[tweet_id] for tweet_id in ordered_tweet_ids]
+    for offset in range(0, len(payload_items), safe_batch_size):
+        chunk = payload_items[offset : offset + safe_batch_size]
+        rows = _pg_upsert_many("twitter_tweets", chunk, conflict_col="tweet_id", conn=conn)
+        for row in rows:
+            row_tweet_id = str(row.get("tweet_id") or "").strip()
+            if row_tweet_id:
+                persisted_by_tweet_id[row_tweet_id] = row
+    if persist_stats is not None:
+        persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + len(
+            persisted_by_tweet_id
+        )
+    return persisted_by_tweet_id
 
 
 def _ingest_twitter(
@@ -10057,6 +12662,7 @@ def _ingest_twitter(
     include_reply_records: bool = True,
     hydrate_audience_replies: bool = False,
     stage: str = "posts",
+    job_config: dict[str, Any] | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
 
@@ -10064,6 +12670,7 @@ def _ingest_twitter(
     date_end = opts.date_end or _now_utc()
     keyword_list = [kw for kw in keywords if isinstance(kw, str) and kw.strip()]
     hashtag_list = [tag for tag in hashtags if isinstance(tag, str) and tag.strip()]
+    hashtag_list = _ensure_rhoslc_twitter_hashtags(context, hashtag_list)
 
     twitter_cookies, twitter_bearer = _load_twitter_auth()
     twikit_creds = _load_twikit_credentials()
@@ -10095,6 +12702,7 @@ def _ingest_twitter(
     link_preview_media_misses = 0
     mirror_jobs_enqueued = 0
     mirror_job_enqueue_errors = 0
+    strict_rhoslc_hashtag_mode = _show_is_rhoslc(context)
     comment_stats = _new_comment_persist_stats()
     progress_state = _new_job_progress_state()
     activity: dict[str, Any] = {
@@ -10146,230 +12754,259 @@ def _ingest_twitter(
             anchor_rows_iter = (
                 anchor_rows if opts.max_posts_per_target <= 0 else anchor_rows[: opts.max_posts_per_target]
             )
-            for row in anchor_rows_iter:
-                tweet_id = str(row.get("tweet_id") or "")
-                if not tweet_id:
-                    continue
-                merged_summary = _fetch_and_apply_twitter_metric_summary(
-                    scraper=scraper,
-                    tweet_id=tweet_id,
-                    conn=None,
-                )
-                expected_replies = max(
-                    int(row.get("replies_count") or 0),
-                    _normalize_non_negative_int((merged_summary or {}).get("replies")),
-                )
-                expected_quotes = max(
-                    int(row.get("quotes") or 0),
-                    _normalize_non_negative_int((merged_summary or {}).get("quotes")),
-                )
-                expected = expected_replies + expected_quotes
-                reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
-                    expected_replies=expected_replies,
-                    expected_quotes=expected_quotes,
-                )
-                decision = _decide_comment_refresh(
-                    sync_strategy=opts.sync_strategy,
-                    expected_count=expected,
-                    snapshot=snapshots.get(tweet_id),
-                    post_published_at=_coerce_dt(row.get("created_at")),
-                    refresh_policy=opts.comment_refresh_policy,
-                )
-                comment_refresh_reasons[decision.reason] += 1
-                if not decision.should_refresh:
-                    skipped_synced += 1
-                    continue
-                scraped_post_count += 1
-                activity["phase"] = "comments_fetch"
-                activity["posts_checked"] = scraped_post_count
-                activity["matched_posts"] = scraped_post_count
-                if scraped_post_count % 10 == 0:
-                    _touch_job_heartbeat(job_id)
-                _flush_progress()
-                fetch_failed = False
-                quote_fetch_failed = False
-                replies: list[Any] = []
-                quotes: list[Any] = []
-                fail_reason = ""
-                quote_fail_reason = ""
-                observed_comment_ids: set[str] = set()
-                local_comment_stats = _new_comment_persist_stats()
-                try:
-                    replies = _fetch_twitter_replies_compat(
+            with pg.db_connection() as comments_conn:
+                for anchor_index, row in enumerate(anchor_rows_iter, start=1):
+                    tweet_id = str(row.get("tweet_id") or "")
+                    if not tweet_id:
+                        continue
+                    merged_summary = _fetch_and_apply_twitter_metric_summary(
                         scraper=scraper,
                         tweet_id=tweet_id,
-                        delay=0.5,
-                        search_max_pages=reply_pages,
-                        twikit_max_pages=reply_pages,
-                    )[:per_post_limit]
-                    fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
-                    if fail_reason:
-                        comment_fail_reasons.add(fail_reason)
-                        if not replies:
-                            comment_errors += 1
-                except Exception:
-                    fetch_failed = True
-                    comment_errors += 1
-                    comment_fail_reasons.add("fetch_exception")
-                    logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
-
-                try:
-                    quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
-                        scraper=scraper,
-                        tweet_id=tweet_id,
-                        delay=0.5,
-                        max_pages=quote_pages,
+                        conn=None,
                     )
-                    quotes = quotes[:per_post_limit]
-                    quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
-                    if missing_quote_method_reason:
-                        quote_fail_reason = missing_quote_method_reason
-                    if quote_fail_reason:
-                        quote_fail_reasons.add(quote_fail_reason)
-                        if not quotes:
-                            quote_errors += 1
-                except Exception:
-                    quote_fetch_failed = True
-                    quote_errors += 1
-                    quote_fail_reasons.add("fetch_exception")
-                    logger.exception("[twitter] Failed to fetch quotes for tweet %s", tweet_id)
-                quote_stats["quotes_fetched"] += len(quotes)
-
-                if not fetch_failed:
+                    expected_replies = max(
+                        int(row.get("replies_count") or 0),
+                        _normalize_non_negative_int((merged_summary or {}).get("replies")),
+                    )
+                    expected_quotes = max(
+                        int(row.get("quotes") or 0),
+                        _normalize_non_negative_int((merged_summary or {}).get("quotes")),
+                    )
+                    expected = expected_replies + expected_quotes
+                    reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
+                        expected_replies=expected_replies,
+                        expected_quotes=expected_quotes,
+                    )
+                    decision = _decide_comment_refresh(
+                        sync_strategy=opts.sync_strategy,
+                        expected_count=expected,
+                        snapshot=snapshots.get(tweet_id),
+                        post_published_at=_coerce_dt(row.get("created_at")),
+                        refresh_policy=opts.comment_refresh_policy,
+                    )
+                    comment_refresh_reasons[decision.reason] += 1
+                    if not decision.should_refresh:
+                        skipped_synced += 1
+                        continue
+                    scraped_post_count += 1
+                    activity["phase"] = "comments_fetch"
+                    activity["posts_checked"] = scraped_post_count
+                    activity["matched_posts"] = scraped_post_count
+                    if scraped_post_count % 10 == 0:
+                        _touch_job_heartbeat(job_id)
+                    _flush_progress()
+                    fetch_failed = False
+                    quote_fetch_failed = False
+                    replies: list[Any] = []
+                    quotes: list[Any] = []
+                    fail_reason = ""
+                    quote_fail_reason = ""
+                    observed_comment_ids: set[str] = set()
+                    local_comment_stats = _new_comment_persist_stats()
                     try:
-                        with pg.db_connection() as conn:
-                            for reply in replies:
-                                if not getattr(reply, "reply_to_tweet_id", None):
-                                    reply.reply_to_tweet_id = tweet_id
-                                reply.is_reply = True
-                                reply_id = str(getattr(reply, "tweet_id", "") or "")
-                                if reply_id:
-                                    observed_comment_ids.add(reply_id)
-                                upserted_reply = _upsert_tweet(
-                                    context,
-                                    job_id=job_id,
-                                    run_id=run_id,
-                                    account=account,
-                                    tweet=reply,
-                                    persist_stats=local_comment_stats,
-                                    conn=conn,
-                                )
-                                if upserted_reply:
-                                    hydrated_replies += 1
-                                    try:
-                                        mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                            context,
-                                            run_id=run_id,
-                                            source_scope=opts.source_scope,
-                                            account=account,
-                                            comment_row=upserted_reply,
-                                            parent_job_id=job_id,
-                                            conn=conn,
-                                        )
-                                        if mirror_job_id:
-                                            local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
-                                                int(local_comment_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
-                                            )
-                                    except Exception:
-                                        local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                            int(local_comment_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
-                                        )
-                                        logger.exception(
-                                            "[twitter] Failed to enqueue comment media mirror for reply %s",
-                                            reply_id,
-                                        )
-
-                            for quote in quotes:
-                                quote.is_reply = False
-                                quote.reply_to_tweet_id = None
-                                quote.is_quote = True
-                                if not getattr(quote, "quoted_tweet_id", None):
-                                    quote.quoted_tweet_id = tweet_id
-                                if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
-                                    continue
-                                quote_id = str(getattr(quote, "tweet_id", "") or "")
-                                if quote_id:
-                                    observed_comment_ids.add(quote_id)
-                                upserted_quote = _upsert_tweet(
-                                    context,
-                                    job_id=job_id,
-                                    run_id=run_id,
-                                    account=account,
-                                    tweet=quote,
-                                    persist_stats=None,
-                                    conn=conn,
-                                )
-                                if upserted_quote:
-                                    hydrated_quotes += 1
-                                    quote_stats["quotes_upserted"] += 1
-                                    try:
-                                        mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                            context,
-                                            run_id=run_id,
-                                            source_scope=opts.source_scope,
-                                            account=account,
-                                            comment_row=upserted_quote,
-                                            parent_job_id=job_id,
-                                            conn=conn,
-                                        )
-                                        if mirror_job_id:
-                                            local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
-                                                int(local_comment_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
-                                            )
-                                    except Exception:
-                                        local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                            int(local_comment_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
-                                        )
-                                        logger.exception(
-                                            "[twitter] Failed to enqueue comment media mirror for quote %s",
-                                            str(getattr(quote, "tweet_id", "") or ""),
-                                        )
-
-                            is_complete = _is_comment_fetch_complete(
-                                fetch_failed=False,
-                                fail_reason=fail_reason,
-                                quote_fail_reason=quote_fail_reason,
-                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                fetched_count=(len(replies) + len(quotes)),
-                                quotes_fetched=len(quotes),
-                                max_comments_per_post=per_post_limit,
-                                expected_count=expected,
-                                expected_quotes=expected_quotes,
-                            )
-                            if is_complete:
-                                missing_marked += _mark_missing_comments_for_anchor(
-                                    platform="twitter",
-                                    anchor_id=tweet_id,
-                                    observed_comment_ids=observed_comment_ids,
-                                    conn=conn,
-                                )
-                                _reconcile_post_comment_count(
-                                    platform="twitter",
-                                    post_db_id=tweet_id,
-                                    conn=conn,
-                                )
-                            else:
-                                incomplete_comment_fetches += 1
-                                comments_mark_missing_skipped += 1
+                        replies = _fetch_twitter_replies_compat(
+                            scraper=scraper,
+                            tweet_id=tweet_id,
+                            delay=0.5,
+                            search_max_pages=reply_pages,
+                            twikit_max_pages=reply_pages,
+                        )[:per_post_limit]
+                        fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
+                        if fail_reason:
+                            comment_fail_reasons.add(fail_reason)
+                            if not replies:
+                                comment_errors += 1
                     except Exception:
                         fetch_failed = True
                         comment_errors += 1
-                        comment_fail_reasons.add("persist_exception")
-                        logger.exception("[twitter] Failed to persist replies for tweet %s", tweet_id)
+                        comment_fail_reasons.add("fetch_exception")
+                        logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
 
-                if fetch_failed:
-                    incomplete_comment_fetches += 1
-                    comments_mark_missing_skipped += 1
-                    continue
+                    try:
+                        quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
+                            scraper=scraper,
+                            tweet_id=tweet_id,
+                            delay=0.5,
+                            max_pages=quote_pages,
+                        )
+                        quotes = quotes[:per_post_limit]
+                        quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
+                        if missing_quote_method_reason:
+                            quote_fail_reason = missing_quote_method_reason
+                        if quote_fail_reason:
+                            quote_fail_reasons.add(quote_fail_reason)
+                            if not quotes:
+                                quote_errors += 1
+                    except Exception:
+                        quote_fetch_failed = True
+                        quote_errors += 1
+                        quote_fail_reasons.add("fetch_exception")
+                        logger.exception("[twitter] Failed to fetch quotes for tweet %s", tweet_id)
+                    quote_stats["quotes_fetched"] += len(quotes)
 
-                if quote_fetch_failed:
-                    quote_fail_reason = "fetch_exception"
-                    if quote_fail_reason:
-                        quote_fail_reasons.add(quote_fail_reason)
+                    if not fetch_failed:
+                        try:
+                            with _SavepointScope(
+                                conn=comments_conn,
+                                prefix="twitter_comments_stage",
+                                index=anchor_index,
+                            ):
+                                for reply in replies:
+                                    if not getattr(reply, "reply_to_tweet_id", None):
+                                        reply.reply_to_tweet_id = tweet_id
+                                    reply.is_reply = True
+                                    reply_id = str(getattr(reply, "tweet_id", "") or "")
+                                    if reply_id:
+                                        observed_comment_ids.add(reply_id)
+                                persisted_replies = _upsert_tweet_batch(
+                                    context,
+                                    job_id=job_id,
+                                    run_id=run_id,
+                                    account=account,
+                                    tweets=replies,
+                                    persist_stats=local_comment_stats,
+                                    conn=comments_conn,
+                                )
+                                for reply in replies:
+                                    reply_id = str(getattr(reply, "tweet_id", "") or "")
+                                    upserted_reply = persisted_replies.get(reply_id)
+                                    if upserted_reply:
+                                        hydrated_replies += 1
+                                        try:
+                                            mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                                context,
+                                                run_id=run_id,
+                                                source_scope=opts.source_scope,
+                                                account=account,
+                                                comment_row=upserted_reply,
+                                                parent_job_id=job_id,
+                                                conn=comments_conn,
+                                            )
+                                            if mirror_job_id:
+                                                local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
+                                                    int(
+                                                        local_comment_stats.get("comment_media_mirror_jobs_enqueued")
+                                                        or 0
+                                                    )
+                                                    + 1
+                                                )
+                                        except Exception:
+                                            local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                                int(
+                                                    local_comment_stats.get("comment_media_mirror_job_enqueue_errors")
+                                                    or 0
+                                                )
+                                                + 1
+                                            )
+                                            logger.exception(
+                                                "[twitter] Failed to enqueue comment media mirror for reply %s",
+                                                reply_id,
+                                            )
 
-                _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
-                _flush_progress()
+                                filtered_quotes: list[Any] = []
+                                for quote in quotes:
+                                    quote.is_reply = False
+                                    quote.reply_to_tweet_id = None
+                                    quote.is_quote = True
+                                    if not getattr(quote, "quoted_tweet_id", None):
+                                        quote.quoted_tweet_id = tweet_id
+                                    if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
+                                        continue
+                                    quote_id = str(getattr(quote, "tweet_id", "") or "")
+                                    if quote_id:
+                                        observed_comment_ids.add(quote_id)
+                                    filtered_quotes.append(quote)
+                                persisted_quotes = _upsert_tweet_batch(
+                                    context,
+                                    job_id=job_id,
+                                    run_id=run_id,
+                                    account=account,
+                                    tweets=filtered_quotes,
+                                    persist_stats=None,
+                                    conn=comments_conn,
+                                )
+                                for quote in filtered_quotes:
+                                    quote_id = str(getattr(quote, "tweet_id", "") or "")
+                                    upserted_quote = persisted_quotes.get(quote_id)
+                                    if upserted_quote:
+                                        hydrated_quotes += 1
+                                        quote_stats["quotes_upserted"] += 1
+                                        try:
+                                            mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                                context,
+                                                run_id=run_id,
+                                                source_scope=opts.source_scope,
+                                                account=account,
+                                                comment_row=upserted_quote,
+                                                parent_job_id=job_id,
+                                                conn=comments_conn,
+                                            )
+                                            if mirror_job_id:
+                                                local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
+                                                    int(
+                                                        local_comment_stats.get("comment_media_mirror_jobs_enqueued")
+                                                        or 0
+                                                    )
+                                                    + 1
+                                                )
+                                        except Exception:
+                                            local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                                int(
+                                                    local_comment_stats.get("comment_media_mirror_job_enqueue_errors")
+                                                    or 0
+                                                )
+                                                + 1
+                                            )
+                                            logger.exception(
+                                                "[twitter] Failed to enqueue comment media mirror for quote %s",
+                                                quote_id,
+                                            )
+
+                                is_complete = _is_comment_fetch_complete(
+                                    fetch_failed=False,
+                                    fail_reason=fail_reason,
+                                    quote_fail_reason=quote_fail_reason,
+                                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                    fetched_count=(len(replies) + len(quotes)),
+                                    quotes_fetched=len(quotes),
+                                    max_comments_per_post=per_post_limit,
+                                    expected_count=expected,
+                                    expected_quotes=expected_quotes,
+                                )
+                                if is_complete:
+                                    missing_marked += _mark_missing_comments_for_anchor(
+                                        platform="twitter",
+                                        anchor_id=tweet_id,
+                                        observed_comment_ids=observed_comment_ids,
+                                        conn=comments_conn,
+                                    )
+                                    _reconcile_post_comment_count(
+                                        platform="twitter",
+                                        post_db_id=tweet_id,
+                                        conn=comments_conn,
+                                    )
+                                else:
+                                    incomplete_comment_fetches += 1
+                                    comments_mark_missing_skipped += 1
+                        except Exception:
+                            fetch_failed = True
+                            comment_errors += 1
+                            comment_fail_reasons.add("persist_exception")
+                            logger.exception("[twitter] Failed to persist replies for tweet %s", tweet_id)
+
+                    if fetch_failed:
+                        incomplete_comment_fetches += 1
+                        comments_mark_missing_skipped += 1
+                        continue
+
+                    if quote_fetch_failed:
+                        quote_fail_reason = "fetch_exception"
+                        if quote_fail_reason:
+                            quote_fail_reasons.add(quote_fail_reason)
+
+                    _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                    scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
+                    _flush_progress()
         scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
         if skipped_synced:
             logger.info("[twitter] Skipped %d tweets whose replies are already synced", skipped_synced)
@@ -10383,7 +13020,12 @@ def _ingest_twitter(
             date_end=date_end,
             include_replies=True,
             include_links=True,
-            delay_seconds=1.0,
+            delay_seconds=_resolve_platform_delay_seconds(
+                platform="twitter",
+                attempt_count=int((job_config or {}).get("_attempt_count") or 1),
+                last_error_code=(job_config or {}).get("_last_error_code"),
+                default=0.35,
+            ),
             max_pages=10,
             show_id=context.show_id,
             season_number=context.season_number,
@@ -10423,7 +13065,14 @@ def _ingest_twitter(
             activity["phase"] = "posts_filter"
             activity["posts_checked"] = scraped_post_count
             text = str(getattr(tweet, "text", "") or "")
-            if not _text_contains_any_term(text=text, hashtags=hashtag_list, keywords=keyword_list):
+            post_hashtags = _as_text_list(getattr(tweet, "hashtags", []), strip_prefix="#")
+            if not _twitter_post_matches_show_terms(
+                context=context,
+                text=text,
+                post_hashtags=post_hashtags,
+                hashtags=hashtag_list,
+                keywords=keyword_list,
+            ):
                 skipped_keyword += 1
                 _flush_progress()
                 continue
@@ -10561,214 +13210,235 @@ def _ingest_twitter(
                 anchor_posts_iter = (
                     anchor_posts if opts.max_posts_per_target <= 0 else anchor_posts[: opts.max_posts_per_target]
                 )
-                for tweet in anchor_posts_iter:
-                    tweet_id = str(getattr(tweet, "tweet_id", "") or "")
-                    if not tweet_id:
-                        continue
-                    expected_replies = _normalize_non_negative_int(getattr(tweet, "replies", 0))
-                    expected_quotes = _normalize_non_negative_int(getattr(tweet, "quotes", 0))
-                    reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
-                        expected_replies=expected_replies,
-                        expected_quotes=expected_quotes,
-                    )
-                    fetch_failed = False
-                    quote_fetch_failed = False
-                    fail_reason = ""
-                    quote_fail_reason = ""
-                    quotes: list[Any] = []
-                    observed_comment_ids: set[str] = set()
-                    local_comment_stats = _new_comment_persist_stats()
-                    try:
-                        replies = _fetch_twitter_replies_compat(
-                            scraper=scraper,
-                            tweet_id=tweet_id,
-                            delay=0.5,
-                            search_max_pages=reply_pages,
-                            twikit_max_pages=reply_pages,
-                        )[:per_post_limit]
-                        fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
-                        if fail_reason:
-                            comment_fail_reasons.add(fail_reason)
-                            if not replies:
-                                comment_errors += 1
-                    except Exception:
-                        fetch_failed = True
-                        comment_errors += 1
-                        comment_fail_reasons.add("fetch_exception")
-                        logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
-                        incomplete_comment_fetches += 1
-                        comments_mark_missing_skipped += 1
-
-                    try:
-                        quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
-                            scraper=scraper,
-                            tweet_id=tweet_id,
-                            delay=0.5,
-                            max_pages=quote_pages,
+                with pg.db_connection() as comments_conn:
+                    for anchor_index, tweet in enumerate(anchor_posts_iter, start=1):
+                        tweet_id = str(getattr(tweet, "tweet_id", "") or "")
+                        if not tweet_id:
+                            continue
+                        expected_replies = _normalize_non_negative_int(getattr(tweet, "replies", 0))
+                        expected_quotes = _normalize_non_negative_int(getattr(tweet, "quotes", 0))
+                        reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
+                            expected_replies=expected_replies,
+                            expected_quotes=expected_quotes,
                         )
-                        quotes = quotes[:per_post_limit]
-                        quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
-                        if missing_quote_method_reason:
-                            quote_fail_reason = missing_quote_method_reason
-                        if quote_fail_reason:
-                            quote_fail_reasons.add(quote_fail_reason)
-                            if not quotes:
-                                quote_errors += 1
-                    except Exception:
-                        quote_fetch_failed = True
-                        quote_errors += 1
-                        quote_fail_reason = "fetch_exception"
-                        quote_fail_reasons.add(quote_fail_reason)
-                        logger.exception("[twitter] Failed to fetch quotes for tweet %s", tweet_id)
-                    quote_stats["quotes_fetched"] += len(quotes)
-
-                    if not fetch_failed:
+                        fetch_failed = False
+                        quote_fetch_failed = False
+                        fail_reason = ""
+                        quote_fail_reason = ""
+                        quotes: list[Any] = []
+                        observed_comment_ids: set[str] = set()
+                        local_comment_stats = _new_comment_persist_stats()
                         try:
-                            with pg.db_connection() as conn:
-                                for reply in replies:
-                                    if not getattr(reply, "reply_to_tweet_id", None):
-                                        reply.reply_to_tweet_id = tweet_id
-                                    reply.is_reply = True
-                                    reply_id = str(getattr(reply, "tweet_id", "") or "")
-                                    if reply_id:
-                                        observed_comment_ids.add(reply_id)
-                                    upserted_reply = _upsert_tweet(
-                                        context,
-                                        job_id=job_id,
-                                        run_id=run_id,
-                                        account=account,
-                                        tweet=reply,
-                                        persist_stats=local_comment_stats,
-                                        conn=conn,
-                                    )
-                                    if upserted_reply:
-                                        hydrated_replies += 1
-                                        try:
-                                            mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                                context,
-                                                run_id=run_id,
-                                                source_scope=opts.source_scope,
-                                                account=account,
-                                                comment_row=upserted_reply,
-                                                parent_job_id=job_id,
-                                                conn=conn,
-                                            )
-                                            if mirror_job_id:
-                                                local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
-                                                    int(
-                                                        local_comment_stats.get("comment_media_mirror_jobs_enqueued")
-                                                        or 0
-                                                    )
-                                                    + 1
-                                                )
-                                        except Exception:
-                                            local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                                int(
-                                                    local_comment_stats.get("comment_media_mirror_job_enqueue_errors")
-                                                    or 0
-                                                )
-                                                + 1
-                                            )
-                                            logger.exception(
-                                                "[twitter] Failed to enqueue comment media mirror for reply %s",
-                                                reply_id,
-                                            )
-
-                                for quote in quotes:
-                                    quote.is_reply = False
-                                    quote.reply_to_tweet_id = None
-                                    quote.is_quote = True
-                                    if not getattr(quote, "quoted_tweet_id", None):
-                                        quote.quoted_tweet_id = tweet_id
-                                    if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
-                                        continue
-                                    quote_id = str(getattr(quote, "tweet_id", "") or "")
-                                    if quote_id:
-                                        observed_comment_ids.add(quote_id)
-                                    upserted_quote = _upsert_tweet(
-                                        context,
-                                        job_id=job_id,
-                                        run_id=run_id,
-                                        account=account,
-                                        tweet=quote,
-                                        persist_stats=None,
-                                        conn=conn,
-                                    )
-                                    if upserted_quote:
-                                        hydrated_quotes += 1
-                                        quote_stats["quotes_upserted"] += 1
-                                        try:
-                                            mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                                context,
-                                                run_id=run_id,
-                                                source_scope=opts.source_scope,
-                                                account=account,
-                                                comment_row=upserted_quote,
-                                                parent_job_id=job_id,
-                                                conn=conn,
-                                            )
-                                            if mirror_job_id:
-                                                local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
-                                                    int(
-                                                        local_comment_stats.get("comment_media_mirror_jobs_enqueued")
-                                                        or 0
-                                                    )
-                                                    + 1
-                                                )
-                                        except Exception:
-                                            local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                                int(
-                                                    local_comment_stats.get("comment_media_mirror_job_enqueue_errors")
-                                                    or 0
-                                                )
-                                                + 1
-                                            )
-                                            logger.exception(
-                                                "[twitter] Failed to enqueue comment media mirror for quote %s",
-                                                str(getattr(quote, "tweet_id", "") or ""),
-                                            )
-
-                                is_complete = _is_comment_fetch_complete(
-                                    fetch_failed=False,
-                                    fail_reason=fail_reason,
-                                    quote_fail_reason=quote_fail_reason,
-                                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                    fetched_count=(len(replies) + len(quotes)),
-                                    quotes_fetched=len(quotes),
-                                    max_comments_per_post=per_post_limit,
-                                    expected_count=(expected_replies + expected_quotes),
-                                    expected_quotes=expected_quotes,
-                                )
-                                if is_complete:
-                                    missing_marked += _mark_missing_comments_for_anchor(
-                                        platform="twitter",
-                                        anchor_id=tweet_id,
-                                        observed_comment_ids=observed_comment_ids,
-                                        conn=conn,
-                                    )
-                                    _reconcile_post_comment_count(
-                                        platform="twitter",
-                                        post_db_id=tweet_id,
-                                        conn=conn,
-                                    )
-                                else:
-                                    incomplete_comment_fetches += 1
-                                    comments_mark_missing_skipped += 1
+                            replies = _fetch_twitter_replies_compat(
+                                scraper=scraper,
+                                tweet_id=tweet_id,
+                                delay=0.5,
+                                search_max_pages=reply_pages,
+                                twikit_max_pages=reply_pages,
+                            )[:per_post_limit]
+                            fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
+                            if fail_reason:
+                                comment_fail_reasons.add(fail_reason)
+                                if not replies:
+                                    comment_errors += 1
                         except Exception:
                             fetch_failed = True
                             comment_errors += 1
-                            comment_fail_reasons.add("persist_exception")
-                            logger.exception("[twitter] Failed to persist replies for tweet %s", tweet_id)
+                            comment_fail_reasons.add("fetch_exception")
+                            logger.exception("[twitter] Failed to fetch replies for tweet %s", tweet_id)
                             incomplete_comment_fetches += 1
                             comments_mark_missing_skipped += 1
 
-                    if not fetch_failed:
-                        _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                        scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
-                        activity["phase"] = "comments_fetch"
-                        _flush_progress()
-                    if quote_fetch_failed and not quote_fail_reason:
-                        quote_fail_reasons.add("fetch_exception")
+                        try:
+                            quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
+                                scraper=scraper,
+                                tweet_id=tweet_id,
+                                delay=0.5,
+                                max_pages=quote_pages,
+                            )
+                            quotes = quotes[:per_post_limit]
+                            quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
+                            if missing_quote_method_reason:
+                                quote_fail_reason = missing_quote_method_reason
+                            if quote_fail_reason:
+                                quote_fail_reasons.add(quote_fail_reason)
+                                if not quotes:
+                                    quote_errors += 1
+                        except Exception:
+                            quote_fetch_failed = True
+                            quote_errors += 1
+                            quote_fail_reason = "fetch_exception"
+                            quote_fail_reasons.add(quote_fail_reason)
+                            logger.exception("[twitter] Failed to fetch quotes for tweet %s", tweet_id)
+                        quote_stats["quotes_fetched"] += len(quotes)
+
+                        if not fetch_failed:
+                            try:
+                                with _SavepointScope(
+                                    conn=comments_conn,
+                                    prefix="twitter_posts_comments",
+                                    index=anchor_index,
+                                ):
+                                    for reply in replies:
+                                        if not getattr(reply, "reply_to_tweet_id", None):
+                                            reply.reply_to_tweet_id = tweet_id
+                                        reply.is_reply = True
+                                        reply_id = str(getattr(reply, "tweet_id", "") or "")
+                                        if reply_id:
+                                            observed_comment_ids.add(reply_id)
+                                    persisted_replies = _upsert_tweet_batch(
+                                        context,
+                                        job_id=job_id,
+                                        run_id=run_id,
+                                        account=account,
+                                        tweets=replies,
+                                        persist_stats=local_comment_stats,
+                                        conn=comments_conn,
+                                    )
+                                    for reply in replies:
+                                        reply_id = str(getattr(reply, "tweet_id", "") or "")
+                                        upserted_reply = persisted_replies.get(reply_id)
+                                        if upserted_reply:
+                                            hydrated_replies += 1
+                                            try:
+                                                mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                                    context,
+                                                    run_id=run_id,
+                                                    source_scope=opts.source_scope,
+                                                    account=account,
+                                                    comment_row=upserted_reply,
+                                                    parent_job_id=job_id,
+                                                    conn=comments_conn,
+                                                )
+                                                if mirror_job_id:
+                                                    local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
+                                                        int(
+                                                            local_comment_stats.get(
+                                                                "comment_media_mirror_jobs_enqueued"
+                                                            )
+                                                            or 0
+                                                        )
+                                                        + 1
+                                                    )
+                                            except Exception:
+                                                local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                                    int(
+                                                        local_comment_stats.get(
+                                                            "comment_media_mirror_job_enqueue_errors"
+                                                        )
+                                                        or 0
+                                                    )
+                                                    + 1
+                                                )
+                                                logger.exception(
+                                                    "[twitter] Failed to enqueue comment media mirror for reply %s",
+                                                    reply_id,
+                                                )
+
+                                    filtered_quotes: list[Any] = []
+                                    for quote in quotes:
+                                        quote.is_reply = False
+                                        quote.reply_to_tweet_id = None
+                                        quote.is_quote = True
+                                        if not getattr(quote, "quoted_tweet_id", None):
+                                            quote.quoted_tweet_id = tweet_id
+                                        if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
+                                            continue
+                                        quote_id = str(getattr(quote, "tweet_id", "") or "")
+                                        if quote_id:
+                                            observed_comment_ids.add(quote_id)
+                                        filtered_quotes.append(quote)
+                                    persisted_quotes = _upsert_tweet_batch(
+                                        context,
+                                        job_id=job_id,
+                                        run_id=run_id,
+                                        account=account,
+                                        tweets=filtered_quotes,
+                                        persist_stats=None,
+                                        conn=comments_conn,
+                                    )
+                                    for quote in filtered_quotes:
+                                        quote_id = str(getattr(quote, "tweet_id", "") or "")
+                                        upserted_quote = persisted_quotes.get(quote_id)
+                                        if upserted_quote:
+                                            hydrated_quotes += 1
+                                            quote_stats["quotes_upserted"] += 1
+                                            try:
+                                                mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                                    context,
+                                                    run_id=run_id,
+                                                    source_scope=opts.source_scope,
+                                                    account=account,
+                                                    comment_row=upserted_quote,
+                                                    parent_job_id=job_id,
+                                                    conn=comments_conn,
+                                                )
+                                                if mirror_job_id:
+                                                    local_comment_stats["comment_media_mirror_jobs_enqueued"] = (
+                                                        int(
+                                                            local_comment_stats.get(
+                                                                "comment_media_mirror_jobs_enqueued"
+                                                            )
+                                                            or 0
+                                                        )
+                                                        + 1
+                                                    )
+                                            except Exception:
+                                                local_comment_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                                    int(
+                                                        local_comment_stats.get(
+                                                            "comment_media_mirror_job_enqueue_errors"
+                                                        )
+                                                        or 0
+                                                    )
+                                                    + 1
+                                                )
+                                                logger.exception(
+                                                    "[twitter] Failed to enqueue comment media mirror for quote %s",
+                                                    quote_id,
+                                                )
+
+                                    is_complete = _is_comment_fetch_complete(
+                                        fetch_failed=False,
+                                        fail_reason=fail_reason,
+                                        quote_fail_reason=quote_fail_reason,
+                                        auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                                        fetched_count=(len(replies) + len(quotes)),
+                                        quotes_fetched=len(quotes),
+                                        max_comments_per_post=per_post_limit,
+                                        expected_count=(expected_replies + expected_quotes),
+                                        expected_quotes=expected_quotes,
+                                    )
+                                    if is_complete:
+                                        missing_marked += _mark_missing_comments_for_anchor(
+                                            platform="twitter",
+                                            anchor_id=tweet_id,
+                                            observed_comment_ids=observed_comment_ids,
+                                            conn=comments_conn,
+                                        )
+                                        _reconcile_post_comment_count(
+                                            platform="twitter",
+                                            post_db_id=tweet_id,
+                                            conn=comments_conn,
+                                        )
+                                    else:
+                                        incomplete_comment_fetches += 1
+                                        comments_mark_missing_skipped += 1
+                            except Exception:
+                                fetch_failed = True
+                                comment_errors += 1
+                                comment_fail_reasons.add("persist_exception")
+                                logger.exception("[twitter] Failed to persist replies for tweet %s", tweet_id)
+                                incomplete_comment_fetches += 1
+                                comments_mark_missing_skipped += 1
+
+                        if not fetch_failed:
+                            _merge_comment_persist_stats(comment_stats, local_comment_stats)
+                            scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
+                            activity["phase"] = "comments_fetch"
+                            _flush_progress()
+                        if quote_fetch_failed and not quote_fail_reason:
+                            quote_fail_reasons.add("fetch_exception")
             scraped_reply_count = int(comment_stats.get("comments_fetched") or 0)
         if skipped_synced:
             logger.info("[twitter] Skipped %d posts already up-to-date", skipped_synced)
@@ -10807,6 +13477,7 @@ def _ingest_twitter(
         "resolved": int(link_preview_media_hits),
         "missing": int(link_preview_media_misses),
     }
+    retrieval_meta["strict_rhoslc_hashtag_mode"] = strict_rhoslc_hashtag_mode
     retrieval_meta["comment_stats"] = _comment_stats_payload(comment_stats)
     retrieval_meta["scrape_counters"] = {"posts": scraped_post_count, "comments": scraped_reply_count}
     retrieval_meta["persist_counters"] = {
@@ -11072,6 +13743,7 @@ def _ingest_facebook(
             include_feed=True,
             include_reels=True,
             include_photos=True,
+            max_scroll_iterations=int(os.getenv("SOCIAL_FACEBOOK_MAX_SCROLL_ITERATIONS", "50")),
         )
 
         def _on_progress(payload: dict[str, Any]) -> None:
@@ -11507,6 +14179,29 @@ def _retry_backoff_seconds(attempt_count: int) -> int:
     return max(5, min(300, 5 * (2 ** max(0, attempt_count - 1))))
 
 
+def _platform_delay_env_name(platform: str) -> str:
+    return f"SOCIAL_{str(platform or '').strip().upper()}_DELAY_SEC"
+
+
+def _resolve_platform_base_delay_seconds(platform: str, *, default: float = 0.35) -> float:
+    return _resolve_non_negative_float_env(_platform_delay_env_name(platform), default)
+
+
+def _resolve_platform_delay_seconds(
+    *,
+    platform: str,
+    attempt_count: int = 1,
+    last_error_code: str | None = None,
+    default: float = 0.35,
+) -> float:
+    base = _resolve_platform_base_delay_seconds(platform, default=default)
+    error_code = str(last_error_code or "").strip().lower()
+    attempt = max(1, int(attempt_count or 1))
+    if error_code in {"rate_limited", "blocked", "network"} and attempt > 1:
+        return min(5.0, base * (1.5 ** max(1, attempt - 1)))
+    return base
+
+
 def _safe_percent(numerator: int | float, denominator: int | float, *, precision: int = 1) -> float | None:
     den = float(denominator)
     if den <= 0:
@@ -11664,7 +14359,9 @@ def _run_platform_media_mirror_stage(
           coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', '') as hosted_thumbnail_url,
           coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
           coalesce(to_jsonb(p) ->> 'media_mirror_status', '') as media_mirror_status,
-          coalesce(to_jsonb(p) ->> 'media_mirror_error', '') as media_mirror_error
+          coalesce(to_jsonb(p) ->> 'media_mirror_error', '') as media_mirror_error,
+          coalesce(to_jsonb(p) ->> 'user_avatar_url', '') as user_avatar_url,
+          coalesce(to_jsonb(p) ->> 'hosted_user_avatar_url', '') as hosted_user_avatar_url
         from social.{table} p
         where p.season_id = %s
           and p.id = %s::uuid
@@ -11708,10 +14405,15 @@ def _run_platform_media_mirror_stage(
             mirror_selected_source = str(media_meta.get("selected_source") or "") or None
             mirror_attempts = _normalize_instagram_mirror_attempts(media_meta.get("attempts"))
 
-        needs_re_resolve = (not source_thumbnail_url and not source_media_urls) or mirror_status in {
-            "failed",
-            "partial",
-        } or source_media_needs_quality_repair
+        needs_re_resolve = (
+            (not source_thumbnail_url and not source_media_urls)
+            or mirror_status
+            in {
+                "failed",
+                "partial",
+            }
+            or source_media_needs_quality_repair
+        )
         if needs_re_resolve and source_id:
             try:
                 resolution_payload = _resolve_instagram_media_for_shortcode(shortcode=source_id)
@@ -11746,10 +14448,15 @@ def _run_platform_media_mirror_stage(
                         }
                     ]
     elif normalized_platform == "tiktok":
-        needs_re_resolve = (not source_media_urls) or mirror_status in {
-            "failed",
-            "partial",
-        } or source_media_needs_quality_repair
+        needs_re_resolve = (
+            (not source_media_urls)
+            or mirror_status
+            in {
+                "failed",
+                "partial",
+            }
+            or source_media_needs_quality_repair
+        )
         if needs_re_resolve and source_id:
             try:
                 canonical_url = str(raw_data.get("url") or "").strip() if isinstance(raw_data, dict) else ""
@@ -11773,6 +14480,29 @@ def _run_platform_media_mirror_stage(
                 source_media_asset_meta = dict(resolution_payload.get("media_asset_meta") or {})
                 if resolved_thumbnail_url:
                     source_thumbnail_url = resolved_thumbnail_url
+                    # Persist resolved thumbnail back to the post row so it's
+                    # available to the week-detail query even before S3 mirroring.
+                    try:
+                        _update_platform_post_field(
+                            platform="tiktok",
+                            post_id=post_id,
+                            field="thumbnail_url",
+                            value=resolved_thumbnail_url,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                # Persist resolved author avatar if the resolver captured one.
+                resolved_avatar_url = str(resolution_payload.get("author_avatar_url") or "").strip()
+                if resolved_avatar_url:
+                    try:
+                        _update_platform_post_field(
+                            platform="tiktok",
+                            post_id=post_id,
+                            field="user_avatar_url",
+                            value=resolved_avatar_url,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 if allow_ytdlp and canonical_url:
                     # Prefer canonical page URL so media download can use yt-dlp fallback.
                     source_media_urls = [canonical_url]
@@ -11794,10 +14524,15 @@ def _run_platform_media_mirror_stage(
                         }
                     ]
     elif normalized_platform == "youtube":
-        needs_re_resolve = (not source_media_urls) or mirror_status in {
-            "failed",
-            "partial",
-        } or source_media_needs_quality_repair
+        needs_re_resolve = (
+            (not source_media_urls)
+            or mirror_status
+            in {
+                "failed",
+                "partial",
+            }
+            or source_media_needs_quality_repair
+        )
         if needs_re_resolve and source_id:
             try:
                 resolution_payload = _resolve_youtube_media_for_video_id(video_id=source_id)
@@ -11897,7 +14632,9 @@ def _run_platform_media_mirror_stage(
                         }
                     ]
     elif normalized_platform == "threads":
-        needs_re_resolve = (not source_media_urls) or (mirror_status in {"failed", "partial"}) or source_media_needs_quality_repair
+        needs_re_resolve = (
+            (not source_media_urls) or (mirror_status in {"failed", "partial"}) or source_media_needs_quality_repair
+        )
         if needs_re_resolve and source_id:
             try:
                 from trr_backend.socials.threads import resolve_threads_media
@@ -12216,6 +14953,45 @@ def _run_platform_media_mirror_stage(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to mirror Instagram profile pics for post %s: %s", post_id, exc)
 
+    # Cross-platform author avatar mirroring (migration 0164)
+    # Mirrors one avatar per account; content-addressed S3 keys preserve old avatars.
+    avatar_mirror_result: dict[str, Any] | None = None
+    if normalized_platform != "instagram" and _platform_posts_has_column(normalized_platform, "hosted_user_avatar_url"):
+        existing_hosted_avatar = str(post_row.get("hosted_user_avatar_url") or "").strip()
+        source_avatar = str(
+            _resolve_post_avatar_url(
+                hosted_avatar_url=None,
+                direct_avatar_url=post_row.get("user_avatar_url"),
+                raw_data=post_row.get("raw_data"),
+            )
+            or ""
+        ).strip()
+        if source_avatar and not existing_hosted_avatar:
+            try:
+                post_username = str(post_row.get("post_username") or "").strip()
+                hosted_avatar = _mirror_post_author_avatar_to_s3(
+                    platform=normalized_platform,
+                    username=post_username or source_id or "unknown",
+                    source_avatar_url=source_avatar,
+                )
+                if hosted_avatar:
+                    _update_post_hosted_avatar(
+                        platform=normalized_platform,
+                        post_id=post_id,
+                        hosted_user_avatar_url=hosted_avatar,
+                    )
+                    avatar_mirror_result = {"hosted_url": hosted_avatar, "status": "mirrored"}
+                else:
+                    avatar_mirror_result = {"hosted_url": None, "status": "failed"}
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to mirror %s avatar for post %s: %s",
+                    normalized_platform,
+                    post_id,
+                    exc,
+                )
+                avatar_mirror_result = {"hosted_url": None, "status": "failed", "error": str(exc)[:240]}
+
     mirrored_assets = _normalize_non_negative_int(result.get("mirrored_count"))
     source_assets = _normalize_non_negative_int(result.get("source_count"))
     metadata = {
@@ -12239,6 +15015,12 @@ def _run_platform_media_mirror_stage(
             "error": profile_pic_result.get("profile_pic_mirror_error"),
             "owner_mirrored": bool(profile_pic_result.get("hosted_owner_profile_pic_url")),
             "tagged_mirrored": len(profile_pic_result.get("hosted_tagged_profile_pics") or {}),
+        }
+    if avatar_mirror_result:
+        metadata["avatar_mirror"] = {
+            "status": avatar_mirror_result.get("status"),
+            "mirrored": bool(avatar_mirror_result.get("hosted_url")),
+            "error": avatar_mirror_result.get("error"),
         }
     return 1, mirrored_assets, metadata
 
@@ -12649,6 +15431,7 @@ def _run_platform_stage(
                 opts=stage_opts,
                 job_id=job_id,
                 stage=stage,
+                job_config=config,
             )
         if normalized_platform == "youtube":
             return _ingest_youtube(
@@ -12660,6 +15443,7 @@ def _run_platform_stage(
                 opts=stage_opts,
                 job_id=job_id,
                 stage=stage,
+                job_config=config,
             )
         if normalized_platform == "twitter":
             return _ingest_twitter(
@@ -12673,6 +15457,7 @@ def _run_platform_stage(
                 include_reply_records=False,
                 hydrate_audience_replies=False,
                 stage=stage,
+                job_config=config,
             )
         if normalized_platform == "facebook":
             return _ingest_facebook(
@@ -12721,6 +15506,7 @@ def _run_platform_stage(
                 opts=opts,
                 job_id=job_id,
                 stage=stage,
+                job_config=config,
             )
             return posts, comments, meta
         if normalized_platform == "youtube":
@@ -12733,6 +15519,7 @@ def _run_platform_stage(
                 opts=opts,
                 job_id=job_id,
                 stage=stage,
+                job_config=config,
             )
             return posts, comments, meta
         if normalized_platform == "twitter":
@@ -12747,6 +15534,7 @@ def _run_platform_stage(
                 include_reply_records=False,
                 hydrate_audience_replies=True,
                 stage=stage,
+                job_config=config,
             )
             return posts, comments, meta
         if normalized_platform == "facebook":
@@ -12877,35 +15665,57 @@ def _run_platform_stage_via_crawlee(
     raise RuntimeError(f"Platform {normalized_platform} ingest is not supported")
 
 
-def _claim_next_job(
+def _claim_next_jobs(
     *,
     worker_id: str | None = None,
     run_id: str | None = None,
     stage: str | None = None,
     platform: str | None = None,
-) -> dict[str, Any] | None:
-    recover_stale_running_jobs(run_id=run_id, stage=stage, platform=platform, limit=25)
-    return pg.fetch_one(
+    limit: int = 1,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX))
+    run_in_flight_cap = _resolve_run_in_flight_cap()
+    return pg.fetch_all(
         """
-        with candidate as (
-          select id
+        with run_in_flight as (
+          select run_id::text as run_id, count(*)::int as in_flight
           from social.scrape_jobs
-          where status in ('queued', 'pending', 'retrying')
-            and available_at <= now()
-            and (%s::uuid is null or run_id = %s::uuid)
+          where status = 'running'
+            and run_id is not null
+          group by run_id
+        ),
+        eligible as (
+          select
+            j.id,
+            j.priority,
+            j.created_at,
+            row_number() over (
+              partition by coalesce(j.run_id::text, j.id::text)
+              order by j.priority asc, j.created_at asc
+            ) as run_rank,
+            coalesce(rif.in_flight, 0)::int as in_flight
+          from social.scrape_jobs j
+          left join run_in_flight rif on rif.run_id = j.run_id::text
+          where j.status in ('queued', 'pending', 'retrying')
+            and j.available_at <= now()
+            and (%s::uuid is null or j.run_id = %s::uuid)
             and (
               %s::text is null
-              or coalesce(config->>'stage', metadata->>'stage', job_type) = %s::text
+              or coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s::text
             )
-            and (%s::text is null or platform = %s::text)
+            and (%s::text is null or j.platform = %s::text)
             and (
-              worker_id is null
-              or worker_id = %s::text
-              or (worker_id is not null and %s::text is not null and %s::text like worker_id || '%%')
+              j.worker_id is null
+              or j.worker_id = %s::text
+              or (j.worker_id is not null and %s::text is not null and %s::text like j.worker_id || '%%')
             )
-          order by priority asc, created_at asc
-          for update skip locked
-          limit 1
+            and (j.run_id is null or coalesce(rif.in_flight, 0) < %s)
+        ),
+        candidate as (
+          select id
+          from eligible
+          order by run_rank asc, priority asc, created_at asc
+          limit %s
         )
         update social.scrape_jobs as j
         set
@@ -12917,6 +15727,7 @@ def _claim_next_job(
           attempt_count = j.attempt_count + 1
         from candidate
         where j.id = candidate.id
+          and j.status in ('queued', 'pending', 'retrying')
         returning
           j.id::text,
           j.run_id::text as run_id,
@@ -12928,10 +15739,35 @@ def _claim_next_job(
           j.attempt_count,
           j.max_attempts,
           j.source_scope,
-          j.season_id::text as season_id
+          j.season_id::text as season_id,
+          j.last_error_code
         """,
-        [run_id, run_id, stage, stage, platform, platform, worker_id, worker_id, worker_id, worker_id],
+        [
+            run_id,
+            run_id,
+            stage,
+            stage,
+            platform,
+            platform,
+            worker_id,
+            worker_id,
+            worker_id,
+            run_in_flight_cap,
+            safe_limit,
+            worker_id,
+        ],
     )
+
+
+def _claim_next_job(
+    *,
+    worker_id: str | None = None,
+    run_id: str | None = None,
+    stage: str | None = None,
+    platform: str | None = None,
+) -> dict[str, Any] | None:
+    claimed = _claim_next_jobs(worker_id=worker_id, run_id=run_id, stage=stage, platform=platform, limit=1)
+    return claimed[0] if claimed else None
 
 
 def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
@@ -12941,10 +15777,32 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
     config = dict(job.get("config") or {})
     config["_attempt_count"] = max(1, int(job.get("attempt_count") or 1))
     config["_max_attempts"] = max(1, int(job.get("max_attempts") or 1))
+    config["_last_error_code"] = str(job.get("last_error_code") or "").strip().lower() or None
     stage = str(config.get("stage") or ((job.get("metadata") or {}).get("stage")) or "posts")
     context = get_season_context(str(config.get("season_id") or job.get("season_id") or ""))
     if platform not in SUPPORTED_PLATFORMS:
-        raise ValueError(f"Unsupported platform in queued job: {platform}")
+        logger.warning(
+            "Worker %s does not support platform %s; releasing job %s back to queue",
+            worker_id, platform, job_id,
+        )
+        _finish_job(
+            job_id,
+            status="retrying",
+            items_found=0,
+            error_message=f"Platform {platform} ingest is not supported by this worker",
+            last_error_code="platform_not_supported",
+            last_error_class="WorkerCapabilityMismatch",
+            next_available_at=_now_utc(),
+        )
+        # Undo the attempt_count bump since this isn't a real attempt failure
+        pg.execute(
+            "UPDATE social.scrape_jobs SET attempt_count = greatest(0, attempt_count - 1) WHERE id = %s",
+            [job_id],
+        )
+        return pg.fetch_one(
+            "SELECT id::text, run_id::text as run_id, platform, job_type, status, items_found, error_message, metadata FROM social.scrape_jobs WHERE id = %s",
+            [job_id],
+        ) or {}
     sync_strategy = str(config.get("sync_strategy") or "incremental").strip().lower()
     if sync_strategy not in SUPPORTED_SYNC_STRATEGIES:
         sync_strategy = "incremental"
@@ -13004,7 +15862,9 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
     account = str(config.get("account") or "")
     hashtags = [str(item).strip().lstrip("#") for item in (config.get("hashtags") or []) if str(item).strip()]
     keywords = [str(item).strip() for item in (config.get("keywords") or []) if str(item).strip()]
-    use_crawlee = should_use_crawlee(platform) and stage in {"posts", "comments"} and normalized_mode != "details_refresh"
+    use_crawlee = (
+        should_use_crawlee(platform) and stage in {"posts", "comments"} and normalized_mode != "details_refresh"
+    )
     crawlee_active_execution = False
     crawlee_fallback_to_legacy = False
     runtime_config = build_runtime_config(platform)
@@ -13322,7 +16182,10 @@ def _fetch_next_preclaimed_job(
         from social.scrape_jobs
         where status = 'running'
           and run_id = %s::uuid
-          and worker_id = %s
+          and (
+            worker_id = %s
+            or (%s::text is not null and %s::text like worker_id || '%%')
+          )
           and (
             %s::text is null
             or coalesce(config->>'stage', metadata->>'stage', job_type) = %s::text
@@ -13331,7 +16194,7 @@ def _fetch_next_preclaimed_job(
         order by priority asc, created_at asc
         limit 1
         """,
-        [run_id, worker_id, stage, stage, platform, platform],
+        [run_id, worker_id, worker_id, worker_id, stage, stage, platform, platform],
     )
 
 
@@ -13342,14 +16205,26 @@ def execute_run(
     stage: str | None = None,
     platform: str | None = None,
 ) -> dict[str, Any]:
-    platform = _normalize_platform_name(platform)
+    platform = _normalize_platform_name(platform) or None
     _set_run_status(run_id, "running")
+    claim_batch_size = _resolve_job_claim_batch_size()
+    claimed_jobs: list[dict[str, Any]] = []
     while True:
-        recover_stale_running_jobs(run_id=run_id, stage=stage, platform=platform, limit=25)
-        job = _claim_next_job(worker_id=worker_id, run_id=run_id, stage=stage, platform=platform)
+        if not claimed_jobs:
+            claimed_jobs = _claim_next_jobs(
+                worker_id=worker_id,
+                run_id=run_id,
+                stage=stage,
+                platform=platform,
+                limit=claim_batch_size,
+            )
+        job = claimed_jobs.pop(0) if claimed_jobs else None
         if not job and worker_id:
             job = _fetch_next_preclaimed_job(
-                worker_id=worker_id, run_id=run_id, stage=stage, platform=platform,
+                worker_id=worker_id,
+                run_id=run_id,
+                stage=stage,
+                platform=platform,
             )
         if not job:
             break
@@ -13385,13 +16260,38 @@ def execute_run(
 
 
 def process_next_queued_job(
-    *, worker_id: str, stage: str | None = None, platform: str | None = None
+    *,
+    worker_id: str,
+    stage: str | None = None,
+    platform: str | None = None,
 ) -> dict[str, Any] | None:
-    platform = _normalize_platform_name(platform)
-    recover_stale_running_jobs(run_id=None, stage=stage, platform=platform, limit=25)
+    platform = _normalize_platform_name(platform) or None
     job = _claim_next_job(worker_id=worker_id, run_id=None, stage=stage, platform=platform)
     if not job:
         return None
+    return _execute_claimed_job(job, worker_id=worker_id)
+
+
+def claim_next_queued_jobs(
+    *,
+    worker_id: str,
+    stage: str | None = None,
+    platform: str | None = None,
+    run_id: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    normalized_platform = _normalize_platform_name(platform) or None
+    safe_limit = _resolve_job_claim_batch_size(limit)
+    return _claim_next_jobs(
+        worker_id=worker_id,
+        run_id=run_id,
+        stage=stage,
+        platform=normalized_platform,
+        limit=safe_limit,
+    )
+
+
+def process_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
     return _execute_claimed_job(job, worker_id=worker_id)
 
 
@@ -13414,6 +16314,12 @@ def ingest_season(
     comment_refresh_policy: str = DEFAULT_COMMENT_REFRESH_POLICY,
     comment_anchor_source_ids: dict[str, list[str]] | None = None,
     sound_ids: list[str] | None = None,
+    runner_strategy: str | None = None,
+    runner_count: int | None = None,
+    window_shard_hours: int | None = None,
+    runner_b_start_offset_hours: int | None = None,
+    day_weight_profile: str | None = None,
+    priority_mode: str | None = None,
     initiated_by: str | None,
     inline_worker_id: str | None = None,
 ) -> dict[str, Any]:
@@ -13494,9 +16400,20 @@ def ingest_season(
         comment_anchor_source_ids=normalized_comment_anchor_source_ids or None,
         sound_ids=normalized_sound_ids or None,
     )
+    schedule = _build_ingest_shard_schedule(
+        date_start=opts.date_start,
+        date_end=opts.date_end,
+        runner_strategy=runner_strategy,
+        runner_count=runner_count,
+        window_shard_hours=window_shard_hours,
+        runner_b_start_offset_hours=runner_b_start_offset_hours,
+        day_weight_profile=day_weight_profile,
+        priority_mode=priority_mode,
+    )
 
     targets_payload = get_targets(season_id, source_scope=source_scope)
     targets_by_platform: dict[str, dict[str, list[str]]] = {}
+    configured_target_platforms: set[str] = set()
     for target in targets_payload.get("targets", []):
         if not target.get("is_active", True):
             continue
@@ -13511,10 +16428,17 @@ def ingest_season(
             continue
         if platform_filter and target_platform not in platform_filter:
             continue
+        configured_target_platforms.add(target_platform)
         bucket = targets_by_platform.setdefault(target_platform, {"accounts": [], "hashtags": [], "keywords": []})
-        bucket["accounts"].extend([str(item or "").strip() for item in (target.get("accounts") or []) if str(item or "").strip()])
-        bucket["hashtags"].extend([str(item or "").strip() for item in (target.get("hashtags") or []) if str(item or "").strip()])
-        bucket["keywords"].extend([str(item or "").strip() for item in (target.get("keywords") or []) if str(item or "").strip()])
+        bucket["accounts"].extend(
+            [str(item or "").strip() for item in (target.get("accounts") or []) if str(item or "").strip()]
+        )
+        bucket["hashtags"].extend(
+            [str(item or "").strip() for item in (target.get("hashtags") or []) if str(item or "").strip()]
+        )
+        bucket["keywords"].extend(
+            [str(item or "").strip() for item in (target.get("keywords") or []) if str(item or "").strip()]
+        )
 
     for platform_name in sorted(platform_filter):
         targets_by_platform.setdefault(platform_name, {"accounts": [], "hashtags": [], "keywords": []})
@@ -13553,6 +16477,38 @@ def ingest_season(
                 *normalized_keywords_override,
                 *fallback_keywords,
             ]
+        )
+        if platform == "instagram":
+            normalized_accounts = _ensure_rhoslc_instagram_accounts(context, normalized_accounts)
+            hashtags = _ensure_rhoslc_instagram_hashtags(context, hashtags)
+        elif platform == "twitter":
+            normalized_accounts = _ensure_rhoslc_twitter_accounts(context, normalized_accounts)
+            hashtags = _ensure_rhoslc_twitter_hashtags(context, hashtags)
+        normalized_accounts = _ensure_bravo_core_platform_accounts(
+            source_scope=source_scope,
+            platform=platform,
+            accounts=normalized_accounts,
+        )
+        if not normalized_accounts and platform in platform_filter and platform in configured_target_platforms:
+            default_accounts = _default_platform_accounts(platform)
+            if default_accounts:
+                logger.info(
+                    "No %s accounts configured for season=%s; using default accounts: %s",
+                    platform,
+                    context.season_id,
+                    default_accounts,
+                )
+                normalized_accounts = default_accounts
+        if platform == "instagram":
+            normalized_accounts = _ensure_rhoslc_instagram_accounts(context, normalized_accounts)
+            hashtags = _ensure_rhoslc_instagram_hashtags(context, hashtags)
+        elif platform == "twitter":
+            normalized_accounts = _ensure_rhoslc_twitter_accounts(context, normalized_accounts)
+            hashtags = _ensure_rhoslc_twitter_hashtags(context, hashtags)
+        normalized_accounts = _ensure_bravo_core_platform_accounts(
+            source_scope=source_scope,
+            platform=platform,
+            accounts=normalized_accounts,
         )
         if normalized_accounts:
             effective_targets.append(
@@ -13595,6 +16551,12 @@ def ingest_season(
         "comment_anchor_source_ids": _serialize_comment_anchor_source_ids(opts.comment_anchor_source_ids),
         "comment_anchor_source_ids_overflow_platforms": sorted(overflow_platforms),
         "sound_ids": list(opts.sound_ids or []),
+        "runner_strategy": schedule.strategy,
+        "runner_count": schedule.runner_count,
+        "window_shard_hours": schedule.window_shard_hours,
+        "runner_b_start_offset_hours": schedule.runner_b_offset_hours,
+        "day_weight_profile": schedule.day_weight_profile,
+        "priority_mode": schedule.priority_mode,
     }
     run_id = _create_run(
         context,
@@ -13608,80 +16570,181 @@ def ingest_season(
     initial_job_status = "queued" if queue_enabled else "pending"
     job_ids: list[str] = []
     skipped_comment_jobs = 0
+    created_total_jobs = 0
+    created_completed_jobs = 0
+    created_failed_jobs = 0
+    created_active_jobs = 0
+    created_items_found_total = 0
+    created_stage_counts: dict[str, dict[str, int]] = {}
+    posts_shards = list(schedule.shards)
+    if normalized_mode != "comments_only" and not posts_shards:
+        fallback_start = _coerce_dt(opts.date_start)
+        fallback_end = _coerce_dt(opts.date_end)
+        if fallback_start and fallback_end and fallback_end < fallback_start:
+            fallback_end = fallback_start
+        if fallback_start is None:
+            fallback_start = _now_utc()
+        if fallback_end is None or fallback_end < fallback_start:
+            fallback_end = fallback_start
+        posts_shards = [
+            IngestTimeShard(
+                shard_index=0,
+                window_start=fallback_start,
+                window_end=fallback_end,
+                runner_lane="A",
+                priority_score=0.0,
+                day_offset=0,
+                day_weight=1.0,
+            )
+        ]
+    shard_priority_by_index: dict[int, int] = {}
+    for rank, shard in enumerate(
+        sorted(posts_shards, key=lambda candidate: (candidate.priority_score, candidate.shard_index))
+    ):
+        shard_priority_by_index[shard.shard_index] = 100 + rank
+    runner_b_available_at: datetime | None = None
+    if schedule.run_start is not None and schedule.runner_b_offset_hours > 0 and schedule.runner_count > 1:
+        runner_b_available_at = schedule.run_start + timedelta(hours=schedule.runner_b_offset_hours)
 
-    for target in effective_targets:
-        platform = str(target.get("platform") or "")
-        accounts = [str(item).strip() for item in (target.get("accounts") or []) if str(item).strip()]
-        hashtags = _normalize_unique_terms([str(item).strip().lstrip("#") for item in (target.get("hashtags") or []) if str(item).strip()])
-        keywords = _normalize_unique_terms([str(item).strip() for item in (target.get("keywords") or []) if str(item).strip()])
-        platform_source_ids = normalized_comment_anchor_source_ids.get(platform)
-        platform_has_explicit_targets = platform in normalized_comment_anchor_source_ids
-        platform_source_ids_list = sorted(platform_source_ids) if platform_source_ids is not None else None
-        for account in accounts:
-            base_config = {
-                "run_id": run_id,
-                "season_id": context.season_id,
-                "show_id": context.show_id,
-                "platform": platform,
-                "source_scope": source_scope,
-                "account": account,
-                "hashtags": hashtags,
-                "keywords": keywords,
-                "date_start": _iso(opts.date_start),
-                "date_end": _iso(opts.date_end),
-                "sync_strategy": opts.sync_strategy,
-                "max_posts_per_target": opts.max_posts_per_target,
-                "max_comments_per_post": opts.max_comments_per_post,
-                "max_replies_per_post": opts.max_replies_per_post,
-                "fetch_replies": opts.fetch_replies,
-                "ingest_mode": opts.ingest_mode,
-                "comment_refresh_policy": opts.comment_refresh_policy,
-                "sound_ids": list(opts.sound_ids or []),
-            }
-            if platform_has_explicit_targets:
-                base_config["comment_anchor_source_ids"] = platform_source_ids_list
-            if normalized_mode != "comments_only":
-                job_ids.append(
-                    _create_job(
-                        context,
-                        run_id=run_id,
-                        platform=platform,
-                        source_scope=source_scope,
-                        job_type="posts",
-                        stage="posts",
-                        config={**base_config, "stage": "posts"},
-                        initiated_by=initiated_by,
-                        status=initial_job_status,
-                        priority=100,
-                        worker_id=inline_worker_id,
-                        preclaim=bool(inline_worker_id),
+    with nullcontext(None) as enqueue_conn:
+        for target in effective_targets:
+            platform = str(target.get("platform") or "")
+            accounts = [str(item).strip() for item in (target.get("accounts") or []) if str(item).strip()]
+            hashtags = _normalize_unique_terms(
+                [str(item).strip().lstrip("#") for item in (target.get("hashtags") or []) if str(item).strip()]
+            )
+            keywords = _normalize_unique_terms(
+                [str(item).strip() for item in (target.get("keywords") or []) if str(item).strip()]
+            )
+            platform_source_ids = normalized_comment_anchor_source_ids.get(platform)
+            platform_has_explicit_targets = platform in normalized_comment_anchor_source_ids
+            platform_source_ids_list = sorted(platform_source_ids) if platform_source_ids is not None else None
+            for account in accounts:
+                base_config = {
+                    "run_id": run_id,
+                    "season_id": context.season_id,
+                    "show_id": context.show_id,
+                    "platform": platform,
+                    "source_scope": source_scope,
+                    "account": account,
+                    "hashtags": hashtags,
+                    "keywords": keywords,
+                    "date_start": _iso(opts.date_start),
+                    "date_end": _iso(opts.date_end),
+                    "sync_strategy": opts.sync_strategy,
+                    "max_posts_per_target": opts.max_posts_per_target,
+                    "max_comments_per_post": opts.max_comments_per_post,
+                    "max_replies_per_post": opts.max_replies_per_post,
+                    "fetch_replies": opts.fetch_replies,
+                    "ingest_mode": opts.ingest_mode,
+                    "comment_refresh_policy": opts.comment_refresh_policy,
+                    "sound_ids": list(opts.sound_ids or []),
+                    "runner_strategy": schedule.strategy,
+                    "runner_count": schedule.runner_count,
+                    "window_shard_hours": schedule.window_shard_hours,
+                    "runner_b_start_offset_hours": schedule.runner_b_offset_hours,
+                    "day_weight_profile": schedule.day_weight_profile,
+                    "priority_mode": schedule.priority_mode,
+                }
+                if platform_has_explicit_targets:
+                    base_config["comment_anchor_source_ids"] = platform_source_ids_list
+                if normalized_mode != "comments_only":
+                    for shard in posts_shards:
+                        available_at = (
+                            runner_b_available_at
+                            if shard.runner_lane == "B" and runner_b_available_at is not None
+                            else None
+                        )
+                        job_ids.append(
+                            _create_job(
+                                context,
+                                run_id=run_id,
+                                platform=platform,
+                                source_scope=source_scope,
+                                job_type="posts",
+                                stage="posts",
+                                config={
+                                    **base_config,
+                                    "stage": "posts",
+                                    "date_start": _iso(shard.window_start),
+                                    "date_end": _iso(shard.window_end),
+                                    "window_start": _iso(shard.window_start),
+                                    "window_end": _iso(shard.window_end),
+                                    "shard_index": shard.shard_index,
+                                    "runner_lane": shard.runner_lane,
+                                    "priority_score": shard.priority_score,
+                                    "day_offset": shard.day_offset,
+                                    "day_weight": shard.day_weight,
+                                },
+                                initiated_by=initiated_by,
+                                status=initial_job_status,
+                                priority=shard_priority_by_index.get(shard.shard_index, 100),
+                                worker_id=inline_worker_id,
+                                preclaim=bool(inline_worker_id),
+                                available_at=available_at,
+                                conn=enqueue_conn,
+                                track_run_counters=False,
+                            )
+                        )
+                        created_total_jobs += 1
+                        if _status_is_active(initial_job_status):
+                            created_active_jobs += 1
+                        created_stage_counts = _increment_stage_counter(
+                            created_stage_counts,
+                            stage="posts",
+                            key="total",
+                            delta=1,
+                        )
+                        if _status_is_active(initial_job_status):
+                            created_stage_counts = _increment_stage_counter(
+                                created_stage_counts,
+                                stage="posts",
+                                key="active",
+                                delta=1,
+                            )
+                if normalized_mode in {"posts_and_comments", "comments_only"} and opts.max_comments_per_post > 0:
+                    if (
+                        normalized_mode == "comments_only"
+                        and opts.comment_refresh_policy == "missing_only"
+                        and platform_has_explicit_targets
+                        and not platform_source_ids_list
+                    ):
+                        skipped_comment_jobs += 1
+                        continue
+                    job_ids.append(
+                        _create_job(
+                            context,
+                            run_id=run_id,
+                            platform=platform,
+                            source_scope=source_scope,
+                            job_type="comments",
+                            stage="comments",
+                            config={**base_config, "stage": "comments"},
+                            initiated_by=initiated_by,
+                            status=initial_job_status,
+                            priority=200,
+                            worker_id=inline_worker_id,
+                            preclaim=bool(inline_worker_id),
+                            conn=enqueue_conn,
+                            track_run_counters=False,
+                        )
                     )
-                )
-            if normalized_mode in {"posts_and_comments", "comments_only"} and opts.max_comments_per_post > 0:
-                if (
-                    normalized_mode == "comments_only"
-                    and opts.comment_refresh_policy == "missing_only"
-                    and platform_has_explicit_targets
-                    and not platform_source_ids_list
-                ):
-                    skipped_comment_jobs += 1
-                    continue
-                job_ids.append(
-                    _create_job(
-                        context,
-                        run_id=run_id,
-                        platform=platform,
-                        source_scope=source_scope,
-                        job_type="comments",
+                    created_total_jobs += 1
+                    if _status_is_active(initial_job_status):
+                        created_active_jobs += 1
+                    created_stage_counts = _increment_stage_counter(
+                        created_stage_counts,
                         stage="comments",
-                        config={**base_config, "stage": "comments"},
-                        initiated_by=initiated_by,
-                        status=initial_job_status,
-                        priority=200,
-                        worker_id=inline_worker_id,
-                        preclaim=bool(inline_worker_id),
+                        key="total",
+                        delta=1,
                     )
-                )
+                    if _status_is_active(initial_job_status):
+                        created_stage_counts = _increment_stage_counter(
+                            created_stage_counts,
+                            stage="comments",
+                            key="active",
+                            delta=1,
+                        )
 
     if not job_ids:
         try:
@@ -13690,7 +16753,9 @@ def ingest_season(
             normalized_run_id = None
         if normalized_run_id:
             try:
-                pg.fetch_one("delete from social.scrape_runs where id = %s::uuid returning id::text", [normalized_run_id])
+                pg.fetch_one(
+                    "delete from social.scrape_runs where id = %s::uuid returning id::text", [normalized_run_id]
+                )
             except Exception:
                 logger.debug(
                     "Unable to cleanup empty ingest run %s due to database unavailability",
@@ -13702,7 +16767,20 @@ def ingest_season(
             "No ingest jobs were created for the requested targets and options",
         )
 
-    summary = _update_run_summary(run_id)
+    if _run_counter_columns_ready():
+        with pg.db_connection() as conn:
+            summary = _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=run_id,
+                total_jobs=created_total_jobs,
+                completed_jobs=created_completed_jobs,
+                failed_jobs=created_failed_jobs,
+                active_jobs=created_active_jobs,
+                items_found_total=created_items_found_total,
+                stage_counts=created_stage_counts,
+            )
+    else:
+        summary = _update_run_summary(run_id)
     if skipped_comment_jobs:
         summary = dict(summary or {})
         summary["skipped_comment_jobs"] = skipped_comment_jobs
@@ -13716,6 +16794,173 @@ def ingest_season(
         "stages": stage_plan,
         "queued_or_started_jobs": len(job_ids),
         "summary": summary,
+    }
+
+
+def preview_ingest_schedule(
+    season_id: str,
+    *,
+    platforms: list[str] | None,
+    source_scope: str,
+    accounts_override: list[str] | None = None,
+    ingest_mode: str = "posts_and_comments",
+    max_comments_per_post: int | None = None,
+    date_start: datetime | None = None,
+    date_end: datetime | None = None,
+    runner_strategy: str | None = None,
+    runner_count: int | None = None,
+    window_shard_hours: int | None = None,
+    runner_b_start_offset_hours: int | None = None,
+    day_weight_profile: str | None = None,
+    priority_mode: str | None = None,
+) -> dict[str, Any]:
+    context = get_season_context(season_id)
+    if source_scope not in SUPPORTED_SCOPES:
+        raise ValueError(f"Unsupported source scope: {source_scope}")
+    normalized_mode = (ingest_mode or "posts_and_comments").strip().lower()
+    if normalized_mode not in SUPPORTED_INGEST_MODES:
+        raise ValueError(f"Unsupported ingest mode: {ingest_mode}")
+    requested_platforms = _resolve_requested_platforms(platforms)
+
+    normalized_accounts_override: list[str] = []
+    invalid_overrides: list[str] = []
+    for raw_account in [str(item or "").strip() for item in (accounts_override or []) if str(item or "").strip()]:
+        normalized = _normalize_account_handle(raw_account)
+        if not normalized:
+            invalid_overrides.append(raw_account)
+            continue
+        if normalized in normalized_accounts_override:
+            continue
+        normalized_accounts_override.append(normalized)
+    if invalid_overrides:
+        raise SocialIngestValidationError(
+            "INVALID_ACCOUNT_HANDLE",
+            f"Invalid account handle override(s): {', '.join(sorted(set(invalid_overrides)))}",
+        )
+
+    schedule = _build_ingest_shard_schedule(
+        date_start=date_start,
+        date_end=date_end,
+        runner_strategy=runner_strategy,
+        runner_count=runner_count,
+        window_shard_hours=window_shard_hours,
+        runner_b_start_offset_hours=runner_b_start_offset_hours,
+        day_weight_profile=day_weight_profile,
+        priority_mode=priority_mode,
+    )
+    projected_shards = list(schedule.shards)
+    if normalized_mode != "comments_only" and not projected_shards:
+        fallback_start = _coerce_dt(date_start) or _now_utc()
+        fallback_end = _coerce_dt(date_end)
+        if fallback_end is None or fallback_end < fallback_start:
+            fallback_end = fallback_start
+        projected_shards = [
+            IngestTimeShard(
+                shard_index=0,
+                window_start=fallback_start,
+                window_end=fallback_end,
+                runner_lane="A",
+                priority_score=0.0,
+                day_offset=0,
+                day_weight=1.0,
+            )
+        ]
+
+    account_map = _target_accounts_by_platform(season_id, source_scope=source_scope, context=context)
+    effective_accounts_by_platform: dict[str, list[str]] = {}
+    for platform in requested_platforms:
+        merged_accounts = _normalize_unique_terms(
+            [
+                *sorted(account_map.get(platform, set())),
+                *normalized_accounts_override,
+            ]
+        )
+        if platform == "instagram":
+            merged_accounts = _ensure_rhoslc_instagram_accounts(context, merged_accounts)
+        elif platform == "twitter":
+            merged_accounts = _ensure_rhoslc_twitter_accounts(context, merged_accounts)
+        merged_accounts = _ensure_bravo_core_platform_accounts(
+            source_scope=source_scope,
+            platform=platform,
+            accounts=merged_accounts,
+        )
+        if not merged_accounts:
+            merged_accounts = _default_platform_accounts(platform)
+        effective_accounts_by_platform[platform] = merged_accounts
+
+    projected_posts_jobs = 0
+    projected_comments_jobs = 0
+    per_platform_counts: dict[str, dict[str, int]] = {}
+    for platform in requested_platforms:
+        account_count = len(effective_accounts_by_platform.get(platform) or [])
+        posts_jobs = account_count * (len(projected_shards) if normalized_mode != "comments_only" else 0)
+        comments_jobs = (
+            account_count
+            if normalized_mode in {"posts_and_comments", "comments_only"} and int(max_comments_per_post or 0) > 0
+            else 0
+        )
+        projected_posts_jobs += posts_jobs
+        projected_comments_jobs += comments_jobs
+        per_platform_counts[platform] = {
+            "accounts": account_count,
+            "posts_jobs": posts_jobs,
+            "comments_jobs": comments_jobs,
+        }
+
+    day_weights_payload = {f"D+{offset}": round(weight, 4) for offset, weight in sorted(schedule.day_weights.items())}
+    dominant_day = max(schedule.day_weights.items(), key=lambda item: item[1])[0] if schedule.day_weights else 0
+    lane_a = [shard for shard in projected_shards if shard.runner_lane == "A"]
+    lane_b = [shard for shard in projected_shards if shard.runner_lane == "B"]
+    return {
+        "season_id": context.season_id,
+        "show_id": context.show_id,
+        "season_number": context.season_number,
+        "source_scope": source_scope,
+        "ingest_mode": normalized_mode,
+        "scheduler": {
+            "strategy": schedule.strategy,
+            "runner_count": schedule.runner_count,
+            "window_shard_hours": schedule.window_shard_hours,
+            "runner_b_start_offset_hours": schedule.runner_b_offset_hours,
+            "day_weight_profile": schedule.day_weight_profile,
+            "priority_mode": schedule.priority_mode,
+            "busiest_day": f"D+{dominant_day}",
+            "day_weights": day_weights_payload,
+        },
+        "date_window": {
+            "start": _iso(_coerce_dt(date_start)),
+            "end": _iso(_coerce_dt(date_end)),
+        },
+        "projected_counts": {
+            "posts_jobs": projected_posts_jobs,
+            "comments_jobs": projected_comments_jobs,
+            "total_jobs": projected_posts_jobs + projected_comments_jobs,
+            "by_platform": per_platform_counts,
+        },
+        "lanes": {
+            "A": [
+                {
+                    "shard_index": shard.shard_index,
+                    "window_start": _iso(shard.window_start),
+                    "window_end": _iso(shard.window_end),
+                    "priority_score": shard.priority_score,
+                    "day_offset": shard.day_offset,
+                    "day_weight": shard.day_weight,
+                }
+                for shard in lane_a
+            ],
+            "B": [
+                {
+                    "shard_index": shard.shard_index,
+                    "window_start": _iso(shard.window_start),
+                    "window_end": _iso(shard.window_end),
+                    "priority_score": shard.priority_score,
+                    "day_offset": shard.day_offset,
+                    "day_weight": shard.day_weight,
+                }
+                for shard in lane_b
+            ],
+        },
     }
 
 
@@ -13758,7 +17003,7 @@ def cancel_run(season_id: str, run_id: str, *, cancelled_by: str | None = None) 
         """,
         [run_id],
     )
-    summary = _update_run_summary(run_id)
+    summary = _update_run_summary(run_id, force_recompute=True)
     _invalidate_week_detail_cache_after_run_terminal_status()
     return {
         "run_id": run_id,
@@ -15677,11 +18922,7 @@ def _rows_for_platform(
         if not relevant_post_db_ids:
             return []
 
-        return [
-            row
-            for row in rows
-            if str(row.get("post_db_id") or "").strip() in relevant_post_db_ids
-        ]
+        return [row for row in rows if str(row.get("post_db_id") or "").strip() in relevant_post_db_ids]
 
     return []
 
@@ -15833,15 +19074,9 @@ def _compute_post_metadata(
             else None
         )
 
-        has_tags_expr = (
-            f"({hashtag_json_expr} or {hashtag_regex_expr})"
-            if hashtag_json_expr
-            else hashtag_regex_expr
-        )
+        has_tags_expr = f"({hashtag_json_expr} or {hashtag_regex_expr})" if hashtag_json_expr else hashtag_regex_expr
         has_mentions_expr = (
-            f"({mention_json_expr} or {mention_regex_expr})"
-            if mention_json_expr
-            else mention_regex_expr
+            f"({mention_json_expr} or {mention_regex_expr})" if mention_json_expr else mention_regex_expr
         )
 
         selects = [
@@ -15851,9 +19086,7 @@ def _compute_post_metadata(
             f"count(*) filter (where {has_mentions_expr}) as has_mentions",
         ]
         if collaborators_json_expr:
-            selects.append(
-                f"count(*) filter (where {collaborators_json_expr}) as has_collaborators"
-            )
+            selects.append(f"count(*) filter (where {collaborators_json_expr}) as has_collaborators")
         if media_type_col:
             selects.append(f"coalesce(nullif(trim(p.{media_type_col}), ''), 'other') as mtype")
             group_by = f"group by coalesce(nullif(trim(p.{media_type_col}), ''), 'other')"
@@ -15913,11 +19146,18 @@ def _compute_post_metadata(
 
     # Normalize raw media_type codes to canonical labels
     media_type_normalize: dict[str, str] = {
-        "1": "photo", "2": "photo", "image": "photo",
-        "8": "video", "reel": "video",
-        "19": "album", "carousel": "album", "carousel_album": "album",
+        "1": "photo",
+        "2": "photo",
+        "image": "photo",
+        "8": "video",
+        "reel": "video",
+        "19": "album",
+        "carousel": "album",
+        "carousel_album": "album",
         "sidecar": "album",
-        "graphimage": "photo", "graphvideo": "video", "graphsidecar": "album",
+        "graphimage": "photo",
+        "graphvideo": "video",
+        "graphsidecar": "album",
     }
     normalized_counts: dict[str, int] = {}
     for raw_key, count in content_type_counts.items():
@@ -15927,11 +19167,13 @@ def _compute_post_metadata(
     # Build content type buckets
     buckets = []
     for key, count in sorted(normalized_counts.items(), key=lambda kv: -kv[1]):
-        buckets.append({
-            "key": key,
-            "count": count,
-            "pct": round((count * 100.0) / total_posts, 1) if total_posts > 0 else None,
-        })
+        buckets.append(
+            {
+                "key": key,
+                "count": count,
+                "pct": round((count * 100.0) / total_posts, 1) if total_posts > 0 else None,
+            }
+        )
 
     return {
         "total_posts": total_posts,
@@ -16263,7 +19505,10 @@ def get_analytics(
         )
     except Exception as exc:
         exc_text = str(exc).lower()
-        if exc_text.startswith("database pool initialization failed") or "invalid input syntax for type uuid" in exc_text:
+        if (
+            exc_text.startswith("database pool initialization failed")
+            or "invalid input syntax for type uuid" in exc_text
+        ):
             logger.debug("Skipping data quality post metadata due unavailable database URL")
             post_metadata = None
         else:
@@ -17244,7 +20489,9 @@ def _comments_coverage_for_platform(
                 """,
                 [post_ids],
             )
-            saved_counts = {str(item.get("post_id") or ""): int(item.get("saved_comments") or 0) for item in comment_rows}
+            saved_counts = {
+                str(item.get("post_id") or ""): int(item.get("saved_comments") or 0) for item in comment_rows
+            }
         else:
             saved_counts = {}
         posts_scanned = len(post_ids)
@@ -17437,9 +20684,7 @@ def _mirror_coverage_for_platform(
     )
     threads_text_expr = "coalesce(p.text, '')" if normalized_platform == "threads" else "''::text"
     threads_raw_data_expr = (
-        "coalesce(to_jsonb(p) -> 'raw_data', '{}'::jsonb)"
-        if normalized_platform == "threads"
-        else "'{}'::jsonb"
+        "coalesce(to_jsonb(p) -> 'raw_data', '{}'::jsonb)" if normalized_platform == "threads" else "'{}'::jsonb"
     )
     twitter_root_filter = "and p.is_reply = false" if normalized_platform == "twitter" else ""
     params: list[Any] = [season_id, start_dt, end_dt]
@@ -17742,7 +20987,15 @@ _MENTION_RE = re.compile(r"@([\w.]+)")
 _HASHTAG_RE = re.compile(r"(?<![\w.])#([A-Za-z0-9_]+)")
 WeekDetailSortField = Literal["engagement", "likes", "views", "comments_count", "shares", "retweets", "posted_at"]
 WeekDetailSortDir = Literal["asc", "desc"]
-WEEK_DETAIL_SORT_FIELDS: set[str] = {"engagement", "likes", "views", "comments_count", "shares", "retweets", "posted_at"}
+WEEK_DETAIL_SORT_FIELDS: set[str] = {
+    "engagement",
+    "likes",
+    "views",
+    "comments_count",
+    "shares",
+    "retweets",
+    "posted_at",
+}
 WEEK_DETAIL_SORT_DIRS: set[str] = {"asc", "desc"}
 
 
@@ -17871,9 +21124,7 @@ def _instagram_cover_source_from_post_row(post_row: dict[str, Any]) -> tuple[str
 
     normalized_thumb = _normalize_media_url_for_compare(thumbnail_url)
     normalized_video_urls = {
-        normalized
-        for normalized in (_normalize_media_url_for_compare(url) for url in video_urls)
-        if normalized
+        normalized for normalized in (_normalize_media_url_for_compare(url) for url in video_urls) if normalized
     }
     if normalized_thumb and normalized_thumb in normalized_video_urls:
         return "still_frame_or_default", "low"
@@ -17967,8 +21218,11 @@ def _week_detail_instagram(
           {duration_expr} as duration_seconds,
           nullif(coalesce(to_jsonb(p) ->> 'owner_profile_pic_url', ''), '') as owner_profile_pic_url,
           nullif(coalesce(to_jsonb(p) ->> 'hosted_owner_profile_pic_url', ''), '') as hosted_owner_profile_pic_url,
+          nullif(coalesce(to_jsonb(p) ->> 'owner_full_name', ''), '') as owner_full_name,
           coalesce(to_jsonb(p) -> 'hosted_tagged_profile_pics', '{{}}'::jsonb) as hosted_tagged_profile_pics,
+          coalesce(to_jsonb(p) -> 'tagged_users_detail', '[]'::jsonb) as tagged_users_detail,
           coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+          coalesce(to_jsonb(p) -> 'child_posts_data', '[]'::jsonb) as child_posts_data,
           coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data,
           {mirror_attempt_count_expr} as media_mirror_attempt_count,
           {mirror_last_attempt_at_expr} as media_mirror_last_attempt_at,
@@ -18066,14 +21320,47 @@ def _week_detail_instagram(
             mentions = _parse_mentions(p.get("text"))
         profile_tags = _json_text_list(p.get("profile_tags"), prefix="@", strip_prefix="@")
         collaborators = _json_text_list(p.get("collaborators"), prefix="@", strip_prefix="@")
-        owner_profile_pic_url = _first_non_empty_str(
-            p.get("owner_profile_pic_url"),
-            _extract_avatar_url_from_raw_data(p.get("raw_data")),
+        owner_profile_pic_url = _resolve_post_avatar_url(
+            hosted_avatar_url=None,
+            direct_avatar_url=p.get("owner_profile_pic_url"),
+            raw_data=p.get("raw_data"),
         )
         hosted_owner_profile_pic_url = _first_non_empty_str(p.get("hosted_owner_profile_pic_url"))
         hosted_tagged_profile_pics = _as_json_string_map(p.get("hosted_tagged_profile_pics"))
-        collaborators_detail = _as_json_object_list(p.get("collaborators_detail"))
-        user_avatar_url = _first_non_empty_str(hosted_owner_profile_pic_url, owner_profile_pic_url)
+        hosted_avatar_by_handle = {
+            normalized_key: value
+            for key, value in hosted_tagged_profile_pics.items()
+            if (normalized_key := _normalize_account_handle(key))
+        }
+        tagged_users_detail = _enrich_handle_details(
+            "instagram",
+            _as_json_object_list(p.get("tagged_users_detail")),
+            hosted_avatar_by_handle=hosted_avatar_by_handle,
+        )
+        collaborators_detail = _enrich_handle_details(
+            "instagram",
+            _as_json_object_list(p.get("collaborators_detail")),
+            hosted_avatar_by_handle=hosted_avatar_by_handle,
+        )
+        child_posts_data_raw = _as_json_object_list(p.get("child_posts_data"))
+        child_posts_data: list[dict[str, Any]] = []
+        for child in child_posts_data_raw:
+            payload = dict(child)
+            tagged_child = _enrich_handle_details(
+                "instagram",
+                _as_json_object_list(payload.get("tagged_users_detail")),
+                hosted_avatar_by_handle=hosted_avatar_by_handle,
+            )
+            payload["tagged_users_detail"] = tagged_child
+            payload["profile_tags_detail"] = tagged_child
+            payload["mentions_detail"] = tagged_child
+            child_posts_data.append(payload)
+        user_avatar_url = _resolve_post_avatar_url(
+            hosted_avatar_url=hosted_owner_profile_pic_url,
+            direct_avatar_url=owner_profile_pic_url,
+            raw_data=p.get("raw_data"),
+        )
+        user_url = _resolve_platform_profile_url("instagram", handle=p.get("author"))
 
         result_posts.append(
             {
@@ -18101,12 +21388,23 @@ def _week_detail_instagram(
                 "mentions": mentions,
                 "user": {
                     "username": p["author"] or "",
+                    "display_name": _first_non_empty_str(p.get("owner_full_name")),
+                    "url": user_url,
                     "avatar_url": user_avatar_url,
                 },
+                "owner_full_name": _first_non_empty_str(p.get("owner_full_name")),
                 "owner_profile_pic_url": owner_profile_pic_url,
                 "hosted_owner_profile_pic_url": hosted_owner_profile_pic_url,
                 "hosted_tagged_profile_pics": hosted_tagged_profile_pics,
+                "tagged_users_detail": tagged_users_detail,
+                "profile_tags_detail": tagged_users_detail,
+                "mentions_detail": _enrich_handle_details(
+                    "instagram",
+                    [*tagged_users_detail, *_build_handle_details_from_tokens("instagram", mentions)],
+                    hosted_avatar_by_handle=hosted_avatar_by_handle,
+                ),
                 "collaborators_detail": collaborators_detail,
+                "child_posts_data": child_posts_data,
                 "duration_seconds": p.get("duration_seconds"),
                 "media_mirror_attempt_count": p.get("media_mirror_attempt_count"),
                 "media_mirror_last_attempt_at": _iso(_coerce_dt(p.get("media_mirror_last_attempt_at"))),
@@ -18155,10 +21453,9 @@ def _week_detail_tiktok(
     sort_dir: str = "desc",
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "tiktok")
+    saves_expr = "coalesce(p.saves, 0)" if _platform_posts_has_column("tiktok", "saves") else "0"
     mentions_expr = (
-        "coalesce(p.mentions, '[]'::jsonb)"
-        if _platform_posts_has_column("tiktok", "mentions")
-        else "'[]'::jsonb"
+        "coalesce(p.mentions, '[]'::jsonb)" if _platform_posts_has_column("tiktok", "mentions") else "'[]'::jsonb"
     )
     account_handles_list = sorted(account_handles)
     account_filter = (
@@ -18208,12 +21505,18 @@ def _week_detail_tiktok(
           coalesce(p.likes, 0) as likes,
           coalesce(p.comments_count, 0) as comments_count,
           coalesce(p.shares, 0) as shares,
+          {saves_expr} as saves,
           coalesce(p.views, 0) as views,
           coalesce(p.hashtags, '[]'::jsonb) as hashtags,
           {mentions_expr} as mentions,
           {thumbnail_expr} as thumbnail_url,
+          coalesce(nullif(p.thumbnail_url, ''), '') as source_thumbnail_url,
+          coalesce(nullif(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
+          coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
+          {_platform_hosted_media_expr("p")} as hosted_media_urls,
           p.duration_seconds,
           nullif(coalesce(to_jsonb(p) ->> 'user_avatar_url', ''), '') as user_avatar_url,
+          nullif(coalesce(to_jsonb(p) ->> 'hosted_user_avatar_url', ''), '') as hosted_user_avatar_url,
           coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data,
           p.posted_at as ts
         from social.tiktok_posts p
@@ -18294,9 +21597,12 @@ def _week_detail_tiktok(
 
         author = p["author"] or ""
         user_avatar_url = _resolve_post_avatar_url(
+            hosted_avatar_url=p.get("hosted_user_avatar_url"),
             direct_avatar_url=p.get("user_avatar_url"),
             raw_data=p.get("raw_data"),
         )
+        user_url = _resolve_platform_profile_url("tiktok", handle=author)
+        mentions_detail = _build_handle_details_from_tokens("tiktok", mentions)
         result_posts.append(
             {
                 "source_id": p["source_id"],
@@ -18308,15 +21614,24 @@ def _week_detail_tiktok(
                 "likes": p["likes"],
                 "comments_count": p["comments_count"],
                 "shares": p["shares"],
+                "saves": int(p.get("saves") or 0),
                 "views": p["views"],
                 "hashtags": hashtags,
                 "thumbnail_url": p.get("thumbnail_url"),
+                "source_thumbnail_url": str(p.get("source_thumbnail_url") or "").strip() or None,
+                "hosted_thumbnail_url": str(p.get("hosted_thumbnail_url") or "").strip() or None,
+                "media_urls": _as_text_list(p.get("source_media_urls")),
+                "source_media_urls": _as_text_list(p.get("source_media_urls")),
+                "hosted_media_urls": _as_text_list(p.get("hosted_media_urls")),
                 "duration_seconds": p.get("duration_seconds"),
                 "mentions": mentions,
                 "user": {
                     "username": author,
+                    "display_name": p.get("nickname") or "",
+                    "url": user_url,
                     "avatar_url": user_avatar_url,
                 },
+                "mentions_detail": mentions_detail,
                 "engagement": engagement,
                 "total_comments_available": db_comment_count,
                 "comments": [
@@ -18366,14 +21681,10 @@ def _week_detail_youtube(
     thumbnail_expr = _platform_thumbnail_expr("v", "youtube")
     youtube_is_short_expr = _youtube_is_short_expr("v")
     hashtags_expr = (
-        "coalesce(v.hashtags, '[]'::jsonb)"
-        if _platform_posts_has_column("youtube", "hashtags")
-        else "'[]'::jsonb"
+        "coalesce(v.hashtags, '[]'::jsonb)" if _platform_posts_has_column("youtube", "hashtags") else "'[]'::jsonb"
     )
     mentions_expr = (
-        "coalesce(v.mentions, '[]'::jsonb)"
-        if _platform_posts_has_column("youtube", "mentions")
-        else "'[]'::jsonb"
+        "coalesce(v.mentions, '[]'::jsonb)" if _platform_posts_has_column("youtube", "mentions") else "'[]'::jsonb"
     )
     account_handles_list = sorted(account_handles)
     account_filter = (
@@ -18382,9 +21693,7 @@ def _week_detail_youtube(
         else ""
     )
     youtube_comment_active_filter = (
-        " and coalesce(c.is_missing, false) = false"
-        if _comment_lifecycle_supported("youtube_comments")
-        else ""
+        " and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("youtube_comments") else ""
     )
     params = [season_id, start_dt, end_dt]
     if account_handles_list:
@@ -18432,6 +21741,7 @@ def _week_detail_youtube(
           {thumbnail_expr} as thumbnail_url,
           v.duration_seconds,
           nullif(coalesce(to_jsonb(v) ->> 'user_avatar_url', ''), '') as user_avatar_url,
+          nullif(coalesce(to_jsonb(v) ->> 'hosted_user_avatar_url', ''), '') as hosted_user_avatar_url,
           coalesce(to_jsonb(v) -> 'raw_data', '{{}}'::jsonb) as raw_data,
           v.published_at as ts
         from social.youtube_videos v
@@ -18515,9 +21825,13 @@ def _week_detail_youtube(
         if not mentions:
             mentions = _parse_mentions(token_text)
         user_avatar_url = _resolve_post_avatar_url(
+            hosted_avatar_url=p.get("hosted_user_avatar_url"),
             direct_avatar_url=p.get("user_avatar_url"),
             raw_data=p.get("raw_data"),
         )
+        author_handle = _normalize_account_handle(p.get("author"))
+        user_url = _resolve_platform_profile_url("youtube", handle=author_handle or p.get("author"))
+        mentions_detail = _build_handle_details_from_tokens("youtube", mentions)
 
         result_posts.append(
             {
@@ -18543,8 +21857,11 @@ def _week_detail_youtube(
                 "duration_seconds": p.get("duration_seconds"),
                 "user": {
                     "username": p["author"] or "",
+                    "display_name": p.get("author") or "",
+                    "url": user_url,
                     "avatar_url": user_avatar_url,
                 },
+                "mentions_detail": mentions_detail,
                 "engagement": engagement,
                 "total_comments_available": db_comment_count,
                 "comments": [
@@ -18646,6 +21963,7 @@ def _week_detail_twitter(
           nullif(coalesce(to_jsonb(t) ->> 'user_id', ''), '') as user_id,
           nullif(coalesce(to_jsonb(t) ->> 'user_profile_url', ''), '') as user_profile_url,
           nullif(coalesce(to_jsonb(t) ->> 'user_avatar_url', ''), '') as user_avatar_url,
+          nullif(coalesce(to_jsonb(t) ->> 'hosted_user_avatar_url', ''), '') as hosted_user_avatar_url,
           coalesce(to_jsonb(t) -> 'raw_data', '{{}}'::jsonb) as raw_data,
           t.hashtags,
           t.mentions,
@@ -18700,6 +22018,7 @@ def _week_detail_twitter(
                   nullif(coalesce(to_jsonb(t) ->> 'user_id', ''), '') as user_id,
                   nullif(coalesce(to_jsonb(t) ->> 'user_profile_url', ''), '') as user_url,
                   nullif(coalesce(to_jsonb(t) ->> 'user_avatar_url', ''), '') as user_avatar_url,
+                  nullif(coalesce(to_jsonb(t) ->> 'hosted_user_avatar_url', ''), '') as hosted_user_avatar_url,
                   t.text,
                   coalesce(t.likes, 0) as likes,
                   true as is_reply,
@@ -18724,6 +22043,7 @@ def _week_detail_twitter(
                   nullif(coalesce(to_jsonb(t) ->> 'user_id', ''), '') as user_id,
                   nullif(coalesce(to_jsonb(t) ->> 'user_profile_url', ''), '') as user_url,
                   nullif(coalesce(to_jsonb(t) ->> 'user_avatar_url', ''), '') as user_avatar_url,
+                  nullif(coalesce(to_jsonb(t) ->> 'hosted_user_avatar_url', ''), '') as hosted_user_avatar_url,
                   t.text,
                   coalesce(t.likes, 0) as likes,
                   true as is_reply,
@@ -18785,8 +22105,10 @@ def _week_detail_twitter(
 
         author = p["author"] or "i"
         post_comments = comments_by_root.get(p["source_id"], [])
+        user_url = _resolve_platform_profile_url("twitter", handle=author, explicit_url=p.get("user_profile_url"))
 
         user_avatar_url = _resolve_post_avatar_url(
+            hosted_avatar_url=p.get("hosted_user_avatar_url"),
             direct_avatar_url=p.get("user_avatar_url"),
             raw_data=p.get("raw_data"),
         )
@@ -18813,7 +22135,7 @@ def _week_detail_twitter(
                     "id": p.get("user_id"),
                     "username": p["author"] or "",
                     "display_name": p.get("display_name") or "",
-                    "url": p.get("user_profile_url"),
+                    "url": user_url,
                     "avatar_url": user_avatar_url,
                 },
                 "engagement": engagement,
@@ -18832,8 +22154,14 @@ def _week_detail_twitter(
                             "id": c.get("user_id"),
                             "username": c["author"] or "",
                             "display_name": c.get("display_name") or "",
-                            "url": c.get("user_url"),
-                            "avatar_url": c.get("user_avatar_url"),
+                            "url": _resolve_platform_profile_url(
+                                "twitter",
+                                handle=c.get("author"),
+                                explicit_url=c.get("user_url"),
+                            ),
+                            "avatar_url": _first_non_empty_str(
+                                c.get("hosted_user_avatar_url"), c.get("user_avatar_url")
+                            ),
                         },
                     }
                     for c in post_comments
@@ -18869,14 +22197,10 @@ def _week_detail_facebook(
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "facebook")
     hashtags_expr = (
-        "coalesce(p.hashtags, '[]'::jsonb)"
-        if _platform_posts_has_column("facebook", "hashtags")
-        else "'[]'::jsonb"
+        "coalesce(p.hashtags, '[]'::jsonb)" if _platform_posts_has_column("facebook", "hashtags") else "'[]'::jsonb"
     )
     mentions_expr = (
-        "coalesce(p.mentions, '[]'::jsonb)"
-        if _platform_posts_has_column("facebook", "mentions")
-        else "'[]'::jsonb"
+        "coalesce(p.mentions, '[]'::jsonb)" if _platform_posts_has_column("facebook", "mentions") else "'[]'::jsonb"
     )
     account_handles_list = sorted(account_handles)
     account_filter = (
@@ -18931,6 +22255,7 @@ def _week_detail_facebook(
           {mentions_expr} as mentions,
           {thumbnail_expr} as thumbnail_url,
           nullif(coalesce(to_jsonb(p) ->> 'user_avatar_url', ''), '') as user_avatar_url,
+          nullif(coalesce(to_jsonb(p) ->> 'hosted_user_avatar_url', ''), '') as hosted_user_avatar_url,
           coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data,
           p.posted_at as ts
         from social.facebook_posts p
@@ -19002,9 +22327,12 @@ def _week_detail_facebook(
         if not mentions:
             mentions = _parse_mentions(p.get("text"))
         user_avatar_url = _resolve_post_avatar_url(
+            hosted_avatar_url=p.get("hosted_user_avatar_url"),
             direct_avatar_url=p.get("user_avatar_url"),
             raw_data=p.get("raw_data"),
         )
+        user_url = _resolve_platform_profile_url("facebook", handle=p.get("author"))
+        mentions_detail = _build_handle_details_from_tokens("facebook", mentions)
         url = (
             f"https://www.facebook.com/reel/{p['source_id']}"
             if str(p.get("post_type") or "").lower() == "reel"
@@ -19027,8 +22355,11 @@ def _week_detail_facebook(
                 "thumbnail_url": p.get("thumbnail_url"),
                 "user": {
                     "username": p["author"] or "",
+                    "display_name": p.get("author") or "",
+                    "url": user_url,
                     "avatar_url": user_avatar_url,
                 },
+                "mentions_detail": mentions_detail,
                 "engagement": engagement,
                 "total_comments_available": db_comment_count,
                 "comments": [
@@ -19076,14 +22407,10 @@ def _week_detail_threads(
 ) -> dict[str, Any]:
     thumbnail_expr = _platform_thumbnail_expr("p", "threads")
     hashtags_expr = (
-        "coalesce(p.hashtags, '[]'::jsonb)"
-        if _platform_posts_has_column("threads", "hashtags")
-        else "'[]'::jsonb"
+        "coalesce(p.hashtags, '[]'::jsonb)" if _platform_posts_has_column("threads", "hashtags") else "'[]'::jsonb"
     )
     mentions_expr = (
-        "coalesce(p.mentions, '[]'::jsonb)"
-        if _platform_posts_has_column("threads", "mentions")
-        else "'[]'::jsonb"
+        "coalesce(p.mentions, '[]'::jsonb)" if _platform_posts_has_column("threads", "mentions") else "'[]'::jsonb"
     )
     account_handles_list = sorted(account_handles)
     account_filter = (
@@ -19154,6 +22481,7 @@ def _week_detail_threads(
           {mentions_expr} as mentions,
           {thumbnail_expr} as thumbnail_url,
           nullif(coalesce(to_jsonb(p) ->> 'user_avatar_url', ''), '') as user_avatar_url,
+          nullif(coalesce(to_jsonb(p) ->> 'hosted_user_avatar_url', ''), '') as hosted_user_avatar_url,
           coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data,
           p.posted_at as ts
         from social.meta_threads_posts p
@@ -19243,9 +22571,12 @@ def _week_detail_threads(
         if not mentions:
             mentions = _parse_mentions(p.get("text"))
         user_avatar_url = _resolve_post_avatar_url(
+            hosted_avatar_url=p.get("hosted_user_avatar_url"),
             direct_avatar_url=p.get("user_avatar_url"),
             raw_data=p.get("raw_data"),
         )
+        user_url = _resolve_platform_profile_url("threads", handle=p.get("author"))
+        mentions_detail = _build_handle_details_from_tokens("threads", mentions)
         result_posts.append(
             {
                 "source_id": p["source_id"],
@@ -19264,8 +22595,11 @@ def _week_detail_threads(
                 "thumbnail_url": p.get("thumbnail_url"),
                 "user": {
                     "username": p["author"] or "",
+                    "display_name": p.get("author") or "",
+                    "url": user_url,
                     "avatar_url": user_avatar_url,
                 },
+                "mentions_detail": mentions_detail,
                 "engagement": engagement,
                 "total_comments_available": db_comment_count,
                 "comments": [
@@ -19423,7 +22757,9 @@ def get_week_detail(
     else:
         merged_posts.sort(
             key=lambda item: (
-                _coerce_week_detail_sort_metric((item[1] if isinstance(item[1], dict) else {}).get(normalized_sort_field)),
+                _coerce_week_detail_sort_metric(
+                    (item[1] if isinstance(item[1], dict) else {}).get(normalized_sort_field)
+                ),
                 str((item[1] if isinstance(item[1], dict) else {}).get("posted_at") or ""),
             ),
             reverse=reverse,
@@ -19503,6 +22839,575 @@ def get_week_detail(
                 "total_duration_ms": int((time_module.perf_counter() - started_at) * 1000),
                 "by_platform": by_platform_duration_ms,
                 "max_comments_per_post": max(0, int(max_comments_per_post)),
+            }
+        },
+    }
+
+
+def _week_summary_account_filter(
+    *,
+    account_expr: str,
+    account_handles: set[str],
+) -> tuple[str, list[Any]]:
+    account_handles_list = sorted(
+        {str(handle or "").strip().lower().lstrip("@") for handle in account_handles if str(handle or "").strip()}
+    )
+    if not account_handles_list:
+        return "", []
+    return f"and ltrim(lower(coalesce(nullif({account_expr}, ''), '')), '@') = any(%s)", [account_handles_list]
+
+
+def _week_summary_fast_generic(
+    *,
+    season_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    account_handles: set[str],
+    post_table: str,
+    timestamp_column: str,
+    account_expr: str,
+    comment_table: str,
+    comment_fk_column: str,
+    likes_expr: str,
+    comments_expr: str,
+    views_expr: str,
+    shares_expr: str = "0",
+    comments_active_filter: str = "",
+) -> dict[str, Any]:
+    account_filter, account_params = _week_summary_account_filter(
+        account_expr=account_expr, account_handles=account_handles
+    )
+    params = [season_id, start_dt, end_dt, *account_params]
+    aggregate = (
+        pg.fetch_one(
+            f"""
+            select
+              count(*)::int as total_posts,
+              coalesce(sum(coalesce({comments_expr}, 0)), 0)::int as expected_comments_total,
+              coalesce(sum(coalesce({likes_expr}, 0) + coalesce({comments_expr}, 0) + coalesce({shares_expr}, 0) + coalesce({views_expr}, 0)), 0)::bigint as total_engagement
+            from social.{post_table} p
+            where p.season_id = %s
+              and p.{timestamp_column} >= %s
+              and p.{timestamp_column} <= %s
+              {account_filter}
+            """,
+            params,
+        )
+        or {}
+    )
+    saved_row = (
+        pg.fetch_one(
+            f"""
+            select count(c.id)::int as saved_comments_total
+            from social.{comment_table} c
+            join social.{post_table} p on p.id = c.{comment_fk_column}
+            where p.season_id = %s
+              and p.{timestamp_column} >= %s
+              and p.{timestamp_column} <= %s
+              {account_filter}
+              {comments_active_filter}
+            """,
+            params,
+        )
+        or {}
+    )
+    total_posts = int(aggregate.get("total_posts") or 0)
+    expected_comments_total = int(aggregate.get("expected_comments_total") or 0)
+    saved_comments_total = int(saved_row.get("saved_comments_total") or 0)
+    total_engagement = int(aggregate.get("total_engagement") or 0)
+    return {
+        "total_posts": total_posts,
+        "totals": {
+            "posts": total_posts,
+            "total_comments": expected_comments_total,
+            "total_engagement": total_engagement,
+            "expected_comments_total": expected_comments_total,
+            "saved_comments_total": saved_comments_total,
+            "comments_saved_pct": _safe_percent(saved_comments_total, expected_comments_total),
+        },
+    }
+
+
+def _week_summary_fast_instagram(
+    *,
+    season_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    account_handles: set[str],
+) -> dict[str, Any]:
+    return _week_summary_fast_generic(
+        season_id=season_id,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        account_handles=account_handles,
+        post_table="instagram_posts",
+        timestamp_column="posted_at",
+        account_expr="coalesce(nullif(p.username, ''), nullif(p.source_account, ''))",
+        comment_table="instagram_comments",
+        comment_fk_column="post_id",
+        likes_expr="p.likes",
+        comments_expr="p.comments_count",
+        views_expr="p.views",
+    )
+
+
+def _week_summary_fast_tiktok(
+    *,
+    season_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    account_handles: set[str],
+) -> dict[str, Any]:
+    return _week_summary_fast_generic(
+        season_id=season_id,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        account_handles=account_handles,
+        post_table="tiktok_posts",
+        timestamp_column="posted_at",
+        account_expr="coalesce(nullif(p.username, ''), nullif(p.source_account, ''))",
+        comment_table="tiktok_comments",
+        comment_fk_column="post_id",
+        likes_expr="p.likes",
+        comments_expr="p.comments_count",
+        views_expr="p.views",
+        shares_expr="p.shares",
+    )
+
+
+def _week_summary_fast_facebook(
+    *,
+    season_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    account_handles: set[str],
+) -> dict[str, Any]:
+    return _week_summary_fast_generic(
+        season_id=season_id,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        account_handles=account_handles,
+        post_table="facebook_posts",
+        timestamp_column="posted_at",
+        account_expr="coalesce(nullif(p.username, ''), nullif(p.source_account, ''))",
+        comment_table="facebook_comments",
+        comment_fk_column="post_id",
+        likes_expr="p.likes",
+        comments_expr="p.comments_count",
+        views_expr="p.views",
+        shares_expr="p.shares",
+    )
+
+
+def _week_summary_fast_youtube(
+    *,
+    season_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    account_handles: set[str],
+) -> dict[str, Any]:
+    account_filter, account_params = _week_summary_account_filter(
+        account_expr="coalesce(nullif(v.channel_title, ''), nullif(v.source_account, ''))",
+        account_handles=account_handles,
+    )
+    comments_active_filter = (
+        "and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("youtube_comments") else ""
+    )
+    row = (
+        pg.fetch_one(
+            f"""
+            with anchors as (
+              select
+                v.id,
+                coalesce(v.views, 0)::int as views,
+                coalesce(v.likes, 0)::int as likes,
+                coalesce(v.comments_count, 0)::int as reported_comments
+              from social.youtube_videos v
+              where v.season_id = %s
+                and v.published_at >= %s
+                and v.published_at <= %s
+                {account_filter}
+            ),
+            saved_counts as (
+              select c.video_id, count(*)::int as saved_comments
+              from social.youtube_comments c
+              join anchors a on a.id = c.video_id
+              where true
+                {comments_active_filter}
+              group by c.video_id
+            )
+            select
+              count(*)::int as total_posts,
+              coalesce(sum(a.reported_comments), 0)::int as expected_comments_total,
+              coalesce(sum(greatest(a.reported_comments, coalesce(sc.saved_comments, 0))), 0)::int as total_comments,
+              coalesce(sum(coalesce(sc.saved_comments, 0)), 0)::int as saved_comments_total,
+              coalesce(sum(a.views + a.likes + greatest(a.reported_comments, coalesce(sc.saved_comments, 0))), 0)::bigint as total_engagement
+            from anchors a
+            left join saved_counts sc on sc.video_id = a.id
+            """,
+            [season_id, start_dt, end_dt, *account_params],
+        )
+        or {}
+    )
+    total_posts = int(row.get("total_posts") or 0)
+    total_comments = int(row.get("total_comments") or 0)
+    expected_comments_total = int(row.get("expected_comments_total") or 0)
+    saved_comments_total = int(row.get("saved_comments_total") or 0)
+    total_engagement = int(row.get("total_engagement") or 0)
+    return {
+        "total_posts": total_posts,
+        "totals": {
+            "posts": total_posts,
+            "total_comments": total_comments,
+            "total_engagement": total_engagement,
+            "expected_comments_total": expected_comments_total,
+            "saved_comments_total": saved_comments_total,
+            "comments_saved_pct": _safe_percent(saved_comments_total, expected_comments_total),
+        },
+    }
+
+
+def _week_summary_fast_twitter(
+    *,
+    season_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    account_handles: set[str],
+) -> dict[str, Any]:
+    account_filter, account_params = _week_summary_account_filter(
+        account_expr="coalesce(nullif(t.username, ''), nullif(t.source_account, ''))",
+        account_handles=account_handles,
+    )
+    anchor_rows = pg.fetch_all(
+        f"""
+        select
+          t.tweet_id,
+          coalesce(t.likes, 0)::int as likes,
+          coalesce(t.retweets, 0)::int as retweets,
+          coalesce(t.replies_count, 0)::int as replies_count,
+          coalesce(t.quotes, 0)::int as quotes,
+          coalesce(t.views, 0)::int as views
+        from social.twitter_tweets t
+        where t.season_id = %s
+          and t.is_reply = false
+          and t.created_at >= %s
+          and t.created_at <= %s
+          {account_filter}
+        """,
+        [season_id, start_dt, end_dt, *account_params],
+    )
+    tweet_ids = [
+        str(row.get("tweet_id") or "").strip() for row in anchor_rows if str(row.get("tweet_id") or "").strip()
+    ]
+    total_posts = len(tweet_ids)
+    expected_comments_total = 0
+    total_engagement = 0
+    for row in anchor_rows:
+        likes = int(row.get("likes") or 0)
+        retweets = int(row.get("retweets") or 0)
+        replies_count = int(row.get("replies_count") or 0)
+        quotes = int(row.get("quotes") or 0)
+        views = int(row.get("views") or 0)
+        expected_comments_total += replies_count + quotes
+        total_engagement += likes + retweets + replies_count + quotes + views
+
+    replies_active_filter = (
+        " and coalesce(r.is_missing, false) = false" if _comment_lifecycle_supported("twitter_tweets") else ""
+    )
+    quotes_active_filter = (
+        " and coalesce(q.is_missing, false) = false" if _comment_lifecycle_supported("twitter_tweets") else ""
+    )
+    saved_reply_count = 0
+    saved_quote_count = 0
+    if tweet_ids:
+        if account_handles:
+            saved_reply_count = int(
+                (
+                    pg.fetch_one(
+                        """
+                        with recursive root_posts as (
+                          select tweet_id from unnest(%s::text[]) as t(tweet_id)
+                        ),
+                        thread_replies as (
+                          select r.tweet_id
+                          from social.twitter_tweets r
+                          where r.season_id = %s
+                            and r.is_reply = true
+                            and r.reply_to_tweet_id in (select tweet_id from root_posts)
+                          union
+                          select child.tweet_id
+                          from social.twitter_tweets child
+                          join thread_replies parent on child.reply_to_tweet_id = parent.tweet_id
+                          where child.season_id = %s
+                            and child.is_reply = true
+                        )
+                        select count(*)::int as cnt
+                        from social.twitter_tweets r
+                        where r.tweet_id in (select tweet_id from thread_replies)
+                          and r.is_reply = true
+                          and r.season_id = %s
+                          and (coalesce(r.is_missing, false) = false or %s::bool = false)
+                        """,
+                        [
+                            tweet_ids,
+                            season_id,
+                            season_id,
+                            season_id,
+                            bool(_comment_lifecycle_supported("twitter_tweets")),
+                        ],
+                    )
+                    or {}
+                ).get("cnt")
+                or 0
+            )
+        else:
+            saved_reply_count = int(
+                (
+                    pg.fetch_one(
+                        f"""
+                        select count(*)::int as cnt
+                        from social.twitter_tweets r
+                        where r.season_id = %s
+                          and r.is_reply = true
+                          and r.reply_to_tweet_id = any(%s)
+                          {replies_active_filter}
+                        """,
+                        [season_id, tweet_ids],
+                    )
+                    or {}
+                ).get("cnt")
+                or 0
+            )
+        saved_quote_count = int(
+            (
+                pg.fetch_one(
+                    f"""
+                    select count(*)::int as cnt
+                    from social.twitter_tweets q
+                    where q.quoted_tweet_id = any(%s)
+                      and q.is_quote = true
+                      {quotes_active_filter}
+                    """,
+                    [tweet_ids],
+                )
+                or {}
+            ).get("cnt")
+            or 0
+        )
+
+    return {
+        "total_posts": total_posts,
+        "totals": {
+            "posts": total_posts,
+            "total_comments": saved_reply_count,
+            "total_engagement": total_engagement,
+            "expected_comments_total": expected_comments_total,
+            "saved_comments_total": saved_reply_count + saved_quote_count,
+            "comments_saved_pct": _safe_percent(saved_reply_count + saved_quote_count, expected_comments_total),
+        },
+    }
+
+
+def _week_summary_fast_threads(
+    *,
+    season_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    account_handles: set[str],
+) -> dict[str, Any]:
+    account_filter, account_params = _week_summary_account_filter(
+        account_expr="coalesce(nullif(p.username, ''), nullif(p.source_account, ''))",
+        account_handles=account_handles,
+    )
+    comments_active_filter = (
+        " and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("meta_threads_comments") else ""
+    )
+    row = (
+        pg.fetch_one(
+            f"""
+            with anchors as (
+              select
+                p.id,
+                coalesce(p.likes, 0)::int as likes,
+                coalesce(p.replies_count, 0)::int as replies_count,
+                coalesce(p.reposts, 0)::int as reposts,
+                coalesce(p.quotes, 0)::int as quotes,
+                coalesce(p.views, 0)::int as views
+              from social.meta_threads_posts p
+              where p.season_id = %s
+                and p.posted_at >= %s
+                and p.posted_at <= %s
+                {account_filter}
+            ),
+            saved_counts as (
+              select c.post_id, count(*)::int as saved_comments
+              from social.meta_threads_comments c
+              join anchors a on a.id = c.post_id
+              where true
+                {comments_active_filter}
+              group by c.post_id
+            )
+            select
+              count(*)::int as total_posts,
+              coalesce(sum(a.replies_count + a.quotes), 0)::int as expected_comments_total,
+              coalesce(sum(a.replies_count + a.quotes), 0)::int as total_comments,
+              coalesce(sum(coalesce(sc.saved_comments, 0)), 0)::int as saved_comments_total,
+              coalesce(sum(a.likes + a.replies_count + a.reposts + a.quotes + a.views), 0)::bigint as total_engagement
+            from anchors a
+            left join saved_counts sc on sc.post_id = a.id
+            """,
+            [season_id, start_dt, end_dt, *account_params],
+        )
+        or {}
+    )
+    total_posts = int(row.get("total_posts") or 0)
+    total_comments = int(row.get("total_comments") or 0)
+    expected_comments_total = int(row.get("expected_comments_total") or 0)
+    saved_comments_total = int(row.get("saved_comments_total") or 0)
+    total_engagement = int(row.get("total_engagement") or 0)
+    return {
+        "total_posts": total_posts,
+        "totals": {
+            "posts": total_posts,
+            "total_comments": total_comments,
+            "total_engagement": total_engagement,
+            "expected_comments_total": expected_comments_total,
+            "saved_comments_total": saved_comments_total,
+            "comments_saved_pct": _safe_percent(saved_comments_total, expected_comments_total),
+        },
+    }
+
+
+_WEEK_DETAIL_SUMMARY_FAST_HANDLERS: dict[str, Any] = {
+    "instagram": _week_summary_fast_instagram,
+    "tiktok": _week_summary_fast_tiktok,
+    "youtube": _week_summary_fast_youtube,
+    "twitter": _week_summary_fast_twitter,
+    "facebook": _week_summary_fast_facebook,
+    "threads": _week_summary_fast_threads,
+}
+
+
+def get_week_detail_summary_fast(
+    season_id: str,
+    *,
+    week_index: int,
+    platforms: list[str] | None,
+    timezone: str,
+    source_scope: str,
+) -> dict[str, Any]:
+    started_at = time_module.perf_counter()
+    context = get_season_context(season_id)
+    available_platforms = _resolve_requested_platforms(platforms)
+    now = _now_utc()
+    week_windows, _week_zero_start_local = _resolve_week_windows(
+        context,
+        timezone=timezone,
+        source_scope=source_scope,
+        now_utc=now,
+    )
+    windows_by_index = {w.week_index: w for w in week_windows}
+    window = windows_by_index.get(week_index)
+    if window is None:
+        raise ValueError(f"Week {week_index} is not available for this season")
+    start_dt = window.start_local.astimezone(UTC)
+    end_dt = (window.end_local - timedelta(microseconds=1)).astimezone(UTC)
+    if end_dt < start_dt:
+        end_dt = start_dt
+
+    target_accounts_by_platform = _target_accounts_by_platform(
+        season_id,
+        source_scope=source_scope,
+        context=context,
+    )
+    requires_target_accounts = source_scope in {"bravo", "creator"}
+
+    platform_results: dict[str, Any] = {}
+    by_platform_duration_ms: dict[str, int] = {}
+    grand_posts = 0
+    grand_comments = 0
+    grand_engagement = 0
+    grand_expected_comments = 0
+    grand_saved_comments = 0
+    for platform in available_platforms:
+        handler = _WEEK_DETAIL_SUMMARY_FAST_HANDLERS.get(platform)
+        if not handler:
+            continue
+        account_handles = set(target_accounts_by_platform.get(platform, set()))
+        if requires_target_accounts and not account_handles:
+            empty_payload = {
+                "total_posts": 0,
+                "totals": {
+                    "posts": 0,
+                    "total_comments": 0,
+                    "total_engagement": 0,
+                    "expected_comments_total": 0,
+                    "saved_comments_total": 0,
+                    "comments_saved_pct": 0.0,
+                },
+            }
+            platform_results[platform] = empty_payload
+            by_platform_duration_ms[platform] = 0
+            continue
+        platform_started_at = time_module.perf_counter()
+        result = handler(
+            season_id=season_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            account_handles=account_handles,
+        )
+        by_platform_duration_ms[platform] = int((time_module.perf_counter() - platform_started_at) * 1000)
+        total_posts = int(result.get("total_posts") or 0)
+        totals = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+        merged_totals = {
+            "posts": total_posts,
+            "total_comments": int(totals.get("total_comments") or 0),
+            "total_engagement": int(totals.get("total_engagement") or 0),
+            "expected_comments_total": int(totals.get("expected_comments_total") or 0),
+            "saved_comments_total": int(totals.get("saved_comments_total") or 0),
+            "comments_saved_pct": float(totals.get("comments_saved_pct") or 0.0),
+        }
+        platform_results[platform] = {
+            "total_posts": total_posts,
+            "totals": merged_totals,
+        }
+        grand_posts += total_posts
+        grand_comments += int(merged_totals.get("total_comments") or 0)
+        grand_engagement += int(merged_totals.get("total_engagement") or 0)
+        grand_expected_comments += int(merged_totals.get("expected_comments_total") or 0)
+        grand_saved_comments += int(merged_totals.get("saved_comments_total") or 0)
+
+    week_end_inclusive = window.end_local - timedelta(microseconds=1)
+    return {
+        "week": {
+            "week_index": week_index,
+            "label": _week_window_label(window, timezone=timezone),
+            "start": _iso(window.start_local.astimezone(UTC)),
+            "end": _iso(week_end_inclusive.astimezone(UTC)),
+            "week_type": window.week_type,
+            "episode_number": window.episode_number,
+        },
+        "season": {
+            "season_id": context.season_id,
+            "show_id": context.show_id,
+            "show_name": context.show_name,
+            "show_slug": context.show_slug,
+            "season_number": context.season_number,
+        },
+        "source_scope": source_scope,
+        "platforms": platform_results,
+        "totals": {
+            "posts": grand_posts,
+            "total_comments": grand_comments,
+            "total_engagement": grand_engagement,
+            "expected_comments_total": grand_expected_comments,
+            "saved_comments_total": grand_saved_comments,
+            "comments_saved_pct": _safe_percent(grand_saved_comments, grand_expected_comments),
+        },
+        "meta": {
+            "performance": {
+                "total_duration_ms": int((time_module.perf_counter() - started_at) * 1000),
+                "by_platform": by_platform_duration_ms,
             }
         },
     }
@@ -19651,6 +23556,9 @@ def get_post_comments(
                    {post_format_expr} as post_format,
                    {profile_tags_expr} as profile_tags,
                    {collaborators_expr} as collaborators,
+                   coalesce(to_jsonb(p) -> 'tagged_users_detail', '[]'::jsonb) as tagged_users_detail,
+                   coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+                   coalesce(to_jsonb(p) -> 'child_posts_data', '[]'::jsonb) as child_posts_data,
                    {hashtags_expr} as hashtags,
                    {mentions_expr} as mentions,
                    {duration_expr} as duration_seconds,
@@ -19691,6 +23599,9 @@ def get_post_comments(
             mentions = _parse_mentions(post.get("text"))
         profile_tags = _json_text_list(post.get("profile_tags"), prefix="@", strip_prefix="@")
         collaborators = _json_text_list(post.get("collaborators"), prefix="@", strip_prefix="@")
+        tagged_users_detail = _as_json_object_list(post.get("tagged_users_detail"))
+        collaborators_detail = _as_json_object_list(post.get("collaborators_detail"))
+        child_posts_data = _as_json_object_list(post.get("child_posts_data"))
         source_media_urls = _json_text_list(post.get("source_media_urls"))
         hosted_media_urls = _json_text_list(post.get("hosted_media_urls"))
         media_urls = hosted_media_urls or source_media_urls
@@ -19725,6 +23636,11 @@ def get_post_comments(
             "post_format": post.get("post_format"),
             "profile_tags": profile_tags,
             "collaborators": collaborators,
+            "tagged_users_detail": tagged_users_detail,
+            "profile_tags_detail": tagged_users_detail,
+            "mentions_detail": tagged_users_detail,
+            "collaborators_detail": collaborators_detail,
+            "child_posts_data": child_posts_data,
             "hashtags": hashtags,
             "mentions": mentions,
             "duration_seconds": post.get("duration_seconds"),
@@ -19753,9 +23669,7 @@ def get_post_comments(
             )
         )
         mentions_expr = (
-            "coalesce(p.mentions, '[]'::jsonb)"
-            if _platform_posts_has_column("tiktok", "mentions")
-            else "'[]'::jsonb"
+            "coalesce(p.mentions, '[]'::jsonb)" if _platform_posts_has_column("tiktok", "mentions") else "'[]'::jsonb"
         )
         post = pg.fetch_one(
             f"""
@@ -19857,42 +23771,36 @@ def get_post_comments(
         thumbnail_expr = _platform_thumbnail_expr("v", "youtube")
         youtube_is_short_expr = _youtube_is_short_expr("v")
         youtube_duration_expr = (
-            "coalesce(v.duration_seconds, 0)"
-            if _platform_posts_has_column("youtube", "duration_seconds")
-            else "0"
+            "coalesce(v.duration_seconds, 0)" if _platform_posts_has_column("youtube", "duration_seconds") else "0"
         )
         hashtags_expr = (
-            "coalesce(v.hashtags, '[]'::jsonb)"
-            if _platform_posts_has_column("youtube", "hashtags")
-            else "'[]'::jsonb"
+            "coalesce(v.hashtags, '[]'::jsonb)" if _platform_posts_has_column("youtube", "hashtags") else "'[]'::jsonb"
         )
         mentions_expr = (
-            "coalesce(v.mentions, '[]'::jsonb)"
-            if _platform_posts_has_column("youtube", "mentions")
-            else "'[]'::jsonb"
+            "coalesce(v.mentions, '[]'::jsonb)" if _platform_posts_has_column("youtube", "mentions") else "'[]'::jsonb"
         )
-        transcript_text_expr = "v.transcript_text" if _platform_posts_has_column("youtube", "transcript_text") else "null::text"
+        transcript_text_expr = (
+            "v.transcript_text" if _platform_posts_has_column("youtube", "transcript_text") else "null::text"
+        )
         transcript_segments_expr = (
             "coalesce(v.transcript_segments, '[]'::jsonb)"
             if _platform_posts_has_column("youtube", "transcript_segments")
             else "'[]'::jsonb"
         )
         transcript_language_expr = (
-            "v.transcript_language"
-            if _platform_posts_has_column("youtube", "transcript_language")
-            else "null::text"
+            "v.transcript_language" if _platform_posts_has_column("youtube", "transcript_language") else "null::text"
         )
         transcript_source_expr = (
-            "v.transcript_source"
-            if _platform_posts_has_column("youtube", "transcript_source")
-            else "null::text"
+            "v.transcript_source" if _platform_posts_has_column("youtube", "transcript_source") else "null::text"
         )
         transcript_synced_at_expr = (
             "v.transcript_synced_at"
             if _platform_posts_has_column("youtube", "transcript_synced_at")
             else "null::timestamptz"
         )
-        transcript_error_expr = "v.transcript_error" if _platform_posts_has_column("youtube", "transcript_error") else "null::text"
+        transcript_error_expr = (
+            "v.transcript_error" if _platform_posts_has_column("youtube", "transcript_error") else "null::text"
+        )
         post = pg.fetch_one(
             f"""
             select v.id, v.video_id as source_id, v.channel_title as author,
@@ -19924,9 +23832,7 @@ def get_post_comments(
         if not post:
             raise ValueError("Post not found")
         youtube_comment_active_filter = (
-            " and coalesce(c.is_missing, false) = false"
-            if _comment_lifecycle_supported("youtube_comments")
-            else ""
+            " and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("youtube_comments") else ""
         )
 
         comments = pg.fetch_all(
@@ -19986,9 +23892,7 @@ def get_post_comments(
             "duration_seconds": _normalize_non_negative_int(post.get("duration_seconds")),
             "transcript_text": str(post.get("transcript_text") or "") or None,
             "transcript_segments": (
-                list(post.get("transcript_segments") or [])
-                if isinstance(post.get("transcript_segments"), list)
-                else []
+                list(post.get("transcript_segments") or []) if isinstance(post.get("transcript_segments"), list) else []
             ),
             "transcript_language": str(post.get("transcript_language") or "") or None,
             "transcript_source": str(post.get("transcript_source") or "") or None,
@@ -20043,9 +23947,7 @@ def get_post_comments(
         if not post:
             raise ValueError("Post not found")
         twitter_comment_active_filter = (
-            " and coalesce(is_missing, false) = false"
-            if _comment_lifecycle_supported("twitter_tweets")
-            else ""
+            " and coalesce(is_missing, false) = false" if _comment_lifecycle_supported("twitter_tweets") else ""
         )
 
         # Full recursive reply chain
@@ -20233,14 +24135,10 @@ def get_post_comments(
     if platform == "facebook":
         thumbnail_expr = _platform_thumbnail_expr("p", "facebook")
         hashtags_expr = (
-            "coalesce(p.hashtags, '[]'::jsonb)"
-            if _platform_posts_has_column("facebook", "hashtags")
-            else "'[]'::jsonb"
+            "coalesce(p.hashtags, '[]'::jsonb)" if _platform_posts_has_column("facebook", "hashtags") else "'[]'::jsonb"
         )
         mentions_expr = (
-            "coalesce(p.mentions, '[]'::jsonb)"
-            if _platform_posts_has_column("facebook", "mentions")
-            else "'[]'::jsonb"
+            "coalesce(p.mentions, '[]'::jsonb)" if _platform_posts_has_column("facebook", "mentions") else "'[]'::jsonb"
         )
         post = pg.fetch_one(
             f"""
@@ -20335,19 +24233,13 @@ def get_post_comments(
     if platform == "threads":
         thumbnail_expr = _platform_thumbnail_expr("p", "threads")
         hashtags_expr = (
-            "coalesce(p.hashtags, '[]'::jsonb)"
-            if _platform_posts_has_column("threads", "hashtags")
-            else "'[]'::jsonb"
+            "coalesce(p.hashtags, '[]'::jsonb)" if _platform_posts_has_column("threads", "hashtags") else "'[]'::jsonb"
         )
         mentions_expr = (
-            "coalesce(p.mentions, '[]'::jsonb)"
-            if _platform_posts_has_column("threads", "mentions")
-            else "'[]'::jsonb"
+            "coalesce(p.mentions, '[]'::jsonb)" if _platform_posts_has_column("threads", "mentions") else "'[]'::jsonb"
         )
         threads_comment_active_filter = (
-            "and coalesce(c.is_missing, false) = false"
-            if _comment_lifecycle_supported("meta_threads_comments")
-            else ""
+            "and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("meta_threads_comments") else ""
         )
         post = pg.fetch_one(
             f"""
@@ -20567,8 +24459,9 @@ def get_tiktok_overview(
     )
     has_saves = _platform_posts_has_column("tiktok", "saves")
     saves_expr = "coalesce(p.saves, 0)" if has_saves else "0"
-    row = pg.fetch_one(
-        f"""
+    row = (
+        pg.fetch_one(
+            f"""
         select
           count(*)::int as post_count,
           coalesce(sum(coalesce(p.views, 0)), 0)::bigint as total_views,
@@ -20589,8 +24482,10 @@ def get_tiktok_overview(
         from social.tiktok_posts p
         where {where_sql}
         """,
-        where_params,
-    ) or {}
+            where_params,
+        )
+        or {}
+    )
 
     daily_rows = pg.fetch_all(
         f"""
@@ -20898,8 +24793,7 @@ def get_tiktok_sounds(
             [[str(row.get("sound_id") or "") for row in rows if str(row.get("sound_id") or "")]],
         )
         related_counts_by_sound = {
-            str(item.get("sound_id") or ""): int(item.get("related_post_count") or 0)
-            for item in related_rows
+            str(item.get("sound_id") or ""): int(item.get("related_post_count") or 0) for item in related_rows
         }
 
     sounds = []
@@ -21000,11 +24894,7 @@ def get_tiktok_content_health(
     median_comments = _median_int(comments_values)
     median_velocity = _median_int(velocity_values)
     non_zero_quality = sorted(value for value in quality_values if value > 0)
-    median_quality = (
-        non_zero_quality[len(non_zero_quality) // 2]
-        if non_zero_quality
-        else 0.0
-    )
+    median_quality = non_zero_quality[len(non_zero_quality) // 2] if non_zero_quality else 0.0
 
     posts: list[dict[str, Any]] = []
     for row in rows:
@@ -21105,15 +24995,18 @@ def get_tiktok_sound_detail(season_id: str, *, sound_id: str) -> dict[str, Any]:
     )
     creator_post_count = 0
     if _platform_posts_has_column("tiktok", "sound_id"):
-        creator_row = pg.fetch_one(
-            """
+        creator_row = (
+            pg.fetch_one(
+                """
             select count(*)::int as count
             from social.tiktok_posts p
             where p.season_id = %s::uuid
               and coalesce(p.sound_id, '') = %s
             """,
-            [season_id, normalized_sound_id],
-        ) or {}
+                [season_id, normalized_sound_id],
+            )
+            or {}
+        )
         creator_post_count = int(creator_row.get("count") or 0)
     return {
         "season_id": season_id,
@@ -21260,9 +25153,7 @@ def get_tiktok_sentiment_trends(
         negative_count = int(row.get("negative_count") or 0)
         toxicity_count = int(row.get("toxicity_count") or 0)
         total = positive_count + neutral_count + negative_count
-        controversy_score = (
-            round(((negative_count + toxicity_count) / max(total, 1)) * 100.0, 3) if total > 0 else 0.0
-        )
+        controversy_score = round(((negative_count + toxicity_count) / max(total, 1)) * 100.0, 3) if total > 0 else 0.0
         timeline.append(
             {
                 "day": str(row.get("day") or ""),
@@ -21442,7 +25333,9 @@ def _refresh_youtube_post_detail_sync(
         date_time=published_dt.strftime("%Y-%m-%d %H:%M:%S") if published_dt else "",
         published_at=published_ts,
         channel_id=str(metadata.get("channel_id") or row_json.get("channel_id") or ""),
-        channel_title=str(metadata.get("channel") or metadata.get("uploader") or row_json.get("channel_title") or account or ""),
+        channel_title=str(
+            metadata.get("channel") or metadata.get("uploader") or row_json.get("channel_title") or account or ""
+        ),
         duration=_youtube_duration_iso(duration_seconds),
         duration_seconds=duration_seconds,
         views=int(metadata.get("view_count") or row_json.get("views") or 0),
@@ -21458,8 +25351,7 @@ def _refresh_youtube_post_detail_sync(
         keywords_matched=[],
         is_short=is_short,
         source_surface=(
-            str(row_json.get("source_surface") or "").strip().lower()
-            or ("shorts" if is_short else "videos")
+            str(row_json.get("source_surface") or "").strip().lower() or ("shorts" if is_short else "videos")
         ),
     )
     transcript_payload = {
@@ -22413,7 +26305,11 @@ def refresh_post_comments(
                             quotes_fetched += 1
                         else:
                             replies_fetched += 1
-                if raw_fetch_reason in {"threads_no_cookies", "threads_pk_resolve_failed", "threads_replies_page_error"}:
+                if raw_fetch_reason in {
+                    "threads_no_cookies",
+                    "threads_pk_resolve_failed",
+                    "threads_replies_page_error",
+                }:
                     fail_reason = raw_fetch_reason
             except Exception:
                 fetch_failed = True
@@ -22526,9 +26422,9 @@ def refresh_post_comments(
     if not twitter_cookies.get("ct0") and twikit_creds:
         if twikit_creds.get("auth_token") and twikit_creds.get("ct0"):
             twitter_cookies = {**twitter_cookies, "auth_token": twikit_creds["auth_token"], "ct0": twikit_creds["ct0"]}
-    has_session_artifacts = bool(
-        twitter_cookies.get("auth_token") and twitter_cookies.get("ct0")
-    ) or bool(twikit_creds and twikit_creds.get("auth_token") and twikit_creds.get("ct0"))
+    has_session_artifacts = bool(twitter_cookies.get("auth_token") and twitter_cookies.get("ct0")) or bool(
+        twikit_creds and twikit_creds.get("auth_token") and twikit_creds.get("ct0")
+    )
 
     scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
     merged_summary = _fetch_and_apply_twitter_metric_summary(
@@ -22626,7 +26522,9 @@ def refresh_post_comments(
                         comment_media_mirror_jobs_enqueued += 1
                 except Exception:
                     comment_media_mirror_job_enqueue_errors += 1
-                    logger.exception("[twitter] refresh_post_comments enqueue reply mirror failed tweet_id=%s", reply_id)
+                    logger.exception(
+                        "[twitter] refresh_post_comments enqueue reply mirror failed tweet_id=%s", reply_id
+                    )
         for quote in quotes:
             quote.is_reply = False
             quote.reply_to_tweet_id = None
@@ -22667,12 +26565,8 @@ def refresh_post_comments(
                         "[twitter] refresh_post_comments enqueue quote mirror failed tweet_id=%s",
                         str(getattr(quote, "tweet_id", "") or ""),
                     )
-        inferred_auth_failed = (
-            (not has_session_artifacts)
-            and (
-                str(fail_reason).startswith("http_404")
-                or str(quote_fail_reason).startswith("http_404")
-            )
+        inferred_auth_failed = (not has_session_artifacts) and (
+            str(fail_reason).startswith("http_404") or str(quote_fail_reason).startswith("http_404")
         )
         auth_failed = bool(getattr(scraper, "comments_auth_failed", False)) or inferred_auth_failed
         is_complete = _is_comment_fetch_complete(

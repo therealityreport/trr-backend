@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from collections.abc import Callable
@@ -71,6 +72,7 @@ class InstagramPermalinkMetadata:
     # Rich user detail objects (None = not extracted; [] = extracted but empty)
     tagged_users_detail: list[dict[str, Any]] | None = None
     collaborators_detail: list[dict[str, Any]] | None = None
+    child_posts_data: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -96,6 +98,72 @@ def _normalize_unique(values: list[str]) -> list[str]:
         seen.add(key)
         out.append(value)
     return out
+
+
+def _normalize_tag_coord(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    coord: float | None = None
+    if isinstance(value, (int, float)):
+        coord = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            coord = float(text)
+        except ValueError:
+            return None
+    if coord is None or not math.isfinite(coord):
+        return None
+    return round(min(1.0, max(0.0, coord)), 4)
+
+
+def _normalized_tag_position(
+    x_value: Any,
+    y_value: Any,
+    *,
+    source: str,
+) -> tuple[float, float, str] | None:
+    x = _normalize_tag_coord(x_value)
+    y = _normalize_tag_coord(y_value)
+    if x is None or y is None:
+        return None
+    return (x, y, source)
+
+
+def _tag_position_from_array(value: Any, *, source: str) -> tuple[float, float, str] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    return _normalized_tag_position(value[0], value[1], source=source)
+
+
+def _tag_position_from_object(value: Any, *, source: str) -> tuple[float, float, str] | None:
+    if not isinstance(value, dict):
+        return None
+    return _normalized_tag_position(
+        value.get("x", value.get("left")),
+        value.get("y", value.get("top")),
+        source=source,
+    )
+
+
+def _extract_rest_tag_position(tagged: dict[str, Any]) -> tuple[float, float, str] | None:
+    position = tagged.get("position")
+    return _tag_position_from_array(position, source="rest_usertags.position_array") or _tag_position_from_object(
+        position, source="rest_usertags.position_object"
+    )
+
+
+def _extract_graphql_tag_position(edge: dict[str, Any], edge_node: dict[str, Any]) -> tuple[float, float, str] | None:
+    return (
+        _tag_position_from_array(edge_node.get("position"), source="graphql_node.position_array")
+        or _tag_position_from_object(edge_node.get("position"), source="graphql_node.position_object")
+        or _normalized_tag_position(edge_node.get("x"), edge_node.get("y"), source="graphql_node.xy")
+        or _tag_position_from_array(edge.get("position"), source="graphql_edge.position_array")
+        or _tag_position_from_object(edge.get("position"), source="graphql_edge.position_object")
+        or _normalized_tag_position(edge.get("x"), edge.get("y"), source="graphql_edge.xy")
+    )
 
 
 def _extract_shortcode_and_route(shortcode_or_url: str) -> tuple[str, str]:
@@ -344,13 +412,17 @@ def _extract_tagged_users_detail(media: dict[str, Any]) -> list[dict[str, Any]]:
         if not username or username.lower() in seen:
             continue
         seen.add(username.lower())
-        details.append({
+        detail = {
             "username": username,
             "user_id": str(user.get("pk") or user.get("id") or "") or None,
             "full_name": str(user.get("full_name") or "").strip() or None,
             "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
             "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
-        })
+        }
+        position = _extract_rest_tag_position(tagged)
+        if position is not None:
+            detail["tag_x"], detail["tag_y"], detail["tag_position_source"] = position
+        details.append(detail)
     return details
 
 
@@ -370,14 +442,43 @@ def _extract_collaborators_detail(media: dict[str, Any]) -> list[dict[str, Any]]
             if not username or username.lower() in seen:
                 continue
             seen.add(username.lower())
-            details.append({
-                "username": username,
-                "user_id": str(user.get("pk") or user.get("id") or "") or None,
-                "full_name": str(user.get("full_name") or "").strip() or None,
-                "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
-                "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
-            })
+            details.append(
+                {
+                    "username": username,
+                    "user_id": str(user.get("pk") or user.get("id") or "") or None,
+                    "full_name": str(user.get("full_name") or "").strip() or None,
+                    "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
+                    "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
+                }
+            )
     return details
+
+
+def _extract_child_posts_data(media: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract carousel child media details and per-child tagged users."""
+    children: list[dict[str, Any]] = []
+    carousel_media = media.get("carousel_media")
+    if not isinstance(carousel_media, list):
+        return children
+    for index, item in enumerate(carousel_media):
+        if not isinstance(item, dict):
+            continue
+        child = {
+            "slide_index": index,
+            "type": "Video" if _best_video_url(item) else "Image",
+            "display_url": _best_image_url(item),
+            "video_url": _best_video_url(item),
+            "width": int(item.get("original_width")) if isinstance(item.get("original_width"), (int, float)) else None,
+            "height": (
+                int(item.get("original_height"))
+                if isinstance(item.get("original_height"), (int, float))
+                else None
+            ),
+            "alt": str(item.get("accessibility_caption") or "").strip() or None,
+            "tagged_users_detail": _extract_tagged_users_detail(item),
+        }
+        children.append(child)
+    return children
 
 
 def _extract_hashtags_mentions(text: str) -> tuple[list[str], list[str]]:
@@ -493,6 +594,7 @@ def parse_permalink_metadata(media: dict[str, Any]) -> InstagramPermalinkMetadat
         raw_media=dict(media),
         tagged_users_detail=_extract_tagged_users_detail(media),
         collaborators_detail=_extract_collaborators_detail(media),
+        child_posts_data=_extract_child_posts_data(media),
     )
 
 
@@ -669,13 +771,20 @@ def _graphql_extract_tagged_users_detail(node: dict[str, Any]) -> list[dict[str,
             if not username or username.lower() in seen:
                 continue
             seen.add(username.lower())
-            details.append({
+            detail = {
                 "username": username,
                 "user_id": str(user.get("id") or user.get("pk") or "") or None,
                 "full_name": str(user.get("full_name") or "").strip() or None,
                 "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
                 "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
-            })
+            }
+            edge_node = edge.get("node") or {}
+            if not isinstance(edge_node, dict):
+                edge_node = {}
+            position = _extract_graphql_tag_position(edge, edge_node)
+            if position is not None:
+                detail["tag_x"], detail["tag_y"], detail["tag_position_source"] = position
+            details.append(detail)
     # Also check REST-style usertags
     usertags = node.get("usertags")
     if isinstance(usertags, dict):
@@ -689,13 +798,17 @@ def _graphql_extract_tagged_users_detail(node: dict[str, Any]) -> list[dict[str,
             if not username or username.lower() in seen:
                 continue
             seen.add(username.lower())
-            details.append({
+            detail = {
                 "username": username,
                 "user_id": str(user.get("pk") or user.get("id") or "") or None,
                 "full_name": str(user.get("full_name") or "").strip() or None,
                 "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
                 "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
-            })
+            }
+            position = _extract_rest_tag_position(tagged)
+            if position is not None:
+                detail["tag_x"], detail["tag_y"], detail["tag_position_source"] = position
+            details.append(detail)
     return details
 
 
@@ -715,14 +828,49 @@ def _graphql_extract_collaborators_detail(node: dict[str, Any]) -> list[dict[str
             if not username or username.lower() in seen:
                 continue
             seen.add(username.lower())
-            details.append({
-                "username": username,
-                "user_id": str(user.get("id") or user.get("pk") or "") or None,
-                "full_name": str(user.get("full_name") or "").strip() or None,
-                "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
-                "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
-            })
+            details.append(
+                {
+                    "username": username,
+                    "user_id": str(user.get("id") or user.get("pk") or "") or None,
+                    "full_name": str(user.get("full_name") or "").strip() or None,
+                    "is_verified": bool(user.get("is_verified")) if user.get("is_verified") is not None else None,
+                    "profile_pic_url": str(user.get("profile_pic_url") or "").strip() or None,
+                }
+            )
     return details
+
+
+def _graphql_extract_child_posts_data(node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract sidecar child media details and per-child tagged users from GraphQL node."""
+    children: list[dict[str, Any]] = []
+    sidecar = node.get("edge_sidecar_to_children")
+    if not isinstance(sidecar, dict):
+        return children
+    edges = sidecar.get("edges")
+    if not isinstance(edges, list):
+        return children
+    for index, edge in enumerate(edges):
+        child = (edge or {}).get("node") if isinstance(edge, dict) else None
+        if not isinstance(child, dict):
+            continue
+        dims = child.get("dimensions")
+        width = dims.get("width") if isinstance(dims, dict) else None
+        height = dims.get("height") if isinstance(dims, dict) else None
+        typename = str(child.get("__typename") or "").strip()
+        child_type = typename.replace("Graph", "") if typename else ("Video" if child.get("is_video") else "Image")
+        children.append(
+            {
+                "slide_index": index,
+                "type": child_type,
+                "display_url": _best_image_url(child),
+                "video_url": _best_video_url(child),
+                "width": int(width) if isinstance(width, (int, float)) else None,
+                "height": int(height) if isinstance(height, (int, float)) else None,
+                "alt": str(child.get("accessibility_caption") or "").strip() or None,
+                "tagged_users_detail": _graphql_extract_tagged_users_detail(child),
+            }
+        )
+    return children
 
 
 def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetadata | None:
@@ -750,6 +898,7 @@ def _metadata_from_graphql_node(node: dict[str, Any]) -> InstagramPermalinkMetad
         raw_media=dict(node),
         tagged_users_detail=_graphql_extract_tagged_users_detail(node),
         collaborators_detail=_graphql_extract_collaborators_detail(node),
+        child_posts_data=_graphql_extract_child_posts_data(node),
     )
 
 

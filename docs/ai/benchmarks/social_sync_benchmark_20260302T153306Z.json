@@ -1,0 +1,181 @@
+{
+  "generated_at": "2026-03-02T15:33:06.110045+00:00",
+  "profiles": {
+    "baseline": {
+      "db_metrics": {
+        "db_connections": 64,
+        "upsert_rows": 10115,
+        "upsert_batches": 9639
+      },
+      "scenarios": [
+        {
+          "name": "single_platform_comments_heavy",
+          "duration_sec": 5.085860333056189,
+          "counters": {
+            "posts": 120,
+            "comments": 2640,
+            "comments_upserted": 2640,
+            "quotes_upserted": 1200
+          },
+          "details": {
+            "account": "bench_comments",
+            "anchors": 120
+          }
+        },
+        {
+          "name": "sync_all",
+          "duration_sec": 1.1717589579056948,
+          "counters": {
+            "posts": 56,
+            "comments": 852,
+            "comments_upserted": 852,
+            "quotes_upserted": 192
+          },
+          "details": {
+            "platforms": [
+              "twitter",
+              "tiktok",
+              "youtube"
+            ]
+          }
+        },
+        {
+          "name": "concurrent_backlog",
+          "duration_sec": 2.987459541996941,
+          "counters": {
+            "posts": 225,
+            "comments": 3600,
+            "comments_upserted": 3600,
+            "quotes_upserted": 0
+          },
+          "details": {
+            "runs": {
+              "bench-concurrent-2": {
+                "duration_sec": 2.9511851250426844,
+                "posts": 75,
+                "comments": 1200
+              },
+              "bench-concurrent-0": {
+                "duration_sec": 2.9733694589231163,
+                "posts": 75,
+                "comments": 1200
+              },
+              "bench-concurrent-1": {
+                "duration_sec": 2.9862365419976413,
+                "posts": 75,
+                "comments": 1200
+              }
+            }
+          }
+        }
+      ]
+    },
+    "optimized": {
+      "db_metrics": {
+        "db_connections": 64,
+        "upsert_rows": 10115,
+        "upsert_batches": 738
+      },
+      "scenarios": [
+        {
+          "name": "single_platform_comments_heavy",
+          "duration_sec": 1.2426805420545861,
+          "counters": {
+            "posts": 120,
+            "comments": 2640,
+            "comments_upserted": 2640,
+            "quotes_upserted": 1200
+          },
+          "details": {
+            "account": "bench_comments",
+            "anchors": 120
+          }
+        },
+        {
+          "name": "sync_all",
+          "duration_sec": 0.5085124169709161,
+          "counters": {
+            "posts": 56,
+            "comments": 852,
+            "comments_upserted": 852,
+            "quotes_upserted": 192
+          },
+          "details": {
+            "platforms": [
+              "twitter",
+              "tiktok",
+              "youtube"
+            ]
+          }
+        },
+        {
+          "name": "concurrent_backlog",
+          "duration_sec": 1.120932999998331,
+          "counters": {
+            "posts": 225,
+            "comments": 3600,
+            "comments_upserted": 3600,
+            "quotes_upserted": 0
+          },
+          "details": {
+            "runs": {
+              "bench-concurrent-0": {
+                "duration_sec": 1.0896338340826333,
+                "posts": 75,
+                "comments": 1200
+              },
+              "bench-concurrent-1": {
+                "duration_sec": 1.1107674170052633,
+                "posts": 75,
+                "comments": 1200
+              },
+              "bench-concurrent-2": {
+                "duration_sec": 1.1204286250285804,
+                "posts": 75,
+                "comments": 1200
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "comparison": [
+    {
+      "scenario": "single_platform_comments_heavy",
+      "baseline_sec": 5.08586,
+      "optimized_sec": 1.242681,
+      "improvement_pct": 75.57,
+      "counters": {
+        "posts": 120,
+        "comments": 2640,
+        "comments_upserted": 2640,
+        "quotes_upserted": 1200
+      }
+    },
+    {
+      "scenario": "sync_all",
+      "baseline_sec": 1.171759,
+      "optimized_sec": 0.508512,
+      "improvement_pct": 56.6,
+      "counters": {
+        "posts": 56,
+        "comments": 852,
+        "comments_upserted": 852,
+        "quotes_upserted": 192
+      }
+    },
+    {
+      "scenario": "concurrent_backlog",
+      "baseline_sec": 2.98746,
+      "optimized_sec": 1.120933,
+      "improvement_pct": 62.48,
+      "counters": {
+        "posts": 225,
+        "comments": 3600,
+        "comments_upserted": 3600,
+        "quotes_upserted": 0
+      }
+    }
+  ]
+}

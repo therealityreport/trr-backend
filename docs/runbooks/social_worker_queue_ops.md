@@ -14,10 +14,19 @@ This runbook covers production operations for social ingest queue mode:
 - `SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS` (optional, default `180`)
 - `SOCIAL_WORKER_HEARTBEAT_INTERVAL_SEC` (optional, default `15`, minimum `5`)
 - `SOCIAL_COMMENTS_RUN_WORKERS` (optional, default `4`, min `1`, max `8`; API-assisted comments-only fanout)
-- `SOCIAL_WORKER_POOL_GENERAL` (optional, default `4`; persistent general queue fanout workers)
-- `SOCIAL_WORKER_POOL_MEDIA_MIRROR` (optional, default `2`; persistent mirror-stage workers)
+- `SOCIAL_WORKER_POOL_POSTS` (optional, default `6`; persistent posts-stage workers)
+- `SOCIAL_WORKER_POOL_COMMENTS` (optional, default `8`; persistent comments-stage workers)
+- `SOCIAL_WORKER_POOL_MEDIA_MIRROR` (optional, default `3`; persistent post media mirror workers)
+- `SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR` (optional, default `2`; persistent comment media mirror workers)
 - `SOCIAL_WORKER_POOL_INTERVAL_SEC` (optional, default `2`; worker idle sleep interval)
-- `SOCIAL_CRAWLEE_ENABLED` (optional, default `false`)
+- `SOCIAL_STALE_RECOVERY_INTERVAL_SEC` (optional, default `30`; stale job recovery cadence)
+- `SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SEC` (optional, default `60`; run-summary reconciliation cadence)
+- `SOCIAL_JOB_CLAIM_BATCH_SIZE` (optional, default `5`, max `25`; queue claim batch size per worker)
+- `SOCIAL_RUN_IN_FLIGHT_CAP` (optional, default `4`; per-run fairness cap)
+- `SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS` (optional, default `200`; comment/reply bulk upsert chunk size)
+- `SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS` (optional, default `50`; post bulk upsert chunk size)
+- `SOCIAL_TWITTER_DELAY_SEC`, `SOCIAL_TIKTOK_DELAY_SEC`, `SOCIAL_YOUTUBE_DELAY_SEC` (optional, default `0.35`)
+- `SOCIAL_CRAWLEE_ENABLED` (optional, default `true` in non-local deployments)
 - `SOCIAL_CRAWLEE_PLATFORMS` (optional, default `instagram,tiktok,twitter,youtube`)
 - `SOCIAL_CRAWLEE_FORCE_LEGACY_PLATFORMS` (optional emergency bypass)
 - `SOCIAL_CRAWLEE_MAX_CONCURRENCY_*` and `SOCIAL_CRAWLEE_MAX_RETRIES_*` (optional per-platform limits)
@@ -60,15 +69,36 @@ cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 SOCIAL_QUEUE_ENABLED=true python -m scripts.socials.worker --parallel 4 --interval 2
 ```
 
-Start a persistent full-sync worker pool (general + media mirror):
+Start a persistent full-sync worker pool (posts + comments + mirrors):
 
 ```bash
 cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 SOCIAL_QUEUE_ENABLED=true \
-SOCIAL_WORKER_POOL_GENERAL=4 \
-SOCIAL_WORKER_POOL_MEDIA_MIRROR=2 \
+SOCIAL_WORKER_POOL_POSTS=6 \
+SOCIAL_WORKER_POOL_COMMENTS=8 \
+SOCIAL_WORKER_POOL_MEDIA_MIRROR=3 \
+SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR=2 \
+SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS=200 \
+SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS=50 \
 ./scripts/socials/start_worker_pool.sh
 ```
+
+## Controlled Benchmark Harness
+
+Run the synthetic benchmark harness to compare baseline vs optimized queue/write-path settings with parity checks across:
+
+- single-platform comments-heavy
+- sync-all (twitter+tiktok+youtube)
+- concurrent multi-run backlog
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+.venv/bin/python scripts/socials/benchmark_sync_jobs.py \
+  --output docs/ai/benchmarks/social_sync_benchmark_latest.json
+```
+
+The script fails if scenario counters diverge between baseline and optimized profiles.
+Use the generated JSON for before/after handoff evidence.
 
 ## API Behavior Guardrail
 

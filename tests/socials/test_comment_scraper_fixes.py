@@ -2425,6 +2425,155 @@ def test_twitter_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch)
     assert any(event.get("phase") == "scrape_graphql_page" for event in events)
 
 
+def test_twitter_scrape_uses_graphql_first_for_from_query_without_ct0(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={}, twikit_credentials={"auth_token": "a", "ct0": "b"})
+    calls = {"graphql": 0, "twikit": 0, "syndication": 0}
+    created_at = int(datetime(2026, 1, 1, 12, 0, tzinfo=UTC).timestamp())
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_search",
+        lambda *_args, **_kwargs: (
+            calls.__setitem__("graphql", calls["graphql"] + 1)
+            or {
+                "data": {
+                    "search_by_raw_query": {
+                        "search_timeline": {
+                            "timeline": {
+                                "instructions": [
+                                    {
+                                        "type": "TimelineAddEntries",
+                                        "entries": [
+                                            {
+                                                "entryId": "tweet-1",
+                                                "content": {"itemContent": {"tweet_results": {"result": {"id": "1"}}}},
+                                            }
+                                        ],
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_parse_tweet_result",
+        lambda _result, _cfg: SimpleNamespace(
+            tweet_id="1",
+            created_at=created_at,
+            username="bravo",
+            date_time="2026-01-01 12:00:00",
+            likes=1,
+            retweets=0,
+        ),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_via_twikit",
+        lambda _cfg: calls.__setitem__("twikit", calls["twikit"] + 1) or [],
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_syndication",
+        lambda *_args, **_kwargs: calls.__setitem__("syndication", calls["syndication"] + 1) or [],
+    )
+
+    results = scraper.scrape(
+        TwitterScrapeConfig(
+            query="from:bravotv #RHOSLC",
+            date_start=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            date_end=datetime(2026, 1, 2, 0, 0, tzinfo=UTC),
+        )
+    )
+
+    assert calls["graphql"] == 1
+    assert calls["twikit"] == 0
+    assert calls["syndication"] == 0
+    assert len(results) == 1
+    assert scraper.last_retrieval_meta.get("retrieval_mode") == "graphql"
+    assert scraper.last_retrieval_meta.get("fallback_triggered") is False
+
+
+def test_twitter_scrape_clamps_results_to_requested_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TwitterScraper(cookies={"ct0": "token"})
+    in_window_ts = int(datetime(2026, 1, 2, 12, 0, tzinfo=UTC).timestamp())
+    before_window_ts = int(datetime(2025, 12, 31, 23, 30, tzinfo=UTC).timestamp())
+    after_window_ts = int(datetime(2026, 1, 8, 0, 30, tzinfo=UTC).timestamp())
+    calls = {"count": 0}
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_search",
+        lambda *_args, **_kwargs: (
+            calls.__setitem__("count", calls["count"] + 1)
+            or {
+                "data": {
+                    "search_by_raw_query": {
+                        "search_timeline": {
+                            "timeline": {
+                                "instructions": [
+                                    {
+                                        "type": "TimelineAddEntries",
+                                        "entries": [
+                                            {
+                                                "entryId": "tweet-before",
+                                                "content": {"itemContent": {"tweet_results": {"result": {"id": "before"}}}},
+                                            },
+                                            {
+                                                "entryId": "tweet-in",
+                                                "content": {"itemContent": {"tweet_results": {"result": {"id": "in"}}}},
+                                            },
+                                            {
+                                                "entryId": "tweet-after",
+                                                "content": {"itemContent": {"tweet_results": {"result": {"id": "after"}}}},
+                                            },
+                                        ],
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+    )
+
+    def _parse(result: dict[str, object], _cfg: TwitterScrapeConfig) -> SimpleNamespace:
+        raw_id = str(result.get("id") or "")
+        ts = {
+            "before": before_window_ts,
+            "in": in_window_ts,
+            "after": after_window_ts,
+        }[raw_id]
+        return SimpleNamespace(
+            tweet_id=raw_id,
+            created_at=ts,
+            username="bravo",
+            date_time="2026-01-01 00:00:00",
+            likes=1,
+            retweets=0,
+        )
+
+    monkeypatch.setattr(scraper, "_parse_tweet_result", _parse)
+
+    results = scraper.scrape(
+        TwitterScrapeConfig(
+            query="from:bravotv #RHOSLC",
+            date_start=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            date_end=datetime(2026, 1, 7, 23, 59, tzinfo=UTC),
+        )
+    )
+
+    assert calls["count"] == 1
+    assert [tweet.tweet_id for tweet in results] == ["in"]
+    assert int(scraper.last_retrieval_meta.get("filtered_out_of_window") or 0) == 2
+
+
 def test_youtube_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = YouTubeScraper()
     events: list[dict[str, int | str]] = []

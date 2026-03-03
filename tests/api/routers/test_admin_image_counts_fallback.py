@@ -192,6 +192,380 @@ def test_auto_count_media_asset_still_requires_any_link(monkeypatch) -> None:
     assert excinfo.value.status_code == 404
 
 
+def test_auto_count_cast_photo_passes_owner_references_and_returns_references_used(monkeypatch) -> None:
+    photo_id = uuid4()
+    owner_id = str(uuid4())
+    expected_references = [
+        {
+            "url": "https://example.com/ref-1.jpg",
+            "media_asset_id": "asset-1",
+            "link_id": "link-1",
+            "rank": 1,
+            "reasons": ["seeded", "solo"],
+        }
+    ]
+    db = _FakeDb(
+        {
+            "cast_photos": {
+                "id": str(photo_id),
+                "person_id": owner_id,
+                "hosted_url": "https://example.com/source.jpg",
+                "url": "https://example.com/source.jpg",
+                "metadata": {"show_name": "The Traitors"},
+            }
+        }
+    )
+
+    received_owner_refs: list[dict[str, object]] = []
+
+    def _fake_count_people(image_url, **kwargs):  # noqa: ANN001
+        nonlocal received_owner_refs
+        owner_reference_images = kwargs.get("owner_reference_images")
+        if isinstance(owner_reference_images, list):
+            received_owner_refs = owner_reference_images
+        return SimpleNamespace(
+            people_count=1,
+            face_count=1,
+            detector="simulated",
+            model=None,
+            detections=[],
+            reference_profile={"used": expected_references},
+        )
+
+    monkeypatch.setattr(counts, "count_people", _fake_count_people)
+    monkeypatch.setattr(counts, "get_tags_by_photo_ids", lambda _db, _ids: {})
+    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
+    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        counts,
+        "build_owner_tagging_reference_profile",
+        lambda *_args, **_kwargs: {"used": expected_references},
+    )
+    monkeypatch.setattr(
+        counts,
+        "sync_owner_tagging_reference_usage",
+        lambda _db, _person_id, *, used_references: used_references,
+    )
+
+    out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    assert received_owner_refs == expected_references
+    assert out.references_used == expected_references
+
+
+def test_auto_count_media_asset_passes_owner_references_and_returns_references_used(monkeypatch) -> None:
+    asset_id = uuid4()
+    owner_id = str(uuid4())
+    expected_references = [
+        {
+            "url": "https://example.com/ref-owner.jpg",
+            "media_asset_id": "asset-1",
+            "link_id": "link-1",
+            "rank": 1,
+            "reasons": ["manual_upload", "solo"],
+        }
+    ]
+    db = _FakeDb(
+        {
+            "media_assets": {
+                "id": str(asset_id),
+                "hosted_url": "https://example.com/source.jpg",
+                "source_url": "https://example.com/source.jpg",
+                "metadata": {},
+            }
+        }
+    )
+    links = [
+        {
+            "id": "link-1",
+            "entity_type": "person",
+            "kind": "gallery",
+            "entity_id": owner_id,
+            "media_asset_id": str(asset_id),
+            "context": {"show_name": "The Traitors"},
+        }
+    ]
+
+    received_owner_refs: list[dict[str, object]] = []
+
+    def _fake_count_people(image_url, **kwargs):  # noqa: ANN001
+        nonlocal received_owner_refs
+        owner_reference_images = kwargs.get("owner_reference_images")
+        if isinstance(owner_reference_images, list):
+            received_owner_refs = owner_reference_images
+        return SimpleNamespace(
+            people_count=1,
+            face_count=1,
+            detector="simulated",
+            model=None,
+            detections=[],
+            reference_profile={"used": expected_references},
+        )
+
+    monkeypatch.setattr(counts, "count_people", _fake_count_people)
+    monkeypatch.setattr(counts, "list_person_links_by_asset_id", lambda _db, _id: links)
+    monkeypatch.setattr(counts, "has_manual_people_tags", lambda _ctx: False)
+    monkeypatch.setattr(counts, "has_people_count", lambda _ctx: False)
+    monkeypatch.setattr(counts, "update_person_links_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        counts,
+        "build_owner_tagging_reference_profile",
+        lambda *_args, **_kwargs: {"used": expected_references},
+    )
+    monkeypatch.setattr(
+        counts,
+        "sync_owner_tagging_reference_usage",
+        lambda _db, _person_id, *, used_references: used_references,
+    )
+
+    out = counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
+    assert received_owner_refs == expected_references
+    assert out.references_used == expected_references
+
+
+def test_auto_count_cast_photo_passes_person_reference_images(monkeypatch) -> None:
+    photo_id = uuid4()
+    owner_id = str(uuid4())
+    expected_person_reference_images = [
+        {
+            "person_id": str(uuid4()),
+            "references": [
+                {
+                    "url": "https://example.com/ref-susan.jpg",
+                    "url_candidates": [
+                        "https://example.com/ref-susan.jpg",
+                        "https://cdn.example.com/ref-susan.jpg",
+                    ],
+                    "source_url": "https://example.com/ref-susan.jpg",
+                    "hosted_url": "https://cdn.example.com/ref-susan.jpg",
+                    "link_id": "link-susan-1",
+                    "media_asset_id": "asset-susan-1",
+                    "rank": 1,
+                    "reasons": ["seeded", "solo"],
+                }
+            ],
+        }
+    ]
+    db = _FakeDb(
+        {
+            "cast_photos": {
+                "id": str(photo_id),
+                "person_id": owner_id,
+                "hosted_url": "https://example.com/source.jpg",
+                "url": "https://example.com/source.jpg",
+                "metadata": {"show_name": "Watch What Happens Live with Andy Cohen"},
+            }
+        }
+    )
+
+    received_person_refs: list[dict[str, object]] = []
+
+    def _fake_count_people(image_url, **kwargs):  # noqa: ANN001
+        nonlocal received_person_refs
+        refs = kwargs.get("person_reference_images")
+        if isinstance(refs, list):
+            received_person_refs = refs
+        return SimpleNamespace(
+            people_count=1,
+            face_count=1,
+            detector="simulated",
+            model=None,
+            detections=[],
+            reference_profile={"used": []},
+        )
+
+    monkeypatch.setattr(counts, "count_people", _fake_count_people)
+    monkeypatch.setattr(counts, "get_tags_by_photo_ids", lambda _db, _ids: {})
+    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
+    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        counts,
+        "_resolve_runtime_person_reference_pools",
+        lambda *_args, **_kwargs: expected_person_reference_images,
+    )
+    monkeypatch.setattr(
+        counts,
+        "build_owner_tagging_reference_profile",
+        lambda *_args, **_kwargs: {"used": []},
+    )
+
+    counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
+    assert received_person_refs == expected_person_reference_images
+
+
+def test_auto_count_media_asset_passes_person_reference_images(monkeypatch) -> None:
+    asset_id = uuid4()
+    owner_id = str(uuid4())
+    expected_person_reference_images = [
+        {
+            "person_id": str(uuid4()),
+            "references": [
+                {
+                    "url": "https://example.com/ref-guest.jpg",
+                    "url_candidates": [
+                        "https://example.com/ref-guest.jpg",
+                        "https://cdn.example.com/ref-guest.jpg",
+                    ],
+                    "source_url": "https://example.com/ref-guest.jpg",
+                    "hosted_url": "https://cdn.example.com/ref-guest.jpg",
+                    "link_id": "link-guest-1",
+                    "media_asset_id": "asset-guest-1",
+                    "rank": 1,
+                    "reasons": ["seeded", "solo"],
+                }
+            ],
+        }
+    ]
+    db = _FakeDb(
+        {
+            "media_assets": {
+                "id": str(asset_id),
+                "hosted_url": "https://example.com/source.jpg",
+                "source_url": "https://example.com/source.jpg",
+                "metadata": {},
+            }
+        }
+    )
+    links = [
+        {
+            "id": "link-1",
+            "entity_type": "person",
+            "kind": "gallery",
+            "entity_id": owner_id,
+            "media_asset_id": str(asset_id),
+            "context": {"show_name": "Watch What Happens Live with Andy Cohen"},
+        }
+    ]
+
+    received_person_refs: list[dict[str, object]] = []
+
+    def _fake_count_people(image_url, **kwargs):  # noqa: ANN001
+        nonlocal received_person_refs
+        refs = kwargs.get("person_reference_images")
+        if isinstance(refs, list):
+            received_person_refs = refs
+        return SimpleNamespace(
+            people_count=1,
+            face_count=1,
+            detector="simulated",
+            model=None,
+            detections=[],
+            reference_profile={"used": []},
+        )
+
+    monkeypatch.setattr(counts, "count_people", _fake_count_people)
+    monkeypatch.setattr(counts, "list_person_links_by_asset_id", lambda _db, _id: links)
+    monkeypatch.setattr(counts, "has_manual_people_tags", lambda _ctx: False)
+    monkeypatch.setattr(counts, "has_people_count", lambda _ctx: False)
+    monkeypatch.setattr(counts, "update_person_links_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        counts,
+        "_resolve_runtime_person_reference_pools",
+        lambda *_args, **_kwargs: expected_person_reference_images,
+    )
+    monkeypatch.setattr(
+        counts,
+        "build_owner_tagging_reference_profile",
+        lambda *_args, **_kwargs: {"used": []},
+    )
+
+    counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=False, db=db, _=None)
+    assert received_person_refs == expected_person_reference_images
+
+
+def test_auto_count_cast_photo_force_enables_identity_even_when_not_trr_eligible(monkeypatch) -> None:
+    photo_id = uuid4()
+    db = _FakeDb(
+        {
+            "cast_photos": {
+                "id": str(photo_id),
+                "hosted_url": "https://example.com/source.jpg",
+                "url": "https://example.com/source.jpg",
+                "metadata": {},
+            }
+        }
+    )
+
+    monkeypatch.setattr(
+        counts,
+        "count_people",
+        lambda image_url, mode="faces_then_yolo": SimpleNamespace(
+            people_count=1,
+            face_count=1,
+            detector="simulated",
+            model=None,
+            detections=[],
+        ),
+    )
+    monkeypatch.setattr(counts, "get_tags_by_photo_ids", lambda _db, _ids: {})
+    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
+    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
+    monkeypatch.setattr(counts, "_is_trr_show_eligible", lambda *_args, **_kwargs: False)
+
+    captured: dict[str, bool] = {}
+
+    def _fake_build_detection_boxes(_result, **kwargs):  # noqa: ANN001
+        captured["allow_identity_assignment"] = bool(kwargs.get("allow_identity_assignment"))
+        return []
+
+    monkeypatch.setattr(counts, "_build_detection_boxes", _fake_build_detection_boxes)
+
+    counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=True, db=db, _=None)
+    assert captured["allow_identity_assignment"] is True
+
+
+def test_auto_count_media_asset_force_enables_identity_even_when_not_trr_eligible(monkeypatch) -> None:
+    asset_id = uuid4()
+    db = _FakeDb(
+        {
+            "media_assets": {
+                "id": str(asset_id),
+                "hosted_url": "https://example.com/source.jpg",
+                "source_url": "https://example.com/source.jpg",
+                "metadata": {},
+            }
+        }
+    )
+
+    monkeypatch.setattr(
+        counts,
+        "count_people",
+        lambda image_url, mode="faces_then_yolo": SimpleNamespace(
+            people_count=1,
+            face_count=1,
+            detector="simulated",
+            model=None,
+            detections=[],
+        ),
+    )
+    monkeypatch.setattr(
+        counts,
+        "list_person_links_by_asset_id",
+        lambda _db, _id: [
+            {
+                "id": "link-1",
+                "entity_type": "person",
+                "kind": "gallery",
+                "entity_id": str(uuid4()),
+                "context": {},
+            }
+        ],
+    )
+    monkeypatch.setattr(counts, "has_manual_people_tags", lambda _ctx: False)
+    monkeypatch.setattr(counts, "update_person_links_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(counts, "_is_trr_show_eligible", lambda *_args, **_kwargs: False)
+
+    captured: dict[str, bool] = {}
+
+    def _fake_build_detection_boxes(_result, **kwargs):  # noqa: ANN001
+        captured["allow_identity_assignment"] = bool(kwargs.get("allow_identity_assignment"))
+        return []
+
+    monkeypatch.setattr(counts, "_build_detection_boxes", _fake_build_detection_boxes)
+
+    counts.auto_count_media_asset(asset_id=UUID(str(asset_id)), force=True, db=db, _=None)
+    assert captured["allow_identity_assignment"] is True
+
+
 def test_auto_count_cast_photo_returns_face_boxes(monkeypatch) -> None:
     photo_id = uuid4()
     db = _FakeDb(
@@ -319,6 +693,8 @@ def test_build_detection_boxes_omits_identity_when_not_trr_eligible() -> None:
                 label="Alan Cumming",
                 match_similarity=0.95,
                 match_status="matched",
+                match_reason="matched",
+                match_candidates=[{"person_id": str(uuid4()), "person_name": "Alan Cumming", "similarity": 0.95}],
             )
         ]
     )
@@ -328,6 +704,70 @@ def test_build_detection_boxes_omits_identity_when_not_trr_eligible() -> None:
     assert "person_id" not in boxes[0]
     assert "person_name" not in boxes[0]
     assert "match_similarity" not in boxes[0]
+    assert "match_reason" not in boxes[0]
+    assert "match_candidates" not in boxes[0]
+
+
+def test_build_detection_boxes_includes_match_reason_and_candidates_when_allowed() -> None:
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.92,
+                kind="face",
+                person_id=str(uuid4()),
+                person_name="Alan Cumming",
+                label="Alan Cumming",
+                match_similarity=0.81,
+                match_status="below_threshold",
+                match_reason="below_threshold",
+                match_candidates=[
+                    {"person_id": str(uuid4()), "person_name": "Susan Lucci", "similarity": 0.81},
+                    {"person_id": str(uuid4()), "similarity": 0.66},
+                ],
+            )
+        ]
+    )
+    boxes = counts._build_detection_boxes(result, allow_identity_assignment=True)
+    assert len(boxes) == 1
+    assert boxes[0]["match_reason"] == "below_threshold"
+    assert isinstance(boxes[0]["match_candidates"], list)
+    assert len(boxes[0]["match_candidates"]) == 2
+
+
+def test_build_detection_boxes_backfills_person_name_from_tagged_people_ids() -> None:
+    alan_id = "11111111-1111-1111-1111-111111111111"
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.92,
+                kind="face",
+                person_id=alan_id,
+                match_similarity=0.81,
+                match_status="matched",
+                match_reason="matched",
+                match_candidates=[{"person_id": alan_id, "similarity": 0.81}],
+            )
+        ],
+    )
+
+    boxes = counts._build_detection_boxes(
+        result,
+        allow_identity_assignment=True,
+        tagged_people_ids=[alan_id],
+        tagged_people_names=["Alan Cumming"],
+    )
+    assert len(boxes) == 1
+    assert boxes[0]["person_name"] == "Alan Cumming"
+    assert boxes[0]["label"] == "Alan Cumming"
+    assert boxes[0]["match_candidates"][0]["person_name"] == "Alan Cumming"
 
 
 def test_build_detection_boxes_person_fallback_skips_deterministic_mapping_when_not_eligible() -> None:
@@ -382,15 +822,112 @@ def test_build_detection_boxes_applies_best_effort_tag_assignment_when_tags_fewe
     assert len(boxes) == 2
     assert boxes[0]["person_name"] == "Alan Cumming"
     assert boxes[0]["label_source"] == "best_effort_tag_map"
+    assert boxes[0]["match_status"] == "matched"
+    assert boxes[0]["match_reason"] == "best_effort_tag_map"
     assert "person_name" not in boxes[1]
 
 
-def test_auto_count_cast_photo_returns_thumbnail_crop(monkeypatch) -> None:
+def test_build_detection_boxes_promotes_single_face_deterministic_assignment_to_matched() -> None:
+    owner_id = "11111111-1111-1111-1111-111111111111"
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.2,
+                y1=0.15,
+                x2=0.45,
+                y2=0.6,
+                confidence=0.84,
+                kind="face",
+                match_status="unassigned",
+            )
+        ],
+    )
+    boxes = counts._build_detection_boxes(
+        result,
+        allow_identity_assignment=True,
+        tagged_people_ids=[owner_id],
+        owner_person_id=owner_id,
+        owner_person_name="Alan Cumming",
+    )
+    assert len(boxes) == 1
+    assert boxes[0]["person_id"] == owner_id
+    assert boxes[0]["person_name"] == "Alan Cumming"
+    assert boxes[0]["label_source"] == "deterministic_tag_map"
+    assert boxes[0]["match_status"] == "matched"
+    assert boxes[0]["match_reason"] == "deterministic_tag_map"
+
+
+def test_build_detection_boxes_applies_similarity_lead_override_before_hybrid_fallback() -> None:
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.91,
+                kind="face",
+                match_status="below_threshold",
+                match_reason="below_threshold",
+                match_similarity=0.76,
+                match_candidates=[
+                    {
+                        "person_id": "11111111-1111-1111-1111-111111111111",
+                        "person_name": "Alan Cumming",
+                        "similarity": 0.76,
+                    }
+                ],
+            ),
+            SimpleNamespace(
+                x1=0.6,
+                y1=0.2,
+                x2=0.8,
+                y2=0.5,
+                confidence=0.88,
+                kind="face",
+                match_status="below_threshold",
+                match_reason="below_threshold",
+                match_similarity=0.07,
+                match_candidates=[
+                    {
+                        "person_id": "11111111-1111-1111-1111-111111111111",
+                        "person_name": "Alan Cumming",
+                        "similarity": 0.07,
+                    }
+                ],
+            ),
+        ]
+    )
+
+    boxes = counts._build_detection_boxes(
+        result,
+        allow_identity_assignment=True,
+        tagged_people_ids=[
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        ],
+        tagged_people_names=["Alan Cumming", "Milo Ventimiglia"],
+    )
+
+    assert len(boxes) == 2
+    by_x = sorted(boxes, key=lambda box: box.get("x", 0.0))
+    lead_face = by_x[0]
+    fallback_face = by_x[1]
+    assert lead_face["person_name"] == "Alan Cumming"
+    assert lead_face["label_source"] == "lead_override"
+    assert lead_face["match_reason"] == "cross_face_lead_override"
+    assert fallback_face["person_name"] == "Milo Ventimiglia"
+    assert fallback_face["label_source"] == "deterministic_tag_map"
+
+
+def test_auto_count_cast_photo_returns_owner_thumbnail_crop_when_confident_match(monkeypatch) -> None:
     photo_id = uuid4()
+    owner_id = str(uuid4())
     db = _FakeDb(
         {
             "cast_photos": {
                 "id": str(photo_id),
+                "person_id": owner_id,
                 "hosted_url": "https://example.com/source.jpg",
                 "url": "https://example.com/source.jpg",
                 "metadata": {},
@@ -406,23 +943,36 @@ def test_auto_count_cast_photo_returns_thumbnail_crop(monkeypatch) -> None:
             face_count=1,
             detector="simulated",
             model=None,
+            detections=[
+                SimpleNamespace(
+                    x1=0.2,
+                    y1=0.2,
+                    x2=0.4,
+                    y2=0.45,
+                    confidence=0.95,
+                    kind="face",
+                    person_id=owner_id,
+                    person_name="Alan Cumming",
+                    match_similarity=0.93,
+                    match_status="matched",
+                )
+            ],
         ),
     )
-    monkeypatch.setattr(counts, "get_tags_by_photo_ids", lambda _db, _ids: {})
-    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
-    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         counts,
-        "auto_thumbnail_crop",
-        lambda _result: {"x": 41.2, "y": 35.4, "zoom": 1.17, "mode": "auto", "strategy": "face_torso_v2"},
+        "get_tags_by_photo_ids",
+        lambda _db, _ids: {str(photo_id): {"people_ids": [owner_id], "people_names": ["Alan Cumming"]}},
     )
-    monkeypatch.setattr(counts, "face_centroid", lambda _result: None)
+    monkeypatch.setattr(counts, "_is_trr_show_eligible", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(counts, "has_manual_tags", lambda _row: False)
+    monkeypatch.setattr(counts, "upsert_cast_photo_tags", lambda *args, **kwargs: None)
 
     out = counts.auto_count_cast_photo(photo_id=UUID(str(photo_id)), force=False, db=db, _=None)
     assert out.thumbnail_crop is not None
-    assert out.thumbnail_crop["x"] == 41.2
-    assert out.thumbnail_crop["y"] == 35.4
-    assert out.thumbnail_crop["zoom"] == 1.17
+    assert out.thumbnail_crop["x"] == 30.0
+    assert out.thumbnail_crop["y"] == 35.5
+    assert out.thumbnail_crop["zoom"] == 1.14
     assert out.thumbnail_crop["mode"] == "auto"
 
 

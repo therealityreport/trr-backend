@@ -56,29 +56,21 @@ _TRACKING_QUERY_KEYS = {"fbclid", "__tn__", "__cft__", "ref", "refsrc"}
 _FB_FEEDBACK_BLOCK_RE = re.compile(
     r'"feedback":\{"id":"[^"]+","comment_rendering_instance":\{"comments":\{"total_count":(\d+)\}\}',
 )
-_FB_REACTION_COUNT_RE = re.compile(
-    r'"reaction_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?'
-)
-_FB_REACTION_I18N_RE = re.compile(
-    r'"i18n_reaction_count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?'
-)
+_FB_REACTION_COUNT_RE = re.compile(r'"reaction_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
+_FB_REACTION_I18N_RE = re.compile(r'"i18n_reaction_count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_TOTAL_COMMENT_COUNT_RE = re.compile(r'"total_comment_count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
-_FB_TOTAL_COMMENT_COUNT_REDUCED_RE = re.compile(r'"total_comment_count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
+_FB_TOTAL_COMMENT_COUNT_REDUCED_RE = re.compile(
+    r'"total_comment_count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?'
+)
 _FB_COMMENT_COUNT_RE = re.compile(
     r'"comment_count"\s*:\s*\{[^{}]*?"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?[^{}]*\}'
 )
 _FB_VIDEO_VIEW_COUNT_RE = re.compile(r'"video_view_count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
-_FB_VIDEO_VIEW_COUNT_REDUCED_RE = re.compile(
-    r'"video_view_count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?'
-)
+_FB_VIDEO_VIEW_COUNT_REDUCED_RE = re.compile(r'"video_view_count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_PLAY_COUNT_RE = re.compile(r'"play_count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_PLAY_COUNT_REDUCED_RE = re.compile(r'"play_count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
-_FB_SHARE_COUNT_RE = re.compile(
-    r'"share_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?'
-)
-_FB_RESHARE_COUNT_RE = re.compile(
-    r'"reshare_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?'
-)
+_FB_SHARE_COUNT_RE = re.compile(r'"share_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
+_FB_RESHARE_COUNT_RE = re.compile(r'"reshare_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_SHARE_COUNT_REDUCED_RE = re.compile(
     r'"share_count"\s*:\s*\{[^{}]*"count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?[^{}]*\}'
 )
@@ -97,6 +89,10 @@ _FB_REACTION_EDGE_RE = re.compile(
 # JSON-based patterns for authenticated SPA responses (no OG meta tags)
 _FB_MESSAGE_TEXT_RE = re.compile(r'"message":\{"text":"((?:[^"\\]|\\.)*)"')
 _FB_PERMALINK_URL_RE = re.compile(r'"permalink_url":"((?:[^"\\]|\\.)*)"')
+# Post creation timestamp embedded in Facebook's JSON data (unix epoch seconds).
+# Facebook rarely includes <meta article:published_time>, but almost always
+# embeds "creation_time":<epoch> in inline script JSON for the primary post.
+_FB_CREATION_TIME_RE = re.compile(r'"creation_time"\s*:\s*(\d{10})')
 _FB_OWNER_PAGE_NAME_RE = re.compile(r'"owner_as_page":\{[^}]*"name":"((?:[^"\\]|\\.)*)"')
 _FB_OWNER_PROFILE_PICTURE_URI_RE = re.compile(
     r'"(?:owner_as_page|owner)":\{[^{}]*?"profile_picture":\{[^{}]*?"uri":"((?:[^"\\]|\\.)*)"',
@@ -123,6 +119,20 @@ class FacebookScrapeConfig:
     show_id: int | None = None
     season_number: int | None = None
     person_id: int | None = None
+    max_scroll_iterations: int = 50
+
+    @property
+    def normalized_handle(self) -> str:
+        return str(self.page_handle or "").strip().lstrip("@")
+
+    def in_date_window(self, value: datetime | None) -> bool:
+        if value is None:
+            return True
+        if self.date_start and value < self.date_start:
+            return False
+        if self.date_end and value > self.date_end:
+            return False
+        return True
 
 
 def _canonicalize_facebook_post_url(url: str) -> str:
@@ -151,19 +161,6 @@ def _deterministic_fallback_post_id(url: str) -> str:
     canonical = _canonicalize_facebook_post_url(url)
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]  # noqa: S324
     return f"fb_{digest}"
-
-    @property
-    def normalized_handle(self) -> str:
-        return str(self.page_handle or "").strip().lstrip("@")
-
-    def in_date_window(self, value: datetime | None) -> bool:
-        if value is None:
-            return True
-        if self.date_start and value < self.date_start:
-            return False
-        if self.date_end and value > self.date_end:
-            return False
-        return True
 
 
 @dataclass
@@ -317,6 +314,71 @@ class FacebookScraper:
             browser.close()
             return html_text
 
+    def _scrape_feed_with_scroll(
+        self,
+        handle: str,
+        config: FacebookScrapeConfig,
+    ) -> list[tuple[str, str]]:
+        """Scroll feed page with Playwright to discover post URLs beyond initial render."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("Playwright unavailable for scroll scraping") from exc
+
+        url = f"{self.BASE_URL}/{quote(handle)}"
+        all_post_urls: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=self._headers().get("user-agent", ""),
+                locale="en-US",
+            )
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                if config.delay_seconds > 0:
+                    page.wait_for_timeout(max(500, int(config.delay_seconds * 1000)))
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(500)
+
+                stagnant_cycles = 0
+                for _ in range(config.max_scroll_iterations):
+                    html_text = page.content() or ""
+                    candidates = self._extract_post_urls(html_text, handle=handle)
+                    new_count = 0
+                    for candidate_url, kind in candidates:
+                        if candidate_url not in seen:
+                            seen.add(candidate_url)
+                            all_post_urls.append((candidate_url, kind))
+                            new_count += 1
+
+                    if new_count == 0:
+                        stagnant_cycles += 1
+                        if stagnant_cycles >= 3:
+                            logger.info(
+                                "[facebook] scroll stagnation after %d cycles, %d URLs discovered",
+                                _ + 1,
+                                len(all_post_urls),
+                            )
+                            break
+                    else:
+                        stagnant_cycles = 0
+
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    if config.delay_seconds > 0:
+                        page.wait_for_timeout(max(500, int(config.delay_seconds * 1000)))
+            finally:
+                context.close()
+                browser.close()
+
+        logger.info("[facebook] scroll scrape discovered %d post URLs for %s", len(all_post_urls), handle)
+        return all_post_urls
+
     @staticmethod
     def _first_group(pattern: re.Pattern[str], text: str) -> str:
         match = pattern.search(text)
@@ -389,17 +451,13 @@ class FacebookScraper:
                 if not name:
                     continue
                 count = FacebookScraper._coerce_engagement_count(
-                    edge.get("reaction_count")
-                    if edge.get("reaction_count") is not None
-                    else edge.get("count")
+                    edge.get("reaction_count") if edge.get("reaction_count") is not None else edge.get("count")
                 )
                 if not count:
                     count = FacebookScraper._coerce_engagement_count(edge.get("i18n_reaction_count"))
                 if not count:
                     count = FacebookScraper._coerce_engagement_count(
-                        edge.get("reaction_count_count")
-                        if edge.get("reaction_count_count") is not None
-                        else None
+                        edge.get("reaction_count_count") if edge.get("reaction_count_count") is not None else None
                     )
                 if count:
                     reactions[name] = count
@@ -519,7 +577,7 @@ class FacebookScraper:
             rc_match = _FB_REACTION_COUNT_RE.search(ctx)
             if rc_match:
                 engagement["reaction_count"] = FacebookScraper._coerce_engagement_count(rc_match.group(1))
-            elif (rc_match_alt := _FB_REACTION_I18N_RE.search(ctx)):
+            elif rc_match_alt := _FB_REACTION_I18N_RE.search(ctx):
                 engagement["reaction_count"] = FacebookScraper._coerce_engagement_count(rc_match_alt.group(1))
 
             vc_match = _FB_VIDEO_VIEW_COUNT_RE.search(ctx)
@@ -557,9 +615,7 @@ class FacebookScraper:
             # Extract per-reaction breakdown (Like, Love, Haha, Wow, Sad, Angry, Care)
             tr_match = _FB_TOP_REACTIONS_RE.search(ctx)
             if tr_match:
-                engagement["reactions"].update(
-                    FacebookScraper._extract_reactions_from_edges(tr_match.group(1))
-                )
+                engagement["reactions"].update(FacebookScraper._extract_reactions_from_edges(tr_match.group(1)))
 
         # Fall back to full-HTML scanning for any metrics still at zero.
         # Authenticated responses split feedback data across multiple blocks,
@@ -629,15 +685,11 @@ class FacebookScraper:
                 ctx = html_text[ctx_start:ctx_end]
                 tr_match = _FB_TOP_REACTIONS_RE.search(ctx)
                 if tr_match:
-                    engagement["reactions"].update(
-                        FacebookScraper._extract_reactions_from_edges(tr_match.group(1))
-                    )
+                    engagement["reactions"].update(FacebookScraper._extract_reactions_from_edges(tr_match.group(1)))
             # Final fallback: try all top_reactions blocks until one has localized_name
             if not engagement["reactions"]:
                 for tr_match in _FB_TOP_REACTIONS_RE.finditer(html_text):
-                    engagement["reactions"].update(
-                        FacebookScraper._extract_reactions_from_edges(tr_match.group(1))
-                    )
+                    engagement["reactions"].update(FacebookScraper._extract_reactions_from_edges(tr_match.group(1)))
                     if engagement["reactions"]:
                         break
 
@@ -666,6 +718,15 @@ class FacebookScraper:
         image_url = self._first_group(_OG_IMAGE_RE, html_text)
         published_iso = self._first_group(_PUBLISHED_TIME_RE, html_text)
         posted_at = self._to_epoch(published_iso)
+        # Fallback: extract creation_time from Facebook's inline JSON data.
+        # Facebook rarely emits the article:published_time meta tag, but its
+        # script payloads almost always contain "creation_time":<unix_epoch>.
+        creation_time_epoch: int | None = None
+        if posted_at is None:
+            ct_match = _FB_CREATION_TIME_RE.search(html_text)
+            if ct_match:
+                creation_time_epoch = int(ct_match.group(1))
+                posted_at = creation_time_epoch
         caption = desc or title
 
         # Authenticated SPA fallback: extract caption from JSON message text
@@ -708,6 +769,7 @@ class FacebookScraper:
                 "og_title": title,
                 "og_description": desc,
                 "published_time": published_iso or None,
+                "creation_time_epoch": creation_time_epoch,
                 "source": "public_ssr_engagement",
                 "play_count": engagement["play_count"],
                 "video_view_count": engagement["view_count"],
@@ -720,21 +782,45 @@ class FacebookScraper:
     _FB_OWNER_PAGE_NAME_RE = re.compile(r'"owner_as_page":\{[^}]*"name":"((?:[^"\\]|\\.)*)"')
     _FB_OWNER_NAME_RE = re.compile(r'"owner":\{[^}]*"name":"((?:[^"\\]|\\.)*)"')
 
+    @staticmethod
+    def _avatar_quality_score(url: str) -> tuple[int, int]:
+        normalized = str(url or "").strip().lower()
+        if not normalized:
+            return (-1, -1)
+        score = 0
+        if any(token in normalized for token in ("profile_picture", "profile_pic", "profile_image")):
+            score += 25
+        if any(
+            token in normalized for token in ("thumb", "thumbnail", "small", "tiny", "s50x50", "s96x96", "s160x160")
+        ):
+            score -= 20
+        max_dim = 0
+        for match in re.finditer(r"(?:s)?(\d{2,4})x(\d{2,4})", normalized):
+            max_dim = max(max_dim, int(match.group(1)), int(match.group(2)))
+        return (score + min(max_dim, 4096), len(normalized))
+
     def _extract_owner_avatar_url(self, html_text: str) -> str | None:
+        candidates: list[str] = []
         for pattern in (_FB_OWNER_PROFILE_PICTURE_URI_RE, _FB_OWNER_PROFILE_PIC_URL_RE, _FB_PROFILE_PICTURE_URI_RE):
-            match = pattern.search(html_text)
-            if not match:
-                continue
-            raw_value = str(match.group(1) or "").strip()
-            if not raw_value:
-                continue
-            try:
-                candidate = str(json.loads(f'"{raw_value}"') or "").strip()
-            except Exception:  # noqa: BLE001
-                candidate = raw_value.replace("\\/", "/").strip()
-            if candidate.startswith(("http://", "https://")):
-                return candidate
-        return None
+            for match in pattern.finditer(html_text):
+                raw_value = str(match.group(1) or "").strip()
+                if not raw_value:
+                    continue
+                try:
+                    candidate = str(json.loads(f'"{raw_value}"') or "").strip()
+                except Exception:  # noqa: BLE001
+                    candidate = raw_value.replace("\\/", "/").strip()
+                if candidate.startswith(("http://", "https://")):
+                    candidates.append(candidate)
+
+        best: str | None = None
+        best_score: tuple[int, int] = (-1, -1)
+        for candidate in candidates:
+            score = self._avatar_quality_score(candidate)
+            if score > best_score:
+                best_score = score
+                best = candidate
+        return best
 
     def scrape_post(
         self,
@@ -805,7 +891,57 @@ class FacebookScraper:
         posts_checked = 0
         matched_posts = 0
 
-        for surface_url in self._surface_urls(handle, config):
+        # When a date window is specified and Playwright is available, use
+        # scroll-based pagination on the feed to reach older posts.
+        feed_candidates_from_scroll: list[tuple[str, str]] | None = None
+        if config.include_feed and config.date_start is not None and self._playwright_fallback_enabled():
+            try:
+                feed_candidates_from_scroll = self._scrape_feed_with_scroll(handle, config)
+                pages_scanned += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[facebook] scroll scrape failed for %s: %s — falling back to static fetch", handle, exc)
+
+        # Process scroll-discovered feed candidates first.
+        if feed_candidates_from_scroll:
+            feed_url = f"{self.BASE_URL}/{handle}"
+            for candidate_url, kind in feed_candidates_from_scroll:
+                posts_checked += 1
+                try:
+                    post_html = self._fetch_html(candidate_url, delay_seconds=config.delay_seconds, referer=feed_url)
+                except Exception:  # noqa: BLE001
+                    continue
+                post = self._build_post_from_html(
+                    url=candidate_url,
+                    html_text=post_html,
+                    username=handle,
+                    post_type_hint=kind,
+                )
+                if not post.post_id or post.post_id in seen_ids:
+                    continue
+                posted_dt = datetime.fromtimestamp(post.posted_at, tz=UTC) if isinstance(post.posted_at, int) else None
+                if not config.in_date_window(posted_dt):
+                    continue
+                seen_ids.add(post.post_id)
+                matched_posts += 1
+                posts.append(post)
+                if progress_cb:
+                    progress_cb(
+                        {
+                            "phase": "scrape_posts",
+                            "pages_scanned": pages_scanned,
+                            "posts_checked": posts_checked,
+                            "matched_posts": matched_posts,
+                        }
+                    )
+
+        # Process remaining surfaces (reels, photos — and feed as fallback
+        # if scroll was not attempted or failed).
+        surface_urls = self._surface_urls(handle, config)
+        if feed_candidates_from_scroll is not None:
+            feed_url = f"{self.BASE_URL}/{handle}"
+            surface_urls = [u for u in surface_urls if u != feed_url]
+
+        for surface_url in surface_urls:
             if config.max_pages is not None and pages_scanned >= max(1, int(config.max_pages)):
                 break
             try:
@@ -821,7 +957,7 @@ class FacebookScraper:
                 posts_checked += 1
                 try:
                     post_html = self._fetch_html(candidate_url, delay_seconds=config.delay_seconds, referer=surface_url)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     continue
                 post = self._build_post_from_html(
                     url=candidate_url,
@@ -831,9 +967,7 @@ class FacebookScraper:
                 )
                 if not post.post_id or post.post_id in seen_ids:
                     continue
-                posted_dt = (
-                    datetime.fromtimestamp(post.posted_at, tz=UTC) if isinstance(post.posted_at, int) else None
-                )
+                posted_dt = datetime.fromtimestamp(post.posted_at, tz=UTC) if isinstance(post.posted_at, int) else None
                 if not config.in_date_window(posted_dt):
                     continue
                 seen_ids.add(post.post_id)
@@ -850,7 +984,7 @@ class FacebookScraper:
                     )
 
         self.last_retrieval_meta = {
-            "source": "public_meta_fallback",
+            "source": "scroll_and_static" if feed_candidates_from_scroll is not None else "public_meta_fallback",
             "pages_scanned": pages_scanned,
             "posts_checked": posts_checked,
             "matched_posts": matched_posts,
@@ -888,11 +1022,7 @@ class FacebookScraper:
         if max_comments == 0:
             return []
 
-        post_url = (
-            post_url_or_id
-            if post_url_or_id.startswith("http")
-            else f"{self.BASE_URL}/reel/{post_url_or_id}"
-        )
+        post_url = post_url_or_id if post_url_or_id.startswith("http") else f"{self.BASE_URL}/reel/{post_url_or_id}"
 
         try:
             html_text = self._fetch_html(post_url, delay_seconds=delay_seconds)
@@ -902,14 +1032,10 @@ class FacebookScraper:
             return []
 
         comments = self._extract_comments_from_ssr(html_text, max_comments=max_comments)
-        self.last_comment_fetch_reason = (
-            "facebook_ssr_comments_ok" if comments else "facebook_no_ssr_comments"
-        )
+        self.last_comment_fetch_reason = "facebook_ssr_comments_ok" if comments else "facebook_no_ssr_comments"
         return comments
 
-    def _extract_comments_from_ssr(
-        self, html_text: str, *, max_comments: int = 100
-    ) -> list[FacebookComment]:
+    def _extract_comments_from_ssr(self, html_text: str, *, max_comments: int = 100) -> list[FacebookComment]:
         """Parse comment data from Facebook SSR HTML preloader JSON."""
         comments: list[FacebookComment] = []
         seen_ids: set[str] = set()
@@ -936,9 +1062,7 @@ class FacebookScraper:
             raw_body = body_match.group(1)
             try:
                 # Decode JSON unicode escapes (\uXXXX) including surrogate pairs
-                body_text = html.unescape(
-                    json.loads(f'"{raw_body}"')
-                )
+                body_text = html.unescape(json.loads(f'"{raw_body}"'))
             except Exception:  # noqa: BLE001
                 body_text = html.unescape(raw_body.replace("\\n", "\n"))
 

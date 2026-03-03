@@ -154,6 +154,9 @@ def _candidate_titles(name: str, aliases: list[str] | None = None) -> list[str]:
             f"{text} (United States)",
             f"{text} (US)",
             text.replace("&", "and"),
+            f"{text}/Icons",
+            text.replace(" ", "_"),
+            f"{text.replace(' ', '_')}/Icons",
         }
         for variant in variants:
             key = variant.casefold()

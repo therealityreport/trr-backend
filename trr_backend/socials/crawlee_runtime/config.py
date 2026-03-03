@@ -21,6 +21,12 @@ CREDENTIAL_ACCOUNT_REGISTRY = {
 
 _MAX_CONCURRENCY_DEFAULT = 2
 _MAX_RETRIES_DEFAULT = 3
+_MAX_CONCURRENCY_BY_PLATFORM_DEFAULT = {
+    "instagram": 4,
+    "tiktok": 4,
+    "twitter": 4,
+    "youtube": 3,
+}
 
 
 @dataclass(frozen=True)
@@ -104,9 +110,18 @@ def build_runtime_config(platform: str) -> CrawleeRuntimeConfig:
     force_legacy_platforms = _parse_platform_set(os.getenv("SOCIAL_CRAWLEE_FORCE_LEGACY_PLATFORMS"), default_all=False)
 
     platform_suffix = normalized_platform.upper()
+    platform_concurrency_default = _MAX_CONCURRENCY_BY_PLATFORM_DEFAULT.get(
+        normalized_platform,
+        _MAX_CONCURRENCY_DEFAULT,
+    )
     max_concurrency = _resolve_positive_int_env(
         f"SOCIAL_CRAWLEE_MAX_CONCURRENCY_{platform_suffix}",
-        _resolve_positive_int_env("SOCIAL_CRAWLEE_MAX_CONCURRENCY", _MAX_CONCURRENCY_DEFAULT, minimum=1, maximum=32),
+        _resolve_positive_int_env(
+            "SOCIAL_CRAWLEE_MAX_CONCURRENCY",
+            platform_concurrency_default,
+            minimum=1,
+            maximum=32,
+        ),
         minimum=1,
         maximum=32,
     )

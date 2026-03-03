@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.routers import admin_brands
 
 
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
@@ -38,7 +39,14 @@ def test_admin_brands_endpoints_require_authentication(client: TestClient) -> No
         ("GET", "/api/v1/admin/brands/families/f1/links"),
         ("GET", "/api/v1/admin/brands/families/f1/wikipedia-show-urls"),
         ("GET", "/api/v1/admin/brands/logos?target_type=publication"),
+        (
+            "GET",
+            "/api/v1/admin/brands/logos/options/sources?target_type=publication&target_key=instagram.com&logo_role=wordmark",
+        ),
+        ("POST", "/api/v1/admin/brands/logos/options/discover"),
+        ("POST", "/api/v1/admin/brands/logos/options/select"),
         ("GET", "/api/v1/admin/brands/logo-targets?target_type=network"),
+        ("POST", "/api/v1/admin/brands/logos/sync"),
         ("PUT", "/api/v1/admin/brands/franchise-rules/real-housewives"),
         ("POST", "/api/v1/admin/brands/franchise-rules/real-housewives/apply"),
         ("POST", "/api/v1/admin/brands/families"),
@@ -236,7 +244,198 @@ def test_get_brand_logos_success(client: TestClient, monkeypatch: pytest.MonkeyP
         "q": "deadline",
         "limit": 5,
         "offset": 0,
+        "include_missing": False,
+        "target_key": None,
+        "logo_role": None,
+        "source_provider": None,
+        "include_related": False,
+        "show_id": None,
     }
+
+
+def test_get_brand_logo_option_sources_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "logo_role": "wordmark",
+        "sources": [{"source_provider": "wikimedia_commons", "total_count": 2, "has_more": False}],
+    }
+    with patch("api.routers.admin_brands._list_logo_option_sources", return_value=expected) as mocked:
+        response = client.get(
+            (
+                "/api/v1/admin/brands/logos/options/sources"
+                "?target_type=publication&target_key=instagram.com&logo_role=wordmark&include_related=true"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs == {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "logo_role": "wordmark",
+        "include_related": True,
+    }
+
+
+def test_get_brand_logos_include_related_survives_missing_related_variant_columns(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    base_rows = [
+        {
+            "id": "logo-1",
+            "target_type": "publication",
+            "target_key": "imdb.com",
+            "target_label": "imdb.com",
+            "source_url": "https://commons.wikimedia.org/wiki/Special:FilePath/IMDB_logo.svg",
+            "source_page_url": None,
+            "source_domain": "commons.wikimedia.org",
+            "hosted_logo_url": "https://cdn.example.com/imdb.svg",
+            "hosted_logo_black_url": None,
+            "hosted_logo_white_url": None,
+            "is_primary": True,
+            "mirror_status": "mirrored",
+            "failure_reason": None,
+            "metadata": {"logo_role": "wordmark"},
+            "logo_role": "wordmark",
+            "source_provider": "wikimedia_commons",
+            "discovered_from": "https://imdb.com/",
+            "option_kind": "stored",
+            "origin_target_type": "publication",
+            "created_at": None,
+            "updated_at": None,
+        }
+    ]
+    admin_brands._brand_logo_assets_variant_columns.cache_clear()
+
+    def _fake_fetch_all(_query: str, _params: list[object] | None = None) -> list[dict[str, object]]:
+        return base_rows
+
+    with patch("api.routers.admin_brands.pg.fetch_all", side_effect=_fake_fetch_all), patch(
+        "api.routers.admin_brands._find_related_network_streaming_assets_by_host",
+        side_effect=RuntimeError('column "hosted_logo_black_url" does not exist'),
+    ):
+        response = client.get(
+            (
+                "/api/v1/admin/brands/logos"
+                "?target_type=publication&target_key=imdb.com&logo_role=wordmark&include_related=true&limit=20"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] >= 1
+    assert payload["rows"][0]["target_key"] == "imdb.com"
+
+
+def test_get_brand_logo_option_sources_include_related_survives_missing_related_variant_columns(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    base_rows = [
+        {
+            "id": "logo-1",
+            "target_type": "publication",
+            "target_key": "imdb.com",
+            "target_label": "imdb.com",
+            "source_url": "https://commons.wikimedia.org/wiki/Special:FilePath/IMDB_logo.svg",
+            "source_page_url": None,
+            "source_domain": "commons.wikimedia.org",
+            "hosted_logo_url": "https://cdn.example.com/imdb.svg",
+            "hosted_logo_black_url": None,
+            "hosted_logo_white_url": None,
+            "is_primary": True,
+            "mirror_status": "mirrored",
+            "failure_reason": None,
+            "metadata": {"logo_role": "wordmark"},
+            "logo_role": "wordmark",
+            "source_provider": "wikimedia_commons",
+            "discovered_from": "https://imdb.com/",
+            "option_kind": "stored",
+            "origin_target_type": "publication",
+            "created_at": None,
+            "updated_at": None,
+        }
+    ]
+    admin_brands._brand_logo_assets_variant_columns.cache_clear()
+
+    def _fake_fetch_all(_query: str, _params: list[object] | None = None) -> list[dict[str, object]]:
+        return base_rows
+
+    with patch("api.routers.admin_brands.pg.fetch_all", side_effect=_fake_fetch_all), patch(
+        "api.routers.admin_brands._find_related_network_streaming_assets_by_host",
+        side_effect=RuntimeError('column "hosted_logo_black_url" does not exist'),
+    ):
+        response = client.get(
+            (
+                "/api/v1/admin/brands/logos/options/sources"
+                "?target_type=publication&target_key=imdb.com&logo_role=wordmark&include_related=true"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload.get("sources"), list)
+    assert any(row.get("source_provider") == "wikimedia_commons" for row in payload["sources"])
+
+
+def test_post_brand_logo_option_discover_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {"candidates": [], "next_offset": 0, "has_more": False}
+    payload = {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "target_label": "instagram.com",
+        "logo_role": "wordmark",
+        "offset": 0,
+        "limit": 10,
+    }
+    with patch("api.routers.admin_brands._discover_logo_candidates_by_source", return_value=expected) as mocked:
+        response = client.post(
+            "/api/v1/admin/brands/logos/options/discover",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.args[0].target_type == "publication"
+    assert mocked.call_args.args[0].target_key == "instagram.com"
+
+
+def test_post_brand_logo_option_select_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "selected": {"id": "asset-1", "logo_role": "wordmark"},
+        "summary": {"wordmark": {"selected_asset_id": "asset-1"}},
+    }
+    payload = {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "target_label": "instagram.com",
+        "logo_role": "wordmark",
+        "asset_id": "asset-1",
+    }
+    with patch("api.routers.admin_brands._select_logo_option", return_value=expected) as mocked:
+        response = client.post(
+            "/api/v1/admin/brands/logos/options/select",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs["payload"].target_type == "publication"
+    assert mocked.call_args.kwargs["payload"].asset_id == "asset-1"
 
 
 def test_get_brand_logo_targets_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,7 +458,38 @@ def test_get_brand_logo_targets_success(client: TestClient, monkeypatch: pytest.
         "target_type": "network",
         "q": "bra",
         "limit": 10,
+        "show_id": None,
     }
+
+
+def test_post_brand_logos_sync_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "scope": "page",
+        "page": "news",
+        "target_types": ["publication", "social"],
+        "targets_scanned": 4,
+        "imports_created": 2,
+        "imports_updated": 0,
+        "skipped": 1,
+        "failed": 0,
+        "unresolved": 1,
+        "targets_with_wordmark": 2,
+        "targets_with_icon": 1,
+    }
+
+    with patch("api.routers.admin_brands._sync_brand_logos", return_value=expected) as mocked:
+        response = client.post(
+            "/api/v1/admin/brands/logos/sync",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"scope": "page", "page": "news", "only_missing": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs["payload"].scope == "page"
+    assert mocked.call_args.kwargs["payload"].page == "news"
 
 
 def test_brand_family_endpoints_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
