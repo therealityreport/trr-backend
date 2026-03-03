@@ -1,0 +1,459 @@
+{
+  "generated_at": "2026-03-02T15:43:14.527723+00:00",
+  "season_id": "e9161955-6ee4-4985-865e-3386a0f670fb",
+  "source_scope": "bravo",
+  "window": {
+    "date_start": "2025-11-01T00:00:00+00:00",
+    "date_end": "2025-11-30T00:00:00+00:00"
+  },
+  "profiles": {
+    "baseline": {
+      "env": {
+        "SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS": "1",
+        "SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS": "1",
+        "SOCIAL_TWITTER_DELAY_SEC": "1.0",
+        "SOCIAL_TIKTOK_DELAY_SEC": "1.0",
+        "SOCIAL_YOUTUBE_DELAY_SEC": "1.0",
+        "SOCIAL_QUEUE_ENABLED": "false"
+      },
+      "total_duration_sec": 13.913606834015809,
+      "scenarios": [
+        {
+          "name": "single_platform_comments_heavy",
+          "duration_sec": 4.604751499951817,
+          "runs": [
+            {
+              "run_id": "83d3c195-0a77-4b8a-9600-89ce12a18787",
+              "status": "running",
+              "duration_sec": 1.0354632090311497,
+              "summary": {
+                "total_jobs": 2,
+                "active_jobs": 2,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "comments": {
+                    "total": 2,
+                    "active": 2,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 2,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0
+            }
+          ],
+          "counters": {
+            "total_jobs": 2,
+            "completed_jobs": 0,
+            "failed_jobs": 0,
+            "items_found_total": 0
+          }
+        },
+        {
+          "name": "sync_all",
+          "duration_sec": 4.363294000038877,
+          "runs": [
+            {
+              "run_id": "525aaae1-c8ac-449d-89ca-57b280a38498",
+              "status": "running",
+              "duration_sec": 1.0159701670054346,
+              "summary": {
+                "total_jobs": 18,
+                "active_jobs": 18,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "posts": {
+                    "total": 9,
+                    "active": 9,
+                    "failed": 0,
+                    "completed": 0
+                  },
+                  "comments": {
+                    "total": 9,
+                    "active": 9,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 18,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0
+            }
+          ],
+          "counters": {
+            "total_jobs": 18,
+            "completed_jobs": 0,
+            "failed_jobs": 0,
+            "items_found_total": 0
+          }
+        },
+        {
+          "name": "concurrent_multi_run_backlog",
+          "duration_sec": 4.940711209084839,
+          "runs": [
+            {
+              "run_id": "35874b05-3837-436d-8122-52b8463d8a8f",
+              "status": "running",
+              "duration_sec": 1.1443574170116335,
+              "summary": {
+                "total_jobs": 2,
+                "active_jobs": 2,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "posts": {
+                    "total": 1,
+                    "active": 1,
+                    "failed": 0,
+                    "completed": 0
+                  },
+                  "comments": {
+                    "total": 1,
+                    "active": 1,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 2,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0,
+              "label": "tiktok"
+            },
+            {
+              "run_id": "2ec515d8-823c-43ad-bad3-2ffdbf3e35e1",
+              "status": "running",
+              "duration_sec": 1.1360427499748766,
+              "summary": {
+                "total_jobs": 4,
+                "active_jobs": 4,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "posts": {
+                    "total": 2,
+                    "active": 2,
+                    "failed": 0,
+                    "completed": 0
+                  },
+                  "comments": {
+                    "total": 2,
+                    "active": 2,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 4,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0,
+              "label": "twitter"
+            },
+            {
+              "run_id": "8cc1484a-7b4c-4add-8f7f-62981eb4ffe4",
+              "status": "running",
+              "duration_sec": 1.2636055409675464,
+              "summary": {
+                "total_jobs": 2,
+                "active_jobs": 2,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "posts": {
+                    "total": 1,
+                    "active": 1,
+                    "failed": 0,
+                    "completed": 0
+                  },
+                  "comments": {
+                    "total": 1,
+                    "active": 1,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 2,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0,
+              "label": "youtube"
+            }
+          ],
+          "counters": {
+            "total_jobs": 8,
+            "completed_jobs": 0,
+            "failed_jobs": 0,
+            "items_found_total": 0
+          }
+        }
+      ]
+    },
+    "optimized": {
+      "env": {
+        "SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS": "200",
+        "SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS": "50",
+        "SOCIAL_TWITTER_DELAY_SEC": "0.35",
+        "SOCIAL_TIKTOK_DELAY_SEC": "0.35",
+        "SOCIAL_YOUTUBE_DELAY_SEC": "0.35",
+        "SOCIAL_QUEUE_ENABLED": "false"
+      },
+      "total_duration_sec": 11.735849249991588,
+      "scenarios": [
+        {
+          "name": "single_platform_comments_heavy",
+          "duration_sec": 2.1746404169825837,
+          "runs": [
+            {
+              "run_id": "fca9c0ce-fac0-4197-84a9-29753082bc72",
+              "status": "running",
+              "duration_sec": 1.0156377500388771,
+              "summary": {
+                "total_jobs": 2,
+                "active_jobs": 2,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "comments": {
+                    "total": 2,
+                    "active": 2,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 2,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0
+            }
+          ],
+          "counters": {
+            "total_jobs": 2,
+            "completed_jobs": 0,
+            "failed_jobs": 0,
+            "items_found_total": 0
+          }
+        },
+        {
+          "name": "sync_all",
+          "duration_sec": 4.304478082922287,
+          "runs": [
+            {
+              "run_id": "10800449-963e-4a0b-9226-9e8ea54bd563",
+              "status": "running",
+              "duration_sec": 1.0368497089948505,
+              "summary": {
+                "total_jobs": 18,
+                "active_jobs": 18,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "posts": {
+                    "total": 9,
+                    "active": 9,
+                    "failed": 0,
+                    "completed": 0
+                  },
+                  "comments": {
+                    "total": 9,
+                    "active": 9,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 18,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0
+            }
+          ],
+          "counters": {
+            "total_jobs": 18,
+            "completed_jobs": 0,
+            "failed_jobs": 0,
+            "items_found_total": 0
+          }
+        },
+        {
+          "name": "concurrent_multi_run_backlog",
+          "duration_sec": 5.254051707917824,
+          "runs": [
+            {
+              "run_id": "f2dd3266-2072-48c7-9b9c-c0d343c7a859",
+              "status": "running",
+              "duration_sec": 1.23049695789814,
+              "summary": {
+                "total_jobs": 2,
+                "active_jobs": 2,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "posts": {
+                    "total": 1,
+                    "active": 1,
+                    "failed": 0,
+                    "completed": 0
+                  },
+                  "comments": {
+                    "total": 1,
+                    "active": 1,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 2,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0,
+              "label": "tiktok"
+            },
+            {
+              "run_id": "212a9830-ea21-47dd-9e5e-cbd8ddcc3eea",
+              "status": "running",
+              "duration_sec": 1.190261916955933,
+              "summary": {
+                "total_jobs": 4,
+                "active_jobs": 4,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "posts": {
+                    "total": 2,
+                    "active": 2,
+                    "failed": 0,
+                    "completed": 0
+                  },
+                  "comments": {
+                    "total": 2,
+                    "active": 2,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 4,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0,
+              "label": "twitter"
+            },
+            {
+              "run_id": "58575e36-21b7-48bd-84bc-a7a4e6487e11",
+              "status": "running",
+              "duration_sec": 1.3312762919813395,
+              "summary": {
+                "total_jobs": 2,
+                "active_jobs": 2,
+                "failed_jobs": 0,
+                "stage_counts": {
+                  "posts": {
+                    "total": 1,
+                    "active": 1,
+                    "failed": 0,
+                    "completed": 0
+                  },
+                  "comments": {
+                    "total": 1,
+                    "active": 1,
+                    "failed": 0,
+                    "completed": 0
+                  }
+                },
+                "completed_jobs": 0,
+                "items_found_total": 0
+              },
+              "total_jobs": 2,
+              "completed_jobs": 0,
+              "failed_jobs": 0,
+              "items_found_total": 0,
+              "label": "youtube"
+            }
+          ],
+          "counters": {
+            "total_jobs": 8,
+            "completed_jobs": 0,
+            "failed_jobs": 0,
+            "items_found_total": 0
+          }
+        }
+      ]
+    }
+  },
+  "comparison": [
+    {
+      "scenario": "single_platform_comments_heavy",
+      "baseline_sec": 4.6048,
+      "optimized_sec": 2.1746,
+      "improvement_pct": 52.77,
+      "baseline_counters": {
+        "total_jobs": 2,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "items_found_total": 0
+      },
+      "optimized_counters": {
+        "total_jobs": 2,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "items_found_total": 0
+      }
+    },
+    {
+      "scenario": "sync_all",
+      "baseline_sec": 4.3633,
+      "optimized_sec": 4.3045,
+      "improvement_pct": 1.35,
+      "baseline_counters": {
+        "total_jobs": 18,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "items_found_total": 0
+      },
+      "optimized_counters": {
+        "total_jobs": 18,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "items_found_total": 0
+      }
+    },
+    {
+      "scenario": "concurrent_multi_run_backlog",
+      "baseline_sec": 4.9407,
+      "optimized_sec": 5.2541,
+      "improvement_pct": -6.34,
+      "baseline_counters": {
+        "total_jobs": 8,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "items_found_total": 0
+      },
+      "optimized_counters": {
+        "total_jobs": 8,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "items_found_total": 0
+      }
+    }
+  ]
+}

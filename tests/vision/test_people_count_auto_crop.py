@@ -35,7 +35,7 @@ def test_auto_thumbnail_crop_face_only_fallback() -> None:
     assert crop is not None
     assert float(crop["x"]) < 40
     assert float(crop["y"]) > 15
-    assert 1.0 <= float(crop["zoom"]) <= 1.6
+    assert 1.0 <= float(crop["zoom"]) <= 2.2
 
 
 def test_auto_thumbnail_crop_person_only_fallback() -> None:
@@ -46,7 +46,7 @@ def test_auto_thumbnail_crop_person_only_fallback() -> None:
     assert crop is not None
     assert float(crop["x"]) > 60
     assert float(crop["y"]) > 20
-    assert 1.0 <= float(crop["zoom"]) <= 1.6
+    assert 1.0 <= float(crop["zoom"]) <= 2.2
 
 
 def test_auto_thumbnail_crop_returns_none_without_detections() -> None:

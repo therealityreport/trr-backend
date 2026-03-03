@@ -47,6 +47,7 @@ class TikTokMediaResolution:
     source: str | None = None
     media_urls: list[str] = field(default_factory=list)
     thumbnail_url: str | None = None
+    author_avatar_url: str | None = None
     media_asset_meta: dict[str, Any] = field(default_factory=dict)
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
@@ -280,6 +281,17 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
         )
 
     media_urls, thumbnail_url = _parse_ytdlp_payload(payload)
+    # Extract author avatar from yt-dlp metadata (TikTok exposes uploader_avatar).
+    author_avatar_url = (
+        str(
+            payload.get("uploader_avatar")
+            or payload.get("channel_thumbnail")
+            or payload.get("channelAvatarUrl")
+            or payload.get("author_avatar_url")
+            or ""
+        ).strip()
+        or None
+    )
     width = int(payload.get("width") or 0)
     height = int(payload.get("height") or 0)
     fps = int(payload.get("fps") or 0)
@@ -317,6 +329,7 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
             "selection_policy": "best_per_asset",
             "source_assets": source_assets,
             "thumbnail_source": thumbnail_meta,
+            "author_avatar_url": author_avatar_url,
         },
     )
 
@@ -471,6 +484,83 @@ def _resolve_with_unofficial_api(
     )
 
 
+def _resolve_thumbnail_via_oembed(
+    video_url: str,
+    *,
+    timeout: tuple[int, int] = (5, 10),
+) -> tuple[str | None, dict[str, Any]]:
+    """Call TikTok oEmbed API to get thumbnail URL.
+
+    Returns (thumbnail_url, attempt_dict).  oEmbed is a lightweight official
+    endpoint that reliably returns thumbnail URLs even when watch-page parsing
+    or the unofficial API fails.
+    """
+    oembed_endpoint = "https://www.tiktok.com/oembed"
+    try:
+        resp = requests.get(
+            oembed_endpoint,
+            params={"url": video_url},
+            headers={"accept": "application/json", "user-agent": _DEFAULT_HEADERS["user-agent"]},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        thumb = str(data.get("thumbnail_url") or "").strip() or None
+        return (
+            thumb,
+            _build_attempt(
+                source="oembed",
+                success=bool(thumb),
+                reason_code=(None if thumb else "oembed_no_thumbnail"),
+                http_status=int(resp.status_code),
+                selected_url_count=(1 if thumb else 0),
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (
+            None,
+            _build_attempt(
+                source="oembed",
+                success=False,
+                reason_code="oembed_failed",
+                http_status=int(getattr(getattr(exc, "response", None), "status_code", 0) or 0) or None,
+                selected_url_count=0,
+                error=exc,
+            ),
+        )
+
+
+def _extract_author_avatar_from_item(item: dict[str, Any] | None) -> str | None:
+    """Pull the author avatar URL from a TikTok watch-page JSON item dict."""
+    if not isinstance(item, dict):
+        return None
+    author = item.get("author") or {}
+    if not isinstance(author, dict):
+        author = {}
+    author_meta = item.get("authorMeta") or {}
+    if not isinstance(author_meta, dict):
+        author_meta = {}
+    url = (
+        str(
+            author.get("avatarUrl")
+            or author.get("avatar")
+            or author.get("originalAvatarUrl")
+            or author.get("avatarLarger")
+            or author.get("avatar_larger")
+            or author.get("avatar_thumb")
+            or author_meta.get("avatarUrl")
+            or author_meta.get("avatar")
+            or author_meta.get("avatarThumb")
+            or author_meta.get("avatar_thumb")
+            or item.get("avatarUrl")
+            or item.get("avatar")
+            or ""
+        ).strip()
+        or None
+    )
+    return url if url and url.startswith("http") else None
+
+
 def resolve_tiktok_media(
     video_id: str,
     *,
@@ -505,6 +595,7 @@ def resolve_tiktok_media(
                 resolution.source = "yt_dlp_manifest"
                 resolution.media_urls = ytdlp_urls
                 resolution.thumbnail_url = ytdlp_thumb
+                resolution.author_avatar_url = str(ytdlp_meta.get("author_avatar_url") or "").strip() or None
                 resolution.media_asset_meta = ytdlp_meta
                 return resolution
             ytdlp_ok, ytdlp_status, ytdlp_error = _probe_media_url(ytdlp_urls[0], timeout=(5, 15))
@@ -512,6 +603,7 @@ def resolve_tiktok_media(
                 resolution.source = "yt_dlp_manifest"
                 resolution.media_urls = ytdlp_urls
                 resolution.thumbnail_url = ytdlp_thumb
+                resolution.author_avatar_url = str(ytdlp_meta.get("author_avatar_url") or "").strip() or None
                 resolution.media_asset_meta = ytdlp_meta
                 return resolution
             resolution.attempts.append(
@@ -560,6 +652,12 @@ def resolve_tiktok_media(
             resolution.media_urls = unofficial_urls
             resolution.thumbnail_url = unofficial_thumb
             return resolution
+        # Watch page and unofficial API both failed; try oEmbed for thumbnail.
+        if not resolution.thumbnail_url and candidate_url:
+            oembed_thumb, oembed_attempt = _resolve_thumbnail_via_oembed(candidate_url)
+            resolution.attempts.append(oembed_attempt)
+            if oembed_thumb:
+                resolution.thumbnail_url = oembed_thumb
         return resolution
 
     html = str(response.text or "")
@@ -577,6 +675,9 @@ def resolve_tiktok_media(
             break
 
     if item:
+        # Capture author avatar from watch-page JSON if available.
+        if not resolution.author_avatar_url:
+            resolution.author_avatar_url = _extract_author_avatar_from_item(item)
         media_urls, thumbnail_url = _extract_urls_from_video_item(item)
         resolution.attempts.append(
             _build_attempt(
@@ -774,4 +875,12 @@ def resolve_tiktok_media(
             selected_url_count=0,
         )
     )
+
+    # Last resort: try oEmbed for a thumbnail when everything else failed.
+    if not resolution.thumbnail_url and candidate_url:
+        oembed_thumb, oembed_attempt = _resolve_thumbnail_via_oembed(candidate_url)
+        resolution.attempts.append(oembed_attempt)
+        if oembed_thumb:
+            resolution.thumbnail_url = oembed_thumb
+
     return resolution

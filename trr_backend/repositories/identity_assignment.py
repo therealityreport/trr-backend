@@ -1,7 +1,46 @@
 from __future__ import annotations
 
+import html
+import re
 from typing import Any
 from uuid import UUID
+
+NAME_SIGNAL_KEYS = (
+    "caption",
+    "name",
+    "title",
+    "titles",
+    "episode",
+    "episode_title",
+    "original_source_page",
+    "source_page",
+)
+NAME_CONNECTOR_SPLIT_RE = re.compile(
+    r"\s*(?:,|/|&|\band\b|\bwith\b|\bin\b|\bfeat\.?\b|\bfeaturing\b)\s*",
+    re.IGNORECASE,
+)
+NAME_PHRASE_RE = re.compile(r"\b[A-Z][A-Za-z'`.-]+(?:\s+[A-Z][A-Za-z'`.-]+){1,4}\b")
+NON_PERSON_NAME_TOKENS = {
+    "and",
+    "the",
+    "watch",
+    "what",
+    "happens",
+    "live",
+    "season",
+    "episode",
+    "still",
+    "frame",
+    "poster",
+    "photo",
+    "gallery",
+    "image",
+    "imdb",
+    "tmdb",
+    "fandom",
+    "tv",
+    "movie",
+}
 
 
 def normalize_uuid_text(value: Any) -> str | None:
@@ -79,14 +118,7 @@ def _resolve_show_id_by_name(
     show_id: str | None = None
     raw_name = " ".join(str(show_name or "").split()).strip()
     try:
-        response = (
-            db.schema("core")
-            .table("shows")
-            .select("id,name")
-            .ilike("name", raw_name)
-            .limit(25)
-            .execute()
-        )
+        response = db.schema("core").table("shows").select("id,name").ilike("name", raw_name).limit(25).execute()
         rows = response.data if isinstance(getattr(response, "data", None), list) else []
         for row in rows:
             if not isinstance(row, dict):
@@ -148,14 +180,7 @@ def is_trr_show_eligible(
         if normalized in show_exists_cache:
             return bool(show_exists_cache[normalized])
         try:
-            response = (
-                db.schema("core")
-                .table("shows")
-                .select("id")
-                .eq("id", normalized)
-                .limit(1)
-                .execute()
-            )
+            response = db.schema("core").table("shows").select("id").eq("id", normalized).limit(1).execute()
             exists = bool(response.data)
         except Exception:  # noqa: BLE001
             exists = False
@@ -244,6 +269,60 @@ def _resolve_person_id_from_name(
     return resolved
 
 
+def _is_likely_person_name(value: str) -> bool:
+    tokens = [token for token in value.split() if token]
+    if len(tokens) < 2 or len(tokens) > 5:
+        return False
+    blocked = sum(1 for token in tokens if token.lower() in NON_PERSON_NAME_TOKENS)
+    return blocked < max(2, len(tokens))
+
+
+def _iter_name_signal_texts(value: Any) -> list[str]:
+    if value is None:
+        return []
+    texts: list[str] = []
+    stack: list[Any] = [value]
+    while stack:
+        current = stack.pop()
+        if current is None:
+            continue
+        if isinstance(current, str):
+            normalized = " ".join(html.unescape(current).split()).strip()
+            if normalized:
+                texts.append(normalized)
+            continue
+        if isinstance(current, list):
+            stack.extend(current)
+            continue
+        if isinstance(current, dict):
+            for key in NAME_SIGNAL_KEYS:
+                if key in current:
+                    stack.append(current.get(key))
+    return texts
+
+
+def _extract_candidate_person_names(value: Any) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_text in _iter_name_signal_texts(value):
+        text = re.sub(r"https?://\S+", " ", raw_text)
+        text = re.sub(r"\(\d{4}\)", " ", text)
+        chunks = NAME_CONNECTOR_SPLIT_RE.split(text)
+        for chunk in chunks:
+            for match in NAME_PHRASE_RE.finditer(chunk):
+                candidate = " ".join(match.group(0).split()).strip(" -_.")
+                if not candidate:
+                    continue
+                if not _is_likely_person_name(candidate):
+                    continue
+                key = candidate.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                names.append(candidate)
+    return names
+
+
 def build_identity_candidate_person_ids(
     *,
     db: Any | None,
@@ -251,6 +330,7 @@ def build_identity_candidate_person_ids(
     owner_person_id: str | None,
     tagged_people_ids: Any,
     tagged_people_names: Any = None,
+    metadata_signals: list[Any] | None = None,
     person_name_id_cache: dict[str, str | None] | None = None,
 ) -> list[str]:
     if not allow_identity_assignment:
@@ -277,5 +357,13 @@ def build_identity_candidate_person_ids(
                 person_name_id_cache=person_name_id_cache,
             )
             _append(resolved_id)
+        for signal in metadata_signals or []:
+            for candidate_name in _extract_candidate_person_names(signal):
+                resolved_id = _resolve_person_id_from_name(
+                    db,
+                    candidate_name,
+                    person_name_id_cache=person_name_id_cache,
+                )
+                _append(resolved_id)
 
     return candidates

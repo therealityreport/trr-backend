@@ -42,6 +42,16 @@ For `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`, ba
 
 If `REDIS_URL` is not set, the API uses an in-memory broker for WebSocket pub/sub. This is fine for local development and single-instance deployments. For multi-instance production deployments, set `REDIS_URL` to enable cross-instance real-time event delivery.
 
+### Backend runtime behavior
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TRR_BACKEND_WORKERS` | Number of uvicorn worker processes. Defaults to `1` for local stability. | `4` |
+| `TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER` | When `1`, blocks multi-worker startup unless `REDIS_URL` is present, forcing `1` worker to avoid websocket broker fragmentation. | `1` |
+| `TRR_BACKEND_RELOAD` | Enables uvicorn `--reload` in local mode. | `0` / `1` |
+
+By default, `TRR_BACKEND_WORKERS` is `1` and `TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER=1`, so multi-worker mode is only enabled when `REDIS_URL` is configured. If `TRR_BACKEND_WORKERS > 1` is requested while `REDIS_URL` is missing, startup logs explicitly warn and fall back to a single worker.
+
 ### CORS (Optional)
 
 | Variable | Description | Example |

@@ -14,7 +14,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -2407,6 +2407,21 @@ class TwitterScraper:
         except Exception:
             logger.debug("Twitter scrape progress callback raised", exc_info=True)
 
+    @staticmethod
+    def _window_bound_timestamp(value: datetime) -> int:
+        if value.tzinfo is None:
+            return int(value.replace(tzinfo=timezone.utc).timestamp())
+        return int(value.timestamp())
+
+    def _tweet_within_window(self, *, tweet: Tweet, start_ts: int, end_ts: int) -> bool:
+        created_at = int(getattr(tweet, "created_at", 0) or 0)
+        if created_at <= 0:
+            return False
+        return start_ts <= created_at <= end_ts
+
+    def _clamp_tweets_to_window(self, *, tweets: list[Tweet], start_ts: int, end_ts: int) -> list[Tweet]:
+        return [tweet for tweet in tweets if self._tweet_within_window(tweet=tweet, start_ts=start_ts, end_ts=end_ts)]
+
     def scrape(
         self,
         config: TwitterScrapeConfig,
@@ -2429,46 +2444,30 @@ class TwitterScraper:
 
         search_query = config.build_search_query()
         logger.info(f"Starting Twitter search: {search_query}")
+        window_start_ts = self._window_bound_timestamp(config.date_start)
+        window_end_ts = self._window_bound_timestamp(config.date_end)
 
         tweets: list[Tweet] = []
         graphql_404_count = 0
         fallback_triggered = False
         retrieval_mode = "graphql"
+        fallback_attempts: list[str] = []
         cursor = None
         page_num = 0
         graphql_failed = False
+        posts_checked_total = 0
+        filtered_out_of_window = 0
+        older_only_page_streak = 0
+        older_only_page_limit = 2
+        stop_reason = "complete"
 
         from_match = re.search(r"(?:^|\s)from:(\w+)", config.query)
-        if from_match and (self._twikit_credentials or not self.cookies.get("ct0")):
-            fallback_triggered = True
-            if self._twikit_credentials:
-                logger.info("Using twikit as primary mode for from: query")
-                tweets = self._scrape_via_twikit(config)
-                retrieval_mode = "twikit"
-            if not tweets:
-                username = from_match.group(1)
-                tweets = self._scrape_syndication(username, config)
-                retrieval_mode = "syndication"
-            if tweets:
-                self._emit_progress(
-                    progress_cb,
-                    phase="scrape_fallback_page",
-                    pages_scanned=1,
-                    posts_checked=len(tweets),
-                    matched_posts=len(tweets),
-                )
-                self.last_retrieval_meta = {
-                    "retrieval_mode": retrieval_mode,
-                    "graphql_404_count": graphql_404_count,
-                    "fallback_triggered": fallback_triggered,
-                    "tweet_count": len(tweets),
-                }
-                return tweets
 
         while True:
             page_num += 1
             if config.max_pages and page_num > config.max_pages:
                 logger.info(f"Reached max pages limit ({config.max_pages})")
+                stop_reason = "max_pages_reached"
                 break
 
             logger.info(f"Fetching page {page_num}...")
@@ -2482,6 +2481,7 @@ class TwitterScraper:
                     logger.warning("GraphQL returned 404; retrying after hash rediscovery")
                     continue
                 graphql_failed = True
+                stop_reason = "graphql_fetch_failed"
                 break
 
             # Parse search results
@@ -2490,6 +2490,8 @@ class TwitterScraper:
             instructions = timeline.get("instructions", [])
 
             tweets_on_page = 0
+            checked_on_page = 0
+            older_than_window_on_page = 0
             next_cursor = None
 
             for instruction in instructions:
@@ -2515,6 +2517,17 @@ class TwitterScraper:
                             if tweet_result:
                                 tweet = self._parse_tweet_result(tweet_result, config)
                                 if tweet:
+                                    checked_on_page += 1
+                                    posts_checked_total += 1
+                                    if not self._tweet_within_window(
+                                        tweet=tweet,
+                                        start_ts=window_start_ts,
+                                        end_ts=window_end_ts,
+                                    ):
+                                        filtered_out_of_window += 1
+                                        if int(getattr(tweet, "created_at", 0) or 0) < window_start_ts:
+                                            older_than_window_on_page += 1
+                                        continue
                                     tweets_on_page += 1
                                     tweets.append(tweet)
                                     logger.info(
@@ -2522,8 +2535,9 @@ class TwitterScraper:
                                         f"- {tweet.likes:,} likes, {tweet.retweets:,} RTs"
                                     )
 
-            if tweets_on_page == 0:
-                logger.info("No more tweets found")
+            if checked_on_page == 0:
+                logger.info("No tweet entries found on page %d; stopping pagination", page_num)
+                stop_reason = "no_tweet_entries"
                 break
 
             logger.info(f"Page {page_num}: found {tweets_on_page} tweets, {len(tweets)} total")
@@ -2531,56 +2545,106 @@ class TwitterScraper:
                 progress_cb,
                 phase="scrape_graphql_page",
                 pages_scanned=page_num,
-                posts_checked=len(tweets),
+                posts_checked=posts_checked_total,
                 matched_posts=len(tweets),
             )
+
+            if tweets_on_page == 0 and older_than_window_on_page == checked_on_page:
+                older_only_page_streak += 1
+                if older_only_page_streak >= older_only_page_limit:
+                    logger.info(
+                        "Stopping pagination after %d page(s) fully older than window start",
+                        older_only_page_streak,
+                    )
+                    stop_reason = "older_than_window_repeated"
+                    break
+            else:
+                older_only_page_streak = 0
 
             # Get next page
             cursor = next_cursor
             if not cursor:
                 logger.info("No more pages available")
+                stop_reason = "no_cursor"
                 break
 
-        # Fallback chain when GraphQL fails
-        if graphql_failed and not tweets:
+        # Fallback chain:
+        # 1) GraphQL SearchTimeline always first
+        # 2) twikit next (if configured)
+        # 3) syndication last resort (from: queries only)
+        if not tweets and from_match:
             fallback_triggered = True
-            # 1. Try twikit (authenticated search via credentials)
             if self._twikit_credentials:
+                fallback_attempts.append("twikit")
                 import time
 
-                # Brief delay after GraphQL failure to avoid Twitter rate limits
                 time.sleep(3)
-                logger.info("GraphQL failed; trying twikit search...")
-                tweets = self._scrape_via_twikit(config)
-                retrieval_mode = "twikit"
-
-            # 2. Try syndication API for from: queries (public, no auth)
+                logger.info("GraphQL yielded no in-window results; trying twikit search fallback...")
+                twikit_tweets = self._scrape_via_twikit(config)
+                tweets = self._clamp_tweets_to_window(
+                    tweets=twikit_tweets,
+                    start_ts=window_start_ts,
+                    end_ts=window_end_ts,
+                )
+                if tweets:
+                    retrieval_mode = "twikit"
             if not tweets:
-                from_match = re.search(r"from:(\w+)", config.query)
-                if from_match:
-                    username = from_match.group(1)
-                    logger.info(f"Falling back to syndication API for @{username}")
-                    tweets = self._scrape_syndication(username, config)
+                username = from_match.group(1)
+                fallback_attempts.append("syndication")
+                logger.info(f"Falling back to syndication API for @{username}")
+                syndication_tweets = self._scrape_syndication(username, config)
+                tweets = self._clamp_tweets_to_window(
+                    tweets=syndication_tweets,
+                    start_ts=window_start_ts,
+                    end_ts=window_end_ts,
+                )
+                if tweets:
                     retrieval_mode = "syndication"
-                elif not self._twikit_credentials:
-                    logger.warning(
-                        "Twitter requires authentication for search. "
-                        "Set SOCIAL_TWITTER_COOKIES_JSON, TWITTER_COOKIES_FILE, "
-                        "or TWIKIT_USERNAME + TWIKIT_PASSWORD env vars."
-                    )
+        elif graphql_failed and not tweets:
+            fallback_triggered = True
+            if self._twikit_credentials:
+                fallback_attempts.append("twikit")
+                import time
 
-        logger.info(f"Search complete: found {len(tweets)} tweets")
+                time.sleep(3)
+                logger.info("GraphQL failed; trying twikit search fallback...")
+                twikit_tweets = self._scrape_via_twikit(config)
+                tweets = self._clamp_tweets_to_window(
+                    tweets=twikit_tweets,
+                    start_ts=window_start_ts,
+                    end_ts=window_end_ts,
+                )
+                if tweets:
+                    retrieval_mode = "twikit"
+            if not tweets and not self._twikit_credentials:
+                logger.warning(
+                    "Twitter requires authentication for search. "
+                    "Set SOCIAL_TWITTER_COOKIES_JSON, TWITTER_COOKIES_FILE, "
+                    "or TWIKIT_USERNAME + TWIKIT_PASSWORD env vars."
+                )
+
+        logger.info("Search complete: found %d tweets (%d checked)", len(tweets), posts_checked_total)
         self._emit_progress(
             progress_cb,
             phase="scrape_complete",
             pages_scanned=page_num,
-            posts_checked=len(tweets),
+            posts_checked=posts_checked_total,
             matched_posts=len(tweets),
         )
         self.last_retrieval_meta = {
             "retrieval_mode": retrieval_mode,
+            "search_query": search_query,
+            "window_start": config.date_start.isoformat(),
+            "window_end": config.date_end.isoformat(),
+            "from_query": bool(from_match),
             "graphql_404_count": graphql_404_count,
+            "graphql_failed": graphql_failed,
             "fallback_triggered": fallback_triggered,
+            "fallback_attempts": fallback_attempts,
+            "pages_scanned": page_num,
+            "posts_checked": posts_checked_total,
+            "filtered_out_of_window": filtered_out_of_window,
+            "stop_reason": stop_reason,
             "tweet_count": len(tweets),
         }
         return tweets

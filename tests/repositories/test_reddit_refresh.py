@@ -32,7 +32,7 @@ def _listing_row(
     }
 
 
-def test_fetch_new_window_exhaustive_terminal_page_before_period_start_is_incomplete(monkeypatch) -> None:
+def test_fetch_new_window_exhaustive_terminal_page_before_period_start_is_complete_when_exhausted(monkeypatch) -> None:
     newer_post_time = datetime(2025, 9, 10, 12, 0, tzinfo=UTC)
     period_start = datetime(2025, 8, 14, 0, 0, tzinfo=UTC)
 
@@ -65,6 +65,46 @@ def test_fetch_new_window_exhaustive_terminal_page_before_period_start_is_incomp
         period_start=period_start,
         period_end=datetime(2025, 9, 16, 23, 0, tzinfo=UTC),
         max_pages=10,
+    )
+
+    assert pages == 1
+    assert len(rows) == 1
+    assert complete is True
+
+
+def test_fetch_new_window_exhaustive_remains_incomplete_when_page_cap_is_hit(monkeypatch) -> None:
+    newer_post_time = datetime(2025, 9, 10, 12, 0, tzinfo=UTC)
+    period_start = datetime(2025, 8, 14, 0, 0, tzinfo=UTC)
+
+    payload = {
+        "data": {
+            "children": [
+                {
+                    "data": {
+                        "id": "abc124",
+                        "title": "SLC recap",
+                        "selftext": "",
+                        "url": "https://reddit.com/r/test/comments/abc124",
+                        "permalink": "/r/test/comments/abc124",
+                        "author": "poster",
+                        "score": 5,
+                        "num_comments": 1,
+                        "created_utc": newer_post_time.timestamp(),
+                        "link_flair_text": "Salt Lake City",
+                    }
+                }
+            ],
+            "after": "t3_more",
+        }
+    }
+
+    monkeypatch.setattr(reddit_refresh._HTTP_CLIENT, "get_json", lambda path, params: payload)  # noqa: ARG005, SLF001
+
+    rows, pages, complete = reddit_refresh._fetch_new_window_exhaustive(  # noqa: SLF001
+        subreddit="bravorealhousewives",
+        period_start=period_start,
+        period_end=datetime(2025, 9, 16, 23, 0, tzinfo=UTC),
+        max_pages=1,
     )
 
     assert pages == 1
@@ -103,9 +143,9 @@ def test_discover_window_search_backfill_recovers_historical_post(monkeypatch) -
         "show_aliases": ["RHOSLC"],
         "cast_names": [],
         "is_show_focused": True,
-        "analysis_flares": ["Salt Lake City"],
-        "analysis_all_flares": ["Salt Lake City"],
-        "force_include_flares": ["Salt Lake City"],
+        "analysis_flairs": ["Salt Lake City"],
+        "analysis_all_flairs": ["Salt Lake City"],
+        "force_include_flairs": ["Salt Lake City"],
         "sort_modes": ["new"],
         "period_start": "2025-08-14T00:00:00Z",
         "period_end": "2025-09-16T23:00:00Z",
@@ -147,6 +187,7 @@ def test_discover_window_backfill_diagnostics_conservative_completion(monkeypatc
                         "rows_fetched": 0,
                         "rows_in_window": 0,
                         "reached_period_start": False,
+                        "exhausted_results": False,
                         "complete": False,
                     }
                 ],
@@ -160,9 +201,9 @@ def test_discover_window_backfill_diagnostics_conservative_completion(monkeypatc
         "show_aliases": ["RHOSLC"],
         "cast_names": [],
         "is_show_focused": True,
-        "analysis_flares": ["Salt Lake City"],
-        "analysis_all_flares": ["Salt Lake City"],
-        "force_include_flares": ["Salt Lake City"],
+        "analysis_flairs": ["Salt Lake City"],
+        "analysis_all_flairs": ["Salt Lake City"],
+        "force_include_flairs": ["Salt Lake City"],
         "period_start": "2025-08-14T00:00:00Z",
         "period_end": "2025-09-16T23:00:00Z",
         "exhaustive_window": True,
@@ -237,6 +278,153 @@ def test_fetch_search_backfill_does_not_stop_early_when_period_start_reached(mon
     assert diagnostics["rows_in_window"] == 1
 
 
+def test_fetch_search_backfill_marks_incomplete_when_page_cap_hit(monkeypatch) -> None:
+    period_start = datetime(2025, 8, 14, 0, 0, tzinfo=UTC)
+    period_end = datetime(2025, 9, 16, 23, 0, tzinfo=UTC)
+
+    responses = iter(
+        [
+            {
+                "data": {
+                    "children": [
+                        {
+                            "data": {
+                                "id": "new001",
+                                "title": "SLC post",
+                                "selftext": "",
+                                "url": "https://reddit.com/r/test/comments/new001",
+                                "permalink": "/r/test/comments/new001",
+                                "author": "poster",
+                                "score": 1,
+                                "num_comments": 1,
+                                "created_utc": datetime(2025, 8, 20, 12, 0, tzinfo=UTC).timestamp(),
+                                "link_flair_text": "Salt Lake City",
+                            }
+                        }
+                    ],
+                    "after": "t3_more",
+                }
+            }
+        ]
+    )
+
+    monkeypatch.setattr(
+        reddit_refresh._HTTP_CLIENT,
+        "get_json",
+        lambda path, params: next(responses),  # noqa: ARG005
+    )
+
+    _rows, diagnostics = reddit_refresh._fetch_search_backfill(  # noqa: SLF001
+        subreddit="bravorealhousewives",
+        tracked_flairs=["Salt Lake City"],
+        show_aliases=[],
+        show_terms=[],
+        period_start=period_start,
+        period_end=period_end,
+        max_pages_per_query=1,
+        max_total_queries=1,
+    )
+
+    assert diagnostics["complete"] is False
+    assert diagnostics["query_diagnostics"][0]["exhausted_results"] is False
+
+
+def test_fetch_search_backfill_optional_queries_do_not_block_required_completeness(monkeypatch) -> None:
+    period_start = datetime(2025, 8, 14, 0, 0, tzinfo=UTC)
+    period_end = datetime(2025, 9, 16, 23, 0, tzinfo=UTC)
+
+    def _child(post_id: str, created_at: datetime, flair: str = "Salt Lake City") -> dict:
+        return {
+            "data": {
+                "id": post_id,
+                "title": "SLC post",
+                "selftext": "",
+                "url": f"https://reddit.com/r/test/comments/{post_id}",
+                "permalink": f"/r/test/comments/{post_id}",
+                "author": "poster",
+                "score": 1,
+                "num_comments": 1,
+                "created_utc": created_at.timestamp(),
+                "link_flair_text": flair,
+            }
+        }
+
+    def fake_get_json(path: str, params: dict) -> dict:  # noqa: ANN001
+        query = str(params.get("q") or "")
+        if query.startswith('flair:"'):
+            return {
+                "data": {
+                    "children": [_child("exact001", datetime(2025, 8, 20, 12, 0, tzinfo=UTC))],
+                    "after": None,
+                }
+            }
+        if query == '"Salt Lake City"':
+            return {
+                "data": {
+                    "children": [_child("phrase001", datetime(2025, 8, 20, 13, 0, tzinfo=UTC))],
+                    "after": "t3_more",
+                }
+            }
+        raise AssertionError(f"Unexpected query: {query}")
+
+    monkeypatch.setattr(reddit_refresh._HTTP_CLIENT, "get_json", fake_get_json)  # noqa: SLF001
+
+    _rows, diagnostics = reddit_refresh._fetch_search_backfill(  # noqa: SLF001
+        subreddit="bravorealhousewives",
+        tracked_flairs=["Salt Lake City"],
+        show_aliases=[],
+        show_terms=[],
+        period_start=period_start,
+        period_end=period_end,
+        max_pages_per_query=1,
+        max_total_queries=2,
+    )
+
+    assert diagnostics["queries_run"] == 2
+    assert diagnostics["required_queries_run"] == 1
+    assert diagnostics["required_queries_complete"] == 1
+    assert diagnostics["optional_queries_incomplete"] == 1
+    assert diagnostics["complete"] is True
+    query_diag_by_kind = {
+        item.get("query_kind"): item for item in diagnostics["query_diagnostics"] if isinstance(item, dict)
+    }
+    assert query_diag_by_kind["flair_exact"]["required"] is True
+    assert query_diag_by_kind["flair_exact"]["complete"] is True
+    assert query_diag_by_kind["flair_phrase"]["required"] is False
+    assert query_diag_by_kind["flair_phrase"]["complete"] is False
+
+
+def test_fetch_search_backfill_handles_required_query_error_as_incomplete(monkeypatch) -> None:
+    period_start = datetime(2025, 8, 14, 0, 0, tzinfo=UTC)
+    period_end = datetime(2025, 9, 16, 23, 0, tzinfo=UTC)
+
+    def fake_get_json(path: str, params: dict) -> dict:  # noqa: ANN001
+        raise reddit_refresh.RedditRefreshError("Reddit rate limit hit, try again shortly.", status=429)
+
+    monkeypatch.setattr(reddit_refresh._HTTP_CLIENT, "get_json", fake_get_json)  # noqa: SLF001
+
+    rows, diagnostics = reddit_refresh._fetch_search_backfill(  # noqa: SLF001
+        subreddit="bravorealhousewives",
+        tracked_flairs=["Salt Lake City"],
+        show_aliases=[],
+        show_terms=[],
+        period_start=period_start,
+        period_end=period_end,
+        max_pages_per_query=1,
+        max_total_queries=1,
+    )
+
+    assert rows == []
+    assert diagnostics["queries_run"] == 1
+    assert diagnostics["required_queries_run"] == 1
+    assert diagnostics["required_queries_complete"] == 0
+    assert diagnostics["complete"] is False
+    first_diag = diagnostics["query_diagnostics"][0]
+    assert first_diag["required"] is True
+    assert first_diag["complete"] is False
+    assert "rate limit" in str(first_diag.get("error") or "").lower()
+
+
 def test_apply_match_metadata_scan_flair_requires_rhoslc_term() -> None:
     row = _listing_row(
         post_id="scan001",
@@ -250,9 +438,9 @@ def test_apply_match_metadata_scan_flair_requires_rhoslc_term() -> None:
         subreddit="bravorealhousewives",
         terms=["rhoslc", "salt lake city"],
         cast_terms=[],
-        analysis_flares=["Shitpost"],
-        analysis_all_flares=[],
-        force_include_flares=[],
+        analysis_flairs=["Shitpost"],
+        analysis_all_flairs=[],
+        force_include_flairs=[],
         show_focused=False,
     )
 
@@ -275,9 +463,9 @@ def test_apply_match_metadata_scan_flair_excludes_without_rhoslc_term() -> None:
         subreddit="bravorealhousewives",
         terms=["rhoslc", "salt lake city"],
         cast_terms=[],
-        analysis_flares=["Shitpost"],
-        analysis_all_flares=[],
-        force_include_flares=[],
+        analysis_flairs=["Shitpost"],
+        analysis_all_flairs=[],
+        force_include_flairs=[],
         show_focused=False,
     )
 
@@ -298,9 +486,9 @@ def test_apply_match_metadata_all_flair_includes_without_term() -> None:
         subreddit="bravorealhousewives",
         terms=["rhoslc", "salt lake city"],
         cast_terms=[],
-        analysis_flares=[],
-        analysis_all_flares=["Shitpost"],
-        force_include_flares=[],
+        analysis_flairs=[],
+        analysis_all_flairs=["Shitpost"],
+        force_include_flairs=[],
         show_focused=False,
     )
 
@@ -362,9 +550,9 @@ def test_discover_window_seed_urls_ingest_rows(monkeypatch) -> None:
         "show_aliases": ["RHOSLC"],
         "cast_names": [],
         "is_show_focused": False,
-        "analysis_flares": ["Shitpost"],
-        "analysis_all_flares": [],
-        "force_include_flares": [],
+        "analysis_flairs": ["Shitpost"],
+        "analysis_all_flairs": [],
+        "force_include_flairs": [],
         "period_start": "2025-08-14T00:00:00Z",
         "period_end": "2025-09-16T23:00:00Z",
         "exhaustive_window": True,
@@ -929,9 +1117,9 @@ def test_apply_match_metadata_filters_stopword_hint_tokens() -> None:
         subreddit="bravorealhousewives",
         terms=["rhoslc"],
         cast_terms=[],
-        analysis_flares=[],
-        analysis_all_flares=["Salt Lake City"],
-        force_include_flares=[],
+        analysis_flairs=[],
+        analysis_all_flairs=["Salt Lake City"],
+        force_include_flairs=[],
         show_focused=False,
     )
 
@@ -1181,6 +1369,101 @@ def test_execute_refresh_run_adaptive_deep_remains_partial_when_second_pass_inco
         "listing_complete": False,
         "backfill_complete": False,
     }
+
+
+def test_execute_refresh_run_max_coverage_listing_incomplete_backfill_complete_marks_completed(
+    monkeypatch,
+) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000012"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "season",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {"fetch_comments": False, "coverage_mode": "max_coverage"},
+        "status": "running",
+        "updated_at": datetime.now(tz=UTC),
+    }
+    result_payload = {
+        "subreddit": "bravorealhousewives",
+        "collection_mode": "exhaustive_window",
+        "listing_pages_fetched": 10,
+        "max_pages_applied": 10,
+        "max_backfill_queries_applied": 30,
+        "max_backfill_pages_per_query_applied": 50,
+        "window_exhaustive_complete": False,
+        "search_backfill": {
+            "complete": True,
+            "pages_fetched": 3,
+            "queries_run": 1,
+            "rows_fetched": 3,
+            "rows_in_window": 3,
+            "query_diagnostics": [
+                {
+                    "flair": "London",
+                    "query": 'flair:"London"',
+                    "pages_fetched": 3,
+                    "rows_fetched": 3,
+                    "rows_in_window": 3,
+                    "reached_period_start": False,
+                    "exhausted_results": True,
+                    "complete": True,
+                }
+            ],
+        },
+        "seed_urls": {},
+        "window_start": "2010-01-01T00:00:00Z",
+        "window_end": "2026-03-03T00:00:00Z",
+        "terms": ["rhoslc", "salt lake city"],
+        "hints": {"suggested_include_terms": ["rhoslc"], "suggested_exclude_terms": []},
+        "threads": [
+            {
+                "reddit_post_id": "p1",
+                "title": "Post 1",
+                "text": "body",
+                "posted_at": "2026-03-01T00:00:00Z",
+                "num_comments": 2,
+                "score": 2,
+                "passes_flair_filter": True,
+            }
+        ],
+        "totals": {"fetched_rows": 10, "matched_rows": 1, "tracked_flair_rows": 1},
+    }
+
+    updates: list[dict] = []
+
+    def fake_update_run(run_id_arg, **kwargs):  # noqa: ANN001
+        updates.append({"run_id": run_id_arg, **kwargs})
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(reddit_refresh, "_discover_window", lambda *args, **kwargs: result_payload)  # noqa: ANN002, ANN003
+    monkeypatch.setattr(reddit_refresh, "_update_run", fake_update_run)
+    monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
+    monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
+    monkeypatch.setattr(
+        reddit_refresh,
+        "get_refresh_run",
+        lambda run_id_arg: {"run_id": run_id_arg, "status": "completed"},
+    )  # noqa: ARG005
+
+    result = reddit_refresh.execute_refresh_run(run_id)
+
+    assert result["status"] == "completed"
+    completed_update = next(
+        (item for item in updates if item.get("status") in {"completed", "partial"}),
+        None,
+    )
+    assert completed_update is not None
+    assert completed_update["status"] == "completed"
+    diagnostics = completed_update.get("diagnostics") or {}
+    assert diagnostics.get("coverage_mode") == "max_coverage"
+    assert diagnostics.get("final_completeness") == {
+        "listing_complete": False,
+        "backfill_complete": True,
+    }
+    assert diagnostics.get("status_resolution") == "listing_incomplete_backfill_complete_max_coverage"
 
 
 def test_get_reddit_community_analytics_summary_season_scope_filters_season(monkeypatch) -> None:

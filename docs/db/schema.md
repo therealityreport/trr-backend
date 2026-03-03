@@ -8,9 +8,8 @@ This repo uses Supabase Postgres as the system of record. The authoritative DDL 
 
 Canonical TV metadata: shows, seasons, episodes, and cast.
 
-### `games`
-
-Interactive "game" content (quiz/poll/prediction/ranking), user sessions, and user responses. Answer keys are stored separately from user responses.
+> Note (2026-02-09+): legacy `games` schema was removed in migration `0106_drop_games_schema.sql`.
+> Bravodle/Realitease runtime data currently lives in TRR-APP Firebase collections, not Supabase `games.*` tables.
 
 ### `surveys`
 
@@ -65,16 +64,6 @@ See `docs/architecture.md` for the full TMDb enrichment pipeline.
 - `pipeline.runs`: One row per orchestrator invocation (status + config + timestamps).
 - `pipeline.run_stages`: Per-stage execution status, hashes for resume, manifest keys, and metrics.
 
-## `games` tables
-
-- `games.games`: A game scoped to a show/season/episode (`show_id` required; `season_id`/`episode_id` optional).
-- `games.questions`: Questions for a game; `question_order` is unique per game.
-- `games.options`: Options for a question (for choice/ranking styles).
-- `games.answer_keys`: Answer keys per question (kept separate from user responses).
-- `games.sessions`: Per-user session for playing a game (user-scoped).
-- `games.responses`: Per-session per-question answers (user-scoped via the owning session); includes `game_id` to enforce session/question scope.
-- `games.stats`: Aggregated/computed stats for games/questions (read-only to clients).
-
 ## `surveys` tables
 
 - `surveys.surveys`: A survey scoped to a show/season/episode (`show_id` required; `season_id`/`episode_id` optional). Includes `slug` for URL-friendly identifiers.
@@ -90,7 +79,7 @@ See `docs/architecture.md` for the full TMDb enrichment pipeline.
 
 ## Games vs. surveys
 
-- `games.*` supports scoring via `games.answer_keys` and session-based play via `games.sessions` + `games.responses`.
+- Legacy `games.*` tables were removed.
 - `surveys.*` focuses on opinion/feedback capture via `surveys.responses` + `surveys.answers`, plus live rollups in `surveys.aggregates`.
 
 ## `social` tables
@@ -123,20 +112,18 @@ All scrape tables include:
 Public read:
 
 - `core.shows`, `core.seasons`, `core.episodes`, `core.people`, `core.cast_memberships`, `core.episode_cast`
-- `games.games`, `games.questions`, `games.options`, `games.stats`
 - `surveys.surveys`, `surveys.questions`, `surveys.options`, `surveys.aggregates`
 - `social.threads`, `social.posts`, `social.reactions` (in-app discussion)
 - `social.scrape_jobs`, `social.instagram_posts`, `social.instagram_comments`, `social.tiktok_posts`, `social.tiktok_comments`, `social.youtube_videos`, `social.youtube_comments`, `social.twitter_tweets` (scraped content)
 
 User-scoped read/write:
 
-- `games.sessions`, `games.responses` (owned by `auth.uid()`)
 - `surveys.responses`, `surveys.answers` (owned by `auth.uid()`)
 - `social.threads`, `social.posts`, `social.reactions` (owned by `auth.uid()` for create/update/delete)
 
 Read-only to clients:
 
-- `games.stats`, `surveys.aggregates` (no INSERT/UPDATE/DELETE policies)
+- `surveys.aggregates` (no INSERT/UPDATE/DELETE policies)
 
 Service role bypasses RLS (Supabase default).
 
@@ -147,4 +134,3 @@ The seed dataset in `supabase/seed.sql` creates:
 - 1 show, 1 season, 2 episodes
 - 5 people + cast links
 - 1 survey with 3 questions and options, plus empty aggregates
-- 1 game with 2 questions and options, plus answer keys and empty stats

@@ -591,6 +591,25 @@ def _extract_source_image_id_from_path(path: str | None) -> str | None:
     return None
 
 
+def _normalize_imdb_title_id(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if re.fullmatch(r"tt\d+", raw, flags=re.IGNORECASE):
+        return raw.lower()
+    match = _TITLE_ID_RE.search(raw)
+    if match:
+        return match.group(1).lower()
+    return None
+
+
+def _build_imdb_title_url(title_id: str | None) -> str | None:
+    normalized = _normalize_imdb_title_id(title_id)
+    if not normalized:
+        return None
+    return f"https://www.imdb.com/title/{normalized}/"
+
+
 def parse_imdb_person_mediaindex_images(html: str, imdb_person_id: str) -> list[dict[str, Any]]:
     imdb_person_id = str(imdb_person_id or "").strip()
     if not _IMDB_NAME_ID_RE.match(imdb_person_id):
@@ -994,6 +1013,15 @@ def parse_imdb_person_mediaviewer_details(html: str, *, viewer_id: str | None = 
     if not title_names and caption_title_fallback:
         title_names = caption_title_fallback
 
+    imdb_title_id = None
+    if isinstance(title_ids, list):
+        for candidate in title_ids:
+            normalized = _normalize_imdb_title_id(candidate if isinstance(candidate, str) else None)
+            if normalized:
+                imdb_title_id = normalized
+                break
+    imdb_title_url = _build_imdb_title_url(imdb_title_id)
+
     image_type = _extract_mediaviewer_image_type(
         html,
         viewer_id=viewer_id,
@@ -1013,5 +1041,7 @@ def parse_imdb_person_mediaviewer_details(html: str, *, viewer_id: str | None = 
         "people_names": people_names or None,
         "title_imdb_ids": title_ids or None,
         "title_names": title_names or None,
+        "imdb_title_id": imdb_title_id,
+        "imdb_title_url": imdb_title_url,
         "image_type": image_type,
     }

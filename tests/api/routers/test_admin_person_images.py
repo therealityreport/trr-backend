@@ -192,6 +192,8 @@ def test_build_detection_boxes_omits_identity_when_assignment_not_allowed() -> N
                 label="Alan Cumming",
                 match_similarity=0.95,
                 match_status="matched",
+                match_reason="matched",
+                match_candidates=[{"person_id": str(uuid4()), "person_name": "Alan Cumming", "similarity": 0.95}],
             )
         ],
     )
@@ -202,6 +204,73 @@ def test_build_detection_boxes_omits_identity_when_assignment_not_allowed() -> N
     assert "person_id" not in face_boxes[0]
     assert "person_name" not in face_boxes[0]
     assert "match_similarity" not in face_boxes[0]
+    assert "match_reason" not in face_boxes[0]
+    assert "match_candidates" not in face_boxes[0]
+
+
+def test_build_detection_boxes_includes_match_reason_and_candidates_when_allowed() -> None:
+    result = SimpleNamespace(
+        people_count=1,
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.92,
+                kind="face",
+                person_id=str(uuid4()),
+                person_name="Alan Cumming",
+                label="Alan Cumming",
+                match_similarity=0.81,
+                match_status="below_threshold",
+                match_reason="below_threshold",
+                match_candidates=[
+                    {"person_id": str(uuid4()), "person_name": "Susan Lucci", "similarity": 0.81},
+                    {"person_id": str(uuid4()), "similarity": 0.66},
+                ],
+            )
+        ],
+    )
+
+    face_boxes, _ = admin_person_images._build_detection_boxes(result, allow_identity_assignment=True)
+    assert len(face_boxes) == 1
+    assert face_boxes[0]["match_reason"] == "below_threshold"
+    assert isinstance(face_boxes[0]["match_candidates"], list)
+    assert len(face_boxes[0]["match_candidates"]) == 2
+
+
+def test_build_detection_boxes_backfills_person_name_from_tagged_people_ids() -> None:
+    alan_id = "11111111-1111-1111-1111-111111111111"
+    result = SimpleNamespace(
+        people_count=1,
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.92,
+                kind="face",
+                person_id=alan_id,
+                match_similarity=0.81,
+                match_status="matched",
+                match_reason="matched",
+                match_candidates=[{"person_id": alan_id, "similarity": 0.81}],
+            )
+        ],
+    )
+
+    face_boxes, _ = admin_person_images._build_detection_boxes(
+        result,
+        allow_identity_assignment=True,
+        tagged_people_ids=[alan_id],
+        tagged_people_names=["Alan Cumming"],
+    )
+    assert len(face_boxes) == 1
+    assert face_boxes[0]["person_name"] == "Alan Cumming"
+    assert face_boxes[0]["label"] == "Alan Cumming"
+    assert face_boxes[0]["match_candidates"][0]["person_name"] == "Alan Cumming"
 
 
 def test_build_detection_boxes_applies_best_effort_tag_assignment_when_tags_fewer_than_boxes() -> None:
@@ -233,7 +302,102 @@ def test_build_detection_boxes_applies_best_effort_tag_assignment_when_tags_fewe
     assert len(face_boxes) == 2
     assert face_boxes[0]["person_name"] == "Alan Cumming"
     assert face_boxes[0]["label_source"] == "best_effort_tag_map"
+    assert face_boxes[0]["match_status"] == "matched"
+    assert face_boxes[0]["match_reason"] == "best_effort_tag_map"
     assert "person_name" not in face_boxes[1]
+
+
+def test_build_detection_boxes_promotes_single_face_deterministic_assignment_to_matched() -> None:
+    owner_id = "11111111-1111-1111-1111-111111111111"
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.2,
+                y1=0.15,
+                x2=0.45,
+                y2=0.6,
+                confidence=0.84,
+                kind="face",
+                match_status="unassigned",
+            )
+        ],
+    )
+    face_boxes, _ = admin_person_images._build_detection_boxes(
+        result,
+        allow_identity_assignment=True,
+        tagged_people_ids=[owner_id],
+        owner_person_id=owner_id,
+        owner_person_name="Alan Cumming",
+    )
+    assert len(face_boxes) == 1
+    assert face_boxes[0]["person_id"] == owner_id
+    assert face_boxes[0]["person_name"] == "Alan Cumming"
+    assert face_boxes[0]["label_source"] == "deterministic_tag_map"
+    assert face_boxes[0]["match_status"] == "matched"
+    assert face_boxes[0]["match_reason"] == "deterministic_tag_map"
+
+
+def test_build_detection_boxes_applies_similarity_lead_override_before_hybrid_fallback() -> None:
+    result = SimpleNamespace(
+        detections=[
+            SimpleNamespace(
+                x1=0.1,
+                y1=0.2,
+                x2=0.3,
+                y2=0.5,
+                confidence=0.91,
+                kind="face",
+                match_status="below_threshold",
+                match_reason="below_threshold",
+                match_similarity=0.76,
+                match_candidates=[
+                    {
+                        "person_id": "11111111-1111-1111-1111-111111111111",
+                        "person_name": "Alan Cumming",
+                        "similarity": 0.76,
+                    }
+                ],
+            ),
+            SimpleNamespace(
+                x1=0.6,
+                y1=0.2,
+                x2=0.8,
+                y2=0.5,
+                confidence=0.88,
+                kind="face",
+                match_status="below_threshold",
+                match_reason="below_threshold",
+                match_similarity=0.07,
+                match_candidates=[
+                    {
+                        "person_id": "11111111-1111-1111-1111-111111111111",
+                        "person_name": "Alan Cumming",
+                        "similarity": 0.07,
+                    }
+                ],
+            ),
+        ],
+    )
+
+    face_boxes, _ = admin_person_images._build_detection_boxes(
+        result,
+        allow_identity_assignment=True,
+        tagged_people_ids=[
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        ],
+        tagged_people_names=["Alan Cumming", "Milo Ventimiglia"],
+    )
+
+    assert len(face_boxes) == 2
+    by_x = sorted(face_boxes, key=lambda box: box.get("x", 0.0))
+    lead_face = by_x[0]
+    fallback_face = by_x[1]
+    assert lead_face["person_name"] == "Alan Cumming"
+    assert lead_face["label_source"] == "lead_override"
+    assert lead_face["match_reason"] == "cross_face_lead_override"
+    assert fallback_face["person_name"] == "Milo Ventimiglia"
+    assert fallback_face["label_source"] == "deterministic_tag_map"
 
 
 def test_is_trr_show_eligible_accepts_mapped_fallback_show_name(monkeypatch) -> None:
@@ -667,6 +831,71 @@ def test_apply_show_context_to_photos_infers_unresolved_imdb_episode_rows_from_e
     assert photos[0]["metadata"]["show_context_source"] == "request_context_inferred"
 
 
+def test_apply_show_context_to_photos_overrides_mismatched_request_context_when_episode_evidence_matches(
+    monkeypatch,
+) -> None:
+    show_id = uuid4()
+    show_id_str = str(show_id)
+    mock_db = MagicMock()
+    episodes_response = MagicMock()
+    episodes_response.error = None
+    episodes_response.data = []
+    episodes_query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value
+    episodes_query.execute.return_value = episodes_response
+
+    photos = [
+        {
+            "id": "photo-1",
+            "source": "imdb",
+            "title_imdb_ids": ["tt26755932"],
+            "metadata": {
+                "show_context_source": "request_context",
+                "show_id": "wrong-show-id",
+                "show_name": "Wrong Show",
+                "show_imdb_id": "tt0000001",
+                "imdb_title_type": "TVEpisode",
+                "imdb_image_type": "still_frame",
+                "imdb_fallback_show_name": "The Traitors",
+                "imdb_fallback_show_imdb_id": "tt1234567",
+                "episode_title": "The Power of the Seer",
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        admin_person_images,
+        "_build_show_lookup_maps",
+        lambda db: (
+            {
+                "tt1234567": {"id": show_id_str, "name": "The Traitors", "imdb_id": "tt1234567"},
+                "tt0000001": {"id": "wrong-show-id", "name": "Wrong Show", "imdb_id": "tt0000001"},
+            },
+            {
+                "the traitors": {"id": show_id_str, "name": "The Traitors", "imdb_id": "tt1234567"},
+                "wrong show": {"id": "wrong-show-id", "name": "Wrong Show", "imdb_id": "tt0000001"},
+            },
+            {
+                show_id_str: {"id": show_id_str, "name": "The Traitors", "imdb_id": "tt1234567"},
+                "wrong-show-id": {"id": "wrong-show-id", "name": "Wrong Show", "imdb_id": "tt0000001"},
+            },
+        ),
+    )
+
+    tagged, failed = admin_person_images._apply_show_context_to_photos(
+        mock_db,
+        photos,
+        show_id=show_id,
+        show_name="The Traitors",
+    )
+
+    assert tagged == 1
+    assert failed == 0
+    assert photos[0]["metadata"]["show_id"] == show_id_str
+    assert photos[0]["metadata"]["show_name"] == "The Traitors"
+    assert photos[0]["metadata"]["show_imdb_id"] == "tt1234567"
+    assert photos[0]["metadata"]["show_context_source"] == "request_context_inferred"
+
+
 def test_repair_existing_imdb_cast_photos_rewrites_rows_via_upsert(monkeypatch) -> None:
     mock_db = MagicMock()
     existing_rows = [
@@ -731,7 +960,7 @@ def test_repair_existing_imdb_cast_photos_backfills_image_type_from_mediaviewer_
             "title_imdb_ids": [],
             "people_imdb_ids": [],
             "people_names": [],
-            "metadata": {},
+            "metadata": {"imdb_title_type": "TVEpisode"},
         }
     ]
 
@@ -753,6 +982,8 @@ def test_repair_existing_imdb_cast_photos_backfills_image_type_from_mediaviewer_
             "people_names": ["Alan Cumming"],
             "title_imdb_ids": ["tt123"],
             "title_names": ["The Traitors"],
+            "imdb_title_id": "tt123",
+            "imdb_title_url": "https://www.imdb.com/title/tt123/",
             "image_type": "still_frame",
         },
     )
@@ -787,6 +1018,9 @@ def test_repair_existing_imdb_cast_photos_backfills_image_type_from_mediaviewer_
     assert len(upserted_rows) == 1
     metadata = dict(upserted_rows[0].get("metadata") or {})
     assert metadata["imdb_image_type"] == "still_frame"
+    assert metadata["imdb_title_id"] == "tt123"
+    assert metadata["imdb_title_url"] == "https://www.imdb.com/title/tt123/"
+    assert metadata["imdb_credit_media_type"] == "TV Episode"
     assert isinstance(metadata.get("imdb_metadata_refreshed_at"), str)
 
 
@@ -802,6 +1036,10 @@ def test_repair_existing_imdb_cast_photos_skips_complete_rows(monkeypatch) -> No
             "people_names": ["Alan Cumming"],
             "metadata": {
                 "imdb_image_type": "event",
+                "imdb_title_type": "Movie",
+                "imdb_title_id": "tt123",
+                "imdb_title_url": "https://www.imdb.com/title/tt123/",
+                "imdb_credit_media_type": "Movie",
                 "show_context_source": "request_context",
                 "tags": {
                     "people": [{"imdb_id": "nm0001086", "name": "Alan Cumming"}],
@@ -871,6 +1109,28 @@ def test_needs_imdb_metadata_refresh_when_request_context_inferred_lacks_corrobo
     assert admin_person_images._needs_imdb_metadata_refresh(row) is True
 
 
+def test_needs_imdb_metadata_refresh_for_episode_evidence_with_mistagged_request_context() -> None:
+    row = {
+        "source": "imdb",
+        "title_imdb_ids": ["tt26755932"],
+        "people_imdb_ids": ["nm0001086"],
+        "context_type": "Still Frame",
+        "metadata": {
+            "show_context_source": "request_context",
+            "show_name": "Wrong Show",
+            "imdb_title_type": "TVEpisode",
+            "imdb_image_type": "still_frame",
+            "episode_title": "The Power of the Seer",
+            "tags": {
+                "people": [{"imdb_id": "nm0001086", "name": "Alan Cumming"}],
+                "titles": [{"imdb_id": "tt26755932", "title": "The Power of the Seer"}],
+            },
+        },
+    }
+
+    assert admin_person_images._needs_imdb_metadata_refresh(row) is True
+
+
 def test_repair_existing_imdb_cast_photos_rejects_stale_request_context_show(monkeypatch) -> None:
     mock_db = MagicMock()
     existing_rows = [
@@ -888,10 +1148,9 @@ def test_repair_existing_imdb_cast_photos_rejects_stale_request_context_show(mon
                 "show_name": "The Traitors",
                 "show_imdb_id": "tt1234567",
                 "show_short_code": "TT",
-                "imdb_image_type": "still_frame",
+                "imdb_image_type": "event",
                 "imdb_fallback_show_name": "Watch What Happens Live with Andy Cohen",
                 "imdb_fallback_show_imdb_id": "tt0318220",
-                "episode_title": "Milo Ventimiglia & Alan Cumming",
                 "tags": {
                     "people": [
                         {"imdb_id": "nm0001086", "name": "Alan Cumming"},
@@ -974,7 +1233,47 @@ def test_repair_existing_imdb_cast_photos_rejects_stale_request_context_show(mon
     assert metadata.get("show_imdb_id") is None
     assert metadata.get("show_short_code") is None
     assert metadata.get("show_context_source") == "request_context_rejected"
-    assert metadata.get("show_context_repair_reason") == "stale_request_context_mismatch"
+    assert metadata.get("show_context_repair_reason") == "missing_corroboration"
+
+
+def test_evaluate_imdb_request_context_staleness_trusts_episode_fallback_on_show_mismatch() -> None:
+    row = {
+        "source": "imdb",
+        "context_type": "Episode Still",
+        "metadata": {
+            "show_context_source": "request_context_inferred",
+            "show_id": "show-wrong",
+            "show_name": "Wrong Show",
+            "show_imdb_id": "tt0000001",
+            "imdb_title_type": "TVEpisode",
+            "imdb_fallback_show_name": "The Traitors",
+            "imdb_fallback_show_imdb_id": "tt1234567",
+            "episode_title": "The Power of the Seer",
+            "imdb_image_type": "still_frame",
+        },
+    }
+    show_lookup_by_imdb_id = {
+        "tt0000001": {"id": "show-wrong", "name": "Wrong Show", "imdb_id": "tt0000001"},
+        "tt1234567": {"id": "show-traitors", "name": "The Traitors", "imdb_id": "tt1234567"},
+    }
+    show_lookup_by_alias = {
+        "wrong show": {"id": "show-wrong", "name": "Wrong Show", "imdb_id": "tt0000001"},
+        "the traitors": {"id": "show-traitors", "name": "The Traitors", "imdb_id": "tt1234567"},
+    }
+    show_lookup_by_id = {
+        "show-wrong": {"id": "show-wrong", "name": "Wrong Show", "imdb_id": "tt0000001"},
+        "show-traitors": {"id": "show-traitors", "name": "The Traitors", "imdb_id": "tt1234567"},
+    }
+
+    stale, reason = admin_person_images._evaluate_imdb_request_context_staleness(
+        row,
+        show_lookup_by_imdb_id=show_lookup_by_imdb_id,
+        show_lookup_by_alias=show_lookup_by_alias,
+        show_lookup_by_id=show_lookup_by_id,
+    )
+
+    assert stale is False
+    assert reason is None
 
 
 def test_repair_existing_imdb_cast_photos_does_not_downgrade_authoritative_rows(monkeypatch) -> None:
@@ -993,6 +1292,10 @@ def test_repair_existing_imdb_cast_photos_does_not_downgrade_authoritative_rows(
                 "show_name": "The Traitors",
                 "show_imdb_id": "tt1234567",
                 "imdb_image_type": "still_frame",
+                "imdb_title_type": "TVEpisode",
+                "imdb_title_id": "tt26755932",
+                "imdb_title_url": "https://www.imdb.com/title/tt26755932/",
+                "imdb_credit_media_type": "TV Episode",
                 "episode_imdb_id": "tt26755932",
                 "episode_title": "The Power of the Seer",
                 "tags": {
@@ -1106,6 +1409,255 @@ def test_reprocess_stream_emits_terminal_error_for_unhandled_exception(client, m
     assert "Reprocess stream failed" in normalized_payload
 
 
+def test_reprocess_stream_force_tagging_recount_true_passes_force_recount(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+    mock_db = MagicMock()
+    mock_response = MagicMock()
+    mock_response.data = [person_data]
+    mock_response.error = None
+    query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+    query.execute.return_value = mock_response
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch(
+            "api.routers.admin_person_images._auto_count_cast_photos",
+            return_value=(2, 2, 0),
+        ) as cast_mock:
+            with patch(
+                "api.routers.admin_person_images._auto_count_media_links",
+                return_value=(1, 1, 0),
+            ) as media_mock:
+                response = client.post(
+                    f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                    json={
+                        "run_metadata": False,
+                        "run_count": True,
+                        "run_tagging": True,
+                        "force_tagging_recount": True,
+                        "run_id_text": False,
+                        "run_crop": False,
+                        "run_resize": False,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+    assert response.status_code == 200
+    assert cast_mock.call_count == 1
+    assert media_mock.call_count == 1
+    assert cast_mock.call_args.kwargs["force_recount"] is True
+    assert media_mock.call_args.kwargs["force_recount"] is True
+
+
+def test_reprocess_stream_tagging_is_always_full_fix_even_when_flag_false(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+    mock_db = MagicMock()
+    mock_response = MagicMock()
+    mock_response.data = [person_data]
+    mock_response.error = None
+    query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+    query.execute.return_value = mock_response
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch(
+            "api.routers.admin_person_images._auto_count_cast_photos",
+            return_value=(2, 2, 0),
+        ) as cast_mock:
+            with patch(
+                "api.routers.admin_person_images._auto_count_media_links",
+                return_value=(1, 1, 0),
+            ) as media_mock:
+                response = client.post(
+                    f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                    json={
+                        "run_metadata": False,
+                        "run_count": True,
+                        "run_tagging": True,
+                        "force_tagging_recount": False,
+                        "run_id_text": False,
+                        "run_crop": False,
+                        "run_resize": False,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+    assert response.status_code == 200
+    assert cast_mock.call_count == 1
+    assert media_mock.call_count == 1
+    assert cast_mock.call_args.kwargs["force_recount"] is True
+    assert media_mock.call_args.kwargs["force_recount"] is True
+
+
+def test_reprocess_stream_passes_owner_reference_pool_to_tagging_calls(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+    mock_db = MagicMock()
+    mock_response = MagicMock()
+    mock_response.data = [person_data]
+    mock_response.error = None
+    query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+    query.execute.return_value = mock_response
+    expected_refs = [
+        {
+            "url": "https://example.com/ref-1.jpg",
+            "media_asset_id": "asset-1",
+            "link_id": "link-1",
+            "rank": 1,
+            "reasons": ["seeded", "solo"],
+        }
+    ]
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch(
+            "api.routers.admin_person_images.build_owner_tagging_reference_profile",
+            return_value={"used": expected_refs},
+        ) as profile_mock:
+            with patch(
+                "api.routers.admin_person_images.sync_owner_tagging_reference_usage",
+                side_effect=lambda _db, _person_id, *, used_references: used_references,
+            ):
+                with patch(
+                    "api.routers.admin_person_images._auto_count_cast_photos",
+                    return_value=(2, 2, 0),
+                ) as cast_mock:
+                    with patch(
+                        "api.routers.admin_person_images._auto_count_media_links",
+                        return_value=(1, 1, 0),
+                    ) as media_mock:
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                            json={
+                                "run_metadata": False,
+                                "run_count": True,
+                                "run_tagging": True,
+                                "run_id_text": False,
+                                "run_crop": False,
+                                "run_resize": False,
+                                "show_name": "The Traitors",
+                            },
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+    assert response.status_code == 200
+    assert profile_mock.call_count == 1
+    assert cast_mock.call_args.kwargs["owner_reference_images"] == expected_refs
+    assert media_mock.call_args.kwargs["owner_reference_images"] == expected_refs
+    assert callable(cast_mock.call_args.kwargs["owner_reference_sync_cb"])
+    assert callable(media_mock.call_args.kwargs["owner_reference_sync_cb"])
+
+
+def test_reprocess_stream_forwards_scoped_targets_to_stage_helpers(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+    mock_db = MagicMock()
+    mock_response = MagicMock()
+    mock_response.data = [person_data]
+    mock_response.error = None
+    query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+    query.execute.return_value = mock_response
+
+    target_cast_photo_ids = [str(uuid4()), str(uuid4())]
+    target_media_link_ids = [str(uuid4())]
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch(
+            "api.routers.admin_person_images._auto_count_cast_photos",
+            return_value=(2, 2, 0),
+        ) as cast_mock:
+            with patch(
+                "api.routers.admin_person_images._auto_count_media_links",
+                return_value=(1, 1, 0),
+            ) as media_mock:
+                with patch(
+                    "api.routers.admin_person_images._recenter_person_gallery_images",
+                    return_value=(1, 1, 0, 0),
+                ) as recenter_mock:
+                    with patch(
+                        "api.routers.admin_person_images._resize_person_gallery_images",
+                        return_value=(1, 1, 0, 1, 1, 0),
+                    ) as resize_mock:
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                            json={
+                                "run_metadata": False,
+                                "run_count": True,
+                                "run_id_text": False,
+                                "run_crop": True,
+                                "run_resize": True,
+                                "target_cast_photo_ids": target_cast_photo_ids,
+                                "target_media_link_ids": target_media_link_ids,
+                            },
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+    assert response.status_code == 200
+    assert cast_mock.call_count == 1
+    assert media_mock.call_count == 1
+    assert recenter_mock.call_count == 1
+    assert resize_mock.call_count == 1
+    assert cast_mock.call_args.kwargs["photo_ids"] == target_cast_photo_ids
+    assert media_mock.call_args.kwargs["media_link_ids"] == target_media_link_ids
+    assert recenter_mock.call_args.kwargs["photo_ids"] == target_cast_photo_ids
+    assert recenter_mock.call_args.kwargs["media_link_ids"] == target_media_link_ids
+    assert resize_mock.call_args.kwargs["photo_ids"] == target_cast_photo_ids
+    assert resize_mock.call_args.kwargs["media_link_ids"] == target_media_link_ids
+
+
+def test_reprocess_stream_skips_scoped_stages_when_scope_targets_are_empty(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+    mock_db = MagicMock()
+    mock_response = MagicMock()
+    mock_response.data = [person_data]
+    mock_response.error = None
+    query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+    query.execute.return_value = mock_response
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_person_images._auto_count_cast_photos") as cast_mock:
+            with patch("api.routers.admin_person_images._auto_count_media_links") as media_mock:
+                with patch("api.routers.admin_person_images._recenter_person_gallery_images") as recenter_mock:
+                    with patch("api.routers.admin_person_images._resize_person_gallery_images") as resize_mock:
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                            json={
+                                "run_metadata": False,
+                                "run_count": True,
+                                "run_id_text": False,
+                                "run_crop": True,
+                                "run_resize": True,
+                                "target_cast_photo_ids": [],
+                                "target_media_link_ids": [],
+                            },
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+    assert response.status_code == 200
+    assert cast_mock.call_count == 0
+    assert media_mock.call_count == 0
+    assert recenter_mock.call_count == 0
+    assert resize_mock.call_count == 0
+    assert "Skipping tagging stage (no scoped targets)." in response.text
+    assert "Skipping centering/cropping stage (no scoped targets)." in response.text
+    assert "Skipping resize stage (no scoped targets)." in response.text
+
+
 def test_refresh_stream_emits_resizing_heartbeat_during_long_variant_generation(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
@@ -1125,17 +1677,17 @@ def test_refresh_stream_emits_resizing_heartbeat_during_long_variant_generation(
 
     with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
         with patch("api.routers.admin_person_images._refresh_tmdb_profile", return_value=None):
-                with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
-                    with patch("api.routers.admin_person_images._resolve_refresh_sources", return_value=([], False)):
+            with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
+                with patch("api.routers.admin_person_images._resolve_refresh_sources", return_value=([], False)):
+                    with patch(
+                        "api.routers.admin_person_images._repair_existing_imdb_cast_photos",
+                        return_value=(0, 0),
+                    ):
                         with patch(
-                            "api.routers.admin_person_images._repair_existing_imdb_cast_photos",
-                            return_value=(0, 0),
+                            "api.routers.admin_person_images._resize_person_gallery_images",
+                            side_effect=_slow_resize,
                         ):
-                            with patch(
-                                "api.routers.admin_person_images._resize_person_gallery_images",
-                                side_effect=_slow_resize,
-                            ):
-                                response = client.post(
+                            response = client.post(
                                 f"/api/v1/admin/person/{person_id}/refresh-images/stream",
                                 json={
                                     "skip_mirror": True,
@@ -1297,6 +1849,47 @@ def test_refresh_stream_sync_imdb_progress_includes_diagnostics(client, monkeypa
     assert final_sync_imdb["imdb_filtered_people"] == 41
     assert final_sync_imdb["imdb_filtered_episode"] == 8
     assert final_sync_imdb["imdb_filtered_other"] == 2
+
+
+def test_refresh_stream_metadata_repair_uses_fixing_imdb_details_label(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    person_data = {
+        "id": person_id,
+        "full_name": "Metadata Repair Label Person",
+        "external_ids": {"imdb": "nm0001086"},
+    }
+    mock_db = MagicMock()
+    mock_response = MagicMock()
+    mock_response.data = [person_data]
+    mock_response.error = None
+    query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+    query.execute.return_value = mock_response
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_person_images._refresh_tmdb_profile", return_value=None):
+            with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
+                with patch("api.routers.admin_person_images._resolve_refresh_sources", return_value=([], False)):
+                    with patch(
+                        "api.routers.admin_person_images._repair_existing_imdb_cast_photos",
+                        return_value=(0, 0),
+                    ):
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                            json={
+                                "skip_mirror": True,
+                                "skip_auto_count": True,
+                                "skip_word_detection": True,
+                                "skip_centering": True,
+                                "skip_resize": True,
+                            },
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+    assert response.status_code == 200
+    assert "Fixing IMDb Details" in response.text
 
 
 def test_refresh_stream_includes_tmdb_profile_failure_fields_in_complete_payload(client, monkeypatch) -> None:
@@ -2183,11 +2776,183 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
         assert complete_data["auto_counts_failed"] == 1
         failed_parts = complete_data.get("failed_parts") or []
         assert any(
-            isinstance(part, dict)
-            and part.get("part") == "people_count_face_crops"
-            and int(part.get("failed", 0)) == 1
+            isinstance(part, dict) and part.get("part") == "people_count_face_crops" and int(part.get("failed", 0)) == 1
             for part in failed_parts
         )
+
+    def test_reprocess_stream_honors_run_tagging_alias_when_run_count_disabled(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images._auto_count_cast_photos",
+                return_value=(2, 2, 0),
+            ) as cast_mock:
+                with patch(
+                    "api.routers.admin_person_images._auto_count_media_links",
+                    return_value=(1, 1, 0),
+                ) as media_mock:
+                    response = client.post(
+                        f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                        json={
+                            "run_metadata": False,
+                            "run_count": False,
+                            "run_tagging": True,
+                            "run_id_text": False,
+                            "run_crop": False,
+                            "run_resize": False,
+                        },
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+        assert response.status_code == 200
+        assert cast_mock.call_count == 1
+        assert media_mock.call_count == 1
+
+    def test_reprocess_stream_run_tagging_takes_precedence_over_run_count(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_person_images._auto_count_cast_photos") as cast_mock:
+                with patch("api.routers.admin_person_images._auto_count_media_links") as media_mock:
+                    response = client.post(
+                        f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                        json={
+                            "run_metadata": False,
+                            "run_count": True,
+                            "run_tagging": False,
+                            "run_id_text": False,
+                            "run_crop": False,
+                            "run_resize": False,
+                        },
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+        assert response.status_code == 200
+        assert cast_mock.call_count == 0
+        assert media_mock.call_count == 0
+        assert "Skipping tagging stage." in response.text
+
+    def test_reprocess_stream_forwards_scoped_targets_to_stage_helpers(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        target_cast_photo_ids = [str(uuid4()), str(uuid4())]
+        target_media_link_ids = [str(uuid4())]
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images._auto_count_cast_photos",
+                return_value=(2, 2, 0),
+            ) as cast_mock:
+                with patch(
+                    "api.routers.admin_person_images._auto_count_media_links",
+                    return_value=(1, 1, 0),
+                ) as media_mock:
+                    with patch(
+                        "api.routers.admin_person_images._recenter_person_gallery_images",
+                        return_value=(1, 1, 0, 0),
+                    ) as recenter_mock:
+                        with patch(
+                            "api.routers.admin_person_images._resize_person_gallery_images",
+                            return_value=(1, 1, 0, 1, 1, 0),
+                        ) as resize_mock:
+                            response = client.post(
+                                f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                                json={
+                                    "run_metadata": False,
+                                    "run_count": True,
+                                    "run_id_text": False,
+                                    "run_crop": True,
+                                    "run_resize": True,
+                                    "target_cast_photo_ids": target_cast_photo_ids,
+                                    "target_media_link_ids": target_media_link_ids,
+                                },
+                                headers={"Authorization": f"Bearer {token}"},
+                            )
+
+        assert response.status_code == 200
+        assert cast_mock.call_count == 1
+        assert media_mock.call_count == 1
+        assert recenter_mock.call_count == 1
+        assert resize_mock.call_count == 1
+
+        assert cast_mock.call_args.kwargs["photo_ids"] == target_cast_photo_ids
+        assert media_mock.call_args.kwargs["media_link_ids"] == target_media_link_ids
+        assert recenter_mock.call_args.kwargs["photo_ids"] == target_cast_photo_ids
+        assert recenter_mock.call_args.kwargs["media_link_ids"] == target_media_link_ids
+        assert resize_mock.call_args.kwargs["photo_ids"] == target_cast_photo_ids
+        assert resize_mock.call_args.kwargs["media_link_ids"] == target_media_link_ids
+
+    def test_reprocess_stream_skips_scoped_stages_when_scope_targets_are_empty(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_person_images._auto_count_cast_photos") as cast_mock:
+                with patch("api.routers.admin_person_images._auto_count_media_links") as media_mock:
+                    with patch("api.routers.admin_person_images._recenter_person_gallery_images") as recenter_mock:
+                        with patch("api.routers.admin_person_images._resize_person_gallery_images") as resize_mock:
+                            response = client.post(
+                                f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                                json={
+                                    "run_metadata": False,
+                                    "run_count": True,
+                                    "run_id_text": False,
+                                    "run_crop": True,
+                                    "run_resize": True,
+                                    "target_cast_photo_ids": [],
+                                    "target_media_link_ids": [],
+                                },
+                                headers={"Authorization": f"Bearer {token}"},
+                            )
+
+        assert response.status_code == 200
+        assert cast_mock.call_count == 0
+        assert media_mock.call_count == 0
+        assert recenter_mock.call_count == 0
+        assert resize_mock.call_count == 0
+        assert "Skipping tagging stage (no scoped targets)." in response.text
+        assert "Skipping centering/cropping stage (no scoped targets)." in response.text
+        assert "Skipping resize stage (no scoped targets)." in response.text
 
 
 class TestUpdateFacebankSeed:
@@ -2458,3 +3223,163 @@ def test_pick_autocount_url_falls_back_to_hosted() -> None:
         "hosted_url": "https://cdn.example.com/x.png",
     }
     assert admin_person_images._pick_autocount_url(row) == row["hosted_url"]
+
+
+def test_owner_face_crop_payload_accepts_moderate_similarity() -> None:
+    """Faces matched at 65-80% similarity should generate owner crop payloads."""
+    face_boxes = [
+        {
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.3,
+            "confidence": 0.916,
+            "person_id": "11111111-1111-1111-1111-111111111111",
+            "match_status": "matched",
+            "match_similarity": 0.765,
+            "match_reason": "matched",
+        },
+        {
+            "x": 0.6,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.3,
+            "confidence": 0.893,
+            "match_status": "below_threshold",
+            "match_similarity": 0.078,
+            "match_reason": "below_threshold",
+        },
+    ]
+    result = admin_person_images._owner_face_crop_payload(
+        face_boxes,
+        owner_person_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert result is not None, "76.5% similarity should pass crop threshold"
+    assert result["mode"] == "auto"
+    assert result["strategy"] == "owner_face_box_v1"
+    assert result["x"] < 50  # Face 1 is at x=0.1, center ~0.2 -> ~20%
+
+
+def test_owner_face_crop_payload_accepts_cross_face_lead_override() -> None:
+    """Cross-face lead override matches at ~55% similarity should generate crops."""
+    face_boxes = [
+        {
+            "x": 0.5,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.3,
+            "confidence": 0.757,
+            "person_id": "11111111-1111-1111-1111-111111111111",
+            "match_status": "matched",
+            "match_similarity": 0.55,
+            "match_reason": "cross_face_lead_override",
+        },
+    ]
+    result = admin_person_images._owner_face_crop_payload(
+        face_boxes,
+        owner_person_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert result is not None, "55% similarity cross_face_lead_override should pass"
+    assert result["strategy"] == "owner_face_box_v1"
+
+
+def test_owner_face_crop_payload_uses_square_crop_bbox() -> None:
+    """When square_crop_bbox is available, use it for crop center computation."""
+    face_boxes = [
+        {
+            "x": 0.4,
+            "y": 0.3,
+            "width": 0.1,
+            "height": 0.15,
+            "confidence": 0.90,
+            "person_id": "owner-id",
+            "match_status": "matched",
+            "match_similarity": 0.80,
+            "match_reason": "matched",
+            "square_crop_bbox": [0.3, 0.2, 0.6, 0.5],  # center = (0.45, 0.35)
+        },
+    ]
+    result = admin_person_images._owner_face_crop_payload(
+        face_boxes,
+        owner_person_id="owner-id",
+    )
+    assert result is not None
+    # With square_crop_bbox [0.3, 0.2, 0.6, 0.5]:
+    # cx = (0.3 + 0.6) / 2 = 0.45 -> x = 45.0
+    # scb_height = 0.5 - 0.2 = 0.3
+    # cy = 0.2 + (0.3 * 0.45) = 0.335 -> y = 33.5
+    assert result["strategy"] == "owner_face_box_v1"
+    assert result["x"] == 45.0, f"Expected x=45.0 (scb center), got {result['x']}"
+    assert result["y"] == 33.5, f"Expected y=33.5 (scb weighted center), got {result['y']}"
+
+
+def test_similarity_lead_does_not_overwrite_already_matched_same_person() -> None:
+    """If a box is already matched for the same person, don't overwrite with lead_override."""
+    boxes = [
+        {
+            "index": 1,
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.3,
+            "confidence": 0.91,
+            "person_id": "11111111-1111-1111-1111-111111111111",
+            "person_name": "Alan Cumming",
+            "label": "Alan Cumming",
+            "label_source": "identity_match",
+            "match_status": "matched",
+            "match_reason": "matched",
+            "match_similarity": 0.765,
+            "match_candidates": [
+                {
+                    "person_id": "11111111-1111-1111-1111-111111111111",
+                    "person_name": "Alan Cumming",
+                    "similarity": 0.765,
+                },
+            ],
+        },
+        {
+            "index": 2,
+            "x": 0.6,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.3,
+            "confidence": 0.88,
+            "label_source": "generic",
+            "match_status": "below_threshold",
+            "match_reason": "below_threshold",
+            "match_similarity": 0.078,
+            "match_candidates": [
+                {
+                    "person_id": "11111111-1111-1111-1111-111111111111",
+                    "person_name": "Alan Cumming",
+                    "similarity": 0.078,
+                },
+            ],
+        },
+    ]
+    admin_person_images._apply_similarity_lead_assignments(
+        boxes,
+        tagged_people_ids=["11111111-1111-1111-1111-111111111111"],
+        tagged_people_names=["Alan Cumming"],
+    )
+    # Face 1 should keep original match_reason, NOT be overwritten to cross_face_lead_override
+    assert boxes[0]["match_reason"] == "matched", (
+        f"Expected 'matched' but got '{boxes[0]['match_reason']}' — "
+        "already-matched faces should not be overwritten by lead_override"
+    )
+    assert boxes[0]["label_source"] == "identity_match"
+
+
+def test_should_recenter_auto_crop_accepts_owner_face_box_v1() -> None:
+    """owner_face_box_v1 crops should be recognized as stable (skip recentering)."""
+    crop = {
+        "x": 35.0,
+        "y": 42.0,
+        "zoom": 1.35,
+        "mode": "auto",
+        "strategy": "owner_face_box_v1",
+    }
+    assert admin_person_images._should_recenter_auto_crop(crop) is False, (
+        "owner_face_box_v1 should be recognized as a stable auto crop"
+    )

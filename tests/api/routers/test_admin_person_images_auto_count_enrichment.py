@@ -154,6 +154,85 @@ def test_auto_count_cast_photos_persists_face_boxes_face_crops_and_auto_people(m
     assert metadata["face_boxes"][0]["person_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
+def test_auto_count_cast_photos_force_recount_allows_identity_without_trr_show(monkeypatch) -> None:
+    photo_id = "11111111-1111-1111-1111-111111111111"
+    owner_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    db = _FakeDb(
+        {
+            "cast_photos": [
+                {
+                    "id": photo_id,
+                    "person_id": owner_id,
+                    "source": "imdb",
+                    "hosted_url": "https://cdn.example.com/photo.jpg",
+                    "url": "https://images.example.com/photo.jpg",
+                    "image_url": "https://images.example.com/photo.jpg",
+                    "thumb_url": None,
+                    "source_page_url": "https://example.com/page",
+                    "metadata": {},
+                }
+            ]
+        }
+    )
+
+    monkeypatch.setattr(
+        "trr_backend.clients.screenalytics.is_screenalytics_configured",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "trr_backend.clients.screenalytics.count_people",
+        lambda _url, **_kwargs: SimpleNamespace(
+            people_count=1,
+            detector="retinaface",
+            detections=[
+                SimpleNamespace(
+                    kind="face",
+                    x1=0.1,
+                    y1=0.1,
+                    x2=0.3,
+                    y2=0.35,
+                    confidence=0.95,
+                    person_id=owner_id,
+                    person_name="Alan Cumming",
+                    match_similarity=0.92,
+                    match_status="matched",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photo_tags.get_tags_by_photo_ids",
+        lambda _db, _ids: {},
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photo_tags.has_manual_tags",
+        lambda _tag: False,
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photo_tags.upsert_cast_photo_tags",
+        lambda _db, **_kwargs: None,
+    )
+    monkeypatch.setattr(admin_person_images, "_is_trr_show_eligible", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(admin_person_images, "generate_and_upload_face_crops", lambda **_kwargs: [])
+
+    diagnostics = admin_person_images._empty_auto_count_diagnostics()
+    attempted, succeeded, failed = admin_person_images._auto_count_cast_photos(
+        db,
+        person_id=owner_id,
+        sources=["imdb"],
+        force_recount=True,
+        diagnostics=diagnostics,
+    )
+
+    assert (attempted, succeeded, failed) == (1, 1, 0)
+    assert diagnostics["auto_identity_skipped_non_trr_show"] == 0
+    metadata_updates = [call for call in db.update_calls if call["table"] == "cast_photos"]
+    assert metadata_updates
+    metadata = metadata_updates[-1]["payload"]["metadata"]
+    assert metadata["face_boxes"][0]["person_id"] == owner_id
+    assert metadata["face_boxes"][0]["match_status"] == "matched"
+
+
 def test_auto_count_media_links_persists_face_boxes_face_crops_and_auto_people(monkeypatch) -> None:
     db = _FakeDb({"media_links": []})
 
@@ -334,6 +413,174 @@ def test_auto_count_cast_photos_promotes_owner_by_similarity_and_assigns_remaini
     assert right_face.get("person_id") == owner_id
     assert right_face.get("person_name") == "Alan Cumming"
     assert right_face.get("label_source") == "owner_similarity_seed"
+
+
+def test_auto_count_cast_photos_does_not_force_owner_to_best_unrelated_similarity(monkeypatch) -> None:
+    photo_id = "11111111-1111-1111-1111-111111111111"
+    owner_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    guest_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    db = _FakeDb(
+        {
+            "cast_photos": [
+                {
+                    "id": photo_id,
+                    "person_id": owner_id,
+                    "source": "imdb",
+                    "hosted_url": "https://cdn.example.com/photo.jpg",
+                    "url": "https://images.example.com/photo.jpg",
+                    "image_url": "https://images.example.com/photo.jpg",
+                    "thumb_url": None,
+                    "source_page_url": "https://example.com/page",
+                    "metadata": {},
+                }
+            ]
+        }
+    )
+
+    monkeypatch.setattr("trr_backend.clients.screenalytics.is_screenalytics_configured", lambda: True)
+    monkeypatch.setattr(
+        "trr_backend.clients.screenalytics.count_people",
+        lambda _url, **_kwargs: SimpleNamespace(
+            people_count=2,
+            detector="retinaface",
+            detections=[
+                SimpleNamespace(
+                    kind="face",
+                    x1=0.08,
+                    y1=0.14,
+                    x2=0.32,
+                    y2=0.42,
+                    confidence=0.92,
+                    person_id=guest_id,
+                    person_name="Susan Lucci",
+                    match_similarity=0.95,
+                    match_status="matched",
+                ),
+                SimpleNamespace(
+                    kind="face",
+                    x1=0.52,
+                    y1=0.12,
+                    x2=0.78,
+                    y2=0.44,
+                    confidence=0.91,
+                    person_id=owner_id,
+                    person_name="Alan Cumming",
+                    match_similarity=0.84,
+                    match_status="matched",
+                ),
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photo_tags.get_tags_by_photo_ids",
+        lambda _db, _ids: {
+            photo_id: {
+                "people_ids": [owner_id, guest_id],
+                "people_names": ["Alan Cumming", "Susan Lucci"],
+            }
+        },
+    )
+    monkeypatch.setattr("trr_backend.repositories.cast_photo_tags.has_manual_tags", lambda _tag: False)
+    monkeypatch.setattr("trr_backend.repositories.cast_photo_tags.upsert_cast_photo_tags", lambda *_a, **_k: None)
+    monkeypatch.setattr(admin_person_images, "_is_trr_show_eligible", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(admin_person_images, "_apply_auto_crop_payload", lambda _result: None)
+    monkeypatch.setattr(admin_person_images, "generate_and_upload_face_crops", lambda **_kwargs: [])
+
+    attempted, succeeded, failed = admin_person_images._auto_count_cast_photos(
+        db,
+        person_id=owner_id,
+        owner_person_name="Alan Cumming",
+        sources=["imdb"],
+    )
+
+    assert (attempted, succeeded, failed) == (1, 1, 0)
+    metadata_updates = [call for call in db.update_calls if call["table"] == "cast_photos"]
+    metadata = metadata_updates[-1]["payload"]["metadata"]
+    face_boxes = metadata.get("face_boxes") or []
+    by_x = sorted(face_boxes, key=lambda box: box.get("x", 0))
+    left_face = by_x[0]
+    right_face = by_x[1]
+    assert left_face.get("person_id") == guest_id
+    assert right_face.get("person_id") == owner_id
+    assert right_face.get("person_name") == "Alan Cumming"
+
+
+def test_auto_count_cast_photos_keeps_existing_thumbnail_crop_without_confident_owner_match(monkeypatch) -> None:
+    photo_id = "11111111-1111-1111-1111-111111111111"
+    owner_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    existing_crop = {
+        "x": 61.2,
+        "y": 44.0,
+        "zoom": 1.15,
+        "mode": "auto",
+        "strategy": "legacy_auto",
+    }
+    db = _FakeDb(
+        {
+            "cast_photos": [
+                {
+                    "id": photo_id,
+                    "person_id": owner_id,
+                    "source": "imdb",
+                    "hosted_url": "https://cdn.example.com/photo.jpg",
+                    "url": "https://images.example.com/photo.jpg",
+                    "image_url": "https://images.example.com/photo.jpg",
+                    "thumb_url": None,
+                    "source_page_url": "https://example.com/page",
+                    "metadata": {"thumbnail_crop": existing_crop},
+                }
+            ]
+        }
+    )
+
+    monkeypatch.setattr("trr_backend.clients.screenalytics.is_screenalytics_configured", lambda: True)
+    monkeypatch.setattr(
+        "trr_backend.clients.screenalytics.count_people",
+        lambda _url, **_kwargs: SimpleNamespace(
+            people_count=1,
+            detector="retinaface",
+            detections=[
+                SimpleNamespace(
+                    kind="face",
+                    x1=0.22,
+                    y1=0.16,
+                    x2=0.46,
+                    y2=0.44,
+                    confidence=0.92,
+                    person_id=owner_id,
+                    person_name="Alan Cumming",
+                    match_similarity=0.81,
+                    match_status="below_threshold",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photo_tags.get_tags_by_photo_ids",
+        lambda _db, _ids: {
+            photo_id: {
+                "people_ids": [owner_id],
+                "people_names": ["Alan Cumming"],
+            }
+        },
+    )
+    monkeypatch.setattr("trr_backend.repositories.cast_photo_tags.has_manual_tags", lambda _tag: False)
+    monkeypatch.setattr("trr_backend.repositories.cast_photo_tags.upsert_cast_photo_tags", lambda *_a, **_k: None)
+    monkeypatch.setattr(admin_person_images, "_is_trr_show_eligible", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(admin_person_images, "_apply_auto_crop_payload", lambda _result: None)
+    monkeypatch.setattr(admin_person_images, "generate_and_upload_face_crops", lambda **_kwargs: [])
+
+    attempted, succeeded, failed = admin_person_images._auto_count_cast_photos(
+        db,
+        person_id=owner_id,
+        owner_person_name="Alan Cumming",
+        sources=["imdb"],
+    )
+
+    assert (attempted, succeeded, failed) == (1, 1, 0)
+    metadata_updates = [call for call in db.update_calls if call["table"] == "cast_photos"]
+    metadata = metadata_updates[-1]["payload"]["metadata"]
+    assert metadata.get("thumbnail_crop") == existing_crop
 
 
 def test_auto_count_cast_photos_backfills_face_metadata_when_people_count_already_exists(monkeypatch) -> None:

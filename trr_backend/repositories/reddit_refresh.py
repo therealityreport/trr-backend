@@ -645,7 +645,7 @@ def _fetch_new_window_exhaustive(
     reached_period_start = False
     exhausted_listing = False
     consecutive_empty_pages = 0  # early-stop: track pages with no in-window posts
-    EARLY_STOP_EMPTY_PAGES = 3
+    early_stop_empty_pages = 3
 
     # Producer-consumer: prefetch next page while processing current page.
     # This overlaps network IO + cooldown with CPU-bound row processing.
@@ -702,11 +702,11 @@ def _fetch_new_window_exhaustive(
                     in_window = _filter_by_window(parsed_rows, period_start=period_start, period_end=period_end)
                     if not in_window:
                         consecutive_empty_pages += 1
-                        if consecutive_empty_pages >= EARLY_STOP_EMPTY_PAGES:
+                        if consecutive_empty_pages >= early_stop_empty_pages:
                             logger.info(
                                 "[reddit_refresh_early_stop] %d consecutive pages outside window, stopping. "
                                 "pages_fetched=%d rows=%d",
-                                EARLY_STOP_EMPTY_PAGES,
+                                early_stop_empty_pages,
                                 pages_fetched,
                                 len(rows),
                             )
@@ -780,18 +780,21 @@ def _fetch_search_backfill(
     query_diagnostics: list[dict[str, Any]] = []
 
     canonical_seen: set[str] = set()
-    queries: list[tuple[str, str, str]] = []
+    # Query tuple = (label, query, query_kind, required_for_completeness).
+    # We require exact flair coverage for completeness, while gap-fill queries
+    # are optional enhancers and should not force perpetual partial status.
+    queries: list[tuple[str, str, str, bool]] = []
     for flair in tracked_flairs:
         canon = to_canonical_flair_key(flair)
         if not canon or canon in canonical_seen:
             continue
         canonical_seen.add(canon)
         # Primary exact flair query.
-        queries.append((flair, f'flair:"{flair}"', "flair_exact"))
+        queries.append((flair, f'flair:"{flair}"', "flair_exact", True))
         if len(queries) >= max_total_queries:
             break
         # Gap-fill query: phrase search for flair text can recover older posts that flair: search misses.
-        queries.append((flair, f'"{flair}"', "flair_phrase"))
+        queries.append((flair, f'"{flair}"', "flair_phrase", False))
         if len(queries) >= max_total_queries:
             break
 
@@ -806,7 +809,7 @@ def _fetch_search_backfill(
         alias_seen.add(alias_key)
         if len(alias_text) < 3 or len(alias_text) > 48:
             continue
-        queries.append((alias_text, alias_text, "show_alias_term"))
+        queries.append((alias_text, alias_text, "show_alias_term", False))
         if len(queries) >= max_total_queries:
             break
 
@@ -819,17 +822,20 @@ def _fetch_search_backfill(
         if term_key in show_term_seen:
             continue
         show_term_seen.add(term_key)
-        queries.append((term_text, f'"{term_text}"', "show_term_phrase"))
+        queries.append((term_text, f'"{term_text}"', "show_term_phrase", False))
         if len(queries) >= max_total_queries:
             break
 
     if len(queries) < max_total_queries:
         # Additional listing-style recovery path that avoids subreddit search index gaps.
-        queries.append(("top_year", "", "top_year_listing"))
+        queries.append(("top_year", "", "top_year_listing", False))
 
     # -- Per-query worker (pagination is sequential within each query) --
     def _run_single_query(
-        flair: str, query: str, query_kind: str,
+        flair: str,
+        query: str,
+        query_kind: str,
+        required: bool,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         after: str | None = None
         pages = 0
@@ -838,6 +844,7 @@ def _fetch_search_backfill(
         rows_in_window = 0
         reached_period_start = False
         exhausted_query = False
+        query_error: str | None = None
 
         for _ in range(max_pages_per_query):
             params: dict[str, Any] = {"raw_json": 1, "limit": 100}
@@ -859,7 +866,11 @@ def _fetch_search_backfill(
             if after:
                 params["after"] = after
 
-            payload = _HTTP_CLIENT.get_json(path, params=params)
+            try:
+                payload = _HTTP_CLIENT.get_json(path, params=params)
+            except Exception as exc:  # noqa: BLE001
+                query_error = str(exc) or exc.__class__.__name__
+                break
             listing = payload.get("data") if isinstance(payload, dict) else None
             children = listing.get("children") if isinstance(listing, dict) else []
             source_sort = "top" if query_kind == "top_year_listing" else "new"
@@ -882,17 +893,19 @@ def _fetch_search_backfill(
                 exhausted_query = True
                 break
 
-        query_complete = bool(period_start is None or reached_period_start or exhausted_query)
+        query_complete = bool((period_start is None or reached_period_start or exhausted_query) and query_error is None)
         diag = {
             "flair": flair,
             "query": query,
             "query_kind": query_kind,
+            "required": required,
             "pages_fetched": pages,
             "rows_fetched": rows_fetched,
             "rows_in_window": rows_in_window,
             "reached_period_start": reached_period_start,
             "exhausted_results": exhausted_query,
             "complete": query_complete,
+            "error": query_error,
         }
         return q_rows, diag
 
@@ -901,23 +914,54 @@ def _fetch_search_backfill(
     rows_total = 0
     rows_window_total = 0
     all_complete = True
+    required_queries_run = 0
+    required_queries_complete = 0
+    optional_queries_incomplete = 0
     _backfill_lock = threading.Lock()
 
     backfill_worker_count = min(4, len(queries)) if queries else 1
     with ThreadPoolExecutor(max_workers=backfill_worker_count, thread_name_prefix="backfill") as pool:
         futures = {
-            pool.submit(_run_single_query, flair, query, query_kind): (flair, query, query_kind)
-            for flair, query, query_kind in queries
+            pool.submit(_run_single_query, flair, query, query_kind, required): (
+                flair,
+                query,
+                query_kind,
+                required,
+            )
+            for flair, query, query_kind, required in queries
         }
         for future in as_completed(futures):
-            q_rows, diag = future.result()
+            flair, query, query_kind, required = futures[future]
+            try:
+                q_rows, diag = future.result()
+            except Exception as exc:  # noqa: BLE001
+                q_rows = []
+                diag = {
+                    "flair": flair,
+                    "query": query,
+                    "query_kind": query_kind,
+                    "required": required,
+                    "pages_fetched": 0,
+                    "rows_fetched": 0,
+                    "rows_in_window": 0,
+                    "reached_period_start": False,
+                    "exhausted_results": False,
+                    "complete": False,
+                    "error": str(exc) or exc.__class__.__name__,
+                }
             with _backfill_lock:
                 rows.extend(q_rows)
                 pages_total += diag["pages_fetched"]
                 rows_total += diag["rows_fetched"]
                 rows_window_total += diag["rows_in_window"]
-                if not diag["complete"]:
-                    all_complete = False
+                if bool(diag.get("required")):
+                    required_queries_run += 1
+                    if diag["complete"]:
+                        required_queries_complete += 1
+                    else:
+                        all_complete = False
+                elif not diag["complete"]:
+                    optional_queries_incomplete += 1
                 query_diagnostics.append(diag)
                 if progress_callback:
                     progress_callback(
@@ -933,6 +977,9 @@ def _fetch_search_backfill(
         "pages_fetched": pages_total,
         "rows_fetched": rows_total,
         "rows_in_window": rows_window_total,
+        "required_queries_run": required_queries_run,
+        "required_queries_complete": required_queries_complete,
+        "optional_queries_incomplete": optional_queries_incomplete,
         "complete": all_complete,
         "query_diagnostics": query_diagnostics,
     }
@@ -3292,7 +3339,17 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
         search_backfill = result.get("search_backfill") if isinstance(result.get("search_backfill"), dict) else None
         seed_urls = result.get("seed_urls") if isinstance(result.get("seed_urls"), dict) else None
         incomplete_listing, incomplete_backfill = _is_result_incomplete(result)
-        status = "partial" if incomplete_listing or incomplete_backfill else "completed"
+        # In max_coverage mode, treat listing incompleteness as non-fatal when
+        # search backfill completed. Reddit listing pagination can exhaust well
+        # before the period start on high-volume communities, while backfill
+        # still delivers complete in-window coverage.
+        listing_incomplete_non_fatal = (
+            coverage_mode == "max_coverage"
+            and incomplete_listing
+            and not incomplete_backfill
+            and bool(search_backfill)
+        )
+        status = "partial" if (incomplete_backfill or (incomplete_listing and not listing_incomplete_non_fatal)) else "completed"
         final_completeness = {
             "listing_complete": not incomplete_listing,
             "backfill_complete": not incomplete_backfill,
@@ -3328,6 +3385,11 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
                 "upserted_rows": comments_upserted,
                 "errors": comment_errors,
             },
+            "status_resolution": (
+                "listing_incomplete_backfill_complete_max_coverage"
+                if listing_incomplete_non_fatal
+                else "strict_completeness"
+            ),
             "progress": {
                 **progress,
                 "stage": "finalizing",

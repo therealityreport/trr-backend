@@ -2,6 +2,8 @@
 
 This doc validates that `supabase/migrations/0001_init.sql`, `supabase/seed.sql`, and RLS behave correctly on a fresh local reset.
 
+Note: `games.*` validation steps were removed because migration `0106_drop_games_schema.sql` dropped the legacy `games` schema.
+
 ## Prereqs
 
 - Docker engine running
@@ -63,12 +65,7 @@ select 'core.episode_cast', count(*) from core.episode_cast union all
 select 'surveys.surveys', count(*) from surveys.surveys union all
 select 'surveys.questions', count(*) from surveys.questions union all
 select 'surveys.options', count(*) from surveys.options union all
-select 'surveys.aggregates', count(*) from surveys.aggregates union all
-select 'games.games', count(*) from games.games union all
-select 'games.questions', count(*) from games.questions union all
-select 'games.options', count(*) from games.options union all
-select 'games.answer_keys', count(*) from games.answer_keys union all
-select 'games.stats', count(*) from games.stats;"
+select 'surveys.aggregates', count(*) from surveys.aggregates;"
 ```
 
 Expected:
@@ -84,11 +81,6 @@ Expected:
  surveys.questions     | 3
  surveys.options       | 8
  surveys.aggregates    | 3
- games.games           | 1
- games.questions       | 2
- games.options         | 8
- games.answer_keys     | 2
- games.stats           | 3
 ```
 
 ## Task B: RLS behavior
@@ -104,10 +96,6 @@ Notes:
 PGPASSWORD=postgres psql "postgresql://postgres@127.0.0.1:55432/postgres" -v ON_ERROR_STOP=1 -c "
 set role anon;
 select 'core.shows' as table_name, count(*) as rows from core.shows union all
-select 'games.games', count(*) from games.games union all
-select 'games.questions', count(*) from games.questions union all
-select 'games.options', count(*) from games.options union all
-select 'games.stats', count(*) from games.stats union all
 select 'surveys.surveys', count(*) from surveys.surveys union all
 select 'surveys.questions', count(*) from surveys.questions union all
 select 'surveys.options', count(*) from surveys.options union all
@@ -176,32 +164,9 @@ responses_visible | 0
 answers_visible   | 0
 ```
 
-Games (sessions + responses) work the same way:
-
-```bash
-PGPASSWORD=postgres psql "postgresql://postgres@127.0.0.1:55432/postgres" -v ON_ERROR_STOP=1 <<'SQL'
-set role authenticated;
-select set_config('request.jwt.claim.sub','c60f22e1-c949-4e9a-b0be-944d410b1069', false);
-
-insert into games.sessions (id, game_id)
-values (
-  '5938115f-347a-41db-b0ec-b9438592a782',
-  '44c17a72-6264-496c-ad0f-24e374e2ba39'
-);
-
-insert into games.responses (game_id, session_id, question_id, answer)
-values (
-  '44c17a72-6264-496c-ad0f-24e374e2ba39',
-  '5938115f-347a-41db-b0ec-b9438592a782',
-  '5925bde7-82c9-4b63-acfa-2c7757b2182c',
-  '{"selected_option_id":"65eeaefb-9c3c-4c56-9f9d-a1481f3fc8f4"}'::jsonb
-);
-SQL
-```
-
 ### Aggregates/stats are read-only to clients
 
-Authenticated users cannot write `surveys.aggregates` or `games.stats`:
+Authenticated users cannot write `surveys.aggregates`:
 
 ```bash
 PGPASSWORD=postgres psql "postgresql://postgres@127.0.0.1:55432/postgres" -v ON_ERROR_STOP=1 <<'SQL'
@@ -215,18 +180,6 @@ SQL
 
 Expected: `ERROR: permission denied for table aggregates`
 
-```bash
-PGPASSWORD=postgres psql "postgresql://postgres@127.0.0.1:55432/postgres" -v ON_ERROR_STOP=1 <<'SQL'
-set role authenticated;
-select set_config('request.jwt.claim.sub','c60f22e1-c949-4e9a-b0be-944d410b1069', false);
-
-insert into games.stats (game_id, question_id, stats)
-values ('44c17a72-6264-496c-ad0f-24e374e2ba39', null, '{"total":999}'::jsonb);
-SQL
-```
-
-Expected: `ERROR: permission denied for table stats`
-
 ### Service role bypasses RLS
 
 ```bash
@@ -234,8 +187,7 @@ PGPASSWORD=postgres psql "postgresql://postgres@127.0.0.1:55432/postgres" -v ON_
 set role service_role;
 select count(*) as survey_responses_all from surveys.responses;
 select count(*) as survey_answers_all from surveys.answers;
-select count(*) as game_sessions_all from games.sessions;
-select count(*) as game_responses_all from games.responses;"
+"
 ```
 
 Expected: counts include rows written by authenticated users (>= 1).
