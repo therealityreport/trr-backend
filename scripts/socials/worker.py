@@ -14,10 +14,12 @@ import time
 from datetime import UTC, datetime
 
 from trr_backend.repositories.social_season_analytics import (
+    claim_next_queued_jobs,
     ensure_media_mirror_s3_ready,
     execute_run,
     mark_worker_stopped,
-    process_next_queued_job,
+    process_claimed_job,
+    reconcile_run_summaries,
     recover_stale_running_jobs,
     update_worker_heartbeat,
 )
@@ -46,6 +48,8 @@ class WorkerHeartbeat:
                 "worker_script": "scripts.socials.worker",
             },
         }
+        self._last_written_status: str | None = None
+        self._last_written_at: float = 0.0
 
     def set_state(
         self,
@@ -82,15 +86,25 @@ class WorkerHeartbeat:
 
     def pulse(self) -> None:
         state = self._snapshot()
+        current_status = str(state.get("status") or "idle")
+
+        now = time.monotonic()
+        # Skip write if status unchanged and interval not elapsed
+        if (self._last_written_status == current_status
+                and (now - self._last_written_at) < self._interval_seconds):
+            return
+
         try:
             update_worker_heartbeat(
                 self._worker_id,
                 stage=str(state.get("stage") or "any"),
-                status=str(state.get("status") or "idle"),
+                status=current_status,
                 run_id=(str(state.get("run_id")) if state.get("run_id") else None),
                 current_job_id=(str(state.get("current_job_id")) if state.get("current_job_id") else None),
                 metadata=dict(state.get("metadata") or {}),
             )
+            self._last_written_status = current_status
+            self._last_written_at = now
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to update worker heartbeat: worker_id=%s error=%s", self._worker_id, exc)
 
@@ -128,6 +142,17 @@ def _build_worker_id(explicit: str | None) -> str:
     return f"social-worker:{host}:{pid}"
 
 
+def _resolve_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return max(minimum, min(maximum, int(default)))
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return max(minimum, min(maximum, int(default)))
+    return max(minimum, min(maximum, parsed))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Process queued social ingest jobs.")
     parser.add_argument("--worker-id", default=None, help="Explicit worker id")
@@ -142,7 +167,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage",
-        choices=["any", "posts", "comments", "media_mirror"],
+        choices=["any", "posts", "comments", "media_mirror", "comment_media_mirror"],
         default="any",
         help="Optional stage filter when claiming jobs",
     )
@@ -175,7 +200,7 @@ def parse_args() -> argparse.Namespace:
 def _requires_media_mirror_s3_preflight(*, stage: str | None, platform: str | None) -> bool:
     normalized_stage = str(stage or "any").strip().lower() or "any"
     normalized_platform = str(platform or "any").strip().lower() or "any"
-    return normalized_stage in {"any", "media_mirror"} and normalized_platform in {
+    return normalized_stage in {"any", "media_mirror", "comment_media_mirror"} and normalized_platform in {
         "any",
         "instagram",
         "tiktok",
@@ -340,18 +365,74 @@ def main() -> int:
             return 0
 
         processed = 0
+        claim_batch_size = _resolve_int_env(
+            "SOCIAL_JOB_CLAIM_BATCH_SIZE",
+            5,
+            minimum=1,
+            maximum=25,
+        )
+        stale_recovery_interval = _resolve_int_env(
+            "SOCIAL_STALE_RECOVERY_INTERVAL_SEC",
+            30,
+            minimum=5,
+            maximum=600,
+        )
+        run_summary_reconcile_interval = _resolve_int_env(
+            "SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SEC",
+            60,
+            minimum=10,
+            maximum=3600,
+        )
+        claimed_jobs: list[dict[str, object]] = []
+        last_stale_recovery_at = 0.0
+        last_summary_reconcile_at = 0.0
         while True:
             started = datetime.now(tz=UTC)
-            stale_jobs = recover_stale_running_jobs(run_id=None, stage=stage_filter, platform=platform_filter, limit=25)
-            if stale_jobs:
-                logger.warning("Recovered %d stale running job(s) before claim", len(stale_jobs))
-            heartbeat.set_state(status="working", stage=stage_filter or "any")
-            job = process_next_queued_job(worker_id=worker_id, stage=stage_filter, platform=platform_filter)
-            if job:
+            now_mono = time.monotonic()
+            if now_mono - last_stale_recovery_at >= stale_recovery_interval:
+                try:
+                    stale_jobs = recover_stale_running_jobs(
+                        run_id=None, stage=stage_filter, platform=platform_filter, limit=25
+                    )
+                    if stale_jobs:
+                        logger.warning("Recovered %d stale running job(s) before claim", len(stale_jobs))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Stale recovery pass failed: %s", exc)
+                last_stale_recovery_at = now_mono
+            if now_mono - last_summary_reconcile_at >= run_summary_reconcile_interval:
+                try:
+                    reconcile = reconcile_run_summaries(limit=100)
+                    if int(reconcile.get("reconciled_runs") or 0) > 0:
+                        logger.debug(
+                            "Reconciled %d run summary rows",
+                            int(reconcile.get("reconciled_runs") or 0),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Run summary reconciliation pass failed: %s", exc)
+                last_summary_reconcile_at = now_mono
+
+            if not claimed_jobs:
+                claimed_jobs = claim_next_queued_jobs(
+                    worker_id=worker_id,
+                    stage=stage_filter,
+                    platform=platform_filter,
+                    limit=claim_batch_size,
+                )
+            claimed = claimed_jobs.pop(0) if claimed_jobs else None
+            if claimed:
+                heartbeat.set_state(status="working", stage=stage_filter or "any")
+                claimed_config = dict(claimed.get("config") or {})
+                heartbeat.set_state(
+                    status="working",
+                    stage=str(claimed_config.get("stage") or stage_filter or "any"),
+                    run_id=str(claimed.get("run_id") or "") or None,
+                    current_job_id=str(claimed.get("id") or "") or None,
+                )
+                job = process_claimed_job(claimed, worker_id=worker_id)
                 processed += 1
                 heartbeat.set_state(
                     status="working",
-                    stage=str((job.get("config") or {}).get("stage") or stage_filter or "any"),
+                    stage=str(claimed_config.get("stage") or stage_filter or "any"),
                     run_id=str(job.get("run_id") or "") or None,
                     current_job_id=str(job.get("id") or "") or None,
                     metadata_updates={"processed_jobs": processed},

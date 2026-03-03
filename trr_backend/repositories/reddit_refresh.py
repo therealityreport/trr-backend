@@ -7,9 +7,11 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from hashlib import sha1
 from typing import Any
@@ -24,9 +26,9 @@ logger = logging.getLogger(__name__)
 REDDIT_USER_AGENT_DEFAULT = "TRRBackendRedditRefresh/1.0 (+https://thereality.report)"
 REDDIT_TIMEOUT_SECONDS_DEFAULT = 20
 REDDIT_MAX_HTTP_RETRIES_DEFAULT = 5
-REDDIT_PAGE_COOLDOWN_SECONDS_DEFAULT = 0.25
+REDDIT_PAGE_COOLDOWN_SECONDS_DEFAULT = 0.05
 REDDIT_RATE_LIMIT_DELAY_SECONDS_DEFAULT = 3.5
-REDDIT_MAX_PAGES_DEFAULT = 500
+REDDIT_MAX_PAGES_DEFAULT = 10_000
 REDDIT_MAX_SEARCH_PAGES_PER_QUERY_DEFAULT = 20
 REDDIT_MAX_BACKFILL_QUERIES_DEFAULT = 12
 REDDIT_MAX_COMMENTS_POSTS_PER_RUN_DEFAULT = 60
@@ -34,7 +36,7 @@ REDDIT_COMMENT_TREE_DEPTH_DEFAULT = 12
 REDDIT_COMMENT_LIMIT_DEFAULT = 500
 REDDIT_REFRESH_STALE_QUEUED_SECONDS_DEFAULT = 300
 REDDIT_REFRESH_STALE_RUNNING_SECONDS_DEFAULT = 1200
-REDDIT_ADAPTIVE_DEEP_MAX_PAGES = 1000
+REDDIT_ADAPTIVE_DEEP_MAX_PAGES = 10_000
 REDDIT_ADAPTIVE_DEEP_MAX_BACKFILL_QUERIES = 30
 REDDIT_ADAPTIVE_DEEP_MAX_BACKFILL_PAGES_PER_QUERY = 50
 
@@ -212,9 +214,9 @@ def _build_run_config_hash(payload: dict[str, Any]) -> str:
         "comment_delta_only": bool(payload.get("comment_delta_only", True)),
         "period_start": _iso_utc(_parse_iso(payload.get("period_start"))),
         "period_end": _iso_utc(_parse_iso(payload.get("period_end"))),
-        "analysis_flares": _normalize_string_list(payload.get("analysis_flares")),
-        "analysis_all_flares": _normalize_string_list(payload.get("analysis_all_flares")),
-        "force_include_flares": _normalize_string_list(payload.get("force_include_flares")),
+        "analysis_flairs": _normalize_string_list(payload.get("analysis_flairs")),
+        "analysis_all_flairs": _normalize_string_list(payload.get("analysis_all_flairs")),
+        "force_include_flairs": _normalize_string_list(payload.get("force_include_flairs")),
         "seed_post_urls": _normalize_string_list(payload.get("seed_post_urls")),
         "sort_modes": _normalize_string_list(payload.get("sort_modes")),
         "limit_per_mode": _coerce_int(payload.get("limit_per_mode"), default=0, minimum=0, maximum=1_000),
@@ -385,8 +387,7 @@ def _normalize_coverage_mode(value: Any) -> str:
 def _is_result_incomplete(result: dict[str, Any]) -> tuple[bool, bool]:
     search_backfill = result.get("search_backfill") if isinstance(result.get("search_backfill"), dict) else None
     incomplete_listing = (
-        result.get("collection_mode") == "exhaustive_window"
-        and result.get("window_exhaustive_complete") is False
+        result.get("collection_mode") == "exhaustive_window" and result.get("window_exhaustive_complete") is False
     )
     incomplete_backfill = bool(search_backfill) and bool(search_backfill.get("complete") is False)
     return incomplete_listing, incomplete_backfill
@@ -462,6 +463,16 @@ class RedditHttpClient:
         self.user_agent = (os.getenv("REDDIT_USER_AGENT") or "").strip() or REDDIT_USER_AGENT_DEFAULT
         self._oauth_token: str | None = None
         self._oauth_expires_at: float = 0.0
+        # Adaptive cooldown: starts at configured minimum, increases on 429s, decays on success
+        self._adaptive_cooldown: float = self.page_cooldown
+        self._adaptive_cooldown_min: float = self.page_cooldown
+        self._adaptive_cooldown_max: float = max(0.5, self.page_cooldown * 10)
+
+        if not self.client_id:
+            logger.warning(
+                "[reddit_http] OAuth not configured (REDDIT_CLIENT_ID not set) — "
+                "rate limits will be ~6x lower than authenticated requests"
+            )
 
     def _auth_headers(self, *, use_oauth: bool) -> dict[str, str]:
         headers = {"User-Agent": self.user_agent}
@@ -503,9 +514,7 @@ class RedditHttpClient:
     def get_json(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
         supports_oauth = bool(self.client_id and self.client_secret)
         base_urls = (
-            ["https://oauth.reddit.com", "https://www.reddit.com"]
-            if supports_oauth
-            else ["https://www.reddit.com"]
+            ["https://oauth.reddit.com", "https://www.reddit.com"] if supports_oauth else ["https://www.reddit.com"]
         )
         last_error: Exception | None = None
 
@@ -520,6 +529,11 @@ class RedditHttpClient:
                         timeout=self.timeout_seconds,
                     )
                     if response.status_code == 429:
+                        # Adaptive backoff: increase cooldown on rate limit
+                        self._adaptive_cooldown = min(
+                            self._adaptive_cooldown_max,
+                            self._adaptive_cooldown * 2,
+                        )
                         retry_after = response.headers.get("Retry-After")
                         delay = self.rate_limit_delay
                         if retry_after:
@@ -544,8 +558,13 @@ class RedditHttpClient:
                             status=response.status_code,
                         )
                     payload = response.json() if response.content else {}
-                    if self.page_cooldown > 0:
-                        time.sleep(self.page_cooldown)
+                    # Adaptive cooldown: use current adaptive value, decay toward minimum on success
+                    if self._adaptive_cooldown > 0:
+                        time.sleep(self._adaptive_cooldown)
+                    self._adaptive_cooldown = max(
+                        self._adaptive_cooldown_min,
+                        self._adaptive_cooldown * 0.9,
+                    )
                     return payload if isinstance(payload, dict) else {}
                 except RedditRefreshError:
                     raise
@@ -624,41 +643,88 @@ def _fetch_new_window_exhaustive(
     pages_fetched = 0
     after: str | None = None
     reached_period_start = False
+    exhausted_listing = False
+    consecutive_empty_pages = 0  # early-stop: track pages with no in-window posts
+    EARLY_STOP_EMPTY_PAGES = 3
 
-    for _ in range(max_pages):
+    # Producer-consumer: prefetch next page while processing current page.
+    # This overlaps network IO + cooldown with CPU-bound row processing.
+    prefetch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="listing_prefetch")
+
+    def _fetch_listing_page(cursor: str | None) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": 100, "raw_json": 1}
-        if after:
-            params["after"] = after
-        payload = _HTTP_CLIENT.get_json(f"/r/{subreddit}/new.json", params=params)
-        listing = payload.get("data") if isinstance(payload, dict) else None
-        children = listing.get("children") if isinstance(listing, dict) else []
-        parsed_rows = _parse_listing_rows(children if isinstance(children, list) else [], source_sort="new")
-        pages_fetched += 1
-        if parsed_rows:
-            rows.extend(parsed_rows)
-            if progress_callback:
-                progress_callback(
-                    {
-                        "listing_pages_fetched": pages_fetched,
-                        "listing_rows_fetched": len(rows),
-                    }
+        if cursor:
+            params["after"] = cursor
+        return _HTTP_CLIENT.get_json(f"/r/{subreddit}/new.json", params=params)
+
+    # Kick off first fetch
+    pending_future = prefetch_pool.submit(_fetch_listing_page, None)
+
+    try:
+        for _ in range(max_pages):
+            payload = pending_future.result()
+            listing = payload.get("data") if isinstance(payload, dict) else None
+            children = listing.get("children") if isinstance(listing, dict) else []
+            parsed_rows = _parse_listing_rows(children if isinstance(children, list) else [], source_sort="new")
+            pages_fetched += 1
+
+            # Determine the next cursor early so we can prefetch while processing
+            after_value = listing.get("after") if isinstance(listing, dict) else None
+            after = str(after_value) if after_value else None
+
+            # Prefetch next page while we process current results
+            should_stop = False
+            if after is not None and pages_fetched < max_pages:
+                pending_future = prefetch_pool.submit(_fetch_listing_page, after)
+            else:
+                should_stop = True  # will stop after processing this page
+
+            if parsed_rows:
+                rows.extend(parsed_rows)
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "listing_pages_fetched": pages_fetched,
+                            "listing_rows_fetched": len(rows),
+                        }
+                    )
+                reached_period_start = _window_complete_for_page(
+                    rows=parsed_rows,
+                    period_start=period_start,
+                    reached_period_start=reached_period_start,
                 )
-            reached_period_start = _window_complete_for_page(
-                rows=parsed_rows,
-                period_start=period_start,
-                reached_period_start=reached_period_start,
-            )
-            if reached_period_start:
+                if reached_period_start:
+                    break
+                # Early-stop: if page has rows but none fall within the target window,
+                # increment the empty counter. If we hit 3 consecutive empty pages,
+                # we've moved past the relevant date range — stop early.
+                if period_start and period_end:
+                    in_window = _filter_by_window(parsed_rows, period_start=period_start, period_end=period_end)
+                    if not in_window:
+                        consecutive_empty_pages += 1
+                        if consecutive_empty_pages >= EARLY_STOP_EMPTY_PAGES:
+                            logger.info(
+                                "[reddit_refresh_early_stop] %d consecutive pages outside window, stopping. "
+                                "pages_fetched=%d rows=%d",
+                                EARLY_STOP_EMPTY_PAGES,
+                                pages_fetched,
+                                len(rows),
+                            )
+                            break
+                    else:
+                        consecutive_empty_pages = 0
+
+            if should_stop:
+                if after is None:
+                    exhausted_listing = True
+                    return rows, pages_fetched, bool(period_start is None or reached_period_start or exhausted_listing)
                 break
-        after_value = listing.get("after") if isinstance(listing, dict) else None
-        after = str(after_value) if after_value else None
-        if after is None:
-            # Terminal page: exhaustive only if period_start was actually reached.
-            return rows, pages_fetched, bool(period_start is None or reached_period_start)
+    finally:
+        prefetch_pool.shutdown(wait=False)
 
     if period_start is None:
         return rows, pages_fetched, True
-    return rows, pages_fetched, reached_period_start
+    return rows, pages_fetched, bool(reached_period_start or exhausted_listing)
 
 
 def _fetch_sample_sorts(
@@ -761,17 +827,17 @@ def _fetch_search_backfill(
         # Additional listing-style recovery path that avoids subreddit search index gaps.
         queries.append(("top_year", "", "top_year_listing"))
 
-    pages_total = 0
-    rows_total = 0
-    rows_window_total = 0
-    all_complete = True
-
-    for flair, query, query_kind in queries:
+    # -- Per-query worker (pagination is sequential within each query) --
+    def _run_single_query(
+        flair: str, query: str, query_kind: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         after: str | None = None
         pages = 0
+        q_rows: list[dict[str, Any]] = []
         rows_fetched = 0
         rows_in_window = 0
         reached_period_start = False
+        exhausted_query = False
 
         for _ in range(max_pages_per_query):
             params: dict[str, Any] = {"raw_json": 1, "limit": 100}
@@ -799,18 +865,9 @@ def _fetch_search_backfill(
             source_sort = "top" if query_kind == "top_year_listing" else "new"
             parsed_rows = _parse_listing_rows(children if isinstance(children, list) else [], source_sort=source_sort)
             pages += 1
-            pages_total += 1
             if parsed_rows:
-                rows.extend(parsed_rows)
+                q_rows.extend(parsed_rows)
                 rows_fetched += len(parsed_rows)
-                rows_total += len(parsed_rows)
-                if progress_callback:
-                    progress_callback(
-                        {
-                            "search_pages_fetched": pages_total,
-                            "search_rows_fetched": rows_total,
-                        }
-                    )
                 reached_period_start = _window_complete_for_page(
                     rows=parsed_rows,
                     period_start=period_start,
@@ -818,27 +875,57 @@ def _fetch_search_backfill(
                 )
                 filtered = _filter_by_window(parsed_rows, period_start=period_start, period_end=period_end)
                 rows_in_window += len(filtered)
-                rows_window_total += len(filtered)
 
             after_value = listing.get("after") if isinstance(listing, dict) else None
             after = str(after_value) if after_value else None
             if after is None:
+                exhausted_query = True
                 break
 
-        query_complete = bool(period_start is None or reached_period_start)
-        all_complete = all_complete and query_complete
-        query_diagnostics.append(
-            {
-                "flair": flair,
-                "query": query,
-                "query_kind": query_kind,
-                "pages_fetched": pages,
-                "rows_fetched": rows_fetched,
-                "rows_in_window": rows_in_window,
-                "reached_period_start": reached_period_start,
-                "complete": query_complete,
-            }
-        )
+        query_complete = bool(period_start is None or reached_period_start or exhausted_query)
+        diag = {
+            "flair": flair,
+            "query": query,
+            "query_kind": query_kind,
+            "pages_fetched": pages,
+            "rows_fetched": rows_fetched,
+            "rows_in_window": rows_in_window,
+            "reached_period_start": reached_period_start,
+            "exhausted_results": exhausted_query,
+            "complete": query_complete,
+        }
+        return q_rows, diag
+
+    # -- Run queries in parallel (4 workers) --
+    pages_total = 0
+    rows_total = 0
+    rows_window_total = 0
+    all_complete = True
+    _backfill_lock = threading.Lock()
+
+    backfill_worker_count = min(4, len(queries)) if queries else 1
+    with ThreadPoolExecutor(max_workers=backfill_worker_count, thread_name_prefix="backfill") as pool:
+        futures = {
+            pool.submit(_run_single_query, flair, query, query_kind): (flair, query, query_kind)
+            for flair, query, query_kind in queries
+        }
+        for future in as_completed(futures):
+            q_rows, diag = future.result()
+            with _backfill_lock:
+                rows.extend(q_rows)
+                pages_total += diag["pages_fetched"]
+                rows_total += diag["rows_fetched"]
+                rows_window_total += diag["rows_in_window"]
+                if not diag["complete"]:
+                    all_complete = False
+                query_diagnostics.append(diag)
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "search_pages_fetched": pages_total,
+                            "search_rows_fetched": rows_total,
+                        }
+                    )
 
     return rows, {
         "enabled": True,
@@ -868,21 +955,15 @@ def _apply_match_metadata(
     subreddit: str,
     terms: list[str],
     cast_terms: list[str],
-    analysis_flares: list[str],
-    analysis_all_flares: list[str],
-    force_include_flares: list[str],
+    analysis_flairs: list[str],
+    analysis_all_flairs: list[str],
+    force_include_flairs: list[str],
     show_focused: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, list[str]], int]:
     del subreddit  # Not currently needed for scoring, retained for API compatibility.
-    scan_keys = {
-        to_canonical_flair_key(flair) for flair in analysis_flares if to_canonical_flair_key(flair)
-    }
-    all_keys = {
-        to_canonical_flair_key(flair) for flair in analysis_all_flares if to_canonical_flair_key(flair)
-    }
-    forced_keys = {
-        to_canonical_flair_key(flair) for flair in force_include_flares if to_canonical_flair_key(flair)
-    }
+    scan_keys = {to_canonical_flair_key(flair) for flair in analysis_flairs if to_canonical_flair_key(flair)}
+    all_keys = {to_canonical_flair_key(flair) for flair in analysis_all_flairs if to_canonical_flair_key(flair)}
+    forced_keys = {to_canonical_flair_key(flair) for flair in force_include_flairs if to_canonical_flair_key(flair)}
     has_tracked_flair_rules = bool(scan_keys or all_keys or forced_keys)
     term_patterns = [(term, _compile_term_pattern(term)) for term in terms if term]
     cast_term_patterns = [(term, _compile_term_pattern(term)) for term in cast_terms if term]
@@ -909,10 +990,7 @@ def _apply_match_metadata(
         all_flair_match = bool(canonical_flair and canonical_flair in all_keys)
         scan_flair_match = bool(canonical_flair and canonical_flair in scan_keys and has_scan_term)
         passes_flair_filter = bool(
-            forced_flair_match
-            or all_flair_match
-            or scan_flair_match
-            or not has_tracked_flair_rules
+            forced_flair_match or all_flair_match or scan_flair_match or not has_tracked_flair_rules
         )
         flair_mode: str | None = None
         if forced_flair_match:
@@ -948,6 +1026,20 @@ def _apply_match_metadata(
                     exclude_counter[token] += 1
             continue
 
+        # Derive match_type for period_post_matches classification:
+        # - show_focused communities include all posts → 'all'
+        # - flair-based matches (forced, all) → 'flair'
+        # - scan_term (matched by search term + flair) → 'scan'
+        # - show_match or no flair rules → 'flair' (default)
+        if show_focused:
+            match_type = "all"
+        elif flair_mode in ("forced", "all"):
+            match_type = "flair"
+        elif flair_mode == "scan_term":
+            match_type = "scan"
+        else:
+            match_type = "flair"
+
         enriched = dict(row)
         enriched.update(
             {
@@ -962,6 +1054,7 @@ def _apply_match_metadata(
                 "suggested_exclude_terms": [],
                 "canonical_flair_key": canonical_flair,
                 "flair_mode": flair_mode,
+                "match_type": match_type,
             }
         )
         output.append(enriched)
@@ -993,11 +1086,7 @@ def _fetch_submission_by_post_id(post_id: str, *, source_sort: str = "seed_url")
         return None
 
     supports_oauth = bool(_HTTP_CLIENT.client_id and _HTTP_CLIENT.client_secret)
-    base_urls = (
-        ["https://oauth.reddit.com", "https://www.reddit.com"]
-        if supports_oauth
-        else ["https://www.reddit.com"]
-    )
+    base_urls = ["https://oauth.reddit.com", "https://www.reddit.com"] if supports_oauth else ["https://www.reddit.com"]
 
     for base_url in base_urls:
         use_oauth = base_url.startswith("https://oauth")
@@ -1111,11 +1200,7 @@ def _walk_comment_nodes(
         created_raw = data.get("created_utc")
         try:
             if created_raw is not None:
-                created_at_utc = (
-                    datetime.fromtimestamp(float(created_raw), tz=UTC)
-                    .isoformat()
-                    .replace("+00:00", "Z")
-                )
+                created_at_utc = datetime.fromtimestamp(float(created_raw), tz=UTC).isoformat().replace("+00:00", "Z")
         except Exception:  # noqa: BLE001
             created_at_utc = None
         flattened.append(
@@ -1221,32 +1306,146 @@ def _fetch_post_comments_tree(post_id: str) -> list[dict[str, Any]]:
     return []
 
 
-def _upsert_posts(rows: list[dict[str, Any]], *, conn: Any) -> None:
+_THUMBNAIL_SKIP_VALUES = {"self", "default", "nsfw", "spoiler", ""}
+
+
+def _derive_post_type(post: dict[str, Any]) -> str:
+    """Derive a post_type classification from Reddit API data."""
+    if post.get("poll_data"):
+        return "poll"
+    if post.get("is_gallery"):
+        return "gallery"
+    hint = str(post.get("post_hint") or "")
+    if post.get("is_video") or hint in ("hosted:video", "rich:video"):
+        return "video"
+    if hint == "image":
+        return "image"
+    if hint == "link":
+        return "link"
+    if post.get("is_self"):
+        return "text"
+    # External URL that isn't self-post defaults to link
+    url = str(post.get("url") or "")
+    permalink = str(post.get("permalink") or "")
+    if url and permalink and not url.endswith(permalink):
+        return "link"
+    return "link"
+
+
+def _upsert_posts(rows: list[dict[str, Any]], *, conn: Any) -> set[str]:
+    """Upsert posts into social.reddit_posts. Returns set of discovered flair texts."""
+    discovered_flairs: set[str] = set()
     if not rows:
-        return
+        return discovered_flairs
+
+    # Check which Sprint-3 columns exist (backward compat before migration).
+    has_upvote_ratio = _column_exists("social", "reddit_posts", "upvote_ratio")
+    has_is_self = _column_exists("social", "reddit_posts", "is_self")
+    has_post_type = _column_exists("social", "reddit_posts", "post_type")
+    has_thumbnail = _column_exists("social", "reddit_posts", "thumbnail")
+    has_media_metadata = _column_exists("social", "reddit_posts", "media_metadata")
+    has_poll_data = _column_exists("social", "reddit_posts", "poll_data")
+    has_content_url = _column_exists("social", "reddit_posts", "content_url")
+    has_is_nsfw = _column_exists("social", "reddit_posts", "is_nsfw")
+    has_is_spoiler = _column_exists("social", "reddit_posts", "is_spoiler")
+    has_author_flair_text = _column_exists("social", "reddit_posts", "author_flair_text")
+
     tuples: list[tuple[Any, ...]] = []
     for row in rows:
-        tuples.append(
-            (
-                row.get("reddit_post_id"),
-                row.get("subreddit"),
-                row.get("title") or "",
-                row.get("selftext"),
-                row.get("url"),
-                row.get("permalink"),
-                row.get("author"),
-                _safe_int(row.get("score")),
-                _safe_int(row.get("num_comments")),
-                _parse_iso(row.get("posted_at")),
-                row.get("link_flair_text"),
-                row.get("canonical_flair_key") or to_canonical_flair_key(row.get("link_flair_text")),
-                _json_value(row.get("source_sorts") or []),
-                _json_value(row.get("raw_payload") or {}),
-            )
-        )
+        raw = row.get("raw_payload") or {}
 
-    pg.execute_values_no_return(
-        """
+        # Collect discovered flairs
+        flair_text = row.get("link_flair_text")
+        if flair_text and isinstance(flair_text, str) and flair_text.strip():
+            discovered_flairs.add(flair_text.strip())
+
+        base = (
+            row.get("reddit_post_id"),
+            row.get("subreddit"),
+            row.get("title") or "",
+            row.get("selftext"),
+            row.get("url"),
+            row.get("permalink"),
+            row.get("author"),
+            _safe_int(row.get("score")),
+            _safe_int(row.get("num_comments")),
+            _parse_iso(row.get("posted_at")),
+            row.get("link_flair_text"),
+            row.get("canonical_flair_key") or to_canonical_flair_key(row.get("link_flair_text")),
+            _json_value(row.get("source_sorts") or []),
+            _json_value(row.get("raw_payload") or {}),
+        )
+        extra: tuple[Any, ...] = ()
+        if has_upvote_ratio:
+            extra += (raw.get("upvote_ratio"),)
+        if has_is_self:
+            extra += (bool(raw.get("is_self", False)),)
+        if has_post_type:
+            extra += (_derive_post_type(raw),)
+        if has_thumbnail:
+            thumb = raw.get("thumbnail")
+            if isinstance(thumb, str) and thumb.lower() in _THUMBNAIL_SKIP_VALUES:
+                thumb = None
+            extra += (thumb,)
+        if has_media_metadata:
+            mm = raw.get("media_metadata") or raw.get("gallery_data") or {}
+            extra += (_json_value(mm if mm else {}),)
+        if has_poll_data:
+            extra += (_json_value(raw.get("poll_data")) if raw.get("poll_data") else Json(None),)
+        if has_content_url:
+            post_url = raw.get("url") or ""
+            permalink = raw.get("permalink") or ""
+            content_url = post_url if (post_url and permalink and not post_url.endswith(permalink)) else None
+            extra += (content_url,)
+        if has_is_nsfw:
+            extra += (bool(raw.get("over_18", False)),)
+        if has_is_spoiler:
+            extra += (bool(raw.get("spoiler", False)),)
+        if has_author_flair_text:
+            extra += (raw.get("author_flair_text"),)
+
+        tuples.append(base + extra)
+
+    # Build dynamic column lists for Sprint-3 columns
+    extra_cols: list[str] = []
+    extra_conflict_sets: list[str] = []
+    if has_upvote_ratio:
+        extra_cols.append("upvote_ratio")
+        extra_conflict_sets.append("upvote_ratio = excluded.upvote_ratio")
+    if has_is_self:
+        extra_cols.append("is_self")
+        extra_conflict_sets.append("is_self = excluded.is_self")
+    if has_post_type:
+        extra_cols.append("post_type")
+        extra_conflict_sets.append("post_type = excluded.post_type")
+    if has_thumbnail:
+        extra_cols.append("thumbnail")
+        extra_conflict_sets.append("thumbnail = excluded.thumbnail")
+    if has_media_metadata:
+        extra_cols.append("media_metadata")
+        extra_conflict_sets.append("media_metadata = excluded.media_metadata")
+    if has_poll_data:
+        extra_cols.append("poll_data")
+        extra_conflict_sets.append("poll_data = excluded.poll_data")
+    if has_content_url:
+        extra_cols.append("content_url")
+        extra_conflict_sets.append("content_url = excluded.content_url")
+    if has_is_nsfw:
+        extra_cols.append("is_nsfw")
+        extra_conflict_sets.append("is_nsfw = excluded.is_nsfw")
+    if has_is_spoiler:
+        extra_cols.append("is_spoiler")
+        extra_conflict_sets.append("is_spoiler = excluded.is_spoiler")
+    if has_author_flair_text:
+        extra_cols.append("author_flair_text")
+        extra_conflict_sets.append("author_flair_text = excluded.author_flair_text")
+
+    extra_cols_sql = (",\n          " + ",\n          ".join(extra_cols)) if extra_cols else ""
+    extra_conflict_sql = (
+        (",\n            " + ",\n            ".join(extra_conflict_sets)) if extra_conflict_sets else ""
+    )
+
+    sql = f"""
         insert into social.reddit_posts (
           reddit_post_id,
           subreddit,
@@ -1261,7 +1460,7 @@ def _upsert_posts(rows: list[dict[str, Any]], *, conn: Any) -> None:
           link_flair_text,
           canonical_flair_key,
           source_sorts,
-          raw_payload
+          raw_payload{extra_cols_sql}
         )
         values %s
         on conflict (reddit_post_id) do update
@@ -1277,13 +1476,13 @@ def _upsert_posts(rows: list[dict[str, Any]], *, conn: Any) -> None:
             link_flair_text = excluded.link_flair_text,
             canonical_flair_key = excluded.canonical_flair_key,
             source_sorts = excluded.source_sorts,
-            raw_payload = excluded.raw_payload,
+            raw_payload = excluded.raw_payload{extra_conflict_sql},
             last_seen_at = now(),
             updated_at = now()
-        """,
-        tuples,
-        conn=conn,
-    )
+        """
+
+    pg.execute_values_no_return(sql, tuples, conn=conn)
+    return discovered_flairs
 
 
 def _load_existing_post_comment_counts(
@@ -1322,24 +1521,81 @@ def _load_existing_post_comment_counts(
 def _upsert_comments(rows: list[dict[str, Any]], *, conn: Any) -> int:
     if not rows:
         return 0
+
+    # Check which Sprint-4 columns exist (backward compat before migration).
+    has_author_flair_text = _column_exists("social", "reddit_comments", "author_flair_text")
+    has_is_submitter = _column_exists("social", "reddit_comments", "is_submitter")
+    has_controversiality = _column_exists("social", "reddit_comments", "controversiality")
+    has_ups = _column_exists("social", "reddit_comments", "ups")
+    has_downs = _column_exists("social", "reddit_comments", "downs")
+    has_gildings = _column_exists("social", "reddit_comments", "gildings")
+    has_body_html = _column_exists("social", "reddit_comments", "body_html")
+
     tuples: list[tuple[Any, ...]] = []
     for row in rows:
-        tuples.append(
-            (
-                row.get("reddit_comment_id"),
-                row.get("reddit_post_id"),
-                row.get("parent_comment_id"),
-                row.get("author"),
-                row.get("body") or "",
-                _safe_int(row.get("score")),
-                _safe_int(row.get("depth")),
-                _parse_iso(row.get("created_at_utc")),
-                _json_value(row.get("raw_payload") or {}),
-            )
+        raw = row.get("raw_payload") or {}
+        base = (
+            row.get("reddit_comment_id"),
+            row.get("reddit_post_id"),
+            row.get("parent_comment_id"),
+            row.get("author"),
+            row.get("body") or "",
+            _safe_int(row.get("score")),
+            _safe_int(row.get("depth")),
+            _parse_iso(row.get("created_at_utc")),
+            _json_value(raw),
         )
+        extra: tuple[Any, ...] = ()
+        if has_author_flair_text:
+            extra += (row.get("author_flair_text") or raw.get("author_flair_text"),)
+        if has_is_submitter:
+            extra += (bool(row.get("is_submitter", raw.get("is_submitter", False))),)
+        if has_controversiality:
+            extra += (_safe_int(row.get("controversiality", raw.get("controversiality", 0))),)
+        if has_ups:
+            val = row.get("ups") if row.get("ups") is not None else raw.get("ups")
+            extra += (_safe_int(val) if val is not None else None,)
+        if has_downs:
+            val = row.get("downs") if row.get("downs") is not None else raw.get("downs", 0)
+            extra += (_safe_int(val),)
+        if has_gildings:
+            gildings_val = row.get("gildings") if row.get("gildings") is not None else raw.get("gildings", {})
+            extra += (_json_value(gildings_val if gildings_val else {}),)
+        if has_body_html:
+            extra += (row.get("body_html") or raw.get("body_html"),)
+        tuples.append(base + extra)
 
-    pg.execute_values_no_return(
-        """
+    # Build dynamic column lists for Sprint-4 columns
+    extra_cols: list[str] = []
+    extra_conflict_sets: list[str] = []
+    if has_author_flair_text:
+        extra_cols.append("author_flair_text")
+        extra_conflict_sets.append("author_flair_text = excluded.author_flair_text")
+    if has_is_submitter:
+        extra_cols.append("is_submitter")
+        extra_conflict_sets.append("is_submitter = excluded.is_submitter")
+    if has_controversiality:
+        extra_cols.append("controversiality")
+        extra_conflict_sets.append("controversiality = excluded.controversiality")
+    if has_ups:
+        extra_cols.append("ups")
+        extra_conflict_sets.append("ups = excluded.ups")
+    if has_downs:
+        extra_cols.append("downs")
+        extra_conflict_sets.append("downs = excluded.downs")
+    if has_gildings:
+        extra_cols.append("gildings")
+        extra_conflict_sets.append("gildings = excluded.gildings")
+    if has_body_html:
+        extra_cols.append("body_html")
+        extra_conflict_sets.append("body_html = excluded.body_html")
+
+    extra_cols_sql = (",\n          " + ",\n          ".join(extra_cols)) if extra_cols else ""
+    extra_conflict_sql = (
+        (",\n            " + ",\n            ".join(extra_conflict_sets)) if extra_conflict_sets else ""
+    )
+
+    sql = f"""
         insert into social.reddit_comments (
           reddit_comment_id,
           reddit_post_id,
@@ -1349,7 +1605,7 @@ def _upsert_comments(rows: list[dict[str, Any]], *, conn: Any) -> int:
           score,
           depth,
           created_at_utc,
-          raw_payload
+          raw_payload{extra_cols_sql}
         )
         values %s
         on conflict (reddit_comment_id) do update
@@ -1360,13 +1616,12 @@ def _upsert_comments(rows: list[dict[str, Any]], *, conn: Any) -> int:
             score = excluded.score,
             depth = excluded.depth,
             created_at_utc = excluded.created_at_utc,
-            raw_payload = excluded.raw_payload,
+            raw_payload = excluded.raw_payload{extra_conflict_sql},
             last_seen_at = now(),
             updated_at = now()
-        """,
-        tuples,
-        conn=conn,
-    )
+        """
+
+    pg.execute_values_no_return(sql, tuples, conn=conn)
     return len(tuples)
 
 
@@ -1382,6 +1637,7 @@ def _replace_period_matches(
     conn: Any,
 ) -> None:
     has_flair_mode = _column_exists("social", "reddit_period_post_matches", "flair_mode")
+    has_match_type = _column_exists("social", "reddit_period_post_matches", "match_type")
     if not rows:
         with pg.db_cursor(conn=conn) as cur:
             cur.execute(
@@ -1423,10 +1679,12 @@ def _replace_period_matches(
             row.get("link_flair_text"),
             row.get("canonical_flair_key") or to_canonical_flair_key(row.get("link_flair_text")),
         )
+        extra = ()
         if has_flair_mode:
-            tuples.append((*base_tuple, row.get("flair_mode")))
-        else:
-            tuples.append(base_tuple)
+            extra += (row.get("flair_mode"),)
+        if has_match_type:
+            extra += (row.get("match_type") or "flair",)
+        tuples.append((*base_tuple, *extra))
     if not tuples:
         with pg.db_cursor(conn=conn) as cur:
             cur.execute(
@@ -1440,84 +1698,57 @@ def _replace_period_matches(
             )
         return
 
+    # Build column list dynamically based on available optional columns
+    base_cols = [
+        "community_id",
+        "season_id",
+        "period_key",
+        "period_start",
+        "period_end",
+        "reddit_post_id",
+        "run_id",
+        "is_show_match",
+        "passes_flair_filter",
+        "matched_terms",
+        "matched_cast_terms",
+        "cross_show_terms",
+        "match_score",
+        "source_sorts",
+        "link_flair_text",
+        "canonical_flair_key",
+    ]
+    # These are always updated on conflict
+    conflict_update_cols = [
+        "run_id",
+        "is_show_match",
+        "passes_flair_filter",
+        "matched_terms",
+        "matched_cast_terms",
+        "cross_show_terms",
+        "match_score",
+        "source_sorts",
+        "link_flair_text",
+        "canonical_flair_key",
+    ]
     if has_flair_mode:
-        pg.execute_values_no_return(
-            """
-            insert into social.reddit_period_post_matches (
-              community_id,
-              season_id,
-              period_key,
-              period_start,
-              period_end,
-              reddit_post_id,
-              run_id,
-              is_show_match,
-              passes_flair_filter,
-              matched_terms,
-              matched_cast_terms,
-              cross_show_terms,
-              match_score,
-              source_sorts,
-              link_flair_text,
-              canonical_flair_key,
-              flair_mode
-            )
-            values %s
-            on conflict (community_id, season_id, period_key, reddit_post_id) do update
-            set run_id = excluded.run_id,
-                is_show_match = excluded.is_show_match,
-                passes_flair_filter = excluded.passes_flair_filter,
-                matched_terms = excluded.matched_terms,
-                matched_cast_terms = excluded.matched_cast_terms,
-                cross_show_terms = excluded.cross_show_terms,
-                match_score = excluded.match_score,
-                source_sorts = excluded.source_sorts,
-                link_flair_text = excluded.link_flair_text,
-                canonical_flair_key = excluded.canonical_flair_key,
-                flair_mode = excluded.flair_mode,
-                updated_at = now()
-            """,
-            tuples,
-            conn=conn,
+        base_cols.append("flair_mode")
+        conflict_update_cols.append("flair_mode")
+    if has_match_type:
+        base_cols.append("match_type")
+        conflict_update_cols.append("match_type")
+
+    cols_str = ",\n              ".join(base_cols)
+    conflict_set_str = ",\n                ".join(f"{col} = excluded.{col}" for col in conflict_update_cols)
+    sql = f"""
+        insert into social.reddit_period_post_matches (
+          {cols_str}
         )
-    else:
-        pg.execute_values_no_return(
-            """
-            insert into social.reddit_period_post_matches (
-              community_id,
-              season_id,
-              period_key,
-              period_start,
-              period_end,
-              reddit_post_id,
-              run_id,
-              is_show_match,
-              passes_flair_filter,
-              matched_terms,
-              matched_cast_terms,
-              cross_show_terms,
-              match_score,
-              source_sorts,
-              link_flair_text,
-              canonical_flair_key
-            )
-            values %s
-            on conflict (community_id, season_id, period_key, reddit_post_id) do update
-            set run_id = excluded.run_id,
-                is_show_match = excluded.is_show_match,
-                passes_flair_filter = excluded.passes_flair_filter,
-                matched_terms = excluded.matched_terms,
-                matched_cast_terms = excluded.matched_cast_terms,
-                cross_show_terms = excluded.cross_show_terms,
-                match_score = excluded.match_score,
-                source_sorts = excluded.source_sorts,
-                link_flair_text = excluded.link_flair_text,
-                canonical_flair_key = excluded.canonical_flair_key,
-                updated_at = now()
-            """,
-            tuples,
-            conn=conn,
-        )
+        values %s
+        on conflict (community_id, season_id, period_key, reddit_post_id) do update
+        set {conflict_set_str},
+            updated_at = now()
+    """
+    pg.execute_values_no_return(sql, tuples, conn=conn)
 
     with pg.db_cursor(conn=conn) as cur:
         cur.execute(
@@ -1903,6 +2134,13 @@ def create_or_reuse_refresh_run(*, payload: dict[str, Any]) -> dict[str, Any]:
             len(stale_rows),
         )
 
+    stale_running_cutoff = _env_int(
+        "REDDIT_REFRESH_STALE_RUNNING_SECONDS",
+        REDDIT_REFRESH_STALE_RUNNING_SECONDS_DEFAULT,
+        minimum=120,
+        maximum=86_400,
+    )
+
     active_runs = pg.fetch_all(
         """
         select *
@@ -1912,15 +2150,39 @@ def create_or_reuse_refresh_run(*, payload: dict[str, Any]) -> dict[str, Any]:
           and period_key = %s
           and status in ('queued', 'running')
         order by created_at desc
+        limit 5
         """,
         [community_id, season_id, period_key],
     )
     for existing in active_runs:
-        existing_payload = (
-            existing.get("request_payload")
-            if isinstance(existing.get("request_payload"), dict)
-            else {}
-        )
+        # Auto-recover stale running runs during dedup check so orphaned runs
+        # don't block new runs indefinitely.
+        existing_status = str(existing.get("status") or "").strip().lower()
+        if existing_status == "running":
+            existing_updated = _parse_iso(existing.get("updated_at"))
+            now = datetime.now(tz=UTC)
+            if existing_updated and (now - existing_updated) > timedelta(seconds=stale_running_cutoff):
+                existing_id = str(existing.get("id") or "")
+                logger.warning(
+                    "[reddit_refresh_dedup_stale_recovery] marking stale run=%s as failed (updated_at=%s, cutoff=%ss)",
+                    existing_id[:8],
+                    existing_updated.isoformat(),
+                    stale_running_cutoff,
+                )
+                _update_run(
+                    existing_id,
+                    status="failed",
+                    diagnostics={
+                        "stale_running_recovered": True,
+                        "stale_running_cutoff_seconds": stale_running_cutoff,
+                        "recovered_during": "dedup_check",
+                    },
+                    error_message="Reddit refresh run was stuck in running state and auto-recovered during dedup check.",
+                    set_completed=True,
+                )
+                continue  # Skip this stale run — let dedup continue or create a new run
+
+        existing_payload = existing.get("request_payload") if isinstance(existing.get("request_payload"), dict) else {}
         existing_hash = str(existing_payload.get("run_config_hash") or "").strip().lower()
         if not existing_hash:
             existing_hash = _build_run_config_hash(existing_payload)
@@ -1998,10 +2260,7 @@ def _claim_refresh_run_for_execution(run_id: str) -> dict[str, Any]:
                     "stale_running_recovered": True,
                     "stale_running_cutoff_seconds": stale_running_seconds,
                 },
-                error_message=(
-                    "Reddit refresh run was stuck in running state and marked failed. "
-                    "Start refresh again."
-                ),
+                error_message=("Reddit refresh run was stuck in running state and marked failed. Start refresh again."),
                 set_completed=True,
             )
             raise RuntimeError("Reddit refresh run recovered from stale running state")
@@ -2022,30 +2281,30 @@ def _discover_window(
     show_name = str(payload.get("show_name") or "").strip()
     show_aliases = [str(item) for item in (payload.get("show_aliases") or []) if isinstance(item, str)]
     cast_names = [str(item) for item in (payload.get("cast_names") or []) if isinstance(item, str)]
-    analysis_flares = [str(item) for item in (payload.get("analysis_flares") or []) if isinstance(item, str)]
-    analysis_all_flares = [str(item) for item in (payload.get("analysis_all_flares") or []) if isinstance(item, str)]
-    force_include_flares = [str(item) for item in (payload.get("force_include_flares") or []) if isinstance(item, str)]
+    analysis_flairs = [str(item) for item in (payload.get("analysis_flairs") or []) if isinstance(item, str)]
+    analysis_all_flairs = [str(item) for item in (payload.get("analysis_all_flairs") or []) if isinstance(item, str)]
+    force_include_flairs = [str(item) for item in (payload.get("force_include_flairs") or []) if isinstance(item, str)]
     seed_post_urls = [str(item) for item in (payload.get("seed_post_urls") or []) if isinstance(item, str)]
 
-    normalized_analysis_flares: list[str] = []
-    for value in analysis_flares:
+    normalized_analysis_flairs: list[str] = []
+    for value in analysis_flairs:
         normalized = _collapse_whitespace(value)
         if normalized:
-            normalized_analysis_flares.append(normalized)
-    normalized_analysis_all_flares: list[str] = []
-    for value in analysis_all_flares:
+            normalized_analysis_flairs.append(normalized)
+    normalized_analysis_all_flairs: list[str] = []
+    for value in analysis_all_flairs:
         normalized = _collapse_whitespace(value)
         if normalized:
-            normalized_analysis_all_flares.append(normalized)
-    normalized_force_include_flares: list[str] = []
-    for value in force_include_flares:
+            normalized_analysis_all_flairs.append(normalized)
+    normalized_force_include_flairs: list[str] = []
+    for value in force_include_flairs:
         normalized = _collapse_whitespace(value)
         if normalized:
-            normalized_force_include_flares.append(normalized)
+            normalized_force_include_flairs.append(normalized)
     tracked_flairs = [
-        *normalized_analysis_all_flares,
-        *normalized_analysis_flares,
-        *normalized_force_include_flares,
+        *normalized_analysis_all_flairs,
+        *normalized_analysis_flairs,
+        *normalized_force_include_flairs,
     ]
 
     period_start = _parse_iso(payload.get("period_start"))
@@ -2056,15 +2315,9 @@ def _discover_window(
     exhaustive = bool(payload.get("exhaustive_window")) and (period_start is not None or period_end is not None)
     search_backfill_enabled = bool(payload.get("search_backfill"))
 
-    sort_modes = (
-        payload.get("sort_modes")
-        if isinstance(payload.get("sort_modes"), list)
-        else ["new", "hot", "top"]
-    )
+    sort_modes = payload.get("sort_modes") if isinstance(payload.get("sort_modes"), list) else ["new", "hot", "top"]
     normalized_sorts = [
-        str(sort).strip().lower()
-        for sort in sort_modes
-        if str(sort).strip().lower() in {"new", "hot", "top"}
+        str(sort).strip().lower() for sort in sort_modes if str(sort).strip().lower() in {"new", "hot", "top"}
     ]
     if not normalized_sorts:
         normalized_sorts = ["new", "hot", "top"]
@@ -2076,10 +2329,10 @@ def _discover_window(
     except Exception:  # noqa: BLE001
         pass
 
-    max_pages = _env_int("REDDIT_EXHAUSTIVE_MAX_PAGES", REDDIT_MAX_PAGES_DEFAULT, minimum=10, maximum=1000)
+    max_pages = _env_int("REDDIT_EXHAUSTIVE_MAX_PAGES", REDDIT_MAX_PAGES_DEFAULT, minimum=1, maximum=10_000)
     try:
         requested_pages = int(payload.get("max_pages") or max_pages)
-        max_pages = max(10, min(1000, requested_pages))
+        max_pages = max(1, min(10_000, requested_pages))
     except Exception:  # noqa: BLE001
         pass
     max_backfill_pages_per_query = _env_int(
@@ -2125,6 +2378,7 @@ def _discover_window(
     }
 
     if exhaustive:
+
         def on_listing_progress(update: dict[str, Any]) -> None:
             nonlocal listing_pages, listing_rows_fetched
             listing_pages = max(listing_pages, _safe_int(update.get("listing_pages_fetched")))
@@ -2176,6 +2430,7 @@ def _discover_window(
 
     search_backfill_diag: dict[str, Any] | None = None
     if exhaustive and search_backfill_enabled and tracked_flairs:
+
         def on_search_progress(update: dict[str, Any]) -> None:
             if not progress_callback:
                 return
@@ -2259,9 +2514,9 @@ def _discover_window(
         subreddit=subreddit,
         terms=terms,
         cast_terms=cast_terms,
-        analysis_flares=normalized_analysis_flares,
-        analysis_all_flares=normalized_analysis_all_flares,
-        force_include_flares=normalized_force_include_flares,
+        analysis_flairs=normalized_analysis_flairs,
+        analysis_all_flairs=normalized_analysis_all_flairs,
+        force_include_flairs=normalized_force_include_flairs,
         show_focused=bool(payload.get("is_show_focused")),
     )
     if progress_callback:
@@ -2424,11 +2679,11 @@ def _merge_discovery_pass_results(results: list[dict[str, Any]]) -> dict[str, An
             )
             existing_posted = _parse_iso(existing.get("posted_at"))
             thread_posted = _parse_iso(thread.get("posted_at"))
-            prefer_thread = bool(
-                thread_posted and (existing_posted is None or thread_posted > existing_posted)
-            ) or _safe_int(thread.get("num_comments")) > _safe_int(existing.get("num_comments")) or _safe_int(
-                thread.get("score")
-            ) > _safe_int(existing.get("score"))
+            prefer_thread = (
+                bool(thread_posted and (existing_posted is None or thread_posted > existing_posted))
+                or _safe_int(thread.get("num_comments")) > _safe_int(existing.get("num_comments"))
+                or _safe_int(thread.get("score")) > _safe_int(existing.get("score"))
+            )
             base = dict(thread if prefer_thread else existing)
             base["source_sorts"] = merged_sorts
             threads_by_id[post_id] = base
@@ -2507,7 +2762,7 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
     def emit_progress(*, force: bool = False) -> None:
         nonlocal last_progress_emit
         now = time.monotonic()
-        if not force and (now - last_progress_emit) < 0.8:
+        if not force and (now - last_progress_emit) < 3.0:
             return
         progress["updated_at"] = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
         _update_run(run_id, status="running", diagnostics={"progress": dict(progress)})
@@ -2526,6 +2781,290 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
     emit_progress(force=True)
 
     try:
+        run_mode = str(request_payload.get("mode") or "sync_posts").strip()
+        if run_mode == "sync_details":
+            # Sprint 4: deep detail scraping — fetch full comment trees,
+            # enhanced metadata, and queue media mirroring for matched posts.
+            from trr_backend.media.s3_mirror import mirror_reddit_media  # lazy import
+
+            community_id = str(run.get("community_id") or "").strip()
+            season_id = str(run.get("season_id") or "").strip()
+            period_key = str(run.get("period_key") or "").strip()
+            force_rescrape = bool(request_payload.get("force_rescrape"))
+
+            # ── 1. Find target posts ──────────────────────────────────────
+            has_detail_scraped_at = _column_exists("social", "reddit_posts", "detail_scraped_at")
+            detail_filter = ""
+            if has_detail_scraped_at and not force_rescrape:
+                detail_filter = "and rp.detail_scraped_at is null"
+
+            with pg.db_connection() as conn:
+                with pg.db_cursor(conn=conn) as cur:
+                    cur.execute(
+                        f"""
+                        select rp.reddit_post_id,
+                               rp.url,
+                               rp.raw_payload
+                        from social.reddit_period_post_matches rpm
+                        join social.reddit_posts rp
+                          on rp.reddit_post_id = rpm.reddit_post_id
+                        where rpm.community_id = %s
+                          and rpm.season_id = %s
+                          and rpm.period_key = %s
+                          {detail_filter}
+                        order by rp.posted_at desc nulls last
+                        """,
+                        [community_id, season_id, period_key],
+                    )
+                    target_posts = cur.fetchall() or []
+
+            apply_progress(
+                {
+                    "stage": "syncing_details",
+                    "detail_posts_total": len(target_posts),
+                    "detail_posts_done": 0,
+                    "comments_upserted": 0,
+                    "media_queued": 0,
+                    "media_mirrored": 0,
+                },
+                force=True,
+            )
+
+            detail_posts_done = 0
+            comments_upserted = 0
+            media_queued = 0
+            media_mirrored = 0
+            detail_errors: list[dict[str, str]] = []
+
+            # ── 2. Process each post (parallelised) ─────────────────────
+            # Compile media-URL regex once, shared across all workers.
+            _media_url_pattern = re.compile(
+                r'https?://[^\s\)"\]>]+\.(?:jpg|jpeg|png|gif|webp|mp4)(?:\?[^\s\)"\]>]*)?',
+                re.IGNORECASE,
+            )
+
+            def _process_single_detail_post(
+                post_row: dict[str, Any],
+                *,
+                _mirror_reddit_media: Callable[..., Any],
+                _has_detail_scraped_at: bool,
+                _media_re: re.Pattern[str],
+            ) -> dict[str, Any]:
+                """Process one post's comments + media inside a worker thread.
+
+                Returns a result dict with counters and optional error info.
+                Each worker obtains its own DB connections from the pool.
+                """
+                result: dict[str, Any] = {
+                    "comments_upserted": 0,
+                    "media_queued": 0,
+                    "media_mirrored": 0,
+                    "error": None,
+                    "reddit_post_id": None,
+                    "skipped": False,
+                }
+
+                pid = str(post_row.get("reddit_post_id") or "").strip()
+                result["reddit_post_id"] = pid
+                if not pid:
+                    result["skipped"] = True
+                    return result
+
+                try:
+                    # 2a. Fetch full comment tree
+                    comments = _fetch_post_comments_tree(pid)
+
+                    # 2b. Enhance comments with extra fields from raw_payload
+                    for comment in comments:
+                        raw = comment.get("raw_payload") or {}
+                        comment["author_flair_text"] = raw.get("author_flair_text")
+                        comment["is_submitter"] = raw.get("is_submitter", False)
+                        comment["controversiality"] = raw.get("controversiality", 0)
+                        comment["ups"] = raw.get("ups")
+                        comment["downs"] = raw.get("downs", 0)
+                        comment["gildings"] = raw.get("gildings", {})
+                        comment["body_html"] = raw.get("body_html")
+
+                    # 2c. Upsert enhanced comments
+                    if comments:
+                        with pg.db_connection() as conn:
+                            result["comments_upserted"] = _upsert_comments(comments, conn=conn)
+
+                    # 2d. Extract media URLs from post
+                    post_raw = post_row.get("raw_payload") if isinstance(post_row.get("raw_payload"), dict) else {}
+                    media_urls: list[tuple[str, str]] = []  # (url, media_type)
+
+                    # Post URL — images/videos
+                    post_url = str(post_raw.get("url") or post_row.get("url") or "").strip()
+                    if post_url and re.search(r"\.(jpg|jpeg|png|gif|webp|mp4)(\?|$)", post_url, re.IGNORECASE):
+                        mtype = "video" if post_url.lower().endswith(".mp4") else "image"
+                        media_urls.append((post_url, mtype))
+
+                    # Thumbnail
+                    thumb = str(post_raw.get("thumbnail") or "").strip()
+                    _skip_thumbs = {"self", "default", "nsfw", "spoiler", ""}
+                    if thumb and thumb.lower() not in _skip_thumbs and thumb.startswith("http"):
+                        media_urls.append((thumb, "thumbnail"))
+
+                    # Preview images
+                    preview = post_raw.get("preview")
+                    if isinstance(preview, dict):
+                        for img in preview.get("images") or []:
+                            if isinstance(img, dict):
+                                source = img.get("source")
+                                if isinstance(source, dict) and source.get("url"):
+                                    media_urls.append((str(source["url"]).replace("&amp;", "&"), "image"))
+
+                    # Media metadata (galleries)
+                    media_metadata = post_raw.get("media_metadata") or {}
+                    if isinstance(media_metadata, dict):
+                        for _key, meta in media_metadata.items():
+                            if not isinstance(meta, dict):
+                                continue
+                            s_url = meta.get("s", {}).get("u") if isinstance(meta.get("s"), dict) else None
+                            if s_url:
+                                media_urls.append((str(s_url).replace("&amp;", "&"), "image"))
+
+                    # Extract media URLs from comments
+                    for comment in comments:
+                        body = str(comment.get("body") or "")
+                        body_html = str(comment.get("body_html") or "")
+                        for text in (body, body_html):
+                            for match in _media_re.findall(text):
+                                media_urls.append((match, "image"))
+
+                    # 2e. Mirror media (parallel within worker)
+                    seen_urls: set[str] = set()
+                    unique_media: list[tuple[str, str]] = []
+                    for url, mtype in media_urls:
+                        url_clean = str(url or "").strip()
+                        if not url_clean or url_clean in seen_urls:
+                            continue
+                        seen_urls.add(url_clean)
+                        unique_media.append((url_clean, mtype))
+                    result["media_queued"] = len(unique_media)
+
+                    def _mirror_single(url_mtype: tuple[str, str]) -> tuple[str, bool, Exception | None]:
+                        u, mt = url_mtype
+                        try:
+                            r = _mirror_reddit_media(
+                                source_url=u,
+                                reddit_post_id=pid,
+                                reddit_comment_id=None,
+                                media_type=mt,
+                            )
+                            ok = isinstance(r, dict) and r.get("status") == "mirrored"
+                            return u, ok, None
+                        except Exception as exc:  # noqa: BLE001
+                            return u, False, exc
+
+                    media_workers = min(8, len(unique_media)) if unique_media else 1
+                    if unique_media:
+                        with ThreadPoolExecutor(max_workers=media_workers, thread_name_prefix="media") as media_pool:
+                            for url_done, ok, mirror_exc in media_pool.map(_mirror_single, unique_media):
+                                if mirror_exc:
+                                    logger.warning(
+                                        "[sync_details_media_mirror_failed] post_id=%s url=%s error=%s",
+                                        pid,
+                                        url_done,
+                                        mirror_exc,
+                                    )
+                                elif ok:
+                                    result["media_mirrored"] += 1
+
+                    # 2f. Update detail_scraped_at
+                    if _has_detail_scraped_at:
+                        with pg.db_connection() as conn:
+                            with pg.db_cursor(conn=conn) as cur:
+                                cur.execute(
+                                    """
+                                    update social.reddit_posts
+                                    set detail_scraped_at = now(),
+                                        updated_at = now()
+                                    where reddit_post_id = %s
+                                    """,
+                                    [pid],
+                                )
+
+                except Exception as post_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[sync_details_post_failed] post_id=%s error=%s",
+                        pid,
+                        post_exc,
+                    )
+                    result["error"] = {
+                        "reddit_post_id": pid,
+                        "error": f"{post_exc.__class__.__name__}: {post_exc}",
+                    }
+
+                return result
+
+            # Submit all posts to the thread pool
+            detail_workers = min(4, len(target_posts)) if target_posts else 1
+            with ThreadPoolExecutor(max_workers=detail_workers, thread_name_prefix="detail") as pool:
+                futures = {
+                    pool.submit(
+                        _process_single_detail_post,
+                        row,
+                        _mirror_reddit_media=mirror_reddit_media,
+                        _has_detail_scraped_at=has_detail_scraped_at,
+                        _media_re=_media_url_pattern,
+                    ): row
+                    for row in target_posts
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+
+                    # Aggregate counters
+                    comments_upserted += result["comments_upserted"]
+                    media_queued += result["media_queued"]
+                    media_mirrored += result["media_mirrored"]
+
+                    if result.get("error"):
+                        detail_errors.append(result["error"])
+
+                    detail_posts_done += 1
+                    # Progress written from main thread (safe for DB writes)
+                    apply_progress(
+                        {
+                            "detail_posts_done": detail_posts_done,
+                            "comments_upserted": comments_upserted,
+                            "media_queued": media_queued,
+                            "media_mirrored": media_mirrored,
+                        }
+                    )
+
+            # ── 3. Finalize ───────────────────────────────────────────────
+            apply_progress({"stage": "finalizing"}, force=True)
+
+            status = "completed" if not detail_errors else "partial"
+            diagnostics = {
+                "mode": "sync_details",
+                "force_rescrape": force_rescrape,
+                "detail_posts_total": len(target_posts),
+                "detail_posts_done": detail_posts_done,
+                "comments_upserted": comments_upserted,
+                "media_queued": media_queued,
+                "media_mirrored": media_mirrored,
+                "errors": detail_errors[:50],  # cap to avoid oversized diagnostics
+                "error_count": len(detail_errors),
+                "progress": {
+                    **progress,
+                    "stage": "finalizing",
+                    "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+                },
+            }
+
+            _update_run(
+                run_id,
+                status=status,
+                diagnostics=diagnostics,
+                total_rows=len(target_posts),
+                matched_rows=detail_posts_done - len(detail_errors),
+                set_completed=True,
+            )
+            return get_refresh_run(run_id)
+
         coverage_mode = _normalize_coverage_mode(request_payload.get("coverage_mode"))
         discover_payload = dict(request_payload)
         if coverage_mode == "max_coverage":
@@ -2533,8 +3072,8 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
                 _coerce_int(
                     discover_payload.get("max_pages"),
                     default=REDDIT_ADAPTIVE_DEEP_MAX_PAGES,
-                    minimum=10,
-                    maximum=1000,
+                    minimum=1,
+                    maximum=10_000,
                 ),
                 REDDIT_ADAPTIVE_DEEP_MAX_PAGES,
             )
@@ -2572,8 +3111,8 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
                 _coerce_int(
                     second_pass_payload.get("max_pages"),
                     default=REDDIT_ADAPTIVE_DEEP_MAX_PAGES,
-                    minimum=10,
-                    maximum=1000,
+                    minimum=1,
+                    maximum=10_000,
                 ),
                 REDDIT_ADAPTIVE_DEEP_MAX_PAGES,
             )
@@ -2595,6 +3134,33 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
                 ),
                 REDDIT_ADAPTIVE_DEEP_MAX_BACKFILL_PAGES_PER_QUERY,
             )
+
+            # Optimization: only run incomplete parts on second pass. Collect
+            # post IDs already seen to avoid re-processing.
+            first_threads = first_result.get("threads") if isinstance(first_result.get("threads"), list) else []
+            seen_post_ids = {
+                str(t.get("reddit_post_id") or "").strip()
+                for t in first_threads
+                if isinstance(t, dict) and str(t.get("reddit_post_id") or "").strip()
+            }
+
+            # If listing was complete, skip it on the second pass (set max_pages=0)
+            if not incomplete_listing:
+                second_pass_payload["max_pages"] = 0
+                logger.info(
+                    "[adaptive_deep_pass2] listing already complete, skipping listing phase. "
+                    "seen_posts=%d",
+                    len(seen_post_ids),
+                )
+
+            # If backfill was complete, skip it
+            if not incomplete_backfill:
+                second_pass_payload["max_backfill_queries"] = 0
+                logger.info("[adaptive_deep_pass2] backfill already complete, skipping backfill phase.")
+
+            # Pass seen_post_ids to help deduplicate on merge
+            second_pass_payload["_seen_post_ids"] = seen_post_ids
+
             second_result = _discover_window(second_pass_payload, progress_callback=apply_progress)
             pass_results.append(second_result)
             pass_summaries.append(_build_pass_summary(2, second_result))
@@ -2682,24 +3248,38 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
             force=True,
         )
 
-        for thread in comment_targets:
+        # Parallel comment fetching: use ThreadPoolExecutor to fetch multiple
+        # comment trees concurrently, then batch-upsert results.
+        _comment_lock = threading.Lock()
+
+        def _fetch_comments_for_thread(thread: dict[str, Any]) -> tuple[str, list[dict[str, Any]] | None, Exception | None]:
             post_id = str(thread.get("reddit_post_id") or "").strip()
             if not post_id:
-                apply_progress({"comments_targets_done": _safe_int(progress.get("comments_targets_done")) + 1})
-                continue
+                return "", None, None
             try:
                 comments = _fetch_post_comments_tree(post_id)
-                if comments:
-                    pending_comment_rows.extend(comments)
-                if len(pending_comment_rows) >= 2_000:
-                    with pg.db_connection() as conn:
-                        comments_upserted += _upsert_comments(pending_comment_rows, conn=conn)
-                    apply_progress({"comments_rows_upserted": comments_upserted})
-                    pending_comment_rows.clear()
+                return post_id, comments, None
             except Exception as exc:  # noqa: BLE001
-                comment_errors += 1
-                logger.warning("[reddit_refresh_comments_failed] post_id=%s error=%s", post_id, exc)
-            finally:
+                return post_id, None, exc
+
+        comment_worker_count = min(5, len(comment_targets)) if comment_targets else 1
+        with ThreadPoolExecutor(max_workers=comment_worker_count, thread_name_prefix="comments") as comment_pool:
+            futures = {
+                comment_pool.submit(_fetch_comments_for_thread, thread): thread
+                for thread in comment_targets
+            }
+            for future in as_completed(futures):
+                post_id, comments, exc = future.result()
+                if exc:
+                    comment_errors += 1
+                    logger.warning("[reddit_refresh_comments_failed] post_id=%s error=%s", post_id, exc)
+                elif comments:
+                    pending_comment_rows.extend(comments)
+                    if len(pending_comment_rows) >= 2_000:
+                        with pg.db_connection() as conn:
+                            comments_upserted += _upsert_comments(pending_comment_rows, conn=conn)
+                        apply_progress({"comments_rows_upserted": comments_upserted})
+                        pending_comment_rows.clear()
                 apply_progress({"comments_targets_done": _safe_int(progress.get("comments_targets_done")) + 1})
 
         if pending_comment_rows:
@@ -2709,11 +3289,7 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
 
         apply_progress({"stage": "finalizing"}, force=True)
 
-        search_backfill = (
-            result.get("search_backfill")
-            if isinstance(result.get("search_backfill"), dict)
-            else None
-        )
+        search_backfill = result.get("search_backfill") if isinstance(result.get("search_backfill"), dict) else None
         seed_urls = result.get("seed_urls") if isinstance(result.get("seed_urls"), dict) else None
         incomplete_listing, incomplete_backfill = _is_result_incomplete(result)
         status = "partial" if incomplete_listing or incomplete_backfill else "completed"
@@ -2736,6 +3312,13 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
             "window_end": result.get("window_end"),
             "terms": result.get("terms"),
             "hints": result.get("hints"),
+            "discovered_flairs": sorted(
+                {
+                    str(thread.get("link_flair_text") or "").strip()
+                    for thread in target_threads
+                    if isinstance(thread, dict) and str(thread.get("link_flair_text") or "").strip()
+                }
+            ),
             "comments": {
                 "enabled": fetch_comments,
                 "delta_only": comment_delta_only,
@@ -2808,17 +3391,21 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
     if not row:
         raise ValueError("Refresh run not found")
 
-    active_counts = pg.fetch_one(
-        """
+    active_counts = (
+        pg.fetch_one(
+            """
         select
           count(*) filter (where status = 'running') as running_total,
           count(*) filter (where status = 'queued') as queued_total,
           count(*) filter (where status = 'queued' and created_at < %s::timestamptz) as queued_ahead
         from social.reddit_refresh_runs
         where status in ('queued', 'running')
+          and community_id = %s
         """,
-        [row.get("created_at")],
-    ) or {}
+            [row.get("created_at"), row.get("community_id")],
+        )
+        or {}
+    )
 
     running_total = _safe_int(active_counts.get("running_total"))
     queued_total = _safe_int(active_counts.get("queued_total"))
@@ -2855,6 +3442,7 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
         "active_jobs": running_total + queued_total,
         "run_config_hash": str(request_payload.get("run_config_hash") or "").strip() or None,
         "diagnostics": diagnostics,
+        "discovered_flairs": diagnostics.get("discovered_flairs") or [],
         "discovery": payload,
         "started_at": _iso_utc(_parse_iso(row.get("started_at"))),
         "completed_at": _iso_utc(_parse_iso(row.get("completed_at"))),
@@ -2896,9 +3484,7 @@ def _build_analytics_filters(
 
     normalized_flair_key = to_canonical_flair_key(flair_key)
     if normalized_flair_key:
-        clauses.append(
-            "coalesce(nullif(m.canonical_flair_key, ''), nullif(p.canonical_flair_key, ''), '') = %s"
-        )
+        clauses.append("coalesce(nullif(m.canonical_flair_key, ''), nullif(p.canonical_flair_key, ''), '') = %s")
         params.append(normalized_flair_key)
 
     return " and ".join(clauses), params
@@ -2915,8 +3501,9 @@ def get_reddit_community_analytics_summary(
         scope=scope,
         season_id=season_id,
     )
-    row = pg.fetch_one(
-        f"""
+    row = (
+        pg.fetch_one(
+            f"""
         with dedup as (
           select distinct on (m.reddit_post_id)
                  m.reddit_post_id,
@@ -2945,8 +3532,10 @@ def get_reddit_community_analytics_summary(
           max(row_updated_at) as updated_at
         from dedup
         """,
-        where_params,
-    ) or {}
+            where_params,
+        )
+        or {}
+    )
     return {
         "scope": _normalize_analytics_scope(scope),
         "season_id": season_id,
@@ -3120,8 +3709,9 @@ def list_reddit_community_posts(
     )
     has_flair_mode = _column_exists("social", "reddit_period_post_matches", "flair_mode")
     flair_mode_select = "m.flair_mode" if has_flair_mode else "null::text as flair_mode"
-    count_row = pg.fetch_one(
-        f"""
+    count_row = (
+        pg.fetch_one(
+            f"""
         select count(*)::int as total_count
         from (
           select distinct on (m.reddit_post_id) m.reddit_post_id
@@ -3131,8 +3721,10 @@ def list_reddit_community_posts(
           order by m.reddit_post_id, m.updated_at desc
         ) dedup
         """,
-        where_params,
-    ) or {}
+            where_params,
+        )
+        or {}
+    )
     rows = pg.fetch_all(
         f"""
         with dedup as (
@@ -3205,8 +3797,9 @@ def get_reddit_community_flair_detail(
         per_page=per_page,
     )
     total = posts_payload.get("pagination", {}).get("total_count", 0)
-    label_row = pg.fetch_one(
-        """
+    label_row = (
+        pg.fetch_one(
+            """
         select
           coalesce(
             nullif(max(link_flair_text), ''),
@@ -3215,8 +3808,10 @@ def get_reddit_community_flair_detail(
         from social.reddit_posts
         where coalesce(nullif(canonical_flair_key, ''), '') = %s
         """,
-        [normalized_flair_key],
-    ) or {}
+            [normalized_flair_key],
+        )
+        or {}
+    )
     return {
         "scope": _normalize_analytics_scope(scope),
         "season_id": season_id,
