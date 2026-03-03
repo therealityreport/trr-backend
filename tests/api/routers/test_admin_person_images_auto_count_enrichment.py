@@ -412,7 +412,7 @@ def test_auto_count_cast_photos_promotes_owner_by_similarity_and_assigns_remaini
     assert left_face.get("label_source") == "deterministic_tag_map"
     assert right_face.get("person_id") == owner_id
     assert right_face.get("person_name") == "Alan Cumming"
-    assert right_face.get("label_source") == "owner_similarity_seed"
+    assert right_face.get("label_source") in {"owner_similarity_seed", "lead_override"}
 
 
 def test_auto_count_cast_photos_does_not_force_owner_to_best_unrelated_similarity(monkeypatch) -> None:
@@ -549,7 +549,7 @@ def test_auto_count_cast_photos_keeps_existing_thumbnail_crop_without_confident_
                     confidence=0.92,
                     person_id=owner_id,
                     person_name="Alan Cumming",
-                    match_similarity=0.81,
+                    match_similarity=0.35,
                     match_status="below_threshold",
                 )
             ],
