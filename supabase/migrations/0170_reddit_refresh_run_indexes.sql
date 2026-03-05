@@ -21,17 +21,15 @@
 --      (community_id, season_id, period_key, status = 'queued', updated_at < cutoff).
 --      Covered by the dedup index below.
 --
--- These indexes are created CONCURRENTLY and use IF NOT EXISTS for safety.
--- Because CREATE INDEX CONCURRENTLY cannot run inside a transaction block,
--- this migration must be applied outside a transaction (e.g. supabase db push
--- handles this, or run with psql outside BEGIN/COMMIT).
+-- These indexes use IF NOT EXISTS for safety and are created in-transaction so
+-- they remain compatible with transaction-scoped reset/apply paths used by CI.
 
 -- 1. Partial composite index for the dedup/reuse check in create_or_reuse_refresh_run().
 --    Covers: WHERE community_id = %s AND season_id = %s AND period_key = %s
 --            AND status IN ('queued', 'running')
 --            ORDER BY created_at DESC
 --    Also covers the stale-queue recovery UPDATE (same triple + status = 'queued').
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reddit_refresh_runs_dedup
+CREATE INDEX IF NOT EXISTS idx_reddit_refresh_runs_dedup
   ON social.reddit_refresh_runs (community_id, season_id, period_key, created_at DESC)
   WHERE status IN ('queued', 'running');
 
@@ -39,7 +37,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reddit_refresh_runs_dedup
 --    Covers: WHERE status IN ('queued', 'running')
 --            with count(*) FILTER expressions on status and created_at comparison.
 --    Narrow partial index ensures only active rows are scanned.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reddit_refresh_runs_active
+CREATE INDEX IF NOT EXISTS idx_reddit_refresh_runs_active
   ON social.reddit_refresh_runs (status, created_at)
   WHERE status IN ('queued', 'running');
 
@@ -48,6 +46,6 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reddit_refresh_runs_active
 --    Covers: WHERE community_id = %s AND season_id = %s AND period_key = %s
 --            AND status IN ('completed', 'partial')
 --            ORDER BY created_at DESC / completed_at DESC NULLS LAST
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reddit_refresh_runs_cache
+CREATE INDEX IF NOT EXISTS idx_reddit_refresh_runs_cache
   ON social.reddit_refresh_runs (community_id, season_id, period_key, created_at DESC)
   WHERE status IN ('completed', 'partial');
