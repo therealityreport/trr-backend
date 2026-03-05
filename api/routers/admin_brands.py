@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from api.auth import AdminUser
-from api.deps import SupabaseAdminClient
+from api.deps import SupabaseAdminClient, get_supabase_admin_client
 from trr_backend.db import pg
 from trr_backend.integrations.free_logo_sources import FREE_LOGO_SOURCE_PROVIDERS, collect_free_logo_candidates
 from trr_backend.media.s3_mirror import download_image
@@ -1844,8 +1844,9 @@ def _selected_logo_role_summary(
 def _select_logo_option(
     *,
     payload: BrandLogosOptionSelectRequest,
-    db: SupabaseAdminClient,
+    db: SupabaseAdminClient | None = None,
 ) -> dict[str, Any]:
+    db = db or get_supabase_admin_client()
     normalized_target_key = _normalize_text(payload.target_key).casefold()
     target_label = _normalize_text(payload.target_label) or normalized_target_key
     asset_id = _normalize_text(payload.asset_id)
@@ -2157,8 +2158,9 @@ def _candidate_discovered_urls(row: dict[str, Any]) -> list[str]:
 def _sync_brand_logos(
     *,
     payload: BrandLogosSyncRequest,
-    db: SupabaseAdminClient,
+    db: SupabaseAdminClient | None = None,
 ) -> dict[str, Any]:
+    db = db or get_supabase_admin_client()
     if payload.scope == "page" and not payload.page:
         raise ValueError("page is required when scope=page")
     if payload.scope == "show" and not _normalize_text(payload.show_id):
@@ -2696,11 +2698,10 @@ def post_brand_logo_option_discover(
 @router.post("/logos/options/select")
 def post_brand_logo_option_select(
     payload: BrandLogosOptionSelectRequest,
-    db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> dict[str, Any]:
     try:
-        return _select_logo_option(payload=payload, db=db)
+        return _select_logo_option(payload=payload)
     except Exception as error:  # noqa: BLE001
         raise _to_http_exception(error) from error
 
@@ -2708,10 +2709,9 @@ def post_brand_logo_option_select(
 @router.post("/logos/sync")
 def post_brand_logos_sync(
     payload: BrandLogosSyncRequest,
-    db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> dict[str, Any]:
     try:
-        return _sync_brand_logos(payload=payload, db=db)
+        return _sync_brand_logos(payload=payload)
     except Exception as error:  # noqa: BLE001
         raise _to_http_exception(error) from error

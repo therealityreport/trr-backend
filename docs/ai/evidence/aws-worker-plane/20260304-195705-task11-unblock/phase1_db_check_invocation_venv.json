@@ -1,0 +1,22 @@
+{
+    "CommandId": "7ebb0131-d843-480b-aed6-8bca8a728269",
+    "InstanceId": "i-05d7f68c379dc05db",
+    "Comment": "Task11 DB reachability check venv",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 1,
+    "ExecutionStartDateTime": "2026-03-05T01:02:33.863Z",
+    "ExecutionElapsedTime": "PT0.013S",
+    "ExecutionEndDateTime": "2026-03-05T01:02:33.863Z",
+    "Status": "Failed",
+    "StatusDetails": "Failed",
+    "StandardOutputContent": "DB_URL_PREFIX=postgresql\n",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'psycopg'\nfailed to run commands: exit status 1",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

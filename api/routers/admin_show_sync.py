@@ -59,6 +59,7 @@ from trr_backend.media.s3_mirror import (
     mirror_logo_monochrome_variants_row,
     upload_bytes_to_s3,
 )
+from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.repositories import brand_families
 from trr_backend.repositories.media_assets import update_asset_with_mirror_result
 from trr_backend.repositories.web_scrape_images import (
@@ -90,6 +91,17 @@ def _field_provided(model: BaseModel, field_name: str) -> bool:
     if fields_set is None:
         fields_set = getattr(model, "__fields_set__", set())
     return field_name in fields_set
+
+
+def _is_internal_raw_stream_request(request: Request | Any | None) -> bool:
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return False
+    try:
+        value = headers.get("x-trr-internal-raw-stream")
+    except Exception:  # noqa: BLE001
+        return False
+    return str(value or "").strip() == "1"
 
 
 def _is_real_housewives_show(show_name: str | None) -> bool:
@@ -1689,12 +1701,7 @@ def import_logo_url(
         if not show_id:
             raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
         show_response = (
-            db.schema("core")
-            .table("shows")
-            .select("id,imdb_id,canonical_slug")
-            .eq("id", show_id)
-            .limit(1)
-            .execute()
+            db.schema("core").table("shows").select("id,imdb_id,canonical_slug").eq("id", show_id).limit(1).execute()
         )
         if hasattr(show_response, "error") and show_response.error:
             raise HTTPException(status_code=502, detail=f"Failed to fetch show row: {show_response.error}")
@@ -1803,11 +1810,7 @@ def import_logo_url(
             if variant_patch and isinstance(variant_patch.patch, dict):
                 update_patch.update(variant_patch.patch)
             core_update = (
-                db.schema("core")
-                .table(table)
-                .update(update_patch)
-                .eq(id_field, target_row.get(id_field))
-                .execute()
+                db.schema("core").table(table).update(update_patch).eq(id_field, target_row.get(id_field)).execute()
             )
             if hasattr(core_update, "error") and core_update.error:
                 raise HTTPException(status_code=502, detail=f"Failed to update {table} row: {core_update.error}")
@@ -1908,12 +1911,7 @@ async def import_logo_file(
         if not show_id:
             raise HTTPException(status_code=400, detail="show_id is required for target_type=show")
         show_response = (
-            db.schema("core")
-            .table("shows")
-            .select("id,imdb_id,canonical_slug")
-            .eq("id", show_id)
-            .limit(1)
-            .execute()
+            db.schema("core").table("shows").select("id,imdb_id,canonical_slug").eq("id", show_id).limit(1).execute()
         )
         if hasattr(show_response, "error") and show_response.error:
             raise HTTPException(status_code=502, detail=f"Failed to fetch show row: {show_response.error}")
@@ -2396,7 +2394,7 @@ def refresh_show_stream(
     payload: ShowRefreshRequest,
     request: Request,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    admin: AdminUser = None,
 ) -> StreamingResponse:
     """
     Stream refresh progress for one or more targets as SSE.
@@ -2520,6 +2518,13 @@ def refresh_show_stream(
         raise HTTPException(status_code=400, detail=f"Unknown refresh target: {target}")
 
     total_steps = len(steps)
+    actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
+    request_payload = {
+        "show_id": show_id_str,
+        "payload": payload.model_dump(mode="json"),
+        "request_id": request_id,
+        "initiated_by": actor,
+    }
 
     def _yield_event(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -2710,15 +2715,74 @@ def refresh_show_stream(
                 error_payload["stage_key"] = current_step_key
             yield _yield_event("error", _with_request_id(error_payload))
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    operation = start_operation_for_stream(
+        operation_type="admin_show_refresh",
+        producer=event_generator,
+        request_payload=request_payload,
+        initiated_by=actor,
+        request=request,
     )
+    return operation_stream_response(str(operation.get("id")), request=request)
+
+
+def build_show_refresh_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    db: SupabaseAdminClient | None = None,
+):
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    show_id_str = str(request_payload.get("show_id") or "").strip()
+    if not show_id_str:
+        raise ValueError("request_payload.show_id is required")
+    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    payload = ShowRefreshRequest.model_validate(payload_data)
+    initiated_by = str(request_payload.get("initiated_by") or "admin")
+    request_id = str(request_payload.get("request_id") or "").strip() or None
+
+    def _producer():
+        local_db = db or create_supabase_admin_client()
+        start_payload: dict[str, Any] = {
+            "show_id": show_id_str,
+            "stage": "starting",
+            "message": "Starting refresh...",
+            "actor": initiated_by,
+        }
+        if request_id:
+            start_payload["request_id"] = request_id
+        yield f"event: progress\ndata: {json.dumps(start_payload)}\n\n"
+        try:
+            result = refresh_show(
+                show_id=UUID(show_id_str),
+                payload=payload,
+                db=local_db,
+                _={"id": initiated_by},
+            )
+            complete_payload = result.model_dump() if isinstance(result, BaseModel) else dict(result or {})
+            if request_id:
+                complete_payload["request_id"] = request_id
+            yield f"event: complete\ndata: {json.dumps(complete_payload)}\n\n"
+        except HTTPException as exc:
+            error_payload: dict[str, Any] = {
+                "show_id": show_id_str,
+                "error": "Show refresh failed",
+                "detail": str(exc.detail),
+                "status": int(exc.status_code),
+            }
+            if request_id:
+                error_payload["request_id"] = request_id
+            yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            error_payload = {
+                "show_id": show_id_str,
+                "error": "Show refresh failed",
+                "detail": str(exc),
+            }
+            if request_id:
+                error_payload["request_id"] = request_id
+            yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
+
+    return _producer
 
 
 @router.post("/{show_id}/refresh-photos/stream")
@@ -2727,7 +2791,7 @@ def refresh_show_photos_stream(
     request: Request,
     payload: RefreshShowPhotosRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    admin_user: AdminUser = None,
 ) -> StreamingResponse:
     """
     High-fidelity gallery refresh for a show with live SSE progress updates.
@@ -4031,7 +4095,7 @@ def refresh_show_photos_stream(
         complete_payload["live_counts"] = build_live_counts()
         yield _yield_event("complete", _with_request_id(complete_payload))
 
-    return StreamingResponse(
+    stream_response = StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
@@ -4040,3 +4104,63 @@ def refresh_show_photos_stream(
             "X-Accel-Buffering": "no",
         },
     )
+    if _is_internal_raw_stream_request(request):
+        return stream_response
+
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
+    request_payload = {
+        "show_id": show_id_str,
+        "payload": payload.model_dump(mode="json"),
+        "request_id": request_id,
+        "initiated_by": actor,
+    }
+    operation = start_operation_for_stream(
+        operation_type="admin_show_refresh_photos",
+        producer=event_generator,
+        request_payload=request_payload,
+        initiated_by=actor,
+        request=request,
+    )
+    return operation_stream_response(str(operation.get("id")), request=request)
+
+
+def build_show_refresh_photos_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    db: SupabaseAdminClient | None = None,
+):
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    show_id_str = str(request_payload.get("show_id") or "").strip()
+    if not show_id_str:
+        raise ValueError("request_payload.show_id is required")
+
+    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    payload = RefreshShowPhotosRequest.model_validate(payload_data)
+    request_id = str(request_payload.get("request_id") or "").strip() or None
+    initiated_by = str(request_payload.get("initiated_by") or "admin")
+
+    class _InternalStreamRequest:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {"x-trr-internal-raw-stream": "1"}
+            if request_id:
+                self.headers["x-trr-request-id"] = request_id
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    def _producer():
+        local_db = db or create_supabase_admin_client()
+        response = refresh_show_photos_stream(
+            show_id=UUID(show_id_str),
+            request=_InternalStreamRequest(),
+            payload=payload,
+            db=local_db,
+            admin_user={"id": initiated_by},
+        )
+        body_iterator = getattr(response, "body_iterator", None)
+        if body_iterator is None:
+            return []
+        return body_iterator
+
+    return _producer

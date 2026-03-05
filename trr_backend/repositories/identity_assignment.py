@@ -323,6 +323,121 @@ def _extract_candidate_person_names(value: Any) -> list[str]:
     return names
 
 
+def _resolve_person_name_from_id(
+    db: Any | None,
+    person_id: Any,
+    *,
+    person_id_name_cache: dict[str, str | None] | None = None,
+) -> str | None:
+    normalized_id = normalize_uuid_text(person_id)
+    if not normalized_id:
+        return None
+    if person_id_name_cache is None:
+        person_id_name_cache = {}
+    if normalized_id in person_id_name_cache:
+        return person_id_name_cache[normalized_id]
+    if db is None:
+        person_id_name_cache[normalized_id] = None
+        return None
+
+    resolved_name: str | None = None
+    try:
+        response = db.schema("core").table("people").select("full_name").eq("id", normalized_id).limit(1).execute()
+        rows = response.data if isinstance(getattr(response, "data", None), list) else []
+        if rows and isinstance(rows[0], dict):
+            candidate = rows[0].get("full_name")
+            if isinstance(candidate, str):
+                normalized = " ".join(candidate.split()).strip()
+                if normalized:
+                    resolved_name = normalized
+    except Exception:  # noqa: BLE001
+        resolved_name = None
+
+    person_id_name_cache[normalized_id] = resolved_name
+    return resolved_name
+
+
+def _iter_people_pairs(people_ids: Any, people_names: Any) -> list[tuple[str | None, str | None]]:
+    ids = _coerce_people_ids(people_ids)
+    names = _coerce_people_names(people_names)
+    total = max(len(ids), len(names))
+    pairs: list[tuple[str | None, str | None]] = []
+    for idx in range(total):
+        pairs.append((ids[idx] if idx < len(ids) else None, names[idx] if idx < len(names) else None))
+    return pairs
+
+
+def build_assignment_tagged_people(
+    *,
+    db: Any | None,
+    owner_person_id: str | None,
+    owner_person_name: str | None = None,
+    tagged_people_ids: Any = None,
+    tagged_people_names: Any = None,
+    row_people_ids: Any = None,
+    row_people_names: Any = None,
+    metadata_signals: list[Any] | None = None,
+    person_name_id_cache: dict[str, str | None] | None = None,
+    person_id_name_cache: dict[str, str | None] | None = None,
+) -> tuple[list[str], list[str]]:
+    if person_name_id_cache is None:
+        person_name_id_cache = {}
+    if person_id_name_cache is None:
+        person_id_name_cache = {}
+
+    merged_ids: list[str] = []
+    merged_names: list[str] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+
+    def _append_candidate(person_id: Any = None, person_name: Any = None) -> None:
+        normalized_id = normalize_uuid_text(person_id)
+        normalized_name = " ".join(str(person_name).split()).strip() if isinstance(person_name, str) else ""
+        normalized_name = normalized_name or None
+
+        if normalized_id and not normalized_name:
+            normalized_name = _resolve_person_name_from_id(
+                db,
+                normalized_id,
+                person_id_name_cache=person_id_name_cache,
+            )
+        if not normalized_id and normalized_name and db is not None:
+            normalized_id = _resolve_person_id_from_name(
+                db,
+                normalized_name,
+                person_name_id_cache=person_name_id_cache,
+            )
+        if normalized_id and normalized_id not in seen_ids:
+            seen_ids.add(normalized_id)
+            merged_ids.append(normalized_id)
+        if normalized_name:
+            name_key = normalized_name.lower()
+            if name_key not in seen_names:
+                seen_names.add(name_key)
+                merged_names.append(normalized_name)
+
+    _append_candidate(owner_person_id, owner_person_name)
+    for person_id, person_name in _iter_people_pairs(tagged_people_ids, tagged_people_names):
+        _append_candidate(person_id, person_name)
+    for person_id, person_name in _iter_people_pairs(row_people_ids, row_people_names):
+        _append_candidate(person_id, person_name)
+    for signal in metadata_signals or []:
+        for person_name in _extract_candidate_person_names(signal):
+            _append_candidate(None, person_name)
+
+    owner_id = normalize_uuid_text(owner_person_id)
+    if owner_id and owner_id not in seen_ids:
+        merged_ids.insert(0, owner_id)
+    if isinstance(owner_person_name, str):
+        owner_name = " ".join(owner_person_name.split()).strip()
+        if owner_name:
+            owner_key = owner_name.lower()
+            if owner_key not in seen_names:
+                merged_names.insert(0, owner_name)
+
+    return merged_ids, merged_names
+
+
 def build_identity_candidate_person_ids(
     *,
     db: Any | None,

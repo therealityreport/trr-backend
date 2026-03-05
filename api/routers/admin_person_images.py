@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from api.auth import AdminUser, FacebankSeedAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.face_crops import generate_and_upload_face_crops
+from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.repositories.identity_assignment import (
     build_identity_candidate_person_ids as build_identity_candidate_person_ids_shared,
 )
@@ -99,6 +100,17 @@ IMDB_CREDIT_MEDIA_TYPE_BY_TITLE_TYPE: dict[str, str] = {
     "VIDEO": "Video",
     "DOCUMENTARY": "Documentary",
 }
+
+
+def _is_internal_raw_stream_request(request: Request | Any | None) -> bool:
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return False
+    try:
+        value = headers.get("x-trr-internal-raw-stream")
+    except Exception:  # noqa: BLE001
+        return False
+    return str(value or "").strip() == "1"
 
 
 class RefreshImagesRequest(BaseModel):
@@ -1468,16 +1480,107 @@ def _apply_similarity_lead_assignments(
         claimed_people.add(person_key)
 
 
+def _has_any_similarity_evidence(boxes: list[dict[str, Any]]) -> bool:
+    for box in boxes:
+        match_similarity = box.get("match_similarity")
+        if isinstance(match_similarity, (int, float)) and float(match_similarity) > FACE_MATCH_SCORE_EVIDENCE_MIN:
+            return True
+        raw_candidates = box.get("match_candidates")
+        if not isinstance(raw_candidates, list):
+            continue
+        for candidate in raw_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            similarity = candidate.get("similarity")
+            if isinstance(similarity, (int, float)) and float(similarity) > FACE_MATCH_SCORE_EVIDENCE_MIN:
+                return True
+    return False
+
+
+def _apply_owner_only_fallback_assignment(
+    boxes: list[dict[str, Any]],
+    *,
+    owner_person_id: str | None = None,
+    owner_person_name: str | None = None,
+) -> bool:
+    owner_id = _normalize_person_id(owner_person_id)
+    owner_name = str(owner_person_name or "").strip() or None
+    if not owner_id and not owner_name:
+        return False
+    protected_label_sources = {"identity_match", "owner_similarity_seed", "lead_override", "owner_fallback_map"}
+    owner_name_key = _person_name_key(owner_name)
+
+    for box in boxes:
+        box_person_id = _normalize_person_id(box.get("person_id"))
+        box_person_name_key = _person_name_key(box.get("person_name"))
+        if (owner_id and box_person_id == owner_id) or (owner_name_key and box_person_name_key == owner_name_key):
+            box["label_source"] = "owner_fallback_map"
+            box["match_status"] = "matched"
+            box["match_reason"] = "owner_fallback_map"
+            return True
+
+    candidate_indexes = [
+        idx
+        for idx, box in enumerate(boxes)
+        if str(box.get("label_source") or "").strip().lower() not in protected_label_sources
+    ]
+    if not candidate_indexes:
+        candidate_indexes = list(range(len(boxes)))
+    if not candidate_indexes:
+        return False
+
+    best_index = max(
+        candidate_indexes,
+        key=lambda idx: (
+            float(boxes[idx].get("confidence") or 0.0),
+            float(boxes[idx].get("width") or 0.0) * float(boxes[idx].get("height") or 0.0),
+            -float(boxes[idx].get("x") or 0.0),
+        ),
+    )
+    best_box = boxes[best_index]
+    if owner_id:
+        best_box["person_id"] = owner_id
+    if owner_name:
+        best_box["person_name"] = owner_name
+        best_box["label"] = owner_name
+    best_box["label_source"] = "owner_fallback_map"
+    best_box["match_status"] = "matched"
+    best_box["match_reason"] = "owner_fallback_map"
+    return True
+
+
 def _apply_tagged_people_assignments(
     boxes: list[dict[str, Any]],
     *,
     tagged_people_ids: Any,
     tagged_people_names: Any,
+    owner_person_id: str | None = None,
+    owner_person_name: str | None = None,
 ) -> None:
     if not boxes:
         return
+    if len(boxes) == 1 and not _has_any_similarity_evidence(boxes):
+        if _apply_owner_only_fallback_assignment(
+            boxes,
+            owner_person_id=owner_person_id,
+            owner_person_name=owner_person_name,
+        ):
+            return
+    if len(boxes) > 1 and not _has_any_similarity_evidence(boxes):
+        if _apply_owner_only_fallback_assignment(
+            boxes,
+            owner_person_id=owner_person_id,
+            owner_person_name=owner_person_name,
+        ):
+            return
     tagged_people = _build_tagged_people(tagged_people_ids, tagged_people_names)
     if not tagged_people:
+        if len(boxes) == 1:
+            _apply_owner_only_fallback_assignment(
+                boxes,
+                owner_person_id=owner_person_id,
+                owner_person_name=owner_person_name,
+            )
         return
 
     remaining_tags = list(tagged_people)
@@ -1510,7 +1613,7 @@ def _apply_tagged_people_assignments(
             tagged for tagged in remaining_tags if not _tagged_person_has_similarity_evidence(tagged, boxes)
         ]
 
-    protected_label_sources = {"identity_match", "owner_similarity_seed", "lead_override"}
+    protected_label_sources = {"identity_match", "owner_similarity_seed", "lead_override", "owner_fallback_map"}
     unassigned_indexes = [
         idx
         for idx, box in enumerate(boxes)
@@ -1705,6 +1808,7 @@ def _build_detection_boxes(
     face_boxes = _extract_detection_boxes(result, kind="face")
     diagnostics = _empty_auto_count_diagnostics()
     diagnostics["auto_faces_detected"] = len(face_boxes)
+    explicit_owner_name = str(owner_person_name or "").strip() or None
     tagged_people_lookup = _build_tagged_people(tagged_people_ids, tagged_people_names)
     person_name_lookup_by_id: dict[str, str] = {}
     for tagged in tagged_people_lookup:
@@ -1713,7 +1817,7 @@ def _build_detection_boxes(
         if tagged_id and tagged_name and tagged_id not in person_name_lookup_by_id:
             person_name_lookup_by_id[tagged_id] = tagged_name
     normalized_owner_id = _normalize_person_id(owner_person_id)
-    normalized_owner_name = str(owner_person_name or "").strip()
+    normalized_owner_name = explicit_owner_name or ""
     if normalized_owner_id and normalized_owner_name and normalized_owner_id not in person_name_lookup_by_id:
         person_name_lookup_by_id[normalized_owner_id] = normalized_owner_name
 
@@ -1792,10 +1896,11 @@ def _build_detection_boxes(
                 tagged_people_ids=tagged_people_ids,
                 tagged_people_names=tagged_people_names,
             )
+            owner_name_for_assignment = resolved_owner_name if (normalized_owner_id or explicit_owner_name) else None
             _promote_owner_similarity_assignment(
                 boxes,
                 owner_person_id=owner_person_id,
-                owner_person_name=resolved_owner_name,
+                owner_person_name=owner_name_for_assignment,
                 allow_identity_assignment=allow_identity_assignment,
             )
             _apply_similarity_lead_assignments(
@@ -1807,6 +1912,8 @@ def _build_detection_boxes(
                 boxes,
                 tagged_people_ids=tagged_people_ids,
                 tagged_people_names=tagged_people_names,
+                owner_person_id=owner_person_id,
+                owner_person_name=owner_name_for_assignment,
             )
             _backfill_assigned_person_names(
                 boxes,
@@ -4194,7 +4301,13 @@ def _enrich_cast_photos_with_episode_metadata(
                 metadata["show_short_code"] = _derive_real_housewives_short_code(resolved_show_name)
         elif fallback:
             fallback_title_type = str(fallback.get("imdb_title_type") or "").strip()
-            fallback_is_episode_like = bool(fallback.get("is_episode_like"))
+            fallback_title_type_upper = fallback_title_type.upper()
+            fallback_is_episode_like = bool(fallback.get("is_episode_like")) or bool(
+                fallback_title_type_upper in {"TVEPISODE", "EPISODE"}
+                or str(fallback.get("episode_imdb_id") or "").strip()
+                or _to_int(fallback.get("season_number")) is not None
+                or _to_int(fallback.get("episode_number")) is not None
+            )
             fallback_title_id = str(fallback.get("episode_imdb_id") or "").strip() or None
             if fallback_title_id:
                 metadata["imdb_title_id"] = fallback_title_id.lower()
@@ -6192,7 +6305,7 @@ async def refresh_person_images_stream(
     connection: Request,
     request: RefreshImagesRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    admin_user: AdminUser = None,
 ) -> StreamingResponse:
     """Refresh images with SSE streaming progress."""
     from trr_backend.ingestion.cast_photo_sources import (
@@ -6206,6 +6319,8 @@ async def refresh_person_images_stream(
     request = request or RefreshImagesRequest()
     person_id_str = str(person_id)
     run_id = f"refresh-{person_id_str}-{int(datetime.now(UTC).timestamp())}"
+    operation_id = "operation-pending"
+    request_id = str(connection.headers.get("x-trr-request-id") or "").strip() or None
     execution_profile = _resolve_execution_profile(request.execution_profile)
     sync_parallelism = _resolve_stage_parallelism(
         request_overrides=request.max_parallelism,
@@ -6214,6 +6329,7 @@ async def refresh_person_images_stream(
     )
 
     async def event_generator() -> AsyncGenerator[str, None]:
+        event_seq = 0
         errors: list[str] = []
         upserted_photo_ids: list[str] = []
         text_overlay_reason_counts: dict[str, int] = dict.fromkeys(TEXT_OVERLAY_FAILURE_REASONS, 0)
@@ -6248,10 +6364,27 @@ async def refresh_person_images_stream(
                 "resized": int(resize_succeeded),
             }
 
+        def envelope(payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal event_seq
+            event_seq += 1
+            return {
+                "operation_id": operation_id,
+                "event_seq": event_seq,
+                **payload,
+            }
+
         def progress(payload: dict[str, Any]) -> str:
             return (
                 "event: progress\ndata: "
-                + json.dumps({"run_id": run_id, "live_counts": build_live_counts(), **payload})
+                + json.dumps(
+                    envelope(
+                        {
+                            "run_id": run_id,
+                            "live_counts": build_live_counts(),
+                            **payload,
+                        }
+                    )
+                )
                 + "\n\n"
             )
 
@@ -6270,7 +6403,7 @@ async def refresh_person_images_stream(
                 payload["stage_error_code"] = stage_error_code
             if stage_error_detail:
                 payload["stage_error_detail"] = stage_error_detail
-            return f"event: error\ndata: {json.dumps(payload)}\n\n"
+            return f"event: error\ndata: {json.dumps(envelope(payload))}\n\n"
 
         async def _client_disconnected(stage: str) -> bool:
             try:
@@ -8112,7 +8245,7 @@ async def refresh_person_images_stream(
             "live_counts": build_live_counts(),
             "errors": errors,
         }
-        yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"
+        yield f"event: complete\ndata: {json.dumps(envelope(complete_data))}\n\n"
 
     async def guarded_event_generator() -> AsyncGenerator[str, None]:
         try:
@@ -8121,6 +8254,8 @@ async def refresh_person_images_stream(
         except Exception as exc:  # noqa: BLE001
             logger.exception("Refresh stream runtime failure for %s: %s", person_id_str, exc)
             payload = {
+                "operation_id": operation_id,
+                "event_seq": 0,
                 "run_id": run_id,
                 "stage": "stream",
                 "error": "Refresh stream failed",
@@ -8133,7 +8268,7 @@ async def refresh_person_images_stream(
             }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n"
 
-    return StreamingResponse(
+    stream_response = StreamingResponse(
         guarded_event_generator(),
         media_type="text/event-stream",
         headers={
@@ -8142,6 +8277,24 @@ async def refresh_person_images_stream(
             "X-Accel-Buffering": "no",
         },
     )
+    if _is_internal_raw_stream_request(connection):
+        return stream_response
+
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
+    request_payload = {
+        "person_id": person_id_str,
+        "payload": request.model_dump(mode="json"),
+        "request_id": request_id,
+        "initiated_by": actor,
+    }
+    operation = start_operation_for_stream(
+        operation_type="admin_person_refresh_images",
+        producer=guarded_event_generator,
+        request_payload=request_payload,
+        initiated_by=actor,
+        request=connection,
+    )
+    return operation_stream_response(str(operation.get("id")), request=connection)
 
 
 @router.post("/{person_id}/reprocess-images/stream")
@@ -8150,13 +8303,16 @@ async def reprocess_person_images_stream(
     connection: Request,
     request: ReprocessImagesRequest = Body(default_factory=ReprocessImagesRequest),
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    admin_user: AdminUser = None,
 ) -> StreamingResponse:
     """Re-run metadata repair, counting, text-ID, centering, and resize on existing photos (no sync/mirror)."""
     person_id_str = str(person_id)
     run_id = f"reprocess-{person_id_str}-{int(datetime.now(UTC).timestamp())}"
+    operation_id = "operation-pending"
+    request_id = str(connection.headers.get("x-trr-request-id") or "").strip() or None
 
     async def event_generator() -> AsyncGenerator[str, None]:
+        event_seq = 0
         errors: list[str] = []
         execution_profile = _resolve_execution_profile(request.execution_profile)
         run_tagging_stage = request.run_tagging if request.run_tagging is not None else request.run_count
@@ -8211,10 +8367,27 @@ async def reprocess_person_images_stream(
                 "resized": int(resize_succeeded),
             }
 
+        def envelope(payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal event_seq
+            event_seq += 1
+            return {
+                "operation_id": operation_id,
+                "event_seq": event_seq,
+                **payload,
+            }
+
         def progress(payload: dict[str, Any]) -> str:
             return (
                 "event: progress\ndata: "
-                + json.dumps({"run_id": run_id, "live_counts": build_live_counts(), **payload})
+                + json.dumps(
+                    envelope(
+                        {
+                            "run_id": run_id,
+                            "live_counts": build_live_counts(),
+                            **payload,
+                        }
+                    )
+                )
                 + "\n\n"
             )
 
@@ -8233,7 +8406,7 @@ async def reprocess_person_images_stream(
                 payload["stage_error_code"] = stage_error_code
             if stage_error_detail:
                 payload["stage_error_detail"] = stage_error_detail
-            return f"event: error\ndata: {json.dumps(payload)}\n\n"
+            return f"event: error\ndata: {json.dumps(envelope(payload))}\n\n"
 
         async def _client_disconnected(stage: str) -> bool:
             try:
@@ -9491,7 +9664,7 @@ async def reprocess_person_images_stream(
             "live_counts": build_live_counts(),
             "errors": errors,
         }
-        yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"
+        yield f"event: complete\ndata: {json.dumps(envelope(complete_data))}\n\n"
 
     async def guarded_event_generator() -> AsyncGenerator[str, None]:
         try:
@@ -9500,6 +9673,8 @@ async def reprocess_person_images_stream(
         except Exception as exc:  # noqa: BLE001
             logger.exception("Reprocess stream runtime failure for %s: %s", person_id_str, exc)
             payload = {
+                "operation_id": operation_id,
+                "event_seq": 0,
                 "run_id": run_id,
                 "stage": "stream",
                 "error": "Reprocess stream failed",
@@ -9512,7 +9687,7 @@ async def reprocess_person_images_stream(
             }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n"
 
-    return StreamingResponse(
+    stream_response = StreamingResponse(
         guarded_event_generator(),
         media_type="text/event-stream",
         headers={
@@ -9521,6 +9696,104 @@ async def reprocess_person_images_stream(
             "X-Accel-Buffering": "no",
         },
     )
+    if _is_internal_raw_stream_request(connection):
+        return stream_response
+
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
+    request_payload = {
+        "person_id": person_id_str,
+        "payload": request.model_dump(mode="json"),
+        "request_id": request_id,
+        "initiated_by": actor,
+    }
+    operation = start_operation_for_stream(
+        operation_type="admin_person_reprocess_images",
+        producer=guarded_event_generator,
+        request_payload=request_payload,
+        initiated_by=actor,
+        request=connection,
+    )
+    return operation_stream_response(str(operation.get("id")), request=connection)
+
+
+class _InternalStreamRequest:
+    def __init__(self, *, request_id: str | None) -> None:
+        self.headers: dict[str, str] = {"x-trr-internal-raw-stream": "1"}
+        if request_id:
+            self.headers["x-trr-request-id"] = request_id
+
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+def build_person_refresh_images_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    db: SupabaseAdminClient | None = None,
+):
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    person_id_str = str(request_payload.get("person_id") or "").strip()
+    if not person_id_str:
+        raise ValueError("request_payload.person_id is required")
+
+    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    payload = RefreshImagesRequest.model_validate(payload_data)
+    request_id = str(request_payload.get("request_id") or "").strip() or None
+    initiated_by = str(request_payload.get("initiated_by") or "admin")
+
+    def _producer():
+        local_db = db or create_supabase_admin_client()
+        stream_response = asyncio.run(
+            refresh_person_images_stream(
+                person_id=UUID(person_id_str),
+                connection=_InternalStreamRequest(request_id=request_id),
+                request=payload,
+                db=local_db,
+                admin_user={"id": initiated_by},
+            )
+        )
+        body_iterator = getattr(stream_response, "body_iterator", None)
+        if body_iterator is None:
+            return []
+        return body_iterator
+
+    return _producer
+
+
+def build_person_reprocess_images_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    db: SupabaseAdminClient | None = None,
+):
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    person_id_str = str(request_payload.get("person_id") or "").strip()
+    if not person_id_str:
+        raise ValueError("request_payload.person_id is required")
+
+    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    payload = ReprocessImagesRequest.model_validate(payload_data)
+    request_id = str(request_payload.get("request_id") or "").strip() or None
+    initiated_by = str(request_payload.get("initiated_by") or "admin")
+
+    def _producer():
+        local_db = db or create_supabase_admin_client()
+        stream_response = asyncio.run(
+            reprocess_person_images_stream(
+                person_id=UUID(person_id_str),
+                connection=_InternalStreamRequest(request_id=request_id),
+                request=payload,
+                db=local_db,
+                admin_user={"id": initiated_by},
+            )
+        )
+        body_iterator = getattr(stream_response, "body_iterator", None)
+        if body_iterator is None:
+            return []
+        return body_iterator
+
+    return _producer
 
 
 @router.patch("/{person_id}/gallery/{link_id}/facebank-seed", response_model=FacebankSeedResponse)

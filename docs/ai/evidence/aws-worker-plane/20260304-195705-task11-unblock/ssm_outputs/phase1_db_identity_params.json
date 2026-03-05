@@ -1,0 +1,8 @@
+{
+  "commands": [
+    "set -e",
+    "DB_URL=$(grep -E '^SUPABASE_DB_URL=|^DATABASE_URL=' /etc/trr-api.env | head -n1 | cut -d= -f2-)",
+    "echo DB_URL_HOST=$(echo \"$DB_URL\" | sed -E 's#.*@([^:/]+).*#\\1#')",
+    "DB_URL=\"$DB_URL\" /opt/trr-backend/.venv/bin/python -c \"import os,psycopg2; conn=psycopg2.connect(os.environ['DB_URL'],connect_timeout=10); cur=conn.cursor(); cur.execute('select current_database(), current_user'); print(cur.fetchone()); cur.execute('select count(*) from information_schema.tables'); print(\\\"table_count=\\\", cur.fetchone()[0]); cur.execute(\\\"select schema_name from information_schema.schemata order by schema_name\\\"); print(\\\"schemas=\\\", [r[0] for r in cur.fetchall()]); conn.close()\""
+  ]
+}

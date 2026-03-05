@@ -1,0 +1,22 @@
+{
+    "CommandId": "051b52ed-7d36-433e-bd70-5378952e0ff2",
+    "InstanceId": "i-05d7f68c379dc05db",
+    "Comment": "Task11 DB reachability check final",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 127,
+    "ExecutionStartDateTime": "2026-03-05T01:01:45.785Z",
+    "ExecutionElapsedTime": "PT0.005S",
+    "ExecutionEndDateTime": "2026-03-05T01:01:45.785Z",
+    "Status": "Failed",
+    "StatusDetails": "Failed",
+    "StandardOutputContent": "DB_URL_PREFIX=postgresql\n",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "/var/lib/amazon/ssm/i-05d7f68c379dc05db/document/orchestration/051b52ed-7d36-433e-bd70-5378952e0ff2/awsrunShellScript/0.awsrunShellScript/_script.sh: line 4: psql: command not found\nfailed to run commands: exit status 127",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

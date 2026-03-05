@@ -1,0 +1,2 @@
+apply_started_at=2026-03-05T01:25:17Z
+db_host=aws-1-us-east-1.pooler.supabase.com

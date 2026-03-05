@@ -45,6 +45,48 @@ def test_apply_surface_guaranteed_limit_overrides_small_cap_when_both_surfaces_p
     assert {"videos", "shorts"} <= {scraper._video_surface(video) for video in limited}
 
 
+def test_extract_channel_header_avatar_from_data_prefers_yt3_and_upscales() -> None:
+    scraper = YouTubeScraper()
+    data = {
+        "header": {
+            "pageHeaderViewModel": {
+                "heroImage": {
+                    "sources": [
+                        {"url": "https://images.test/not-yt3.jpg"},
+                        {"url": "https://yt3.googleusercontent.com/abc=s160-c-k-c0x00ffffff-no-rj"},
+                    ]
+                }
+            }
+        }
+    }
+
+    avatar = scraper._extract_channel_header_avatar_from_data(data)  # noqa: SLF001
+    assert avatar == "https://yt3.googleusercontent.com/abc=s1024-c-k-c0x00ffffff-no-rj"
+
+
+def test_parse_video_renderer_uses_header_avatar_fallback_when_renderer_avatar_missing() -> None:
+    scraper = YouTubeScraper()
+    config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[])
+    renderer = {
+        "videoId": "abc1234",
+        "title": {"runs": [{"text": "Bravo clip"}]},
+        "descriptionSnippet": {"runs": [{"text": "episode"}]},
+        "viewCountText": {"simpleText": "1,234 views"},
+        "publishedTimeText": {"simpleText": "1 day ago"},
+        "ownerText": {"runs": [{"text": "Bravo"}]},
+        "thumbnail": {"thumbnails": [{"url": "https://img.test/thumb.jpg"}]},
+    }
+
+    parsed = scraper._parse_video_renderer(  # noqa: SLF001
+        renderer,
+        config,
+        fallback_channel_avatar_url="https://yt3.googleusercontent.com/avatar=s160-c-k",
+    )
+
+    assert parsed is not None
+    assert parsed.user_avatar_url == "https://yt3.googleusercontent.com/avatar=s1024-c-k"
+
+
 def test_scrape_progress_reports_non_zero_shorts_initial_pages(monkeypatch) -> None:
     scraper = YouTubeScraper()
     progress_events: list[dict[str, int | str]] = []

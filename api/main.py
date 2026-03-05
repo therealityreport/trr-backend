@@ -103,8 +103,7 @@ app.add_middleware(
 @app.middleware("http")
 async def observability_middleware(request: Request, call_next):
     incoming_trace = (
-        str(request.headers.get("x-trace-id") or "").strip()
-        or str(request.headers.get("x-request-id") or "").strip()
+        str(request.headers.get("x-trace-id") or "").strip() or str(request.headers.get("x-request-id") or "").strip()
     )
     trace_id = incoming_trace or uuid.uuid4().hex
     trace_token = bind_trace_id(trace_id)
@@ -126,6 +125,7 @@ async def observability_middleware(request: Request, call_next):
     reset_trace_id(trace_token)
     return response
 
+
 # Include routers
 from api.routers import (  # noqa: E402
     admin_asset_batch_jobs,
@@ -136,6 +136,7 @@ from api.routers import (  # noqa: E402
     admin_fandom_sync,
     admin_image_counts,
     admin_media_assets,
+    admin_operations,
     admin_person_images,
     admin_scrape,
     admin_show_bravo,
@@ -169,6 +170,7 @@ app.include_router(admin_brands.router, prefix="/api/v1")
 app.include_router(admin_fandom_sync.router, prefix="/api/v1")
 app.include_router(admin_image_counts.router, prefix="/api/v1")
 app.include_router(admin_media_assets.router, prefix="/api/v1")
+app.include_router(admin_operations.router, prefix="/api/v1")
 app.include_router(admin_show_icons.router, prefix="/api/v1")
 app.include_router(admin_show_links.router, prefix="/api/v1")
 app.include_router(admin_show_links.fandom_router, prefix="/api/v1")

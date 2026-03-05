@@ -1,0 +1,22 @@
+{
+    "CommandId": "605088c7-2a28-4892-8741-d79f3f481bf1",
+    "InstanceId": "i-09b52a7ad5f88c0a1",
+    "Comment": "Task11 parity gate check runtime",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 1,
+    "ExecutionStartDateTime": "2026-03-05T01:25:32.874Z",
+    "ExecutionElapsedTime": "PT0.07S",
+    "ExecutionEndDateTime": "2026-03-05T01:25:32.874Z",
+    "Status": "Failed",
+    "StatusDetails": "Failed",
+    "StandardOutputContent": "",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nTypeError: 'NoneType' object is not subscriptable\nfailed to run commands: exit status 1",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

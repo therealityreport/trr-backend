@@ -228,10 +228,12 @@ class InstagramScraper:
         "overlay_text",
     )
 
-    def __init__(self, cookies: dict | None = None):
+    def __init__(self, cookies: dict | None = None, session: requests.Session | None = None):
         self.cookies = cookies or {}
-        self.session = self._create_session()
+        self.session = session if session is not None else self._create_session()
         self._request_count = 0
+        self._last_429_at: float = 0.0
+        self._consecutive_success: int = 0
         self.last_retrieval_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self.last_comment_fetch_reason: str | None = None
@@ -310,11 +312,15 @@ class InstagramScraper:
 
     def _get(self, url: str, **kwargs: Any) -> requests.Response:
         kwargs.setdefault("timeout", self.request_timeout)
-        return self.session.get(url, **kwargs)
+        response = self.session.get(url, **kwargs)
+        self._track_response_status(response.status_code)
+        return response
 
     def _post(self, url: str, **kwargs: Any) -> requests.Response:
         kwargs.setdefault("timeout", self.request_timeout)
-        return self.session.post(url, **kwargs)
+        response = self.session.post(url, **kwargs)
+        self._track_response_status(response.status_code)
+        return response
 
     def _resolve_metrics_request_timeout(self) -> tuple[int, int]:
         read_raw = (os.getenv("SOCIAL_INSTAGRAM_METRICS_READ_TIMEOUT_SECONDS") or "").strip()
@@ -351,11 +357,30 @@ class InstagramScraper:
         return headers
 
     def _rate_limit(self, delay: float):
-        """Apply rate limiting between requests."""
+        """Apply adaptive rate limiting between requests.
+
+        Starts at 50% of the base delay. Doubles for 60s after any 429 response.
+        Halves (back to 50%) after 20 consecutive successes.
+        """
         if self._request_count > 0:
-            logger.debug(f"Rate limiting: waiting {delay}s")
-            time.sleep(delay)
+            now = time.monotonic()
+            if self._last_429_at and (now - self._last_429_at) < 60.0:
+                effective_delay = delay * 2.0
+            elif self._consecutive_success >= 20:
+                effective_delay = delay * 0.5
+            else:
+                effective_delay = delay * 0.5
+            logger.debug(f"Rate limiting: waiting {effective_delay:.3f}s (base={delay}s)")
+            time.sleep(effective_delay)
         self._request_count += 1
+
+    def _track_response_status(self, status_code: int) -> None:
+        """Track response status for adaptive rate limiting."""
+        if status_code == 429:
+            self._last_429_at = time.monotonic()
+            self._consecutive_success = 0
+        elif 200 <= status_code < 400:
+            self._consecutive_success += 1
 
     @staticmethod
     def _normalize_tag_coord(value: Any) -> float | None:

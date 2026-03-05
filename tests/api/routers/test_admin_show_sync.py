@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -180,6 +181,7 @@ class TestSyncNetworksStreaming:
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
         received = {"entities": None, "providers": None, "links": None, "show_logos": None}
+        from api.routers.admin_show_sync import SyncNetworksStreamingStepResult
 
         def fake_entities(argv):
             received["entities"] = list(argv or [])
@@ -250,21 +252,38 @@ class TestSyncNetworksStreaming:
                         side_effect=fake_links,
                     ):
                         with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=fake_show_logos):
-                            response = client.post(
-                                "/api/v1/admin/shows/sync-networks-streaming",
-                                headers={"Authorization": f"Bearer {token}"},
-                                json={
-                                    "skip_s3": True,
-                                    "force": True,
-                                    "limit": 50,
-                                    "refresh_external_sources": True,
-                                    "entity_type": "production",
-                                    "entity_keys": ["shed media", "big head productions"],
-                                    "batch_size": 20,
-                                    "max_runtime_sec": 1200,
-                                    "resume_run_id": "network-streaming-20260224T200000Z",
-                                },
-                            )
+                            with patch(
+                                "api.routers.admin_show_sync._run_brand_family_wikipedia_import_step",
+                                return_value=SyncNetworksStreamingStepResult(
+                                    status="success",
+                                    duration_ms=1,
+                                    exit_code=0,
+                                    metrics={
+                                        "families_total": 0,
+                                        "families_processed": 0,
+                                        "wikipedia_rows_imported": 0,
+                                        "wikipedia_rows_matched": 0,
+                                        "rules_upserted": 0,
+                                        "fetch_errors": 0,
+                                        "skipped_dry_run": 0,
+                                    },
+                                ),
+                            ):
+                                response = client.post(
+                                    "/api/v1/admin/shows/sync-networks-streaming",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    json={
+                                        "skip_s3": True,
+                                        "force": True,
+                                        "limit": 50,
+                                        "refresh_external_sources": True,
+                                        "entity_type": "production",
+                                        "entity_keys": ["shed media", "big head productions"],
+                                        "batch_size": 20,
+                                        "max_runtime_sec": 1200,
+                                        "resume_run_id": "network-streaming-20260224T200000Z",
+                                    },
+                                )
 
         assert response.status_code == 200
         payload = response.json()
@@ -412,11 +431,28 @@ class TestSyncNetworksStreaming:
 
         with patch("api.routers.admin_show_sync._schema_preflight_missing_columns", return_value=[]):
             with patch("api.routers.admin_show_sync._run_script_step_with_metrics", side_effect=step_results):
-                response = client.post(
-                    "/api/v1/admin/shows/sync-networks-streaming",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={},
-                )
+                with patch(
+                    "api.routers.admin_show_sync._run_brand_family_wikipedia_import_step",
+                    return_value=SyncNetworksStreamingStepResult(
+                        status="success",
+                        duration_ms=1,
+                        exit_code=0,
+                        metrics={
+                            "families_total": 0,
+                            "families_processed": 0,
+                            "wikipedia_rows_imported": 0,
+                            "wikipedia_rows_matched": 0,
+                            "rules_upserted": 0,
+                            "fetch_errors": 0,
+                            "skipped_dry_run": 0,
+                        },
+                    ),
+                ):
+                    response = client.post(
+                        "/api/v1/admin/shows/sync-networks-streaming",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={},
+                    )
 
         assert response.status_code == 200
         payload = response.json()
@@ -428,6 +464,7 @@ class TestSyncNetworksStreaming:
     def test_marks_step_failed_when_script_returns_non_zero(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+        from api.routers.admin_show_sync import SyncNetworksStreamingStepResult
 
         def bad_entities(argv):
             print("failures=4")
@@ -462,11 +499,28 @@ class TestSyncNetworksStreaming:
                 with patch("api.routers.admin_show_sync.sync_tmdb_watch_providers.main", side_effect=ok_providers):
                     with patch("api.routers.admin_show_sync.sync_networks_streaming_links.main", side_effect=ok_links):
                         with patch("api.routers.admin_show_sync.sync_show_logos.main", side_effect=ok_show_logos):
-                            response = client.post(
-                                "/api/v1/admin/shows/sync-networks-streaming",
-                                headers={"Authorization": f"Bearer {token}"},
-                                json={},
-                            )
+                            with patch(
+                                "api.routers.admin_show_sync._run_brand_family_wikipedia_import_step",
+                                return_value=SyncNetworksStreamingStepResult(
+                                    status="success",
+                                    duration_ms=1,
+                                    exit_code=0,
+                                    metrics={
+                                        "families_total": 0,
+                                        "families_processed": 0,
+                                        "wikipedia_rows_imported": 0,
+                                        "wikipedia_rows_matched": 0,
+                                        "rules_upserted": 0,
+                                        "fetch_errors": 0,
+                                        "skipped_dry_run": 0,
+                                    },
+                                ),
+                            ):
+                                response = client.post(
+                                    "/api/v1/admin/shows/sync-networks-streaming",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    json={},
+                                )
 
         assert response.status_code == 200
         payload = response.json()
@@ -703,6 +757,11 @@ class TestRefreshShow:
                     )
 
         assert "event: complete" in text
+        assert '"operation_id"' in text
+        event_seq_matches = [int(match) for match in re.findall(r'"event_seq"\s*:\s*(\d+)', text)]
+        assert event_seq_matches
+        assert event_seq_matches == sorted(event_seq_matches)
+        assert len(event_seq_matches) == len(set(event_seq_matches))
 
     def test_refresh_stream_runs_episodes_before_seasons(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
@@ -937,3 +996,8 @@ class TestRefreshShowPhotosStream:
         assert '"request_id": "req-refresh-photos-1"' in response.text or (
             '"request_id":"req-refresh-photos-1"' in response.text
         )
+        assert '"operation_id"' in response.text
+        event_seq_matches = [int(match) for match in re.findall(r'"event_seq"\s*:\s*(\d+)', response.text)]
+        assert event_seq_matches
+        assert event_seq_matches == sorted(event_seq_matches)
+        assert len(event_seq_matches) == len(set(event_seq_matches))

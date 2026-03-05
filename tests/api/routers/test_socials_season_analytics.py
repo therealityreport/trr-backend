@@ -30,6 +30,12 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _default_local_job_plane(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "local")
+    monkeypatch.delenv("TRR_LONG_JOB_ENFORCE_REMOTE", raising=False)
+
+
 def test_get_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -1588,6 +1594,74 @@ def test_ingest_returns_503_when_queue_enabled_and_worker_missing(
     ingest_mock.assert_not_called()
 
 
+def test_ingest_returns_503_when_remote_job_plane_enforced_and_queue_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    payload = {"source_scope": "bravo", "platforms": ["twitter"], "allow_inline_dev_fallback": True}
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+            response = client.post(
+                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+    ingest_mock.assert_not_called()
+
+
+def test_ingest_returns_503_when_remote_job_plane_enforced_and_worker_missing_even_with_inline_fallback(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["youtube"],
+        "allow_inline_dev_fallback": True,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "No healthy social ingest workers are reporting heartbeats.",
+                worker_health={
+                    "healthy": False,
+                    "healthy_workers": 0,
+                    "reason": "no_healthy_workers",
+                    "workers": [],
+                },
+            ),
+        ):
+            with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+    assert body["detail"]["worker_health"]["healthy"] is False
+    ingest_mock.assert_not_called()
+
+
 def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1596,11 +1670,12 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "instagram,tiktok")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {
         "source_scope": "bravo",
-        "platforms": ["instagram"],
+        "platforms": ["youtube"],
         "allow_inline_dev_fallback": True,
     }
     expected = {
@@ -1648,6 +1723,50 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
     assert isinstance(body.get("warnings"), list)
     assert any("inline dev fallback" in str(item).lower() for item in (body.get("warnings") or []))
     ingest_mock.assert_called_once()
+
+
+def test_ingest_requires_remote_worker_for_instagram_even_with_inline_fallback_enabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "instagram,tiktok")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "allow_inline_dev_fallback": True,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "No healthy social ingest workers are reporting heartbeats.",
+                worker_health={
+                    "healthy": False,
+                    "healthy_workers": 0,
+                    "reason": "no_healthy_workers",
+                    "workers": [],
+                },
+            ),
+        ):
+            with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_REMOTE_WORKER_REQUIRED"
+    assert body["detail"]["required_platforms"] == ["instagram"]
+    ingest_mock.assert_not_called()
 
 
 def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers(
@@ -2083,6 +2202,24 @@ def test_get_queue_status_endpoint_returns_payload(
     assert response.json() == expected
 
 
+def test_get_queue_status_endpoint_forwards_fresh_flag(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.social_season_analytics.get_queue_status", return_value={"ok": True}) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/ingest/queue-status?fresh=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert mocked.call_args.kwargs.get("fresh") is True
+
+
 def test_get_queue_status_endpoint_returns_500_on_unhandled_error(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2101,6 +2238,64 @@ def test_get_queue_status_endpoint_returns_500_on_unhandled_error(
 
     assert response.status_code == 500
     assert response.json()["detail"] == "queue status failed"
+
+
+def test_get_run_progress_endpoint_returns_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    run_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "run_id": run_id,
+        "stages": {"posts": {"jobs_total": 2}},
+        "per_handle": [],
+        "recent_log": [],
+        "worker_runtime": {"active_workers_now": 1},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_run_progress_snapshot", return_value=expected) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/progress?recent_log_limit=15",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs["recent_log_limit"] == 15
+
+
+def test_get_week_live_health_endpoint_returns_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "day_account_rows": [
+            {"day": "2025-11-25", "platform": "instagram", "account": "bravotv", "posts": 1, "comments": 2, "likes": 3}
+        ],
+        "asset_health": [
+            {"asset": "images", "scraped": 3, "saved": 2},
+        ],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_week_live_health_snapshot", return_value=expected) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/11/live-health?platforms=instagram,tiktok&timezone=America/New_York&source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs["week_index"] == 11
+    assert mocked.call_args.kwargs["platforms"] == ["instagram", "tiktok"]
+    assert mocked.call_args.kwargs["timezone"] == "America/New_York"
 
 
 def test_get_health_dot_endpoint_returns_lightweight_payload(
@@ -2252,6 +2447,52 @@ def test_cancel_stuck_jobs_endpoint_returns_500_on_unhandled_error(
 
     assert response.status_code == 500
     assert response.json()["detail"] == "cancel stuck failed"
+
+
+def test_cancel_active_jobs_endpoint_returns_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "cancelled_jobs": 5,
+        "cancelled_job_ids": [str(uuid4())],
+        "affected_run_ids": [str(uuid4())],
+        "active_jobs_remaining": 0,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.cancel_active_jobs", return_value=expected) as mocked:
+        response = client.post(
+            "/api/v1/admin/socials/ingest/active-jobs/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_count == 1
+
+
+def test_cancel_active_jobs_endpoint_returns_500_on_unhandled_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.cancel_active_jobs",
+        side_effect=RuntimeError("cancel active failed"),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/ingest/active-jobs/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "cancel active failed"
 
 
 def test_get_worker_detail_endpoint_returns_payload(

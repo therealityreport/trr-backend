@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import re
+import socket
 import threading
 import time
 from collections import Counter
@@ -39,6 +40,7 @@ REDDIT_REFRESH_STALE_RUNNING_SECONDS_DEFAULT = 1200
 REDDIT_ADAPTIVE_DEEP_MAX_PAGES = 10_000
 REDDIT_ADAPTIVE_DEEP_MAX_BACKFILL_QUERIES = 30
 REDDIT_ADAPTIVE_DEEP_MAX_BACKFILL_PAGES_PER_QUERY = 50
+REDDIT_REFRESH_CLAIM_LEASE_SECONDS_DEFAULT = 300
 
 FRANCHISE_EXCLUDE_TERMS = (
     "rhoa",
@@ -140,6 +142,19 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0, maximum: floa
     if maximum is not None:
         bounded = min(maximum, bounded)
     return bounded
+
+
+def _claim_lease_seconds() -> int:
+    return _env_int(
+        "REDDIT_REFRESH_CLAIM_LEASE_SECONDS",
+        REDDIT_REFRESH_CLAIM_LEASE_SECONDS_DEFAULT,
+        minimum=30,
+        maximum=86_400,
+    )
+
+
+def _default_worker_id() -> str:
+    return f"reddit-refresh:{socket.gethostname()}:{os.getpid()}"
 
 
 def _collapse_whitespace(value: str) -> str:
@@ -1682,20 +1697,24 @@ def _replace_period_matches(
     run_id: str,
     rows: list[dict[str, Any]],
     conn: Any,
+    preserve_existing_assignments: bool = True,
 ) -> None:
     has_flair_mode = _column_exists("social", "reddit_period_post_matches", "flair_mode")
     has_match_type = _column_exists("social", "reddit_period_post_matches", "match_type")
     if not rows:
-        with pg.db_cursor(conn=conn) as cur:
-            cur.execute(
-                """
-                delete from social.reddit_period_post_matches
-                where community_id = %s
-                  and season_id = %s
-                  and period_key = %s
-                """,
-                [community_id, season_id, period_key],
-            )
+        # Preserve existing assignments when a refresh returns no rows
+        # (for example due to partial coverage or transient Reddit limits).
+        if not preserve_existing_assignments:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute(
+                    """
+                    delete from social.reddit_period_post_matches
+                    where community_id = %s
+                      and season_id = %s
+                      and period_key = %s
+                    """,
+                    [community_id, season_id, period_key],
+                )
         return
 
     tuples: list[tuple[Any, ...]] = []
@@ -1732,17 +1751,40 @@ def _replace_period_matches(
         if has_match_type:
             extra += (row.get("match_type") or "flair",)
         tuples.append((*base_tuple, *extra))
-    if not tuples:
+    if preserve_existing_assignments and post_ids_to_keep:
         with pg.db_cursor(conn=conn) as cur:
             cur.execute(
                 """
-                delete from social.reddit_period_post_matches
+                select reddit_post_id
+                from social.reddit_period_post_matches
                 where community_id = %s
                   and season_id = %s
-                  and period_key = %s
+                  and period_key <> %s
+                  and reddit_post_id = any(%s::text[])
                 """,
-                [community_id, season_id, period_key],
+                [community_id, season_id, period_key, post_ids_to_keep],
             )
+            existing_rows = cur.fetchall() or []
+        assigned_elsewhere = {
+            str(row.get("reddit_post_id") or "").strip()
+            for row in existing_rows
+            if isinstance(row, dict) and str(row.get("reddit_post_id") or "").strip()
+        }
+        if assigned_elsewhere:
+            tuples = [row_tuple for row_tuple in tuples if str(row_tuple[5] or "").strip() not in assigned_elsewhere]
+
+    if not tuples:
+        if not preserve_existing_assignments:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute(
+                    """
+                    delete from social.reddit_period_post_matches
+                    where community_id = %s
+                      and season_id = %s
+                      and period_key = %s
+                    """,
+                    [community_id, season_id, period_key],
+                )
         return
 
     # Build column list dynamically based on available optional columns
@@ -1797,17 +1839,18 @@ def _replace_period_matches(
     """
     pg.execute_values_no_return(sql, tuples, conn=conn)
 
-    with pg.db_cursor(conn=conn) as cur:
-        cur.execute(
-            """
-            delete from social.reddit_period_post_matches
-            where community_id = %s
-              and season_id = %s
-              and period_key = %s
-              and not (reddit_post_id = any(%s::text[]))
-            """,
-            [community_id, season_id, period_key, post_ids_to_keep],
-        )
+    if not preserve_existing_assignments:
+        with pg.db_cursor(conn=conn) as cur:
+            cur.execute(
+                """
+                delete from social.reddit_period_post_matches
+                where community_id = %s
+                  and season_id = %s
+                  and period_key = %s
+                  and not (reddit_post_id = any(%s::text[]))
+                """,
+                [community_id, season_id, period_key, post_ids_to_keep],
+            )
 
 
 def _base_thread_projection(row: dict[str, Any]) -> dict[str, Any]:
@@ -2070,6 +2113,8 @@ def _update_run(
     tracked_flair_rows: int | None = None,
     set_started: bool = False,
     set_completed: bool = False,
+    claim_token: str | None = None,
+    release_claim: bool = False,
 ) -> None:
     row = pg.fetch_one(
         "select diagnostics from social.reddit_refresh_runs where id = %s",
@@ -2090,6 +2135,8 @@ def _update_run(
         "total_rows": total_rows,
         "matched_rows": matched_rows,
         "tracked_flair_rows": tracked_flair_rows,
+        "claim_token": str(claim_token or "").strip() or None,
+        "release_claim": bool(release_claim),
     }
 
     pg.execute_returning(
@@ -2103,8 +2150,16 @@ def _update_run(
             tracked_flair_rows = coalesce(%(tracked_flair_rows)s, tracked_flair_rows),
             started_at = coalesce(%(started_at)s, started_at),
             completed_at = coalesce(%(completed_at)s, completed_at),
+            heartbeat_at = now(),
+            lease_expires_at = case
+              when %(release_claim)s then null
+              else now() + (%(lease_seconds)s::int * interval '1 second')
+            end,
+            claim_token = case when %(release_claim)s then null else claim_token end,
+            claimed_by_worker_id = case when %(release_claim)s then null else claimed_by_worker_id end,
             updated_at = %(updated_at)s
         where id = %(run_id)s::uuid
+          and (%(claim_token)s::text is null or claim_token = %(claim_token)s::text)
         returning id
         """,
         {
@@ -2116,6 +2171,9 @@ def _update_run(
             "tracked_flair_rows": values["tracked_flair_rows"],
             "started_at": values["started_at"],
             "completed_at": values["completed_at"],
+            "lease_seconds": _claim_lease_seconds(),
+            "claim_token": values["claim_token"],
+            "release_claim": values["release_claim"],
             "updated_at": values["updated_at"],
             "run_id": run_id,
         },
@@ -2224,7 +2282,9 @@ def create_or_reuse_refresh_run(*, payload: dict[str, Any]) -> dict[str, Any]:
                         "stale_running_cutoff_seconds": stale_running_cutoff,
                         "recovered_during": "dedup_check",
                     },
-                    error_message="Reddit refresh run was stuck in running state and auto-recovered during dedup check.",
+                    error_message=(
+                        "Reddit refresh run was stuck in running state and auto-recovered during dedup check."
+                    ),
                     set_completed=True,
                 )
                 continue  # Skip this stale run — let dedup continue or create a new run
@@ -2262,25 +2322,47 @@ def create_or_reuse_refresh_run(*, payload: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def _claim_refresh_run_for_execution(run_id: str) -> dict[str, Any]:
+def _claim_refresh_run_for_execution(
+    run_id: str,
+    *,
+    worker_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_worker = str(worker_id or "").strip() or _default_worker_id()
+    lease_seconds = _claim_lease_seconds()
     claimed = pg.fetch_one(
         """
         update social.reddit_refresh_runs
         set status = 'running',
             started_at = coalesce(started_at, now()),
+            claim_token = gen_random_uuid()::text,
+            claimed_by_worker_id = %s,
+            lease_expires_at = now() + (%s::int * interval '1 second'),
+            heartbeat_at = now(),
+            attempt_count = coalesce(attempt_count, 0) + 1,
+            next_retry_at = null,
             updated_at = now()
         where id = %s::uuid
-          and status = 'queued'
-        returning id, community_id, season_id, period_key, subreddit, request_payload, status, updated_at
+          and (
+            status = 'queued'
+            or (
+              status = 'running'
+              and (
+                lease_expires_at is null
+                or lease_expires_at < now()
+                or coalesce(heartbeat_at, updated_at, created_at) < now() - interval '5 minutes'
+              )
+            )
+          )
+        returning id, community_id, season_id, period_key, subreddit, request_payload, status, updated_at, claim_token
         """,
-        [run_id],
+        [normalized_worker, lease_seconds, run_id],
     )
     if claimed:
         return claimed
 
     row = pg.fetch_one(
         """
-        select id, community_id, season_id, period_key, subreddit, request_payload, status, updated_at
+        select id, community_id, season_id, period_key, subreddit, request_payload, status, updated_at, claim_token
         from social.reddit_refresh_runs
         where id = %s::uuid
         """,
@@ -2317,6 +2399,72 @@ def _claim_refresh_run_for_execution(run_id: str) -> dict[str, Any]:
         raise RuntimeError(f"Reddit refresh run is already {status}")
 
     raise RuntimeError(f"Reddit refresh run cannot be executed from status '{status or 'unknown'}'")
+
+
+def claim_next_refresh_run(*, worker_id: str | None = None) -> dict[str, Any] | None:
+    normalized_worker = str(worker_id or "").strip() or _default_worker_id()
+    lease_seconds = _claim_lease_seconds()
+    row = pg.fetch_one(
+        """
+        with candidate as (
+          select id
+          from social.reddit_refresh_runs
+          where status in ('queued', 'running')
+            and coalesce(next_retry_at, now()) <= now()
+            and (
+              status = 'queued'
+              or lease_expires_at is null
+              or lease_expires_at < now()
+              or coalesce(heartbeat_at, updated_at, created_at) < now() - interval '5 minutes'
+            )
+          order by
+            case when status = 'queued' then 0 else 1 end,
+            created_at asc
+          limit 1
+          for update skip locked
+        )
+        update social.reddit_refresh_runs r
+        set status = 'running',
+            started_at = coalesce(r.started_at, now()),
+            claim_token = gen_random_uuid()::text,
+            claimed_by_worker_id = %s,
+            lease_expires_at = now() + (%s::int * interval '1 second'),
+            heartbeat_at = now(),
+            attempt_count = coalesce(r.attempt_count, 0) + 1,
+            next_retry_at = null,
+            updated_at = now()
+        from candidate
+        where r.id = candidate.id
+        returning r.id,
+                  r.community_id,
+                  r.season_id,
+                  r.period_key,
+                  r.subreddit,
+                  r.request_payload,
+                  r.status,
+                  r.updated_at,
+                  r.claim_token
+        """,
+        [normalized_worker, lease_seconds],
+    )
+    return dict(row) if row else None
+
+
+def _touch_refresh_run_heartbeat(*, run_id: str, claim_token: str | None = None) -> None:
+    token = str(claim_token or "").strip() or None
+    pg.execute_returning(
+        """
+        update social.reddit_refresh_runs
+        set heartbeat_at = now(),
+            lease_expires_at = now() + (%s::int * interval '1 second'),
+            updated_at = now()
+        where id = %s::uuid
+          and status = 'running'
+          and (%s::text is null or claim_token = %s::text)
+        returning id
+        """,
+        [_claim_lease_seconds(), run_id, token, token],
+    )
 
 
 def _discover_window(
@@ -2779,8 +2927,21 @@ def _merge_discovery_pass_results(results: list[dict[str, Any]]) -> dict[str, An
     return final
 
 
-def execute_refresh_run(run_id: str) -> dict[str, Any]:
-    run = _claim_refresh_run_for_execution(run_id)
+def execute_refresh_run(
+    run_id: str,
+    *,
+    preclaimed_run: dict[str, Any] | None = None,
+    worker_id: str | None = None,
+) -> dict[str, Any]:
+    run = (
+        dict(preclaimed_run)
+        if isinstance(preclaimed_run, dict)
+        else _claim_refresh_run_for_execution(
+            run_id,
+            worker_id=worker_id,
+        )
+    )
+    claim_token = str(run.get("claim_token") or "").strip() or None
 
     request_payload = run.get("request_payload") if isinstance(run.get("request_payload"), dict) else {}
 
@@ -2812,7 +2973,8 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
         if not force and (now - last_progress_emit) < 3.0:
             return
         progress["updated_at"] = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
-        _update_run(run_id, status="running", diagnostics={"progress": dict(progress)})
+        _touch_refresh_run_heartbeat(run_id=run_id, claim_token=claim_token)
+        _update_run(run_id, status="running", diagnostics={"progress": dict(progress)}, claim_token=claim_token)
         last_progress_emit = now
 
     def apply_progress(update: dict[str, Any], *, force: bool = False) -> None:
@@ -3109,6 +3271,8 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
                 total_rows=len(target_posts),
                 matched_rows=detail_posts_done - len(detail_errors),
                 set_completed=True,
+                claim_token=claim_token,
+                release_claim=True,
             )
             return get_refresh_run(run_id)
 
@@ -3195,8 +3359,7 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
             if not incomplete_listing:
                 second_pass_payload["max_pages"] = 0
                 logger.info(
-                    "[adaptive_deep_pass2] listing already complete, skipping listing phase. "
-                    "seen_posts=%d",
+                    "[adaptive_deep_pass2] listing already complete, skipping listing phase. seen_posts=%d",
                     len(seen_post_ids),
                 )
 
@@ -3224,6 +3387,7 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
         comments_upserted = 0
         fetch_comments = bool(request_payload.get("fetch_comments"))
         comment_delta_only = bool(request_payload.get("comment_delta_only", True))
+        preserve_existing_assignments = bool(request_payload.get("preserve_existing_assignments", True))
         comment_posts_cap = _env_int(
             "REDDIT_COMMENTS_MAX_POSTS_PER_RUN",
             REDDIT_MAX_COMMENTS_POSTS_PER_RUN_DEFAULT,
@@ -3285,6 +3449,7 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
                 run_id=run_id,
                 rows=target_threads,
                 conn=conn,
+                preserve_existing_assignments=preserve_existing_assignments,
             )
 
         apply_progress(
@@ -3299,7 +3464,9 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
         # comment trees concurrently, then batch-upsert results.
         _comment_lock = threading.Lock()
 
-        def _fetch_comments_for_thread(thread: dict[str, Any]) -> tuple[str, list[dict[str, Any]] | None, Exception | None]:
+        def _fetch_comments_for_thread(
+            thread: dict[str, Any],
+        ) -> tuple[str, list[dict[str, Any]] | None, Exception | None]:
             post_id = str(thread.get("reddit_post_id") or "").strip()
             if not post_id:
                 return "", None, None
@@ -3311,10 +3478,7 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
 
         comment_worker_count = min(5, len(comment_targets)) if comment_targets else 1
         with ThreadPoolExecutor(max_workers=comment_worker_count, thread_name_prefix="comments") as comment_pool:
-            futures = {
-                comment_pool.submit(_fetch_comments_for_thread, thread): thread
-                for thread in comment_targets
-            }
+            futures = {comment_pool.submit(_fetch_comments_for_thread, thread): thread for thread in comment_targets}
             for future in as_completed(futures):
                 post_id, comments, exc = future.result()
                 if exc:
@@ -3344,12 +3508,13 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
         # before the period start on high-volume communities, while backfill
         # still delivers complete in-window coverage.
         listing_incomplete_non_fatal = (
-            coverage_mode == "max_coverage"
-            and incomplete_listing
-            and not incomplete_backfill
-            and bool(search_backfill)
+            coverage_mode == "max_coverage" and incomplete_listing and not incomplete_backfill and bool(search_backfill)
         )
-        status = "partial" if (incomplete_backfill or (incomplete_listing and not listing_incomplete_non_fatal)) else "completed"
+        status = (
+            "partial"
+            if (incomplete_backfill or (incomplete_listing and not listing_incomplete_non_fatal))
+            else "completed"
+        )
         final_completeness = {
             "listing_complete": not incomplete_listing,
             "backfill_complete": not incomplete_backfill,
@@ -3379,6 +3544,7 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
             "comments": {
                 "enabled": fetch_comments,
                 "delta_only": comment_delta_only,
+                "preserve_existing_assignments": preserve_existing_assignments,
                 "attempted_posts": len(comment_targets),
                 "candidate_posts": len(target_threads),
                 "skipped_posts": max(0, len(target_threads) - len(comment_targets)),
@@ -3406,6 +3572,8 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
             matched_rows=int(result.get("totals", {}).get("matched_rows") or 0),
             tracked_flair_rows=int(result.get("totals", {}).get("tracked_flair_rows") or 0),
             set_completed=True,
+            claim_token=claim_token,
+            release_claim=True,
         )
         return get_refresh_run(run_id)
     except Exception as exc:  # noqa: BLE001
@@ -3422,8 +3590,39 @@ def execute_refresh_run(run_id: str) -> dict[str, Any]:
             },
             error_message=str(exc),
             set_completed=True,
+            claim_token=claim_token,
+            release_claim=True,
         )
         raise
+
+
+def run_reddit_refresh_worker_loop(
+    *,
+    worker_id: str | None = None,
+    poll_seconds: float = 2.0,
+    once: bool = False,
+) -> int:
+    normalized_worker = str(worker_id or "").strip() or _default_worker_id()
+    safe_poll = max(0.2, float(poll_seconds))
+
+    while True:
+        claimed = claim_next_refresh_run(worker_id=normalized_worker)
+        if not claimed:
+            if once:
+                return 1
+            time.sleep(safe_poll)
+            continue
+
+        run_id = str(claimed.get("id") or "").strip()
+        logger.info(
+            "[reddit_refresh_claimed] worker_id=%s run_id=%s attempt=%s",
+            normalized_worker,
+            run_id[:8] if run_id else None,
+            _safe_int(claimed.get("attempt_count")),
+        )
+        execute_refresh_run(run_id, preclaimed_run=claimed, worker_id=normalized_worker)
+        if once:
+            return 0
 
 
 def get_refresh_run(run_id: str) -> dict[str, Any]:
@@ -3441,6 +3640,12 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
                total_rows,
                matched_rows,
                tracked_flair_rows,
+               claimed_by_worker_id,
+               claim_token,
+               lease_expires_at,
+               heartbeat_at,
+               attempt_count,
+               next_retry_at,
                started_at,
                completed_at,
                created_at,
@@ -3503,6 +3708,12 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
         "queue_position": queue_position,
         "active_jobs": running_total + queued_total,
         "run_config_hash": str(request_payload.get("run_config_hash") or "").strip() or None,
+        "claimed_by_worker_id": str(row.get("claimed_by_worker_id") or "").strip() or None,
+        "claim_token": str(row.get("claim_token") or "").strip() or None,
+        "lease_expires_at": _iso_utc(_parse_iso(row.get("lease_expires_at"))),
+        "heartbeat_at": _iso_utc(_parse_iso(row.get("heartbeat_at"))),
+        "attempt_count": _safe_int(row.get("attempt_count")),
+        "next_retry_at": _iso_utc(_parse_iso(row.get("next_retry_at"))),
         "diagnostics": diagnostics,
         "discovered_flairs": diagnostics.get("discovered_flairs") or [],
         "discovery": payload,
@@ -3511,6 +3722,95 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
         "created_at": _iso_utc(_parse_iso(row.get("created_at"))),
         "updated_at": _iso_utc(_parse_iso(row.get("updated_at"))),
     }
+
+
+def list_refresh_runs(
+    *,
+    community_id: str | None = None,
+    season_id: str | None = None,
+    period_key: str | None = None,
+    statuses: list[str] | None = None,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    normalized_limit = max(1, min(int(limit), 100))
+    normalized_statuses = [
+        str(status or "").strip().lower() for status in (statuses or []) if str(status or "").strip()
+    ]
+    allowed_statuses = {"queued", "running", "completed", "partial", "failed", "cancelled"}
+    if normalized_statuses and any(status not in allowed_statuses for status in normalized_statuses):
+        raise ValueError("status must be one of: queued, running, completed, partial, failed, cancelled")
+
+    where_clauses = ["1 = 1"]
+    params: list[Any] = []
+
+    if community_id:
+        where_clauses.append("community_id = %s::uuid")
+        params.append(community_id)
+    if season_id:
+        where_clauses.append("season_id = %s::uuid")
+        params.append(season_id)
+    if period_key:
+        where_clauses.append("period_key = %s")
+        params.append(period_key)
+    if normalized_statuses:
+        where_clauses.append("lower(status) = any(%s)")
+        params.append(normalized_statuses)
+
+    params.append(normalized_limit)
+
+    rows = pg.fetch_all(
+        f"""
+        select id,
+               community_id,
+               season_id,
+               period_key,
+               subreddit,
+               status,
+               error_message,
+               request_payload,
+               claimed_by_worker_id,
+               heartbeat_at,
+               lease_expires_at,
+               attempt_count,
+               next_retry_at,
+               started_at,
+               completed_at,
+               created_at,
+               updated_at
+        from social.reddit_refresh_runs
+        where {" and ".join(where_clauses)}
+        order by created_at desc
+        limit %s
+        """,
+        params,
+    )
+
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
+        results.append(
+            {
+                "run_id": row.get("id"),
+                "community_id": row.get("community_id"),
+                "season_id": row.get("season_id"),
+                "period_key": row.get("period_key"),
+                "subreddit": row.get("subreddit"),
+                "status": row.get("status"),
+                "error": row.get("error_message"),
+                "client_session_id": str(payload.get("client_session_id") or "").strip() or None,
+                "client_workflow_id": str(payload.get("client_workflow_id") or "").strip() or None,
+                "claimed_by_worker_id": str(row.get("claimed_by_worker_id") or "").strip() or None,
+                "heartbeat_at": _iso_utc(_parse_iso(row.get("heartbeat_at"))),
+                "lease_expires_at": _iso_utc(_parse_iso(row.get("lease_expires_at"))),
+                "attempt_count": _safe_int(row.get("attempt_count")),
+                "next_retry_at": _iso_utc(_parse_iso(row.get("next_retry_at"))),
+                "started_at": _iso_utc(_parse_iso(row.get("started_at"))),
+                "completed_at": _iso_utc(_parse_iso(row.get("completed_at"))),
+                "created_at": _iso_utc(_parse_iso(row.get("created_at"))),
+                "updated_at": _iso_utc(_parse_iso(row.get("updated_at"))),
+            }
+        )
+    return results
 
 
 def _normalize_analytics_scope(scope: str | None) -> str:

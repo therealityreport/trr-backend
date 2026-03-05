@@ -1,0 +1,157 @@
+{
+    "SecurityGroups": [
+        {
+            "GroupId": "sg-09ad087d9a6b689dd",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5432,
+                    "ToPort": 5432,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "PostgreSQL to DB",
+                            "UserId": "522814694101",
+                            "GroupId": "sg-0d65ae6822a009c2f"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 8000,
+                    "ToPort": 8000,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "ALB to API targets on 8000 (self)",
+                            "UserId": "522814694101",
+                            "GroupId": "sg-09ad087d9a6b689dd"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 6379,
+                    "ToPort": 6379,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "Description": "Redis - update to Redis SG",
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "Description": "HTTPS to internet/NAT",
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "VpcId": "vpc-05151344c1c5c40f9",
+            "SecurityGroupArn": "arn:aws:ec2:us-east-1:522814694101:security-group/sg-09ad087d9a6b689dd",
+            "OwnerId": "522814694101",
+            "GroupName": "trr-api-sg",
+            "Description": "TRR API security group - inbound 8000 from ALB only",
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 8000,
+                    "ToPort": 8000,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "API from trr-alb-sg",
+                            "UserId": "522814694101",
+                            "GroupId": "sg-054ae25e1699a3845"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ]
+        },
+        {
+            "GroupId": "sg-09b039c604dd9d077",
+            "IpPermissionsEgress": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 80,
+                    "ToPort": 80,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "Description": "HTTP OS package mirrors",
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5432,
+                    "ToPort": 5432,
+                    "UserIdGroupPairs": [
+                        {
+                            "Description": "PostgreSQL to DB",
+                            "UserId": "522814694101",
+                            "GroupId": "sg-0d65ae6822a009c2f"
+                        }
+                    ],
+                    "IpRanges": [],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 6379,
+                    "ToPort": 6379,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "Description": "Redis - update to Redis SG",
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "UserIdGroupPairs": [],
+                    "IpRanges": [
+                        {
+                            "Description": "HTTPS Screenalytics+AWS+S3",
+                            "CidrIp": "0.0.0.0/0"
+                        }
+                    ],
+                    "Ipv6Ranges": [],
+                    "PrefixListIds": []
+                }
+            ],
+            "VpcId": "vpc-05151344c1c5c40f9",
+            "SecurityGroupArn": "arn:aws:ec2:us-east-1:522814694101:security-group/sg-09b039c604dd9d077",
+            "OwnerId": "522814694101",
+            "GroupName": "trr-worker-sg",
+            "Description": "TRR Worker security group - no inbound, outbound to DB/Redis/HTTPS",
+            "IpPermissions": []
+        }
+    ]
+}

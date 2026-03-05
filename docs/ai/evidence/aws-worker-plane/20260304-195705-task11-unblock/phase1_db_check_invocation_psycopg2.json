@@ -1,0 +1,22 @@
+{
+    "CommandId": "21516f69-de9b-42ec-84bc-03fa07499d38",
+    "InstanceId": "i-05d7f68c379dc05db",
+    "Comment": "Task11 DB reachability check psycopg2",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 1,
+    "ExecutionStartDateTime": "2026-03-05T01:02:53.421Z",
+    "ExecutionElapsedTime": "PT0.063S",
+    "ExecutionEndDateTime": "2026-03-05T01:02:53.421Z",
+    "Status": "Failed",
+    "StatusDetails": "Failed",
+    "StandardOutputContent": "DB_URL_PREFIX=postgresql\n",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\npsycopg2.errors.UndefinedTable: relation \"core.admin_operations\" does not exist\nLINE 1: select 1 from core.admin_operations limit 1;\n                      ^\n\nfailed to run commands: exit status 1",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

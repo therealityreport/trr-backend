@@ -1,0 +1,3 @@
+event: operation
+data: {"status": "pending", "attached": false, "request_id": "task11-worker-recycle-1772677098", "operation_id": "5f6154c1-0801-4283-9570-fea1591be91d", "execution_owner": "remote_worker", "execution_mode_canonical": "remote", "event_seq": 1}
+

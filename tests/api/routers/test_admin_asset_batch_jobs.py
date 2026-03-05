@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -52,6 +53,11 @@ class TestAssetBatchJobsStream:
         assert '"skipped": 1' in response.text or '"skipped":1' in response.text
         assert '"operation_counts"' in response.text
         assert '"live_counts"' in response.text
+        assert '"operation_id"' in response.text
+        event_seq_matches = [int(match) for match in re.findall(r'"event_seq"\s*:\s*(\d+)', response.text)]
+        assert event_seq_matches
+        assert event_seq_matches == sorted(event_seq_matches)
+        assert len(event_seq_matches) == len(set(event_seq_matches))
 
     def test_enforces_season_scope_for_season_endpoint(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")

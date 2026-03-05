@@ -1,0 +1,6 @@
+EVIDENCE_DIR=/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-195705-task11-unblock
+API_INSTANCE_ID=i-REDACTED
+WORKER_INSTANCE_ID=i-REDACTED
+EVIDENCE_DIR=/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-195705-task11-unblock
+API_INSTANCE_ID=i-REDACTED
+WORKER_INSTANCE_ID=i-REDACTED

@@ -1,0 +1,331 @@
+{
+    "AutoScalingGroups": [
+        {
+            "AutoScalingGroupName": "trr-api-asg",
+            "AutoScalingGroupARN": "arn:aws:autoscaling:us-east-1:522814694101:autoScalingGroup:f06b9322-32f6-4bd0-b725-13f23d392234:autoScalingGroupName/trr-api-asg",
+            "LaunchTemplate": {
+                "LaunchTemplateId": "lt-079b57847b9abc86f",
+                "LaunchTemplateName": "trr-api-lt",
+                "Version": "5"
+            },
+            "MinSize": 1,
+            "MaxSize": 3,
+            "DesiredCapacity": 1,
+            "DefaultCooldown": 300,
+            "AvailabilityZones": [
+                "us-east-1a",
+                "us-east-1b"
+            ],
+            "LoadBalancerNames": [],
+            "TargetGroupARNs": [
+                "arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc"
+            ],
+            "HealthCheckType": "ELB",
+            "HealthCheckGracePeriod": 180,
+            "Instances": [
+                {
+                    "InstanceId": "i-05d7f68c379dc05db",
+                    "InstanceType": "c7i.large",
+                    "AvailabilityZone": "us-east-1b",
+                    "LifecycleState": "InService",
+                    "HealthStatus": "Healthy",
+                    "LaunchTemplate": {
+                        "LaunchTemplateId": "lt-079b57847b9abc86f",
+                        "LaunchTemplateName": "trr-api-lt",
+                        "Version": "5"
+                    },
+                    "ProtectedFromScaleIn": false
+                }
+            ],
+            "CreatedTime": "2026-03-03T23:30:50.363000+00:00",
+            "SuspendedProcesses": [],
+            "VPCZoneIdentifier": "subnet-0d9834f9f3de2414d,subnet-08ed7732ae3850a5a",
+            "EnabledMetrics": [
+                {
+                    "Metric": "WarmPoolDesiredCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupAndWarmPoolTotalCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupInServiceInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolPendingCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupPendingCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTerminatingRetainedCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupDesiredCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTerminatingInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTotalInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolPendingRetainedCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTotalCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupPendingInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupMinSize",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupInServiceCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolTerminatingCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupAndWarmPoolDesiredCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTerminatingRetainedInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolMinSize",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolTerminatingRetainedCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolTotalCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupMaxSize",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupStandbyInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTerminatingCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolWarmedCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupStandbyCapacity",
+                    "Granularity": "1Minute"
+                }
+            ],
+            "Tags": [],
+            "TerminationPolicies": [
+                "Default"
+            ],
+            "NewInstancesProtectedFromScaleIn": false,
+            "ServiceLinkedRoleARN": "arn:aws:iam::522814694101:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling",
+            "TrafficSources": [
+                {
+                    "Identifier": "arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc",
+                    "Type": "elbv2"
+                }
+            ],
+            "DeletionProtection": "none",
+            "AvailabilityZoneDistribution": {
+                "CapacityDistributionStrategy": "balanced-best-effort"
+            },
+            "CapacityReservationSpecification": {
+                "CapacityReservationPreference": "default"
+            },
+            "InstanceLifecyclePolicy": {
+                "RetentionTriggers": {
+                    "TerminateHookAbandon": "terminate"
+                }
+            }
+        },
+        {
+            "AutoScalingGroupName": "trr-worker-asg",
+            "AutoScalingGroupARN": "arn:aws:autoscaling:us-east-1:522814694101:autoScalingGroup:4b7dd13b-740f-4586-a055-19d15462b576:autoScalingGroupName/trr-worker-asg",
+            "LaunchTemplate": {
+                "LaunchTemplateId": "lt-0bff4ba246330cb98",
+                "LaunchTemplateName": "trr-worker-lt",
+                "Version": "5"
+            },
+            "MinSize": 1,
+            "MaxSize": 8,
+            "DesiredCapacity": 1,
+            "DefaultCooldown": 300,
+            "AvailabilityZones": [
+                "us-east-1a",
+                "us-east-1b"
+            ],
+            "LoadBalancerNames": [],
+            "TargetGroupARNs": [],
+            "HealthCheckType": "EC2",
+            "HealthCheckGracePeriod": 300,
+            "Instances": [
+                {
+                    "InstanceId": "i-0dd68b716caf8d3ca",
+                    "InstanceType": "c7i.xlarge",
+                    "AvailabilityZone": "us-east-1b",
+                    "LifecycleState": "InService",
+                    "HealthStatus": "Healthy",
+                    "LaunchTemplate": {
+                        "LaunchTemplateId": "lt-0bff4ba246330cb98",
+                        "LaunchTemplateName": "trr-worker-lt",
+                        "Version": "5"
+                    },
+                    "ProtectedFromScaleIn": false
+                }
+            ],
+            "CreatedTime": "2026-03-03T23:31:52.425000+00:00",
+            "SuspendedProcesses": [],
+            "VPCZoneIdentifier": "subnet-0d9834f9f3de2414d,subnet-08ed7732ae3850a5a",
+            "EnabledMetrics": [
+                {
+                    "Metric": "WarmPoolTerminatingRetainedCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTerminatingRetainedInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTotalInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupPendingInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupInServiceCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupMinSize",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolPendingCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupPendingCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolDesiredCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolWarmedCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupDesiredCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupStandbyInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTotalCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTerminatingInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolTotalCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupAndWarmPoolTotalCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupMaxSize",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolMinSize",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTerminatingRetainedCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolPendingRetainedCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupTerminatingCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupInServiceInstances",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "WarmPoolTerminatingCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupAndWarmPoolDesiredCapacity",
+                    "Granularity": "1Minute"
+                },
+                {
+                    "Metric": "GroupStandbyCapacity",
+                    "Granularity": "1Minute"
+                }
+            ],
+            "Tags": [],
+            "TerminationPolicies": [
+                "Default"
+            ],
+            "NewInstancesProtectedFromScaleIn": false,
+            "ServiceLinkedRoleARN": "arn:aws:iam::522814694101:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling",
+            "TrafficSources": [],
+            "DeletionProtection": "none",
+            "AvailabilityZoneDistribution": {
+                "CapacityDistributionStrategy": "balanced-best-effort"
+            },
+            "CapacityReservationSpecification": {
+                "CapacityReservationPreference": "default"
+            },
+            "InstanceLifecyclePolicy": {
+                "RetentionTriggers": {
+                    "TerminateHookAbandon": "terminate"
+                }
+            }
+        }
+    ]
+}

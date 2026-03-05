@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
@@ -21,6 +22,7 @@ from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
 from api.routers import admin_show_bravo
 from trr_backend.db import pg
+from trr_backend.job_plane import canonical_execution_mode, execution_owner_label, is_remote_job_plane_enabled
 from trr_backend.scraping.google_news_parser import fetch_google_news, normalize_article_url
 
 logger = logging.getLogger(__name__)
@@ -1181,26 +1183,51 @@ def _create_google_news_sync_job(*, show_id: str, force: bool, requested_by: str
     return str(rows[0]["id"])
 
 
-def _set_google_news_sync_job_running(*, job_id: str) -> None:
+def _set_google_news_sync_job_running(
+    *,
+    job_id: str,
+    claim_token: str | None = None,
+    worker_id: str | None = None,
+    lease_seconds: int | None = None,
+) -> None:
+    safe_lease = max(30, int(lease_seconds or _get_google_sync_stale_timeout_minutes() * 60))
     pg.execute_returning(
         """
         UPDATE core.google_news_sync_jobs
-        SET status = %s, started_at = NOW(), heartbeat_at = NOW(), updated_at = NOW()
+        SET status = %s,
+            started_at = COALESCE(started_at, NOW()),
+            heartbeat_at = NOW(),
+            lease_expires_at = NOW() + (%s::int * INTERVAL '1 second'),
+            claim_token = COALESCE(%s::text, claim_token),
+            claimed_by_worker_id = COALESCE(%s::text, claimed_by_worker_id),
+            updated_at = NOW()
         WHERE id = %s::uuid
+          AND (%s::text IS NULL OR claim_token = %s::text OR claim_token IS NULL)
+        RETURNING id::text
         """,
-        [_GOOGLE_SYNC_JOB_STATUS_RUNNING, job_id],
+        [_GOOGLE_SYNC_JOB_STATUS_RUNNING, safe_lease, claim_token, worker_id, job_id, claim_token, claim_token],
     )
 
 
-def _touch_google_news_sync_job_heartbeat(*, job_id: str) -> None:
+def _touch_google_news_sync_job_heartbeat(
+    *,
+    job_id: str,
+    claim_token: str | None = None,
+    lease_seconds: int | None = None,
+) -> None:
+    safe_lease = max(30, int(lease_seconds or _get_google_sync_stale_timeout_minutes() * 60))
     pg.execute_returning(
         """
         UPDATE core.google_news_sync_jobs
-        SET heartbeat_at = NOW(), updated_at = NOW()
+        SET heartbeat_at = NOW(),
+            lease_expires_at = NOW() + (%s::int * INTERVAL '1 second'),
+            updated_at = NOW()
         WHERE id = %s::uuid
           AND status IN (%s, %s)
+          AND (%s::text IS NULL OR claim_token = %s::text)
+        RETURNING id::text
         """,
-        [job_id, _GOOGLE_SYNC_JOB_STATUS_QUEUED, _GOOGLE_SYNC_JOB_STATUS_RUNNING],
+        [safe_lease, job_id, _GOOGLE_SYNC_JOB_STATUS_QUEUED, _GOOGLE_SYNC_JOB_STATUS_RUNNING, claim_token, claim_token],
     )
 
 
@@ -1210,6 +1237,7 @@ def _set_google_news_sync_job_finished(
     status: str,
     result: dict[str, Any] | None = None,
     error: str | None = None,
+    claim_token: str | None = None,
 ) -> None:
     pg.execute_returning(
         """
@@ -1219,10 +1247,15 @@ def _set_google_news_sync_job_finished(
             error = %s,
             finished_at = NOW(),
             heartbeat_at = NOW(),
+            claim_token = NULL,
+            claimed_by_worker_id = NULL,
+            lease_expires_at = NULL,
             updated_at = NOW()
         WHERE id = %s::uuid
+          AND (%s::text IS NULL OR claim_token = %s::text OR claim_token IS NULL)
+        RETURNING id::text
         """,
-        [status, json.dumps(result or {}), error, job_id],
+        [status, json.dumps(result or {}), error, job_id, claim_token, claim_token],
     )
 
 
@@ -1239,6 +1272,11 @@ def _get_google_news_sync_job(*, show_id: str, job_id: str) -> dict[str, Any] | 
           requested_by,
           result,
           error,
+          claimed_by_worker_id,
+          claim_token,
+          lease_expires_at,
+          attempt_count,
+          next_retry_at,
           heartbeat_at,
           created_at,
           started_at,
@@ -1278,6 +1316,9 @@ def _reconcile_stale_google_news_sync_jobs(
                 result = %s::jsonb,
                 error = %s,
                 finished_at = COALESCE(finished_at, NOW()),
+                claim_token = NULL,
+                claimed_by_worker_id = NULL,
+                lease_expires_at = NULL,
                 heartbeat_at = NOW(),
                 updated_at = NOW()
             WHERE status IN (%s, %s)
@@ -1292,6 +1333,115 @@ def _reconcile_stale_google_news_sync_jobs(
         logger.exception("Failed to reconcile stale google_news sync jobs for show_id=%s", show_id)
         return []
     return [str(row.get("id")) for row in rows or [] if row.get("id")]
+
+
+def claim_next_google_news_sync_job(
+    *,
+    worker_id: str,
+    lease_seconds: int = 300,
+) -> dict[str, Any] | None:
+    safe_lease = max(30, int(lease_seconds))
+    row = pg.fetch_one(
+        """
+        WITH candidate AS (
+          SELECT id
+          FROM core.google_news_sync_jobs
+          WHERE status IN (%s, %s)
+            AND coalesce(next_retry_at, now()) <= now()
+            AND (
+              status = %s
+              OR lease_expires_at IS NULL
+              OR lease_expires_at < now()
+              OR coalesce(heartbeat_at, updated_at, created_at) < now() - interval '5 minutes'
+            )
+          ORDER BY
+            CASE WHEN status = %s THEN 0 ELSE 1 END,
+            created_at ASC
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+        )
+        UPDATE core.google_news_sync_jobs j
+        SET status = %s,
+            started_at = COALESCE(j.started_at, NOW()),
+            claim_token = gen_random_uuid()::text,
+            claimed_by_worker_id = %s,
+            lease_expires_at = NOW() + (%s::int * INTERVAL '1 second'),
+            heartbeat_at = NOW(),
+            attempt_count = COALESCE(j.attempt_count, 0) + 1,
+            next_retry_at = NULL,
+            updated_at = NOW()
+        FROM candidate
+        WHERE j.id = candidate.id
+        RETURNING
+          j.id::text AS id,
+          j.show_id::text AS show_id,
+          j.force,
+          j.requested_by,
+          j.status,
+          j.claim_token,
+          j.claimed_by_worker_id,
+          j.attempt_count
+        """,
+        [
+            _GOOGLE_SYNC_JOB_STATUS_QUEUED,
+            _GOOGLE_SYNC_JOB_STATUS_RUNNING,
+            _GOOGLE_SYNC_JOB_STATUS_QUEUED,
+            _GOOGLE_SYNC_JOB_STATUS_QUEUED,
+            _GOOGLE_SYNC_JOB_STATUS_RUNNING,
+            worker_id,
+            safe_lease,
+        ],
+    )
+    return dict(row) if row else None
+
+
+def execute_claimed_google_news_sync_job(*, job_row: dict[str, Any], worker_id: str) -> None:
+    job_id = str(job_row.get("id") or "").strip()
+    show_id_str = str(job_row.get("show_id") or "").strip()
+    if not job_id or not show_id_str:
+        return
+    claim_token = str(job_row.get("claim_token") or "").strip() or None
+    force = bool(job_row.get("force"))
+    requested_by = str(job_row.get("requested_by") or "").strip() or "service_role:google-news-worker"
+    _run_google_news_sync_job(
+        job_id=job_id,
+        show_id_str=show_id_str,
+        force=force,
+        worker_id=worker_id,
+        claim_token=claim_token,
+        admin_user_payload={"id": requested_by, "role": "service_role"},
+    )
+
+
+def run_google_news_worker_loop(
+    *,
+    worker_id: str | None = None,
+    poll_seconds: float = 2.0,
+    once: bool = False,
+    lease_seconds: int = 300,
+) -> int:
+    normalized_worker_id = (worker_id or "").strip() or f"google-news:{socket.gethostname()}:{os.getpid()}"
+    safe_poll = max(0.2, float(poll_seconds))
+    safe_lease = max(30, int(lease_seconds))
+
+    while True:
+        claimed = claim_next_google_news_sync_job(worker_id=normalized_worker_id, lease_seconds=safe_lease)
+        if not claimed:
+            if once:
+                return 1
+            time.sleep(safe_poll)
+            continue
+
+        logger.info(
+            "Claimed google-news sync job: worker_id=%s job_id=%s show_id=%s attempt=%s",
+            normalized_worker_id,
+            str(claimed.get("id") or ""),
+            str(claimed.get("show_id") or ""),
+            int(claimed.get("attempt_count") or 0),
+        )
+        execute_claimed_google_news_sync_job(job_row=claimed, worker_id=normalized_worker_id)
+        if once:
+            return 0
 
 
 def _run_google_news_sync_impl(
@@ -1439,20 +1589,26 @@ def _run_google_news_sync_job(
     show_id_str: str,
     force: bool,
     admin_user_payload: dict[str, Any] | None,
+    worker_id: str | None = None,
+    claim_token: str | None = None,
 ) -> None:
     from trr_backend.db.admin import create_supabase_admin_client
 
     db = create_supabase_admin_client()
-    _set_google_news_sync_job_running(job_id=job_id)
+    _set_google_news_sync_job_running(
+        job_id=job_id,
+        claim_token=claim_token,
+        worker_id=worker_id,
+    )
     admin_user = admin_user_payload or {"id": "service_role:background", "role": "service_role"}
     try:
-        _touch_google_news_sync_job_heartbeat(job_id=job_id)
+        _touch_google_news_sync_job_heartbeat(job_id=job_id, claim_token=claim_token)
         result = _run_google_news_sync_impl(
             show_id_str=show_id_str,
             force=force,
             db=db,
             admin_user=admin_user,
-            heartbeat_cb=lambda: _touch_google_news_sync_job_heartbeat(job_id=job_id),
+            heartbeat_cb=lambda: _touch_google_news_sync_job_heartbeat(job_id=job_id, claim_token=claim_token),
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Google News async sync job failed for %s", show_id_str)
@@ -1461,6 +1617,7 @@ def _run_google_news_sync_job(
             status=_GOOGLE_SYNC_JOB_STATUS_FAILED,
             result={},
             error=str(exc),
+            claim_token=claim_token,
         )
         return
     _set_google_news_sync_job_finished(
@@ -1468,6 +1625,7 @@ def _run_google_news_sync_job(
         status=_GOOGLE_SYNC_JOB_STATUS_COMPLETED,
         result=result,
         error=None,
+        claim_token=claim_token,
     )
 
 
@@ -1488,21 +1646,34 @@ def sync_google_news(
     _resolve_google_news_topic_url(show_id_str)
 
     if payload.async_mode:
+        remote_mode = is_remote_job_plane_enabled()
+        execution_mode = canonical_execution_mode()
+        execution_owner = execution_owner_label()
         requested_by = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "").strip() or None
         job_id = _create_google_news_sync_job(show_id=show_id_str, force=payload.force, requested_by=requested_by)
-        background_tasks.add_task(
-            _run_google_news_sync_job,
-            job_id=job_id,
-            show_id_str=show_id_str,
-            force=payload.force,
-            admin_user_payload=dict(admin_user or {}),
-        )
+        if remote_mode:
+            logger.info(
+                "Queued google-news sync job for remote worker ownership: show_id=%s job_id=%s execution_mode=%s",
+                show_id_str,
+                job_id,
+                execution_mode,
+            )
+        else:
+            background_tasks.add_task(
+                _run_google_news_sync_job,
+                job_id=job_id,
+                show_id_str=show_id_str,
+                force=payload.force,
+                admin_user_payload=dict(admin_user or {}),
+            )
         return {
             "show_id": show_id_str,
             "synced": False,
             "queued": True,
             "job_id": job_id,
             "status": _GOOGLE_SYNC_JOB_STATUS_QUEUED,
+            "execution_owner": execution_owner,
+            "execution_mode_canonical": execution_mode,
         }
 
     return _run_google_news_sync_impl(show_id_str=show_id_str, force=payload.force, db=db, admin_user=admin_user)

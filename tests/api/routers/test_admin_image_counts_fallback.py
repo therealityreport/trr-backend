@@ -852,9 +852,9 @@ def test_build_detection_boxes_promotes_single_face_deterministic_assignment_to_
     assert len(boxes) == 1
     assert boxes[0]["person_id"] == owner_id
     assert boxes[0]["person_name"] == "Alan Cumming"
-    assert boxes[0]["label_source"] == "deterministic_tag_map"
+    assert boxes[0]["label_source"] == "owner_fallback_map"
     assert boxes[0]["match_status"] == "matched"
-    assert boxes[0]["match_reason"] == "deterministic_tag_map"
+    assert boxes[0]["match_reason"] == "owner_fallback_map"
 
 
 def test_build_detection_boxes_applies_similarity_lead_override_before_hybrid_fallback() -> None:

@@ -1,0 +1,22 @@
+{
+    "CommandId": "651a01e2-5dba-4c42-bda7-303954800ce7",
+    "InstanceId": "i-05d7f68c379dc05db",
+    "Comment": "Task11 DB reachability check python",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 1,
+    "ExecutionStartDateTime": "2026-03-05T01:02:07.705Z",
+    "ExecutionElapsedTime": "PT0.021S",
+    "ExecutionEndDateTime": "2026-03-05T01:02:07.705Z",
+    "Status": "Failed",
+    "StatusDetails": "Failed",
+    "StandardOutputContent": "DB_URL_PREFIX=postgresql\n",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/usr/lib64/python3.9/importlib/__init__.py\", line 127, in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n  File \"<frozen importlib._bootstrap>\", line 1030, in _gcd_import\n  File \"<frozen importlib._bootstrap>\", line 1007, in _find_and_load\n  File \"<frozen importlib._bootstrap>\", line 984, in _find_and_load_unlocked\nModuleNotFoundError: No module named 'psycopg2'\nfailed to run commands: exit status 1",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

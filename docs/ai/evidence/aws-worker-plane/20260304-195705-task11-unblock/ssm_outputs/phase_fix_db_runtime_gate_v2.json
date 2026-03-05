@@ -1,0 +1,22 @@
+{
+    "CommandId": "a1b0abdb-4fcd-4c18-8f35-0216a4dc827a",
+    "InstanceId": "i-09b52a7ad5f88c0a1",
+    "Comment": "Task11 parity gate check runtime v2",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 0,
+    "ExecutionStartDateTime": "2026-03-05T01:25:44.715Z",
+    "ExecutionElapsedTime": "PT0.068S",
+    "ExecutionEndDateTime": "2026-03-05T01:25:44.715Z",
+    "Status": "Success",
+    "StatusDetails": "Success",
+    "StandardOutputContent": "(1, 1)\n",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

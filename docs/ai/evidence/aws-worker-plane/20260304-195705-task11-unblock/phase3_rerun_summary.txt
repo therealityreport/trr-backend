@@ -1,0 +1,3 @@
+run30_exit=1
+run31_exit=1
+run32_exit=143

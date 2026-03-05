@@ -1,0 +1,26 @@
+{
+  "evidence_root": "/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-195705-task11-unblock",
+  "sg_6543_present": {
+    "trr-worker-sg": true,
+    "trr-api-sg": true
+  },
+  "ssm_params": {
+    "/trr/staging/DATABASE_URL": "postgresql://postgres.vwxfvzutyufrkhfgoeaa:5lLVvjDaelWfLlXv@aws-1-us-east-1.pooler.supabase.com:6543/postgres",
+    "/trr/staging/SUPABASE_DB_URL": "postgresql://postgres.vwxfvzutyufrkhfgoeaa:5lLVvjDaelWfLlXv@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
+  },
+  "required_alarm_presence": {
+    "trr-api-target-5xx": 1,
+    "trr-worker-zero-inservice": 1,
+    "trr-worker-status-check-failed": 1,
+    "trr-queue-depth-high": 1,
+    "trr-stale-leases-high": 1,
+    "trr-long-job-failures-high": 1,
+    "trr-worker-service-failure-signal": 1
+  },
+  "required_alarm_duplicates": {},
+  "rerun_exit_codes": {
+    "run30_t180_exit": 1,
+    "run31_t180_exit": 1,
+    "run32_t180_exit": 1
+  }
+}

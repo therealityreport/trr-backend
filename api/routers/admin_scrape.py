@@ -16,16 +16,17 @@ import re
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
+from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.scraping.url_image_scraper import (
     download_and_hash_image,
     scrape_url_for_images,
@@ -916,12 +917,7 @@ def import_images(
                 referer=str(request.source_url),
             )
 
-            if (
-                img.kind == "logo"
-                and _brand_logo_routing_v2_enabled()
-                and logo_target
-                and logo_target[0] != "show"
-            ):
+            if img.kind == "logo" and _brand_logo_routing_v2_enabled() and logo_target and logo_target[0] != "show":
                 _, routed_url, routed_asset_id = _import_non_show_logo_target(
                     db=db,
                     target_type=logo_target[0],
@@ -1449,8 +1445,9 @@ def import_images(
 @router.post("/import/stream")
 async def import_images_stream(
     request: ImportRequest,
+    connection: Request,
     db: SupabaseAdminClient,
-    _: AdminUser,
+    admin: AdminUser,
 ) -> StreamingResponse:
     """
     Import images with SSE streaming progress updates.
@@ -1628,12 +1625,7 @@ async def import_images_stream(
                     referer=str(request.source_url),
                 )
 
-                if (
-                    img.kind == "logo"
-                    and _brand_logo_routing_v2_enabled()
-                    and logo_target
-                    and logo_target[0] != "show"
-                ):
+                if img.kind == "logo" and _brand_logo_routing_v2_enabled() and logo_target and logo_target[0] != "show":
                     _, routed_url, routed_asset_id = _import_non_show_logo_target(
                         db=db,
                         target_type=logo_target[0],
@@ -2199,12 +2191,56 @@ async def import_images_stream(
         }
         yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n"
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
+    request_payload = {"request": request.model_dump(mode="json")}
+    operation = start_operation_for_stream(
+        operation_type="admin_scrape_import_images",
+        producer=event_generator,
+        request_payload=request_payload,
+        initiated_by=actor,
+        request=connection,
     )
+    return operation_stream_response(str(operation.get("id")), request=connection)
+
+
+def build_scrape_import_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    db: SupabaseAdminClient | None = None,
+):
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    payload_data = request_payload.get("request") if isinstance(request_payload.get("request"), dict) else {}
+    parsed_request = ImportRequest.model_validate(payload_data)
+    initiated_by = str(request_payload.get("initiated_by") or "admin")
+
+    def _producer():
+        local_db = db or create_supabase_admin_client()
+        started_payload = {
+            "stage": "starting",
+            "message": "Starting image import...",
+            "total": len(parsed_request.images),
+            "actor": initiated_by,
+        }
+        yield f"event: progress\ndata: {json.dumps(started_payload)}\n\n"
+        try:
+            result = import_images(parsed_request, local_db, {"id": initiated_by})
+            complete_payload = result.model_dump() if isinstance(result, BaseModel) else dict(result or {})
+            yield f"event: complete\ndata: {json.dumps(complete_payload)}\n\n"
+        except HTTPException as exc:
+            error_payload = {
+                "stage": "error",
+                "error": "Import failed",
+                "detail": str(exc.detail),
+                "status": int(exc.status_code),
+            }
+            yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            error_payload = {
+                "stage": "error",
+                "error": "Import failed",
+                "detail": str(exc),
+            }
+            yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
+
+    return _producer

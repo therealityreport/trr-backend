@@ -1,0 +1,38 @@
+{
+    "LaunchTemplateVersions": [
+        {
+            "LaunchTemplateId": "lt-0bff4ba246330cb98",
+            "LaunchTemplateName": "trr-worker-lt",
+            "VersionNumber": 2,
+            "VersionDescription": "cw-agent-bootstrap-20260304-142443",
+            "CreateTime": "2026-03-04T19:24:44+00:00",
+            "CreatedBy": "arn:aws:iam::522814694101:user/social-admin",
+            "DefaultVersion": false,
+            "LaunchTemplateData": {
+                "IamInstanceProfile": {
+                    "Arn": "arn:aws:iam::522814694101:instance-profile/trr-ec2-role"
+                },
+                "NetworkInterfaces": [
+                    {
+                        "AssociatePublicIpAddress": false,
+                        "DeviceIndex": 0,
+                        "Groups": [
+                            "sg-09b039c604dd9d077"
+                        ]
+                    }
+                ],
+                "ImageId": "ami-0f3caa1cf4417e51b",
+                "InstanceType": "c7i.xlarge",
+                "UserData": "IyEvYmluL2Jhc2gKc2V0IC1ldW8gcGlwZWZhaWwKCmRuZiB1cGRhdGUgLXkKZG5mIGluc3RhbGwgLXkgYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQgYXdzY2xpIGpxCgpUT0tFTj0kKGN1cmwgLXNTIC1YIFBVVCAiaHR0cDovLzE2OS4yNTQuMTY5LjI1NC9sYXRlc3QvYXBpL3Rva2VuIiBcCi1IICJYLWF3cy1lYzItbWV0YWRhdGEtdG9rZW4tdHRsLXNlY29uZHM6IDIxNjAwIikKUkVHSU9OPSQoY3VybCAtc1MgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbjogJFRPS0VOIiBcCmh0dHA6Ly8xNjkuMjU0LjE2OS4yNTQvbGF0ZXN0L2R5bmFtaWMvaW5zdGFuY2UtaWRlbnRpdHkvZG9jdW1lbnQgfCBqcSAtciAnLnJlZ2lvbicpCgpjYXQgPiAvZXRjL3Ryci13b3JrZXIuZW52IDw8ICdFTlZFT0YnClRSUl9KT0JfUExBTkVfTU9ERT1yZW1vdGUKVFJSX0xPTkdfSk9CX0VORk9SQ0VfUkVNT1RFPTEKVFJSX0FETUlOX09QRVJBVElPTl9XT1JLRVJfRU5BQkxFRD0xClRSUl9SRURESVRfUkVGUkVTSF9XT1JLRVJfRU5BQkxFRD0xClRSUl9HT09HTEVfTkVXU19XT1JLRVJfRU5BQkxFRD0xClNPQ0lBTF9XT1JLRVJfUE9PTF9QT1NUUz0zClNPQ0lBTF9XT1JLRVJfUE9PTF9DT01NRU5UUz0zClNPQ0lBTF9XT1JLRVJfUE9PTF9NRURJQV9NSVJST1I9MQpTT0NJQUxfV09SS0VSX1BPT0xfQ09NTUVOVF9NRURJQV9NSVJST1I9MQpFTlZFT0YKCmF3cyBzc20gZ2V0LXBhcmFtZXRlcnMtYnktcGF0aCBcCi0tcGF0aCAiL3Ryci9zdGFnaW5nLyIgXAotLXJlY3Vyc2l2ZSBcCi0td2l0aC1kZWNyeXB0aW9uIFwKLS1yZWdpb24gIiRSRUdJT04iIFwKLS1vdXRwdXQganNvbiBcCnwganEgLXIgJy5QYXJhbWV0ZXJzW10gfCAiXCguTmFtZXxzcGxpdCgiLyIpWy0xXXxhc2NpaV91cGNhc2UpPVwoLlZhbHVlKSInIFwKPj4gL2V0Yy90cnItd29ya2VyLmVudgoKc3lzdGVtY3RsIGRhZW1vbi1yZWxvYWQKc3lzdGVtY3RsIGVuYWJsZSB0cnItd29ya2VyCnN5c3RlbWN0bCBzdGFydCB0cnItd29ya2VyCiMgVFJSLUNXQUdFTlQtTUFOQUdFRApta2RpciAtcCAvb3B0L2F3cy9hbWF6b24tY2xvdWR3YXRjaC1hZ2VudC9ldGMKY2F0ID4gL29wdC9hd3MvYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQvZXRjL2FtYXpvbi1jbG91ZHdhdGNoLWFnZW50Lmpzb24gPDwnQ1dFT0YnCnsKICAiYWdlbnQiOiB7CiAgICAibWV0cmljc19jb2xsZWN0aW9uX2ludGVydmFsIjogNjAsCiAgICAicnVuX2FzX3VzZXIiOiAicm9vdCIKICB9LAogICJsb2dzIjogewogICAgImxvZ3NfY29sbGVjdGVkIjogewogICAgICAiZmlsZXMiOiB7CiAgICAgICAgImNvbGxlY3RfbGlzdCI6IFsKICAgICAgICAgIHsiZmlsZV9wYXRoIjogIi92YXIvbG9nL21lc3NhZ2VzIiwgImxvZ19ncm91cF9uYW1lIjogIi90cnIvZWMyL3N5c3RlbSIsICJsb2dfc3RyZWFtX25hbWUiOiAie2luc3RhbmNlX2lkfSIsICJyZXRlbnRpb25faW5fZGF5cyI6IDMwfSwKICAgICAgICAgIHsiZmlsZV9wYXRoIjogIi92YXIvbG9nL2Nsb3VkLWluaXQubG9nIiwgImxvZ19ncm91cF9uYW1lIjogIi90cnIvZWMyL2Nsb3VkLWluaXQiLCAibG9nX3N0cmVhbV9uYW1lIjogIntpbnN0YW5jZV9pZH0iLCAicmV0ZW50aW9uX2luX2RheXMiOiAzMH0sCiAgICAgICAgICB7ImZpbGVfcGF0aCI6ICIvdmFyL2xvZy9jbG91ZC1pbml0LW91dHB1dC5sb2ciLCAibG9nX2dyb3VwX25hbWUiOiAiL3Ryci9lYzIvY2xvdWQtaW5pdC1vdXRwdXQiLCAibG9nX3N0cmVhbV9uYW1lIjogIntpbnN0YW5jZV9pZH0iLCAicmV0ZW50aW9uX2luX2RheXMiOiAzMH0KICAgICAgICBdCiAgICAgIH0KICAgIH0KICB9LAogICJtZXRyaWNzIjogewogICAgIm5hbWVzcGFjZSI6ICJUUlIvRUMyIiwKICAgICJhcHBlbmRfZGltZW5zaW9ucyI6IHsKICAgICAgIkluc3RhbmNlSWQiOiAiJHthd3M6SW5zdGFuY2VJZH0iLAogICAgICAiQXV0b1NjYWxpbmdHcm91cE5hbWUiOiAiJHthd3M6QXV0b1NjYWxpbmdHcm91cE5hbWV9IgogICAgfSwKICAgICJtZXRyaWNzX2NvbGxlY3RlZCI6IHsKICAgICAgIm1lbSI6IHsibWVhc3VyZW1lbnQiOiBbIm1lbV91c2VkX3BlcmNlbnQiXX0sCiAgICAgICJkaXNrIjogeyJtZWFzdXJlbWVudCI6IFsidXNlZF9wZXJjZW50Il0sICJyZXNvdXJjZXMiOiBbIi8iXX0KICAgIH0KICB9Cn0KQ1dFT0YKCnN5c3RlbWN0bCBlbmFibGUgYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQgfHwgdHJ1ZQovb3B0L2F3cy9hbWF6b24tY2xvdWR3YXRjaC1hZ2VudC9iaW4vYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQtY3RsIC1hIHN0b3AgfHwgdHJ1ZQovb3B0L2F3cy9hbWF6b24tY2xvdWR3YXRjaC1hZ2VudC9iaW4vYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQtY3RsIC1hIGZldGNoLWNvbmZpZyAtbSBlYzIgLWMgZmlsZTovb3B0L2F3cy9hbWF6b24tY2xvdWR3YXRjaC1hZ2VudC9ldGMvYW1hem9uLWNsb3Vkd2F0Y2gtYWdlbnQuanNvbiAtcw==",
+                "MetadataOptions": {
+                    "HttpTokens": "required",
+                    "HttpPutResponseHopLimit": 2,
+                    "HttpEndpoint": "enabled"
+                }
+            },
+            "Operator": {
+                "Managed": false
+            }
+        }
+    ]
+}

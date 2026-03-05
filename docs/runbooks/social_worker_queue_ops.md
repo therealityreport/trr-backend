@@ -14,15 +14,20 @@ This runbook covers production operations for social ingest queue mode:
 - `SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS` (optional, default `180`)
 - `SOCIAL_WORKER_HEARTBEAT_INTERVAL_SEC` (optional, default `15`, minimum `5`)
 - `SOCIAL_COMMENTS_RUN_WORKERS` (optional, default `4`, min `1`, max `8`; API-assisted comments-only fanout)
+- `SOCIAL_WORKER_MIN_STAGE_RUNNERS` (optional, default `6`; floor for enabled stage worker pools)
+- `SOCIAL_WORKER_ALLOW_STAGE_DISABLE` (optional, default `0`; set `1` to allow explicit `0` workers per stage)
 - `SOCIAL_WORKER_POOL_POSTS` (optional, default `6`; persistent posts-stage workers)
-- `SOCIAL_WORKER_POOL_COMMENTS` (optional, default `8`; persistent comments-stage workers)
-- `SOCIAL_WORKER_POOL_MEDIA_MIRROR` (optional, default `3`; persistent post media mirror workers)
-- `SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR` (optional, default `2`; persistent comment media mirror workers)
+- `SOCIAL_WORKER_POOL_COMMENTS` (optional, default `6`; persistent comments-stage workers)
+- `SOCIAL_WORKER_POOL_MEDIA_MIRROR` (optional, default `6`; persistent post media mirror workers)
+- `SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR` (optional, default `6`; persistent comment media mirror workers)
 - `SOCIAL_WORKER_POOL_INTERVAL_SEC` (optional, default `2`; worker idle sleep interval)
 - `SOCIAL_STALE_RECOVERY_INTERVAL_SEC` (optional, default `30`; stale job recovery cadence)
 - `SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SEC` (optional, default `60`; run-summary reconciliation cadence)
-- `SOCIAL_JOB_CLAIM_BATCH_SIZE` (optional, default `5`, max `25`; queue claim batch size per worker)
-- `SOCIAL_RUN_IN_FLIGHT_CAP` (optional, default `4`; per-run fairness cap)
+- `SOCIAL_JOB_CLAIM_BATCH_SIZE` (optional, default `posts=10`, other stages=`5`, max `25`; queue claim batch size per worker)
+- `SOCIAL_RUN_IN_FLIGHT_CAP` (optional, default `24`; per-run fairness cap)
+- `SOCIAL_JOB_STALE_SECONDS` (optional, default `300`; global stale timeout fallback)
+- `SOCIAL_JOB_STALE_SECONDS_YOUTUBE_POSTS` (optional, default `900`)
+- `SOCIAL_JOB_STALE_SECONDS_YOUTUBE_COMMENTS` (optional, default `600`)
 - `SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS` (optional, default `200`; comment/reply bulk upsert chunk size)
 - `SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS` (optional, default `50`; post bulk upsert chunk size)
 - `SOCIAL_TWITTER_DELAY_SEC`, `SOCIAL_TIKTOK_DELAY_SEC`, `SOCIAL_YOUTUBE_DELAY_SEC` (optional, default `0.35`)
@@ -74,13 +79,55 @@ Start a persistent full-sync worker pool (posts + comments + mirrors):
 ```bash
 cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 SOCIAL_QUEUE_ENABLED=true \
+SOCIAL_WORKER_MIN_STAGE_RUNNERS=6 \
 SOCIAL_WORKER_POOL_POSTS=6 \
-SOCIAL_WORKER_POOL_COMMENTS=8 \
-SOCIAL_WORKER_POOL_MEDIA_MIRROR=3 \
-SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR=2 \
+SOCIAL_WORKER_POOL_COMMENTS=6 \
+SOCIAL_WORKER_POOL_MEDIA_MIRROR=6 \
+SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR=6 \
 SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS=200 \
 SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS=50 \
 ./scripts/socials/start_worker_pool.sh
+```
+
+## Post Author Avatar Mirroring Guarantee
+
+- Social post-author avatars are mirrored to S3 for non-Instagram platforms.
+- Hosted avatar URLs are preferred in payloads and UI where available.
+- YouTube avatar fallback uses channel-header image sources (`yt3.googleusercontent.com`) and normalizes size to `s1024` before mirror persistence.
+
+## Remote Job Plane Workers (Admin + Reddit + Google News)
+
+When `TRR_JOB_PLANE_MODE=remote` (or `TRR_LONG_JOB_ENFORCE_REMOTE=1`), API kickoff routes enqueue jobs and worker loops own execution:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+TRR_JOB_PLANE_MODE=remote \
+TRR_LONG_JOB_ENFORCE_REMOTE=1 \
+TRR_REMOTE_WORKER_POLL_SECONDS=2 \
+TRR_ADMIN_OPERATION_WORKER_ENABLED=1 \
+TRR_ADMIN_OPERATION_WORKER_COUNT=2 \
+TRR_REDDIT_REFRESH_WORKER_ENABLED=1 \
+TRR_REDDIT_REFRESH_WORKER_COUNT=2 \
+TRR_GOOGLE_NEWS_WORKER_ENABLED=1 \
+TRR_GOOGLE_NEWS_WORKER_COUNT=1 \
+TRR_GOOGLE_NEWS_WORKER_LEASE_SECONDS=300 \
+./scripts/start_remote_job_workers.sh
+```
+
+Worker-family knobs:
+
+- `TRR_ADMIN_OPERATION_WORKER_COUNT` (default `1`)
+- `TRR_REDDIT_REFRESH_WORKER_COUNT` (default `1`)
+- `TRR_GOOGLE_NEWS_WORKER_COUNT` (default `1`)
+- `TRR_GOOGLE_NEWS_WORKER_LEASE_SECONDS` (default `300`)
+- `TRR_REMOTE_WORKER_POLL_SECONDS` (default `2`)
+
+Individual worker entrypoints:
+
+```bash
+python -m scripts.workers.admin_operations_worker
+python -m scripts.workers.reddit_refresh_worker
+python -m scripts.workers.google_news_worker
 ```
 
 ## Controlled Benchmark Harness

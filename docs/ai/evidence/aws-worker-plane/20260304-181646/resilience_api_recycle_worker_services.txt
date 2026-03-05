@@ -1,0 +1,5 @@
+SVC=trr-admin-operations-worker ACTIVE=active
+SVC=trr-reddit-refresh-worker ACTIVE=active
+SVC=trr-google-news-worker ACTIVE=active
+SVC=trr-social-worker-pool ACTIVE=active
+

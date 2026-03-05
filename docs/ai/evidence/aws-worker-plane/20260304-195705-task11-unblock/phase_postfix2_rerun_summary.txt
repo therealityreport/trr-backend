@@ -1,0 +1,3 @@
+run30_postfix_exit=1
+run31_postfix2_exit=1
+run32_postfix2_exit=1

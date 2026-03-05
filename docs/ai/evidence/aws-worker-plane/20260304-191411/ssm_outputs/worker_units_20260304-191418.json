@@ -1,0 +1,22 @@
+{
+    "CommandId": "aadad544-0d61-4c63-af3b-4b08e08ac401",
+    "InstanceId": "i-0dd68b716caf8d3ca",
+    "Comment": "Task11 validate worker units",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 0,
+    "ExecutionStartDateTime": "2026-03-05T00:14:19.830Z",
+    "ExecutionElapsedTime": "PT0.093S",
+    "ExecutionEndDateTime": "2026-03-05T00:14:19.830Z",
+    "Status": "Success",
+    "StatusDetails": "Success",
+    "StandardOutputContent": "trr-admin-operations-worker.service active=active enabled=enabled\ntrr-reddit-refresh-worker.service active=active enabled=enabled\ntrr-google-news-worker.service active=active enabled=enabled\ntrr-social-worker-pool.service active=active enabled=enabled\n",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

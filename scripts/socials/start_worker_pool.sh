@@ -5,11 +5,13 @@ set -euo pipefail
 # Usage:
 #   SOCIAL_QUEUE_ENABLED=true ./scripts/socials/start_worker_pool.sh
 # Optional env knobs:
-#   SOCIAL_WORKER_POOL_POSTS=6
-#   SOCIAL_WORKER_POOL_COMMENTS=8
-#   SOCIAL_WORKER_POOL_MEDIA_MIRROR=3
-#   SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR=2
-#   SOCIAL_WORKER_POOL_INTERVAL_SEC=2
+#   SOCIAL_WORKER_MIN_STAGE_RUNNERS=1
+#   SOCIAL_WORKER_ALLOW_STAGE_DISABLE=1
+#   SOCIAL_WORKER_POOL_POSTS=1
+#   SOCIAL_WORKER_POOL_COMMENTS=1
+#   SOCIAL_WORKER_POOL_MEDIA_MIRROR=0
+#   SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR=0
+#   SOCIAL_WORKER_POOL_INTERVAL_SEC=3
 #   SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS=200
 #   SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS=50
 #   PYTHON_BIN=python
@@ -18,11 +20,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-POSTS_WORKERS="${SOCIAL_WORKER_POOL_POSTS:-6}"
-COMMENTS_WORKERS="${SOCIAL_WORKER_POOL_COMMENTS:-8}"
-MEDIA_MIRROR_WORKERS="${SOCIAL_WORKER_POOL_MEDIA_MIRROR:-3}"
-COMMENT_MEDIA_MIRROR_WORKERS="${SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR:-2}"
-WORKER_INTERVAL="${SOCIAL_WORKER_POOL_INTERVAL_SEC:-2}"
+MIN_STAGE_RUNNERS="${SOCIAL_WORKER_MIN_STAGE_RUNNERS:-1}"
+ALLOW_STAGE_DISABLE="${SOCIAL_WORKER_ALLOW_STAGE_DISABLE:-1}"
+POSTS_WORKERS="${SOCIAL_WORKER_POOL_POSTS:-1}"
+COMMENTS_WORKERS="${SOCIAL_WORKER_POOL_COMMENTS:-1}"
+MEDIA_MIRROR_WORKERS="${SOCIAL_WORKER_POOL_MEDIA_MIRROR:-0}"
+COMMENT_MEDIA_MIRROR_WORKERS="${SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR:-0}"
+WORKER_INTERVAL="${SOCIAL_WORKER_POOL_INTERVAL_SEC:-3}"
 
 normalize_count() {
   local raw="${1:-0}"
@@ -37,6 +41,36 @@ POSTS_WORKERS="$(normalize_count "$POSTS_WORKERS")"
 COMMENTS_WORKERS="$(normalize_count "$COMMENTS_WORKERS")"
 MEDIA_MIRROR_WORKERS="$(normalize_count "$MEDIA_MIRROR_WORKERS")"
 COMMENT_MEDIA_MIRROR_WORKERS="$(normalize_count "$COMMENT_MEDIA_MIRROR_WORKERS")"
+MIN_STAGE_RUNNERS="$(normalize_count "$MIN_STAGE_RUNNERS")"
+if [[ "$MIN_STAGE_RUNNERS" -lt 1 ]]; then
+  MIN_STAGE_RUNNERS=1
+fi
+
+if [[ "$ALLOW_STAGE_DISABLE" != "1" ]]; then
+  ALLOW_STAGE_DISABLE="0"
+fi
+
+apply_stage_floor() {
+  local value="$1"
+  if [[ "$value" -eq 0 ]]; then
+    if [[ "$ALLOW_STAGE_DISABLE" -eq 1 ]]; then
+      echo 0
+      return
+    fi
+    echo "$MIN_STAGE_RUNNERS"
+    return
+  fi
+  if [[ "$value" -lt "$MIN_STAGE_RUNNERS" ]]; then
+    echo "$MIN_STAGE_RUNNERS"
+    return
+  fi
+  echo "$value"
+}
+
+POSTS_WORKERS="$(apply_stage_floor "$POSTS_WORKERS")"
+COMMENTS_WORKERS="$(apply_stage_floor "$COMMENTS_WORKERS")"
+MEDIA_MIRROR_WORKERS="$(apply_stage_floor "$MEDIA_MIRROR_WORKERS")"
+COMMENT_MEDIA_MIRROR_WORKERS="$(apply_stage_floor "$COMMENT_MEDIA_MIRROR_WORKERS")"
 
 if [[ "$POSTS_WORKERS" -eq 0 && "$COMMENTS_WORKERS" -eq 0 && "$MEDIA_MIRROR_WORKERS" -eq 0 && "$COMMENT_MEDIA_MIRROR_WORKERS" -eq 0 ]]; then
   echo "[social-worker-pool] nothing to start (all worker pools are 0)"
@@ -86,5 +120,5 @@ if [[ "$COMMENT_MEDIA_MIRROR_WORKERS" -gt 0 ]]; then
   start_worker "comment_media_mirror" --stage comment_media_mirror --parallel "$COMMENT_MEDIA_MIRROR_WORKERS" --interval "$WORKER_INTERVAL"
 fi
 
-echo "[social-worker-pool] started (posts=${POSTS_WORKERS}, comments=${COMMENTS_WORKERS}, media_mirror=${MEDIA_MIRROR_WORKERS}, comment_media_mirror=${COMMENT_MEDIA_MIRROR_WORKERS})"
+echo "[social-worker-pool] started (posts=${POSTS_WORKERS}, comments=${COMMENTS_WORKERS}, media_mirror=${MEDIA_MIRROR_WORKERS}, comment_media_mirror=${COMMENT_MEDIA_MIRROR_WORKERS}, min_stage_runners=${MIN_STAGE_RUNNERS}, allow_stage_disable=${ALLOW_STAGE_DISABLE})"
 wait

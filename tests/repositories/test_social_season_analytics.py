@@ -39,6 +39,14 @@ from trr_backend.repositories.social_season_analytics import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_scraper_cache():
+    """Clear the scraper instance cache between tests to prevent cross-test leakage."""
+    social_repo._scraper_cache.clear()
+    yield
+    social_repo._scraper_cache.clear()
+
+
 def test_sentiment_for_text_deterministic() -> None:
     assert sentiment_for_text("I love this amazing episode") == ("positive", 2)
     assert sentiment_for_text("This was boring and awful") == ("negative", -2)
@@ -1207,8 +1215,8 @@ def test_ingest_season_dedupes_normalized_account_overrides(monkeypatch: pytest.
         initiated_by=None,
     )
 
-    assert payload["queued_or_started_jobs"] == 2
-    assert sorted(created_job_accounts) == ["bravotv", "bravowwhl"]
+    assert payload["queued_or_started_jobs"] == 1
+    assert created_job_accounts == ["bravotv"]
     run_config = run_config_holder.get("config")
     assert isinstance(run_config, dict)
     assert run_config.get("accounts_override") == ["bravotv"]
@@ -1273,8 +1281,8 @@ def test_ingest_season_enforces_bravo_core_accounts_when_no_override(
     assert sorted(created_job_accounts) == ["bravotv", "bravowwhl"]
 
 
-@pytest.mark.parametrize("platform", ["instagram", "tiktok", "twitter"])
-def test_ingest_season_enforces_bravo_core_accounts_even_with_override(
+@pytest.mark.parametrize("platform", ["instagram", "tiktok", "twitter", "facebook", "threads", "youtube"])
+def test_ingest_season_honors_authoritative_account_override_when_explicit(
     monkeypatch: pytest.MonkeyPatch,
     platform: str,
 ) -> None:
@@ -1329,8 +1337,77 @@ def test_ingest_season_enforces_bravo_core_accounts_even_with_override(
         initiated_by=None,
     )
 
-    assert payload["queued_or_started_jobs"] == 3
-    assert sorted(created_job_accounts) == ["bravotv", "bravowwhl", "networkpromo"]
+    assert payload["queued_or_started_jobs"] == 1
+    assert created_job_accounts == ["networkpromo"]
+
+
+def test_ingest_season_honors_authoritative_rhoslc_instagram_account_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = SeasonContext(
+        season_id="season-rhoslc-instagram-override",
+        show_id="show-rhoslc-instagram-override",
+        show_name="The Real Housewives of Salt Lake City",
+        show_slug="rhoslc",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    created_job_accounts: list[str] = []
+    run_config_holder: dict[str, Any] = {}
+
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: context)
+    monkeypatch.setattr(
+        social_repo,
+        "get_targets",
+        lambda *_args, **_kwargs: {
+            "targets": [
+                {
+                    "platform": "instagram",
+                    "accounts": [],
+                    "hashtags": [],
+                    "keywords": [],
+                    "is_active": True,
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda _context, **kwargs: run_config_holder.update({"config": kwargs.get("config")}) or "run-rhoslc-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda _context, **kwargs: created_job_accounts.append(str(kwargs.get("config", {}).get("account") or ""))
+        or f"job-{len(created_job_accounts)}",
+    )
+    monkeypatch.setattr(social_repo, "_update_run_summary", lambda _run_id: {"total_jobs": len(created_job_accounts)})
+
+    payload = social_repo.ingest_season(
+        context.season_id,
+        platforms=["instagram"],
+        source_scope="bravo",
+        accounts_override=["networkpromo"],
+        hashtags_override=["RHOSLC"],
+        keywords_override=["Salt Lake City"],
+        max_posts_per_target=10,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_only",
+        date_start=None,
+        date_end=None,
+        initiated_by=None,
+    )
+
+    assert payload["queued_or_started_jobs"] == 1
+    assert created_job_accounts == ["networkpromo"]
+    run_config = run_config_holder.get("config")
+    assert isinstance(run_config, dict)
+    assert run_config.get("accounts_override") == ["networkpromo"]
 
 
 def test_build_ingest_shard_schedule_assigns_dual_runner_lanes_and_offset() -> None:
@@ -1347,7 +1424,7 @@ def test_build_ingest_shard_schedule_assigns_dual_runner_lanes_and_offset() -> N
 
     assert schedule.strategy == "adaptive_dual_runner"
     assert schedule.runner_count == 2
-    assert schedule.runner_b_offset_hours == 48
+    assert schedule.runner_b_offset_hours == 0
     assert schedule.shards
     assert all(shard.window_end >= shard.window_start for shard in schedule.shards)
     assert any(shard.runner_lane == "B" for shard in schedule.shards)
@@ -5097,7 +5174,18 @@ def test_list_runs_applies_filters_and_order(monkeypatch) -> None:
     def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
         captured["sql"] = sql
         captured["params"] = params
-        return [{"id": "run-1", "status": "completed"}]
+        return [
+            {
+                "id": "run-1",
+                "status": "running",
+                "summary": {
+                    "total_jobs": 12,
+                    "completed_jobs": 0,
+                    "failed_jobs": 2,
+                    "active_jobs": 5,
+                },
+            }
+        ]
 
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
 
@@ -5109,7 +5197,24 @@ def test_list_runs_applies_filters_and_order(monkeypatch) -> None:
         run_id="123e4567-e89b-12d3-a456-426614174000",
     )
 
-    assert rows == [{"id": "run-1", "status": "completed"}]
+    assert rows == [
+        {
+            "id": "run-1",
+            "status": "running",
+            "summary": {
+                "total_jobs": 12,
+                "completed_jobs": 0,
+                "failed_jobs": 2,
+                "active_jobs": 5,
+            },
+            "summary_normalized": {
+                "total_jobs": 12,
+                "completed_jobs": 5,
+                "failed_jobs": 2,
+                "active_jobs": 5,
+            },
+        }
+    ]
     sql = str(captured["sql"]).lower()
     params = captured["params"]
     assert "from social.scrape_runs" in sql
@@ -6227,6 +6332,7 @@ def test_recover_stale_running_jobs_updates_worker_state_and_run_summaries(monke
             },
         ]
 
+    monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: {"has_stale": True})
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(
         social_repo,
@@ -6246,6 +6352,17 @@ def test_recover_stale_running_jobs_updates_worker_state_and_run_summaries(monke
     assert _count_unescaped_placeholders(sql_text) == len(params)
     assert "claimed_at = null" in sql_text
     assert "worker_id = null" in sql_text
+
+
+def test_resolve_social_job_stale_seconds_youtube_stage_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_JOB_STALE_SECONDS", "300")
+    monkeypatch.setenv("SOCIAL_JOB_STALE_SECONDS_YOUTUBE_POSTS", "900")
+    monkeypatch.setenv("SOCIAL_JOB_STALE_SECONDS_YOUTUBE_COMMENTS", "600")
+
+    assert social_repo._resolve_social_job_stale_seconds(platform="youtube", stage="posts") == 900
+    assert social_repo._resolve_social_job_stale_seconds(platform="youtube", stage="comments") == 600
+    assert social_repo._resolve_social_job_stale_seconds(platform="youtube", stage="media_mirror") == 300
+    assert social_repo._resolve_social_job_stale_seconds(platform="instagram", stage="posts") == 300
 
 
 def test_finish_job_retrying_releases_claim_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6354,7 +6471,7 @@ def test_claim_next_queued_jobs_treats_empty_platform_filter_as_none(
     assert captured["run_id"] == "run-1"
     assert captured["stage"] is None
     assert captured["platform"] is None
-    assert captured["limit"] == 5  # default batch size
+    assert captured["limit"] == 2  # default batch size
 
 
 def test_fetch_next_preclaimed_job_allows_worker_prefix_match(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -10138,6 +10255,217 @@ def test_get_queue_status_uses_cache_ttl_and_skips_recent_failures_when_disabled
     assert social_repo.SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT == 20
 
 
+def test_get_queue_status_fresh_true_bypasses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Cursor:
+        def execute(self, _sql: str, _params: list[object] | None = None) -> None:
+            return None
+
+    query_counter = {"count": 0}
+
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, params: list[object] | None = None):
+        del sql, params
+        query_counter["count"] += 1
+        return [{"platform": "instagram", "job_type": "posts", "status": "running", "total": 1}]
+
+    monkeypatch.setenv("SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS", "30")
+    cached_payload = {
+        "queue_enabled": True,
+        "workers": {"healthy": True, "healthy_workers": 1},
+        "queue": {
+            "by_status": {"running": 9, "queued": 0, "pending": 0, "retrying": 0, "failed": 0, "cancelled": 0, "completed": 0},
+            "by_platform": {},
+            "by_job_type": {},
+            "recent_failures": [],
+            "stuck_jobs": [],
+            "stuck_jobs_total": 0,
+            "runs_by_status": {"running": 0, "queued": 0, "pending": 0, "retrying": 0, "failed": 0, "cancelled": 0, "completed": 0},
+            "runs_total": 0,
+        },
+    }
+    monkeypatch.setattr(
+        social_repo,
+        "_queue_status_cache",
+        (
+            social_repo.time_module.monotonic(),
+            20,
+            5000,
+            False,
+            True,
+            social_repo.SOCIAL_QUEUE_STATUS_STUCK_JOBS_LIMIT_DEFAULT,
+            False,
+            cached_payload,
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_queue_status_last_good_cache", None)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_list_stuck_jobs", lambda limit=100: ([], 0))
+    monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
+
+    cached = social_repo.get_queue_status(include_recent_failures=False, include_runs_summary=False)
+    count_after_cached = query_counter["count"]
+    fresh = social_repo.get_queue_status(include_recent_failures=False, include_runs_summary=False, fresh=True)
+
+    assert cached["queue"]["by_status"]["running"] == 9
+    assert count_after_cached == 0
+    assert query_counter["count"] == 1
+    assert fresh["queue"]["by_status"]["running"] == 1
+
+
+def test_get_run_progress_snapshot_includes_dynamic_stages_and_per_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    season_id = "11111111-1111-1111-1111-111111111111"
+    run_id = "22222222-2222-2222-2222-222222222222"
+    run_row = {
+        "run_id": run_id,
+        "season_id": season_id,
+        "status": "running",
+        "source_scope": "bravo",
+        "config": {"runner_count": 2, "runner_strategy": "adaptive_dual_runner"},
+        "summary": {"total_jobs": 4},
+        "created_at": datetime(2026, 3, 5, 15, 0, tzinfo=UTC),
+        "started_at": datetime(2026, 3, 5, 15, 1, tzinfo=UTC),
+        "completed_at": None,
+    }
+    job_rows = [
+        {
+            "id": "job-posts",
+            "platform": "instagram",
+            "job_type": "posts",
+            "status": "running",
+            "items_found": 12,
+            "error_message": None,
+            "created_at": datetime(2026, 3, 5, 15, 1, tzinfo=UTC),
+            "started_at": datetime(2026, 3, 5, 15, 2, tzinfo=UTC),
+            "completed_at": None,
+            "config": {"account": "@bravotv", "stage": "posts"},
+            "metadata": {"stage_counters": {"posts": 12}, "persist_counters": {"posts_upserted": 4}},
+            "worker_id": "social-worker:a",
+        },
+        {
+            "id": "job-cmm",
+            "platform": "instagram",
+            "job_type": "comment_media_mirror",
+            "status": "completed",
+            "items_found": 3,
+            "error_message": None,
+            "created_at": datetime(2026, 3, 5, 15, 3, tzinfo=UTC),
+            "started_at": datetime(2026, 3, 5, 15, 3, tzinfo=UTC),
+            "completed_at": datetime(2026, 3, 5, 15, 4, tzinfo=UTC),
+            "config": {"account": "@bravowwhl"},
+            "metadata": {"stage": "comment_media_mirror", "persist_counters": {"comments_upserted": 2}},
+            "worker_id": "social-worker:b",
+        },
+        {
+            "id": "job-other",
+            "platform": "instagram",
+            "job_type": "media_enrich",
+            "status": "failed",
+            "items_found": 1,
+            "error_message": "boom",
+            "created_at": datetime(2026, 3, 5, 15, 5, tzinfo=UTC),
+            "started_at": datetime(2026, 3, 5, 15, 5, tzinfo=UTC),
+            "completed_at": datetime(2026, 3, 5, 15, 6, tzinfo=UTC),
+            "config": {"account": "@bravowwhl"},
+            "metadata": {"activity": {"phase": "enriching"}},
+            "worker_id": "social-worker:c",
+        },
+    ]
+
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
+    monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
+
+    payload = social_repo.get_run_progress_snapshot(season_id, run_id, recent_log_limit=10)
+
+    assert payload["run_id"] == run_id
+    assert payload["stages"]["posts"]["jobs_total"] == 1
+    assert payload["stages"]["comment_media_mirror"]["jobs_total"] == 1
+    assert payload["stages"]["other"]["jobs_total"] == 1
+    assert payload["worker_runtime"]["active_workers_now"] == 1
+    assert payload["worker_runtime"]["scheduler_lanes"] == ["A", "B"]
+    per_handle_keys = {(row["platform"], row["account_handle"], row["stage"]) for row in payload["per_handle"]}
+    assert ("instagram", "bravotv", "posts") in per_handle_keys
+    assert ("instagram", "bravowwhl", "comment_media_mirror") in per_handle_keys
+    assert ("instagram", "bravowwhl", "media_enrich") in per_handle_keys
+
+
+def test_get_week_live_health_snapshot_returns_day_rows_and_asset_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    season_id = "33333333-3333-3333-3333-333333333333"
+    context = SeasonContext(
+        season_id=season_id,
+        show_id="44444444-4444-4444-4444-444444444444",
+        show_name="The Real Housewives of Salt Lake City",
+        show_slug="rhoslc",
+        season_number=6,
+        anchor_date=date(2025, 9, 16),
+    )
+    week_window = WeekWindow(
+        week_index=11,
+        start_local=datetime(2025, 11, 25, 20, 0, tzinfo=ZoneInfo("America/New_York")),
+        end_local=datetime(2025, 12, 2, 20, 0, tzinfo=ZoneInfo("America/New_York")),
+        week_type="episode",
+        episode_number=11,
+    )
+
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: context)
+    monkeypatch.setattr(social_repo, "_resolve_requested_platforms", lambda _platforms: ["instagram"])
+    monkeypatch.setattr(social_repo, "_resolve_week_windows", lambda *_args, **_kwargs: ([week_window], None))
+    monkeypatch.setattr(
+        social_repo,
+        "_target_accounts_by_platform",
+        lambda *_args, **_kwargs: {"instagram": {"bravotv"}},
+    )
+
+    def _fake_fetch_all(sql: str, _params: list[object] | None = None) -> list[dict[str, object]]:
+        normalized = " ".join(sql.split()).lower()
+        assert "from social.instagram_posts" in normalized
+        return [
+            {
+                "day_local": date(2025, 11, 26),
+                "account_handle": "bravotv",
+                "comments_count": 8,
+                "likes_count": 120,
+                "media_urls": ["https://cdn.example.com/post-1.jpg", "https://cdn.example.com/post-1.mp4"],
+                "thumbnail_url": "https://cdn.example.com/post-1-thumb.jpg",
+                "hosted_media_urls": ["https://s3.example.com/post-1.jpg", "https://s3.example.com/post-1.mp4"],
+                "hosted_thumbnail_url": "https://s3.example.com/post-1-thumb.jpg",
+                "caption": "Great episode",
+                "description": None,
+                "text": None,
+                "title": None,
+                "owner_profile_pic_url": "https://cdn.example.com/profile.jpg",
+                "user_avatar_url": None,
+                "avatar_url": None,
+                "profile_pic_url": None,
+                "hosted_owner_profile_pic_url": "https://s3.example.com/profile.jpg",
+                "hosted_tagged_profile_pics": {},
+            }
+        ]
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    payload = social_repo.get_week_live_health_snapshot(
+        season_id,
+        week_index=11,
+        platforms=["instagram"],
+        timezone="America/New_York",
+        source_scope="bravo",
+    )
+
+    assert payload["week"]["week_index"] == 11
+    assert payload["day_account_rows"][0]["posts"] == 1
+    assert payload["day_account_rows"][0]["comments"] == 8
+    assert payload["day_account_rows"][0]["likes"] == 120
+    asset_map = {row["asset"]: row for row in payload["asset_health"]}
+    assert asset_map["images"]["scraped"] >= 1
+    assert asset_map["videos"]["scraped"] >= 1
+    assert asset_map["captions"]["scraped"] == 1
+    assert asset_map["profile_pictures"]["saved"] == 1
+
+
 def test_get_queue_status_returns_stale_last_good_on_query_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Cursor:
         def execute(self, _sql: str, _params: list[object] | None = None) -> None:
@@ -10571,8 +10899,149 @@ def test_cancel_stuck_jobs_clear_all_uses_null_filter(monkeypatch: pytest.Monkey
 
     assert payload["requested_job_ids_count"] == 0
     assert payload["cancelled_jobs"] == 0
-    assert captured_params[2] is None
-    assert captured_params[3] is None
+    assert captured_params[6] is None
+    assert captured_params[7] is None
+
+
+def test_cancel_active_jobs_cancels_all_active_and_finalizes_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    finalize_calls: list[str] = []
+    heartbeat_calls: list[str] = []
+
+    def _fake_fetch_all(sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
+        captured["sql"] = sql
+        captured["params"] = params or []
+        return [
+            {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "run_id": "11111111-1111-1111-1111-111111111111"},
+            {"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "run_id": "22222222-2222-2222-2222-222222222222"},
+        ]
+
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo, "_count_active_jobs", lambda: 4)
+    monkeypatch.setattr(
+        social_repo,
+        "_finalize_run_status",
+        lambda run_id, force_recompute=False: finalize_calls.append(f"{run_id}:{force_recompute}") or {},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_clear_worker_heartbeat_for_job",
+        lambda job_id, status, metadata=None: heartbeat_calls.append(f"{job_id}:{status}"),
+    )
+
+    payload = social_repo.cancel_active_jobs(cancelled_by="admin@example.com")
+
+    normalized_sql = " ".join(str(captured["sql"]).split()).lower()
+    assert "status = any(%s::text[])" in normalized_sql
+    assert "cancelled by user request (active job)" in normalized_sql
+    assert payload["cancelled_jobs"] == 2
+    assert payload["active_jobs_remaining"] == 4
+    assert payload["affected_run_ids"] == [
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    ]
+    assert finalize_calls == [
+        "11111111-1111-1111-1111-111111111111:True",
+        "22222222-2222-2222-2222-222222222222:True",
+    ]
+    assert len(heartbeat_calls) == 2
+
+
+def test_cancel_run_cancels_cancelling_jobs_and_clears_worker_heartbeats(monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id = "11111111-1111-1111-1111-111111111111"
+    season_id = "22222222-2222-2222-2222-222222222222"
+    fetch_one_calls: list[str] = []
+    heartbeat_calls: list[str] = []
+
+    def _fake_fetch_one(sql: str, params: list[object] | None = None):
+        normalized = " ".join(sql.split()).lower()
+        fetch_one_calls.append(normalized)
+        if "from social.scrape_runs" in normalized and "where id = %s and season_id = %s" in normalized:
+            return {"id": run_id, "season_id": season_id, "status": "running"}
+        if normalized.startswith("update social.scrape_runs"):
+            return {"id": run_id}
+        return {}
+
+    def _fake_execute_returning(sql: str, params: list[object] | None = None):
+        normalized = " ".join(sql.split()).lower()
+        assert "status in ('queued', 'pending', 'retrying', 'running', 'cancelling')" in normalized
+        assert params == [run_id]
+        return [
+            {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "run_id": run_id},
+            {"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "run_id": run_id},
+        ]
+
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "execute_returning", _fake_execute_returning)
+    monkeypatch.setattr(social_repo, "_update_run_summary", lambda _run_id, force_recompute=False: {"total_jobs": 12})
+    monkeypatch.setattr(social_repo, "_invalidate_week_detail_cache_after_run_terminal_status", lambda: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_clear_worker_heartbeat_for_job",
+        lambda job_id, status, metadata=None: heartbeat_calls.append(f"{job_id}:{status}:{metadata.get('source') if metadata else ''}"),
+    )
+
+    payload = social_repo.cancel_run(season_id, run_id, cancelled_by="admin@example.com")
+
+    assert payload["status"] == "cancelled"
+    assert payload["cancelled_jobs"] == 2
+    assert any("update social.scrape_runs" in call for call in fetch_one_calls)
+    assert heartbeat_calls == [
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:idle:cancel_run",
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:idle:cancel_run",
+    ]
+
+
+def test_query_worker_health_uses_aggregate_totals_and_stale_hidden_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Cursor:
+        def execute(self, _sql: str, _params: list[object] | None = None) -> None:
+            return None
+
+    worker_rows = [
+        {
+            "worker_id": f"worker-{idx}",
+            "stage": "posts",
+            "status": "working",
+            "run_id": None,
+            "current_job_id": None,
+            "metadata": {},
+            "started_at": datetime(2026, 3, 1, 10, 0, tzinfo=UTC),
+            "last_seen_at": datetime(2026, 3, 1, 10, 5, tzinfo=UTC),
+            "updated_at": datetime(2026, 3, 1, 10, 5, tzinfo=UTC),
+            "is_fresh": idx < 80,
+            "is_healthy": idx < 56,
+        }
+        for idx in range(120)
+    ]
+
+    monkeypatch.setattr(social_repo, "_worker_heartbeat_schema_ready", lambda: True)
+    monkeypatch.setattr(social_repo, "_worker_health_cache", None)
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one_with_cursor",
+        lambda *_args, **_kwargs: {
+            "total_workers": 150,
+            "active_workers": 120,
+            "healthy_workers": 56,
+            "fresh_workers": 90,
+        },
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", lambda *_args, **_kwargs: worker_rows)
+
+    payload = social_repo.get_worker_health(stale_after_seconds=300)
+
+    assert payload["healthy_workers"] == 56
+    assert payload["fresh_workers"] == 90
+    assert payload["stale_workers"] == 60
+    # 40 stale workers visible in the capped list, 20 additional stale workers hidden.
+    assert payload["stale_hidden_count"] == 20
+    assert payload["total_workers"] == 150
+    assert payload["active_workers"] == 120
 
 
 def test_purge_inactive_workers_deletes_non_active_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -10837,8 +11306,11 @@ def test_claim_next_jobs_filters_by_worker_capability(monkeypatch: pytest.Monkey
     assert "select coalesce" in sql.lower()
     assert "supported_platforms" in sql
 
-    # Verify ANY filter in eligible WHERE
-    assert "any((select platforms from worker_caps))" in sql.lower()
+    # Verify capability filter uses array ANY() from worker_caps row.
+    assert "exists (" in sql.lower()
+    assert "where j.platform = any(wc.platforms)" in sql.lower()
+    # Regression guard: avoid ANY(subquery) form that compares text = text[].
+    assert "any((select platforms from worker_caps))" not in sql.lower()
 
     # Verify worker_id is the first parameter (for the CTE)
     assert params[0] == "test-worker-1"
@@ -10857,14 +11329,13 @@ def test_claim_next_jobs_legacy_null_capability_uses_safe_defaults(monkeypatch: 
     social_repo._claim_next_jobs(worker_id="w1", limit=1)
 
     sql = str(captured["sql"])
-    # Verify coalesce includes the 4 legacy platforms
+    # Verify coalesce includes full social platform defaults for legacy NULL capability rows.
     assert "instagram" in sql
     assert "tiktok" in sql
     assert "twitter" in sql
     assert "youtube" in sql
-    # Verify threads and facebook are NOT in the legacy default
-    # (they're not in the coalesce array, only in the worker's registered list)
-    # The coalesce array is the fallback for NULL supported_platforms
+    assert "facebook" in sql
+    assert "threads" in sql
 
 
 def test_claim_next_jobs_returns_empty_without_worker_id(monkeypatch: pytest.MonkeyPatch) -> None:

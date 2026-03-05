@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -193,7 +194,82 @@ class YouTubeScraper:
                 best_url = candidate
         return best_url
 
-    def _extract_channel_avatar_from_renderer(self, renderer: dict[str, Any]) -> str | None:
+    @staticmethod
+    def _normalize_channel_avatar_url(candidate: Any, *, require_yt3_host: bool = False) -> str | None:
+        value = str(candidate or "").strip()
+        if not value:
+            return None
+        parsed = urlparse(value)
+        host = parsed.netloc.lower()
+        is_yt3 = host == "yt3.googleusercontent.com" or host.endswith(".yt3.googleusercontent.com")
+        if require_yt3_host and not is_yt3:
+            return None
+        if is_yt3:
+            value = re.sub(r"=s\d+(-[^?]*)?", r"=s1024\1", value)
+        return value
+
+    def _extract_channel_header_avatar_from_data(self, data: dict[str, Any]) -> str | None:
+        if not isinstance(data, dict):
+            return None
+        header = data.get("header")
+        if not isinstance(header, dict):
+            return None
+
+        target_nodes: list[dict[str, Any]] = []
+        stack: list[Any] = [header]
+        visited = 0
+        while stack and visited < 600:
+            node = stack.pop()
+            visited += 1
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    key_lower = str(key or "").strip().lower()
+                    if (
+                        key_lower in {"c4tabbedheaderrenderer", "pageheaderrenderer", "pageheaderviewmodel"}
+                        or "pageheader" in key_lower
+                    ) and isinstance(value, dict):
+                        target_nodes.append(value)
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(node, list):
+                stack.extend(node)
+
+        def _collect_urls(payload: Any) -> list[str]:
+            urls: list[str] = []
+            walk_stack: list[Any] = [payload]
+            walked = 0
+            while walk_stack and walked < 1000:
+                current = walk_stack.pop()
+                walked += 1
+                if isinstance(current, dict):
+                    direct_url = str(current.get("url") or "").strip()
+                    if direct_url:
+                        urls.append(direct_url)
+                    thumb_url = self._pick_largest_thumbnail_url(current)
+                    if thumb_url:
+                        urls.append(thumb_url)
+                    for nested in current.values():
+                        if isinstance(nested, (dict, list)):
+                            walk_stack.append(nested)
+                elif isinstance(current, list):
+                    walk_stack.extend(current)
+            return urls
+
+        candidates: list[str] = []
+        for node in target_nodes or [header]:
+            candidates.extend(_collect_urls(node))
+        for candidate in candidates:
+            normalized = self._normalize_channel_avatar_url(candidate, require_yt3_host=True)
+            if normalized:
+                return normalized
+        return None
+
+    def _extract_channel_avatar_from_renderer(
+        self,
+        renderer: dict[str, Any],
+        *,
+        fallback_channel_avatar_url: str | None = None,
+    ) -> str | None:
         candidates: list[str] = []
         byline_runs = renderer.get("shortBylineText", {}).get("runs", [])
         if isinstance(byline_runs, list) and byline_runs:
@@ -216,10 +292,10 @@ class YouTubeScraper:
                 if candidate:
                     candidates.append(candidate)
         for candidate in candidates:
-            value = str(candidate or "").strip()
+            value = self._normalize_channel_avatar_url(candidate)
             if value:
                 return value
-        return None
+        return self._normalize_channel_avatar_url(fallback_channel_avatar_url, require_yt3_host=True)
     COMMENT_API_URL = "https://www.youtube.com/youtubei/v1/next"
     YTINITAL_DATA_PATTERN = re.compile(r"var ytInitialData = ({.*?});", re.DOTALL)
     PUBLISHED_DATE_PATTERNS = (
@@ -612,6 +688,7 @@ class YouTubeScraper:
         config: YouTubeScrapeConfig,
         *,
         surface: str = "videos",
+        fallback_channel_avatar_url: str | None = None,
     ) -> YouTubeVideo | None:
         """Parse a video renderer from YouTube data."""
         video_id = renderer.get("videoId", "")
@@ -673,7 +750,10 @@ class YouTubeScraper:
             short_byline = renderer.get("shortBylineText", {}).get("runs", [])
             if isinstance(short_byline, list) and short_byline:
                 channel_title = str(short_byline[0].get("text") or "")
-        channel_avatar_url = self._extract_channel_avatar_from_renderer(renderer)
+        channel_avatar_url = self._extract_channel_avatar_from_renderer(
+            renderer,
+            fallback_channel_avatar_url=fallback_channel_avatar_url,
+        )
 
         # Find matched keywords
         combined_text = f"{title} {description}".lower()
@@ -1640,14 +1720,11 @@ class YouTubeScraper:
                     thumbnail_url=(data.get("thumbnails") or [{}])[0].get("url", ""),
                     tags=data.get("tags", []) or [],
                     keywords_matched=[query],
-                    user_avatar_url=(
-                        str(
-                            data.get("uploader_avatar")
-                            or data.get("channel_thumbnail")
-                            or data.get("channelAvatarUrl")
-                            or data.get("author_avatar_url")
-                            or ""
-                        ).strip()
+                    user_avatar_url=self._normalize_channel_avatar_url(
+                        data.get("uploader_avatar")
+                        or data.get("channel_thumbnail")
+                        or data.get("channelAvatarUrl")
+                        or data.get("author_avatar_url")
                         or None
                     ),
                     is_short=is_short,
@@ -1669,6 +1746,7 @@ class YouTubeScraper:
         surface: str = "videos",
         target_handle: str | None = None,
         ownership_filtered_counter: list[int] | None = None,
+        fallback_channel_avatar_url: str | None = None,
     ) -> tuple[list[YouTubeVideo], dict[str, int]]:
         videos: list[YouTubeVideo] = []
         stats: dict[str, int] = {
@@ -1685,7 +1763,12 @@ class YouTubeScraper:
                     ownership_filtered_counter[0] += 1
                 continue
             stats["checked_renderers"] += 1
-            video = self._parse_video_renderer(renderer, config, surface=surface)
+            video = self._parse_video_renderer(
+                renderer,
+                config,
+                surface=surface,
+                fallback_channel_avatar_url=fallback_channel_avatar_url,
+            )
             if not video:
                 continue
             in_range: bool | None = None
@@ -1726,12 +1809,14 @@ class YouTubeScraper:
         return_stats: bool = False,
     ) -> list[YouTubeVideo] | tuple[list[YouTubeVideo], dict[str, int]]:
         """Process video data and apply filters."""
+        fallback_channel_avatar_url = self._extract_channel_header_avatar_from_data(data)
         videos, stats = self._process_renderer_batch(
             self._iter_video_renderers(data),
             config,
             surface=surface,
             target_handle=target_handle,
             ownership_filtered_counter=ownership_filtered_counter,
+            fallback_channel_avatar_url=fallback_channel_avatar_url,
         )
         if return_stats:
             return videos, stats

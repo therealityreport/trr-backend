@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import random
 import socket
 import subprocess
 import sys
@@ -155,10 +156,14 @@ def _resolve_int_env(name: str, default: int, *, minimum: int, maximum: int) -> 
     return max(minimum, min(maximum, parsed))
 
 
+def _default_claim_batch_size_for_stage(stage: str | None) -> int:
+    return 4 if (stage or "").strip().lower() == "posts" else 2
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Process queued social ingest jobs.")
     parser.add_argument("--worker-id", default=None, help="Explicit worker id")
-    parser.add_argument("--interval", type=float, default=2.0, help="Idle sleep interval in seconds")
+    parser.add_argument("--interval", type=float, default=3.0, help="Idle sleep interval in seconds")
     parser.add_argument("--once", action="store_true", help="Process at most one job then exit")
     parser.add_argument("--run-id", default=None, help="Execute one specific run id then exit")
     parser.add_argument(
@@ -379,7 +384,7 @@ def main() -> int:
         processed = 0
         claim_batch_size = _resolve_int_env(
             "SOCIAL_JOB_CLAIM_BATCH_SIZE",
-            5,
+            _default_claim_batch_size_for_stage(stage_filter),
             minimum=1,
             maximum=25,
         )
@@ -467,7 +472,8 @@ def main() -> int:
             if args.once:
                 logger.info("No queued jobs found")
                 break
-            time.sleep(max(0.25, args.interval))
+            idle_sleep_seconds = max(0.25, args.interval) + random.uniform(0.0, 0.2)
+            time.sleep(idle_sleep_seconds)
 
         logger.info("Worker exiting: processed=%d", processed)
         return 0

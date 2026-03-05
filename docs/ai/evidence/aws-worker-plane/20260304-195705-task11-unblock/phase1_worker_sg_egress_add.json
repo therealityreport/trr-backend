@@ -1,0 +1,17 @@
+{
+    "Return": true,
+    "SecurityGroupRules": [
+        {
+            "SecurityGroupRuleId": "sgr-03a3e2b64437bdc1e",
+            "GroupId": "sg-09b039c604dd9d077",
+            "GroupOwnerId": "522814694101",
+            "IsEgress": true,
+            "IpProtocol": "tcp",
+            "FromPort": 6543,
+            "ToPort": 6543,
+            "CidrIpv4": "0.0.0.0/0",
+            "Description": "Supabase pooler Postgres",
+            "SecurityGroupRuleArn": "arn:aws:ec2:us-east-1:522814694101:security-group-rule/sgr-03a3e2b64437bdc1e"
+        }
+    ]
+}
