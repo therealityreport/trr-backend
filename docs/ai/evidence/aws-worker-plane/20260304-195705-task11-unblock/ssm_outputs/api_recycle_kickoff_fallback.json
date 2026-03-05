@@ -1,0 +1,22 @@
+{
+    "CommandId": "87b8c63d-f9ac-477d-82de-a82a99b73cce",
+    "InstanceId": "i-09b52a7ad5f88c0a1",
+    "Comment": "Task11 API recycle fallback kickoff",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 0,
+    "ExecutionStartDateTime": "2026-03-05T01:15:49.476Z",
+    "ExecutionElapsedTime": "PT0.019S",
+    "ExecutionEndDateTime": "2026-03-05T01:15:49.476Z",
+    "Status": "Success",
+    "StatusDetails": "Success",
+    "StandardOutputContent": "Internal Server Error",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

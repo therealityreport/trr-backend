@@ -28,6 +28,9 @@ from trr_backend.repositories.cast_photo_tags import (
     upsert_cast_photo_tags,
 )
 from trr_backend.repositories.identity_assignment import (
+    build_assignment_tagged_people as build_assignment_tagged_people_shared,
+)
+from trr_backend.repositories.identity_assignment import (
     build_identity_candidate_person_ids as build_identity_candidate_person_ids_shared,
 )
 from trr_backend.repositories.identity_assignment import (
@@ -47,6 +50,7 @@ from trr_backend.repositories.tagging_references import (
 router = APIRouter(prefix="/admin", tags=["admin-images"])
 logger = logging.getLogger(__name__)
 OWNER_FACE_MATCH_SIMILARITY_MIN_DEFAULT = 0.50
+OWNER_FALLBACK_CROP_MIN_CONFIDENCE_DEFAULT = 0.80
 FACE_MATCH_CROSS_FACE_LEAD_MIN = 0.45
 FACE_MATCH_CROSS_FACE_LEAD_MIN_SIMILARITY = 0.30
 FACE_MATCH_SCORE_EVIDENCE_MIN = 1e-6
@@ -119,6 +123,17 @@ def _owner_face_match_similarity_min() -> float:
         value = float(raw)
     except ValueError:
         return OWNER_FACE_MATCH_SIMILARITY_MIN_DEFAULT
+    return max(0.0, min(1.0, value))
+
+
+def _owner_fallback_crop_min_confidence() -> float:
+    raw = str(os.getenv("OWNER_FALLBACK_CROP_MIN_CONFIDENCE") or "").strip()
+    if not raw:
+        return OWNER_FALLBACK_CROP_MIN_CONFIDENCE_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return OWNER_FALLBACK_CROP_MIN_CONFIDENCE_DEFAULT
     return max(0.0, min(1.0, value))
 
 
@@ -242,6 +257,33 @@ def _build_identity_candidate_person_ids(
         tagged_people_names=tagged_people_names,
         metadata_signals=metadata_signals,
         person_name_id_cache=person_name_id_cache,
+    )
+
+
+def _build_assignment_tagged_people(
+    *,
+    db: SupabaseAdminClient | None,
+    owner_person_id: str | None,
+    owner_person_name: str | None = None,
+    tagged_people_ids: Any = None,
+    tagged_people_names: Any = None,
+    row_people_ids: Any = None,
+    row_people_names: Any = None,
+    metadata_signals: list[Any] | None = None,
+    person_name_id_cache: dict[str, str | None] | None = None,
+    person_id_name_cache: dict[str, str | None] | None = None,
+) -> tuple[list[str], list[str]]:
+    return build_assignment_tagged_people_shared(
+        db=db,
+        owner_person_id=owner_person_id,
+        owner_person_name=owner_person_name,
+        tagged_people_ids=tagged_people_ids,
+        tagged_people_names=tagged_people_names,
+        row_people_ids=row_people_ids,
+        row_people_names=row_people_names,
+        metadata_signals=metadata_signals,
+        person_name_id_cache=person_name_id_cache,
+        person_id_name_cache=person_id_name_cache,
     )
 
 
@@ -550,16 +592,108 @@ def _apply_similarity_lead_assignments(
         claimed_people.add(person_key)
 
 
+def _has_any_similarity_evidence(boxes: list[dict[str, Any]]) -> bool:
+    for box in boxes:
+        match_similarity = box.get("match_similarity")
+        if isinstance(match_similarity, (int, float)) and float(match_similarity) > FACE_MATCH_SCORE_EVIDENCE_MIN:
+            return True
+        raw_candidates = box.get("match_candidates")
+        if not isinstance(raw_candidates, list):
+            continue
+        for candidate in raw_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            similarity = candidate.get("similarity")
+            if isinstance(similarity, (int, float)) and float(similarity) > FACE_MATCH_SCORE_EVIDENCE_MIN:
+                return True
+    return False
+
+
+def _apply_owner_only_fallback_assignment(
+    boxes: list[dict[str, Any]],
+    *,
+    owner_person_id: str | None = None,
+    owner_person_name: str | None = None,
+) -> bool:
+    owner_id = _normalize_person_id(owner_person_id)
+    owner_name = str(owner_person_name or "").strip() or None
+    if not owner_id and not owner_name:
+        return False
+    protected_label_sources = {"identity_match", "owner_similarity_seed", "lead_override", "owner_fallback_map"}
+    owner_name_key = _person_name_key(owner_name)
+
+    for box in boxes:
+        box_person_id = _normalize_person_id(box.get("person_id"))
+        box_person_name_key = _person_name_key(box.get("person_name"))
+        if (owner_id and box_person_id == owner_id) or (owner_name_key and box_person_name_key == owner_name_key):
+            box["label_source"] = "owner_fallback_map"
+            box["match_status"] = "matched"
+            box["match_reason"] = "owner_fallback_map"
+            return True
+
+    candidate_indexes = [
+        idx
+        for idx, box in enumerate(boxes)
+        if str(box.get("label_source") or "").strip().lower() not in protected_label_sources
+    ]
+    if not candidate_indexes:
+        candidate_indexes = list(range(len(boxes)))
+
+    if not candidate_indexes:
+        return False
+
+    best_index = max(
+        candidate_indexes,
+        key=lambda idx: (
+            float(boxes[idx].get("confidence") or 0.0),
+            float(boxes[idx].get("width") or 0.0) * float(boxes[idx].get("height") or 0.0),
+            -float(boxes[idx].get("x") or 0.0),
+        ),
+    )
+    best_box = boxes[best_index]
+    if owner_id:
+        best_box["person_id"] = owner_id
+    if owner_name:
+        best_box["person_name"] = owner_name
+        best_box["label"] = owner_name
+    best_box["label_source"] = "owner_fallback_map"
+    best_box["match_status"] = "matched"
+    best_box["match_reason"] = "owner_fallback_map"
+    return True
+
+
 def _apply_tagged_people_assignments(
     boxes: list[dict[str, Any]],
     *,
     tagged_people_ids: Any,
     tagged_people_names: Any,
+    owner_person_id: str | None = None,
+    owner_person_name: str | None = None,
 ) -> None:
     if not boxes:
         return
+    if len(boxes) == 1 and not _has_any_similarity_evidence(boxes):
+        if _apply_owner_only_fallback_assignment(
+            boxes,
+            owner_person_id=owner_person_id,
+            owner_person_name=owner_person_name,
+        ):
+            return
+    if len(boxes) > 1 and not _has_any_similarity_evidence(boxes):
+        if _apply_owner_only_fallback_assignment(
+            boxes,
+            owner_person_id=owner_person_id,
+            owner_person_name=owner_person_name,
+        ):
+            return
     tagged_people = _build_tagged_people(tagged_people_ids, tagged_people_names)
     if not tagged_people:
+        if len(boxes) == 1:
+            _apply_owner_only_fallback_assignment(
+                boxes,
+                owner_person_id=owner_person_id,
+                owner_person_name=owner_person_name,
+            )
         return
 
     remaining_tags = list(tagged_people)
@@ -592,7 +726,7 @@ def _apply_tagged_people_assignments(
             tagged for tagged in remaining_tags if not _tagged_person_has_similarity_evidence(tagged, boxes)
         ]
 
-    protected_label_sources = {"identity_match", "owner_similarity_seed", "lead_override"}
+    protected_label_sources = {"identity_match", "owner_similarity_seed", "lead_override", "owner_fallback_map"}
     unassigned_indexes = [
         idx
         for idx, box in enumerate(boxes)
@@ -710,6 +844,8 @@ def _extract_detection_boxes(result: Any, *, kind: str) -> list[dict[str, Any]]:
         match_status_raw = getattr(det, "match_status", None)
         match_reason_raw = getattr(det, "match_reason", None)
         match_candidates_raw = getattr(det, "match_candidates", None)
+        filter_decision_raw = getattr(det, "filter_decision", None)
+        filter_metrics_raw = getattr(det, "filter_metrics", None)
         square_crop_bbox_raw = getattr(det, "square_crop_bbox", None)
         person_id = str(person_id_raw).strip() if isinstance(person_id_raw, str) and person_id_raw.strip() else None
         person_name = (
@@ -731,8 +867,20 @@ def _extract_detection_boxes(result: Any, *, kind: str) -> list[dict[str, Any]]:
             if isinstance(match_reason_raw, str) and match_reason_raw.strip()
             else None
         )
-        if kind == "face" and match_reason == "face_too_small":
-            continue
+        filter_decision = (
+            str(filter_decision_raw).strip().lower()
+            if isinstance(filter_decision_raw, str) and str(filter_decision_raw).strip()
+            else None
+        )
+        filter_metrics: dict[str, float] | None = None
+        if isinstance(filter_metrics_raw, dict):
+            candidate_metrics: dict[str, float] = {}
+            for key in ("face_w", "face_h", "face_area_ratio"):
+                raw_metric = filter_metrics_raw.get(key)
+                if isinstance(raw_metric, (int, float)):
+                    candidate_metrics[key] = float(raw_metric)
+            if candidate_metrics:
+                filter_metrics = candidate_metrics
         match_candidates: list[dict[str, Any]] = []
         if isinstance(match_candidates_raw, list):
             for candidate in match_candidates_raw:
@@ -767,6 +915,8 @@ def _extract_detection_boxes(result: Any, *, kind: str) -> list[dict[str, Any]]:
                 **({"match_status": match_status} if match_status else {}),
                 **({"match_reason": match_reason} if match_reason else {}),
                 **({"match_candidates": match_candidates} if match_candidates else {}),
+                **({"filter_decision": filter_decision} if filter_decision else {}),
+                **({"filter_metrics": filter_metrics} if filter_metrics else {}),
                 **({"square_crop_bbox": square_crop_bbox} if square_crop_bbox else {}),
             }
         )
@@ -783,6 +933,7 @@ def _build_detection_boxes(
     allow_identity_assignment: bool = True,
 ) -> list[dict[str, Any]]:
     face_boxes = _extract_detection_boxes(result, kind="face")
+    explicit_owner_name = str(owner_person_name or "").strip() or None
     tagged_people_lookup = _build_tagged_people(tagged_people_ids, tagged_people_names)
     person_name_lookup_by_id: dict[str, str] = {}
     for tagged in tagged_people_lookup:
@@ -791,7 +942,7 @@ def _build_detection_boxes(
         if tagged_id and tagged_name and tagged_id not in person_name_lookup_by_id:
             person_name_lookup_by_id[tagged_id] = tagged_name
     normalized_owner_id = _normalize_person_id(owner_person_id)
-    normalized_owner_name = str(owner_person_name or "").strip()
+    normalized_owner_name = explicit_owner_name or ""
     if normalized_owner_id and normalized_owner_name and normalized_owner_id not in person_name_lookup_by_id:
         person_name_lookup_by_id[normalized_owner_id] = normalized_owner_name
 
@@ -865,6 +1016,12 @@ def _build_detection_boxes(
                         if allow_identity_assignment and isinstance(box.get("match_candidates"), list)
                         else {}
                     ),
+                    **({"filter_decision": box.get("filter_decision")} if box.get("filter_decision") else {}),
+                    **(
+                        {"filter_metrics": box.get("filter_metrics")}
+                        if isinstance(box.get("filter_metrics"), dict)
+                        else {}
+                    ),
                     **({"square_crop_bbox": box.get("square_crop_bbox")} if box.get("square_crop_bbox") else {}),
                 }
             )
@@ -875,10 +1032,13 @@ def _build_detection_boxes(
                 tagged_people_ids=tagged_people_ids,
                 tagged_people_names=tagged_people_names,
             )
+            owner_name_for_assignment = (
+                resolved_owner_name if (normalized_owner_id or explicit_owner_name) else None
+            )
             _promote_owner_similarity_assignment(
                 out,
                 owner_person_id=owner_person_id,
-                owner_person_name=resolved_owner_name,
+                owner_person_name=owner_name_for_assignment,
                 allow_identity_assignment=allow_identity_assignment,
             )
             _apply_similarity_lead_assignments(
@@ -890,6 +1050,8 @@ def _build_detection_boxes(
                 out,
                 tagged_people_ids=tagged_people_ids,
                 tagged_people_names=tagged_people_names,
+                owner_person_id=owner_person_id,
+                owner_person_name=owner_name_for_assignment,
             )
             _backfill_assigned_person_names(
                 out,
@@ -911,17 +1073,51 @@ def _build_detection_boxes(
     )
     tagged_people = _build_tagged_people(tagged_people_ids, tagged_people_names)
     deterministic_assignments: dict[int, dict[str, str | None]] = {}
-    if allow_identity_assignment and len(tagged_people) == 1:
-        deterministic_assignments[0] = tagged_people[0]
-    elif allow_identity_assignment and len(tagged_people) == len(person_boxes):
-        for idx, tagged in enumerate(tagged_people):
-            deterministic_assignments[idx] = tagged
+    if allow_identity_assignment:
+        resolved_owner_name = _resolve_owner_person_name(
+            owner_person_id=owner_person_id,
+            owner_person_name=owner_person_name,
+            tagged_people_ids=tagged_people_ids,
+            tagged_people_names=tagged_people_names,
+        )
+        owner_name_for_assignment = resolved_owner_name if (normalized_owner_id or explicit_owner_name) else None
+        has_owner_context = bool(normalized_owner_id or owner_name_for_assignment)
+        if len(person_boxes) == 1 and has_owner_context:
+            deterministic_assignments[0] = {
+                "person_id": normalized_owner_id,
+                "person_name": owner_name_for_assignment,
+            }
+        elif len(person_boxes) > 1 and has_owner_context:
+            deterministic_assignments[0] = {
+                "person_id": normalized_owner_id,
+                "person_name": owner_name_for_assignment,
+            }
+        elif len(tagged_people) == 1:
+            deterministic_assignments[0] = tagged_people[0]
+        elif len(tagged_people) == len(person_boxes):
+            for idx, tagged in enumerate(tagged_people):
+                deterministic_assignments[idx] = tagged
 
     out: list[dict[str, Any]] = []
     for idx, box in enumerate(person_boxes, start=1):
         assignment = deterministic_assignments.get(idx - 1)
         assigned_person_id = assignment.get("person_id") if assignment else None
         assigned_person_name = assignment.get("person_name") if assignment else None
+        is_owner_assignment = bool(
+            assignment
+            and (
+                (normalized_owner_id and _normalize_person_id(assigned_person_id) == normalized_owner_id)
+                or (
+                    normalized_owner_name
+                    and _person_name_key(assigned_person_name) == _person_name_key(normalized_owner_name)
+                )
+            )
+        )
+        assignment_reason = (
+            "owner_fallback_map"
+            if is_owner_assignment and len(person_boxes) != len(tagged_people)
+            else "deterministic_tag_map"
+        )
         fallback_label = str(box.get("label") or "").strip() or f"Person {idx}"
         out.append(
             {
@@ -933,13 +1129,13 @@ def _build_detection_boxes(
                 "height": box["height"],
                 "confidence": box.get("confidence"),
                 "source_kind": "person_fallback",
-                "label_source": "deterministic_tag_map" if assignment else "generic",
+                "label_source": assignment_reason if assignment else "generic",
                 "fallback_reason": "no_faces_detected",
                 "label": assigned_person_name or fallback_label,
                 **({"person_id": assigned_person_id} if assigned_person_id else {}),
                 **({"person_name": assigned_person_name} if assigned_person_name else {}),
                 **({"match_status": "matched"} if assignment else {}),
-                **({"match_reason": "deterministic_tag_map"} if assignment else {}),
+                **({"match_reason": assignment_reason} if assignment else {}),
                 **({"square_crop_bbox": box.get("square_crop_bbox")} if box.get("square_crop_bbox") else {}),
             }
         )
@@ -970,6 +1166,28 @@ def _auto_people_from_face_boxes(face_boxes: list[dict[str, Any]]) -> tuple[list
                 seen_names.add(key)
                 people_names.append(normalized_name)
     return people_ids, people_names
+
+
+def _build_face_filter_diagnostics(result: Any) -> dict[str, Any] | None:
+    face_count_raw = getattr(result, "face_count_raw", None)
+    face_count_filtered = getattr(result, "face_count_filtered", None)
+    raw_thresholds = getattr(result, "face_filter_thresholds", None)
+    payload: dict[str, Any] = {}
+    if isinstance(face_count_raw, int) and face_count_raw >= 0:
+        payload["raw"] = face_count_raw
+    if isinstance(face_count_filtered, int) and face_count_filtered >= 0:
+        payload["filtered"] = face_count_filtered
+    if isinstance(raw_thresholds, dict):
+        min_side_px = raw_thresholds.get("min_side_px")
+        min_area_ratio = raw_thresholds.get("min_area_ratio")
+        thresholds: dict[str, Any] = {}
+        if isinstance(min_side_px, int) and min_side_px > 0:
+            thresholds["min_side_px"] = min_side_px
+        if isinstance(min_area_ratio, (int, float)) and float(min_area_ratio) >= 0:
+            thresholds["min_area_ratio"] = float(min_area_ratio)
+        if thresholds:
+            payload["thresholds"] = thresholds
+    return payload or None
 
 
 def _normalize_thumbnail_crop_payload(value: Any) -> dict[str, Any] | None:
@@ -1026,17 +1244,20 @@ def _owner_face_crop_payload(
         return None
 
     min_similarity = _owner_face_match_similarity_min()
+    min_fallback_confidence = _owner_fallback_crop_min_confidence()
     qualified_candidates: list[dict[str, Any]] = []
     for box in candidates:
         match_status = str(box.get("match_status") or "").strip().lower()
         match_similarity = box.get("match_similarity")
         if match_status != "matched":
             continue
-        if not isinstance(match_similarity, (int, float)):
+        if isinstance(match_similarity, (int, float)) and float(match_similarity) >= min_similarity:
+            qualified_candidates.append(box)
             continue
-        if float(match_similarity) < min_similarity:
-            continue
-        qualified_candidates.append(box)
+        label_source = str(box.get("label_source") or "").strip().lower()
+        confidence = float(box.get("confidence") or 0.0)
+        if label_source == "owner_fallback_map" and confidence >= min_fallback_confidence:
+            qualified_candidates.append(box)
     if not qualified_candidates:
         return None
 
@@ -1098,6 +1319,8 @@ class FaceBox(BaseModel):
     match_status: str | None = None
     match_reason: str | None = None
     match_candidates: list[dict[str, Any]] | None = None
+    filter_decision: str | None = None
+    filter_metrics: dict[str, float] | None = None
     square_crop_bbox: list[float] | None = None
 
 
@@ -1183,15 +1406,33 @@ def auto_count_cast_photo(
         tagged_people_ids=existing_people_ids,
         tagged_people_names=existing_people_names,
     )
+    person_name_id_cache: dict[str, str | None] = {}
+    person_id_name_cache: dict[str, str | None] = {}
+    assignment_people_ids, assignment_people_names = _build_assignment_tagged_people(
+        db=db,
+        owner_person_id=owner_person_id,
+        tagged_people_ids=existing_people_ids,
+        tagged_people_names=existing_people_names,
+        row_people_names=row.get("people_names"),
+        metadata_signals=[
+            existing_people_names,
+            row.get("people_names"),
+            row.get("title_names"),
+            row.get("caption"),
+            row.get("source_page_url"),
+            metadata,
+        ],
+        person_name_id_cache=person_name_id_cache,
+        person_id_name_cache=person_id_name_cache,
+    )
     candidate_person_ids = _build_identity_candidate_person_ids(
         db=db,
         allow_identity_assignment=allow_identity_assignment,
         owner_person_id=owner_person_id,
-        tagged_people_ids=existing_people_ids,
-        tagged_people_names=existing_people_names,
+        tagged_people_ids=assignment_people_ids,
+        tagged_people_names=assignment_people_names,
         metadata_signals=[
-            existing_people_names,
-            row.get("people_names"),
+            assignment_people_names,
             row.get("title_names"),
             row.get("caption"),
             row.get("source_page_url"),
@@ -1208,7 +1449,6 @@ def auto_count_cast_photo(
         except ValueError:
             request_show_id = None
     reference_cache: dict[str, list[dict[str, Any]]] = {}
-    person_id_name_cache: dict[str, str | None] = {}
     person_reference_images = _resolve_runtime_person_reference_pools(
         db,
         candidate_person_ids=candidate_person_ids,
@@ -1292,13 +1532,14 @@ def auto_count_cast_photo(
         raise HTTPException(status_code=502, detail=str(last_error or "Failed to auto-count cast photo"))
     face_boxes = _build_detection_boxes(
         result,
-        tagged_people_ids=existing_people_ids,
-        tagged_people_names=existing_people_names,
+        tagged_people_ids=assignment_people_ids,
+        tagged_people_names=assignment_people_names,
         owner_person_id=owner_person_id,
         owner_person_name=owner_person_name,
         allow_identity_assignment=allow_identity_assignment,
     )
     auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
+    face_filter_diagnostics = _build_face_filter_diagnostics(result)
     reference_profile_raw = getattr(result, "reference_profile", None)
     reference_profile_result = reference_profile_raw if isinstance(reference_profile_raw, dict) else None
     reference_profile_used = reference_profile_result.get("used") if reference_profile_result else None
@@ -1315,11 +1556,17 @@ def auto_count_cast_photo(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to sync owner tagging references for cast photo %s: %s", photo_id, exc)
+    if force:
+        resolved_people_names = auto_people_names or assignment_people_names or existing_people_names or None
+        resolved_people_ids = auto_people_ids or assignment_people_ids or existing_people_ids or None
+    else:
+        resolved_people_names = existing_people_names if existing_people_names else (auto_people_names or None)
+        resolved_people_ids = existing_people_ids if existing_people_ids else (auto_people_ids or None)
     upsert_cast_photo_tags(
         db,
         cast_photo_id=str(photo_id),
-        people_names=existing_people_names if existing_people_names else (auto_people_names or None),
-        people_ids=existing_people_ids if existing_people_ids else (auto_people_ids or None),
+        people_names=resolved_people_names,
+        people_ids=resolved_people_ids,
         people_count=result.people_count,
         people_count_source="auto",
         detector=result.detector,
@@ -1345,6 +1592,10 @@ def auto_count_cast_photo(
     if metadata.get("face_boxes") != face_boxes:
         metadata["face_boxes"] = face_boxes
         metadata_changed = True
+    if face_filter_diagnostics is not None:
+        if metadata.get("face_detection_diagnostics") != face_filter_diagnostics:
+            metadata["face_detection_diagnostics"] = face_filter_diagnostics
+            metadata_changed = True
 
     owner_crop_payload = _owner_face_crop_payload(
         face_boxes,
@@ -1466,14 +1717,37 @@ def auto_count_media_asset(
         None,
     )
     context_for_refs = primary_context_for_refs if isinstance(primary_context_for_refs, dict) else {}
-    candidate_person_ids = _build_identity_candidate_person_ids(
+    person_name_id_cache: dict[str, str | None] = {}
+    person_id_name_cache: dict[str, str | None] = {}
+    assignment_people_ids, assignment_people_names = _build_assignment_tagged_people(
         db=db,
-        allow_identity_assignment=allow_identity_assignment,
-        owner_person_id=None,
+        owner_person_id=owner_person_id,
+        owner_person_name=owner_person_name,
         tagged_people_ids=tagged_people_ids,
         tagged_people_names=tagged_people_names,
         metadata_signals=[
             tagged_people_names,
+            context_for_refs.get("titles"),
+            context_for_refs.get("caption"),
+            context_for_refs.get("name"),
+            context_for_refs.get("title"),
+            context_for_refs.get("episode"),
+            context_for_refs.get("original_source_page"),
+            context_for_refs,
+            row.get("caption"),
+            row.get("metadata"),
+        ],
+        person_name_id_cache=person_name_id_cache,
+        person_id_name_cache=person_id_name_cache,
+    )
+    candidate_person_ids = _build_identity_candidate_person_ids(
+        db=db,
+        allow_identity_assignment=allow_identity_assignment,
+        owner_person_id=owner_person_id,
+        tagged_people_ids=assignment_people_ids,
+        tagged_people_names=assignment_people_names,
+        metadata_signals=[
+            assignment_people_names,
             context_for_refs.get("titles"),
             context_for_refs.get("caption"),
             context_for_refs.get("name"),
@@ -1495,7 +1769,6 @@ def auto_count_media_asset(
         except ValueError:
             request_show_id = None
     reference_cache: dict[str, list[dict[str, Any]]] = {}
-    person_id_name_cache: dict[str, str | None] = {}
     person_reference_images = _resolve_runtime_person_reference_pools(
         db,
         candidate_person_ids=candidate_person_ids,
@@ -1589,13 +1862,14 @@ def auto_count_media_asset(
         raise HTTPException(status_code=502, detail=str(last_error or "Failed to auto-count media asset"))
     face_boxes = _build_detection_boxes(
         result,
-        tagged_people_ids=tagged_people_ids,
-        tagged_people_names=tagged_people_names,
+        tagged_people_ids=assignment_people_ids,
+        tagged_people_names=assignment_people_names,
         owner_person_id=owner_person_id,
         owner_person_name=owner_person_name,
         allow_identity_assignment=allow_identity_assignment,
     )
     auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
+    face_filter_diagnostics = _build_face_filter_diagnostics(result)
     reference_profile_raw = getattr(result, "reference_profile", None)
     reference_profile_result = reference_profile_raw if isinstance(reference_profile_raw, dict) else None
     reference_profile_used = reference_profile_result.get("used") if reference_profile_result else None
@@ -1627,9 +1901,22 @@ def auto_count_media_asset(
         "people_count_detector": result.detector,
         "face_boxes": face_boxes,
         "face_crops": face_crops,
-        **({"people_ids": auto_people_ids} if auto_people_ids else {}),
-        **({"people_names": auto_people_names} if auto_people_names else {}),
+        **({"face_detection_diagnostics": face_filter_diagnostics} if face_filter_diagnostics else {}),
     }
+    if force:
+        if auto_people_ids:
+            context_auto_update["people_ids"] = auto_people_ids
+        elif assignment_people_ids:
+            context_auto_update["people_ids"] = assignment_people_ids
+        if auto_people_names:
+            context_auto_update["people_names"] = auto_people_names
+        elif assignment_people_names:
+            context_auto_update["people_names"] = assignment_people_names
+    else:
+        if auto_people_ids:
+            context_auto_update["people_ids"] = auto_people_ids
+        if auto_people_names:
+            context_auto_update["people_names"] = auto_people_names
     update_person_links_context(
         db,
         links,
@@ -1908,6 +2195,7 @@ def auto_count_show_images(
             allow_identity_assignment=allow_identity_assignment,
         )
         auto_people_ids, auto_people_names = _auto_people_from_face_boxes(face_boxes)
+        face_filter_diagnostics = _build_face_filter_diagnostics(result)
         face_crops: list[dict[str, Any]] = []
         if selected_image_url and face_boxes:
             face_crops = generate_and_upload_face_crops(
@@ -1923,6 +2211,7 @@ def auto_count_show_images(
             "people_count_detector": result.detector,
             "face_boxes": face_boxes,
             "face_crops": face_crops,
+            **({"face_detection_diagnostics": face_filter_diagnostics} if face_filter_diagnostics else {}),
             **({"people_ids": auto_people_ids} if auto_people_ids else {}),
             **({"people_names": auto_people_names} if auto_people_names else {}),
         }

@@ -2304,7 +2304,13 @@ def test_tiktok_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(
         scraper,
         "_parse_post_item",
-        lambda item, cfg: SimpleNamespace(video_id="vid-1", date_time="2026-01-01", views=100),
+        lambda item, cfg: SimpleNamespace(
+            video_id="vid-1",
+            date_time="2026-01-01",
+            views=100,
+            thumbnail_url=None,
+            url=f"https://www.tiktok.com/@bravotv/video/{item.get('id', 'vid-1')}",
+        ),
     )
     monkeypatch.setattr(scraper, "_has_ytdlp", lambda: False)
 
@@ -2351,7 +2357,13 @@ def test_tiktok_scrape_skips_items_without_valid_timestamp(monkeypatch: pytest.M
     def _fake_parse(item: dict, cfg: TikTokScrapeConfig) -> SimpleNamespace:
         del cfg
         parsed_ids.append(str(item.get("id") or ""))
-        return SimpleNamespace(video_id=str(item.get("id") or ""), date_time="2026-01-01", views=100)
+        return SimpleNamespace(
+            video_id=str(item.get("id") or ""),
+            date_time="2026-01-01",
+            views=100,
+            thumbnail_url=None,
+            url=f"https://www.tiktok.com/@bravotv/video/{item.get('id', '')}",
+        )
 
     monkeypatch.setattr(scraper, "_parse_post_item", _fake_parse)
     monkeypatch.setattr(scraper, "_has_ytdlp", lambda: False)

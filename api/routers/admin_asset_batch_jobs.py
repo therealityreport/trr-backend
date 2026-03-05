@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,7 @@ from api.routers.admin_media_assets import (
     detect_text_overlay_media_asset,
     generate_variants_for_media_asset,
 )
+from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-asset-batch-jobs"])
 
@@ -307,384 +308,436 @@ def _execute_target_operation(
     raise RuntimeError(f"Unsupported target operation: {origin}/{operation}")
 
 
-def _stream_batch_jobs(
+def _run_batch_jobs_events(
     *,
-    show_id: UUID,
+    show_id_str: str,
+    season_number: int | None,
     payload: BatchJobsRequest,
     db: SupabaseAdminClient,
-    season_number: int | None = None,
-) -> StreamingResponse:
-    show_id_str = str(show_id)
+):
     operations = list(dict.fromkeys(payload.operations))
     allowed_content_types = {_normalize_content_type(item) for item in payload.content_types if item}
     allowed_content_types.discard("")
     total = len(payload.targets) * len(operations)
 
-    def event_generator():
-        attempted = 0
-        succeeded = 0
-        failed = 0
-        skipped = 0
-        current = 0
+    attempted = 0
+    succeeded = 0
+    failed = 0
+    skipped = 0
+    current = 0
 
-        skip_reasons: dict[str, int] = defaultdict(int)
-        failure_reasons: dict[str, int] = defaultdict(int)
-        operation_counts: dict[str, dict[str, int]] = {
-            op: {"attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0} for op in operations
+    skip_reasons: dict[str, int] = defaultdict(int)
+    failure_reasons: dict[str, int] = defaultdict(int)
+    operation_counts: dict[str, dict[str, int]] = {
+        op: {"attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0} for op in operations
+    }
+
+    def operation_counts_snapshot() -> dict[str, dict[str, int]]:
+        return {
+            op: {
+                "attempted": int(values.get("attempted", 0)),
+                "succeeded": int(values.get("succeeded", 0)),
+                "failed": int(values.get("failed", 0)),
+                "skipped": int(values.get("skipped", 0)),
+            }
+            for op, values in operation_counts.items()
         }
 
-        def operation_counts_snapshot() -> dict[str, dict[str, int]]:
-            return {
-                op: {
-                    "attempted": int(values.get("attempted", 0)),
-                    "succeeded": int(values.get("succeeded", 0)),
-                    "failed": int(values.get("failed", 0)),
-                    "skipped": int(values.get("skipped", 0)),
-                }
-                for op, values in operation_counts.items()
-            }
+    def live_counts_snapshot() -> dict[str, int]:
+        snap = operation_counts_snapshot()
+        return {
+            "synced": 0,
+            "mirrored": 0,
+            "counted": int(snap.get("count", {}).get("succeeded", 0)),
+            "cropped": int(snap.get("crop", {}).get("succeeded", 0)),
+            "id_text": int(snap.get("id_text", {}).get("succeeded", 0)),
+            "resized": int(snap.get("resize", {}).get("succeeded", 0)),
+        }
 
-        def live_counts_snapshot() -> dict[str, int]:
-            snap = operation_counts_snapshot()
-            return {
-                "synced": 0,
-                "mirrored": 0,
-                "counted": int(snap.get("count", {}).get("succeeded", 0)),
-                "cropped": int(snap.get("crop", {}).get("succeeded", 0)),
-                "id_text": int(snap.get("id_text", {}).get("succeeded", 0)),
-                "resized": int(snap.get("resize", {}).get("succeeded", 0)),
-            }
-
-        def emit_progress(payload: dict[str, Any]) -> str:
-            return _yield_event(
-                "progress",
-                {
-                    **payload,
-                    "operation_counts": operation_counts_snapshot(),
-                    "live_counts": live_counts_snapshot(),
-                },
-            )
-
-        yield emit_progress(
+    def emit_progress(next_payload: dict[str, Any]) -> str:
+        return _yield_event(
+            "progress",
             {
-                "show_id": show_id_str,
-                "season_number": season_number,
-                "stage": "starting",
-                "message": "Starting batch jobs...",
-                "current": 0,
-                "total": total,
-            },
-        )
-
-        for target in payload.targets:
-            target_id = str(target.id or "").strip()
-            origin_raw = str(target.origin or "").strip().lower()
-            content_type = _normalize_content_type(target.content_type)
-
-            for operation in operations:
-                current += 1
-                operation_counts[operation]["attempted"] += 1
-
-                if not target_id:
-                    skipped += 1
-                    operation_counts[operation]["skipped"] += 1
-                    skip_reasons["skipped_missing_target_id"] += 1
-                    yield emit_progress(
-                        {
-                            "show_id": show_id_str,
-                            "season_number": season_number,
-                            "stage": "batch_jobs",
-                            "message": "Skipped target with missing id.",
-                            "current": current,
-                            "total": total,
-                            "operation": operation,
-                            "skip_reason": "skipped_missing_target_id",
-                        },
-                    )
-                    continue
-
-                if allowed_content_types and content_type not in allowed_content_types:
-                    skipped += 1
-                    operation_counts[operation]["skipped"] += 1
-                    skip_reasons["skipped_content_type_filtered"] += 1
-                    yield emit_progress(
-                        {
-                            "show_id": show_id_str,
-                            "season_number": season_number,
-                            "stage": "batch_jobs",
-                            "message": f"Skipped {target_id}: filtered by content type.",
-                            "current": current,
-                            "total": total,
-                            "operation": operation,
-                            "origin": origin_raw,
-                            "target_id": target_id,
-                            "skip_reason": "skipped_content_type_filtered",
-                        },
-                    )
-                    continue
-
-                if origin_raw not in {"cast_photos", "media_assets"}:
-                    skipped += 1
-                    operation_counts[operation]["skipped"] += 1
-                    skip_reasons["skipped_unsupported_origin"] += 1
-                    yield emit_progress(
-                        {
-                            "show_id": show_id_str,
-                            "season_number": season_number,
-                            "stage": "batch_jobs",
-                            "message": f"Skipped {target_id}: unsupported origin {origin_raw}.",
-                            "current": current,
-                            "total": total,
-                            "operation": operation,
-                            "origin": origin_raw,
-                            "target_id": target_id,
-                            "skip_reason": "skipped_unsupported_origin",
-                        },
-                    )
-                    continue
-
-                origin = origin_raw
-
-                if season_number is not None:
-                    try:
-                        row_show_id, row_season_number, scope_error = _fetch_target_scope_fields(db, origin, target_id)
-                    except Exception as exc:  # noqa: BLE001
-                        skipped += 1
-                        operation_counts[operation]["skipped"] += 1
-                        skip_reasons["skipped_scope_lookup_failed"] += 1
-                        yield emit_progress(
-                            {
-                                "show_id": show_id_str,
-                                "season_number": season_number,
-                                "stage": "batch_jobs",
-                                "message": f"Skipped {target_id}: scope lookup failed ({exc}).",
-                                "current": current,
-                                "total": total,
-                                "operation": operation,
-                                "origin": origin,
-                                "target_id": target_id,
-                                "skip_reason": "skipped_scope_lookup_failed",
-                            },
-                        )
-                        continue
-
-                    if scope_error == "not_found":
-                        skipped += 1
-                        operation_counts[operation]["skipped"] += 1
-                        skip_reasons["skipped_not_found"] += 1
-                        yield emit_progress(
-                            {
-                                "show_id": show_id_str,
-                                "season_number": season_number,
-                                "stage": "batch_jobs",
-                                "message": f"Skipped {target_id}: target not found.",
-                                "current": current,
-                                "total": total,
-                                "operation": operation,
-                                "origin": origin,
-                                "target_id": target_id,
-                                "skip_reason": "skipped_not_found",
-                            },
-                        )
-                        continue
-
-                    if row_show_id != show_id_str:
-                        skipped += 1
-                        operation_counts[operation]["skipped"] += 1
-                        skip_reasons["skipped_out_of_scope_show"] += 1
-                        yield emit_progress(
-                            {
-                                "show_id": show_id_str,
-                                "season_number": season_number,
-                                "stage": "batch_jobs",
-                                "message": f"Skipped {target_id}: target does not belong to this show.",
-                                "current": current,
-                                "total": total,
-                                "operation": operation,
-                                "origin": origin,
-                                "target_id": target_id,
-                                "skip_reason": "skipped_out_of_scope_show",
-                            },
-                        )
-                        continue
-
-                    if row_season_number != season_number:
-                        skipped += 1
-                        operation_counts[operation]["skipped"] += 1
-                        skip_reasons["skipped_out_of_scope_season"] += 1
-                        yield emit_progress(
-                            {
-                                "show_id": show_id_str,
-                                "season_number": season_number,
-                                "stage": "batch_jobs",
-                                "message": f"Skipped {target_id}: target does not belong to season {season_number}.",
-                                "current": current,
-                                "total": total,
-                                "operation": operation,
-                                "origin": origin,
-                                "target_id": target_id,
-                                "skip_reason": "skipped_out_of_scope_season",
-                            },
-                        )
-                        continue
-
-                attempted += 1
-                try:
-                    operation_result = _execute_target_operation(
-                        origin=origin,
-                        target_id=target_id,
-                        operation=operation,
-                        force=bool(payload.force),
-                        db=db,
-                    )
-                    succeeded += 1
-                    operation_counts[operation]["succeeded"] += 1
-                    crop_source = operation_result.get("crop_source") if isinstance(operation_result, dict) else None
-                    detail_suffix = (
-                        f" (crop source: {crop_source})."
-                        if operation == "resize" and isinstance(crop_source, str) and crop_source
-                        else "."
-                    )
-                    yield emit_progress(
-                        {
-                            "show_id": show_id_str,
-                            "season_number": season_number,
-                            "stage": "batch_jobs",
-                            "message": f"{operation} succeeded for {target_id}{detail_suffix}",
-                            "current": current,
-                            "total": total,
-                            "operation": operation,
-                            "origin": origin,
-                            "target_id": target_id,
-                            **({"crop_source": crop_source} if crop_source else {}),
-                        },
-                    )
-                except ValueError:
-                    skipped += 1
-                    operation_counts[operation]["skipped"] += 1
-                    skip_reasons["skipped_invalid_target_id"] += 1
-                    yield emit_progress(
-                        {
-                            "show_id": show_id_str,
-                            "season_number": season_number,
-                            "stage": "batch_jobs",
-                            "message": f"Skipped {target_id}: invalid target id.",
-                            "current": current,
-                            "total": total,
-                            "operation": operation,
-                            "origin": origin,
-                            "target_id": target_id,
-                            "skip_reason": "skipped_invalid_target_id",
-                        },
-                    )
-                except HTTPException as exc:
-                    reason = f"http_{int(exc.status_code)}"
-                    if int(exc.status_code) in {404, 409}:
-                        skipped += 1
-                        operation_counts[operation]["skipped"] += 1
-                        skip_reasons[f"skipped_{reason}"] += 1
-                        yield emit_progress(
-                            {
-                                "show_id": show_id_str,
-                                "season_number": season_number,
-                                "stage": "batch_jobs",
-                                "message": f"Skipped {target_id}: {exc.detail}",
-                                "current": current,
-                                "total": total,
-                                "operation": operation,
-                                "origin": origin,
-                                "target_id": target_id,
-                                "skip_reason": f"skipped_{reason}",
-                            },
-                        )
-                    else:
-                        failed += 1
-                        operation_counts[operation]["failed"] += 1
-                        failure_reasons[reason] += 1
-                        yield emit_progress(
-                            {
-                                "show_id": show_id_str,
-                                "season_number": season_number,
-                                "stage": "batch_jobs",
-                                "message": f"{operation} failed for {target_id}: {exc.detail}",
-                                "current": current,
-                                "total": total,
-                                "operation": operation,
-                                "origin": origin,
-                                "target_id": target_id,
-                                "error": str(exc.detail),
-                            },
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    failed += 1
-                    operation_counts[operation]["failed"] += 1
-                    failure_reasons["unhandled_error"] += 1
-                    yield emit_progress(
-                        {
-                            "show_id": show_id_str,
-                            "season_number": season_number,
-                            "stage": "batch_jobs",
-                            "message": f"{operation} failed for {target_id}.",
-                            "current": current,
-                            "total": total,
-                            "operation": operation,
-                            "origin": origin,
-                            "target_id": target_id,
-                            "error": str(exc),
-                        },
-                    )
-
-        yield _yield_event(
-            "complete",
-            {
-                "show_id": show_id_str,
-                "season_number": season_number,
-                "operations": operations,
-                "content_types": sorted(allowed_content_types),
-                "targets": len(payload.targets),
-                "attempted": attempted,
-                "succeeded": succeeded,
-                "failed": failed,
-                "skipped": skipped,
-                "skip_reasons": dict(skip_reasons),
-                "failure_reasons": dict(failure_reasons),
+                **next_payload,
                 "operation_counts": operation_counts_snapshot(),
                 "live_counts": live_counts_snapshot(),
             },
         )
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
+    yield emit_progress(
+        {
+            "show_id": show_id_str,
+            "season_number": season_number,
+            "stage": "starting",
+            "message": "Starting batch jobs...",
+            "current": 0,
+            "total": total,
         },
     )
+
+    for target in payload.targets:
+        target_id = str(target.id or "").strip()
+        origin_raw = str(target.origin or "").strip().lower()
+        content_type = _normalize_content_type(target.content_type)
+
+        for operation in operations:
+            current += 1
+            operation_counts[operation]["attempted"] += 1
+
+            if not target_id:
+                skipped += 1
+                operation_counts[operation]["skipped"] += 1
+                skip_reasons["skipped_missing_target_id"] += 1
+                yield emit_progress(
+                    {
+                        "show_id": show_id_str,
+                        "season_number": season_number,
+                        "stage": "batch_jobs",
+                        "message": "Skipped target with missing id.",
+                        "current": current,
+                        "total": total,
+                        "operation": operation,
+                        "skip_reason": "skipped_missing_target_id",
+                    },
+                )
+                continue
+
+            if allowed_content_types and content_type not in allowed_content_types:
+                skipped += 1
+                operation_counts[operation]["skipped"] += 1
+                skip_reasons["skipped_content_type_filtered"] += 1
+                yield emit_progress(
+                    {
+                        "show_id": show_id_str,
+                        "season_number": season_number,
+                        "stage": "batch_jobs",
+                        "message": f"Skipped {target_id}: filtered by content type.",
+                        "current": current,
+                        "total": total,
+                        "operation": operation,
+                        "origin": origin_raw,
+                        "target_id": target_id,
+                        "skip_reason": "skipped_content_type_filtered",
+                    },
+                )
+                continue
+
+            if origin_raw not in {"cast_photos", "media_assets"}:
+                skipped += 1
+                operation_counts[operation]["skipped"] += 1
+                skip_reasons["skipped_unsupported_origin"] += 1
+                yield emit_progress(
+                    {
+                        "show_id": show_id_str,
+                        "season_number": season_number,
+                        "stage": "batch_jobs",
+                        "message": f"Skipped {target_id}: unsupported origin {origin_raw}.",
+                        "current": current,
+                        "total": total,
+                        "operation": operation,
+                        "origin": origin_raw,
+                        "target_id": target_id,
+                        "skip_reason": "skipped_unsupported_origin",
+                    },
+                )
+                continue
+
+            origin = origin_raw
+
+            if season_number is not None:
+                try:
+                    row_show_id, row_season_number, scope_error = _fetch_target_scope_fields(db, origin, target_id)
+                except Exception as exc:  # noqa: BLE001
+                    skipped += 1
+                    operation_counts[operation]["skipped"] += 1
+                    skip_reasons["skipped_scope_lookup_failed"] += 1
+                    yield emit_progress(
+                        {
+                            "show_id": show_id_str,
+                            "season_number": season_number,
+                            "stage": "batch_jobs",
+                            "message": f"Skipped {target_id}: scope lookup failed ({exc}).",
+                            "current": current,
+                            "total": total,
+                            "operation": operation,
+                            "origin": origin,
+                            "target_id": target_id,
+                            "skip_reason": "skipped_scope_lookup_failed",
+                        },
+                    )
+                    continue
+
+                if scope_error == "not_found":
+                    skipped += 1
+                    operation_counts[operation]["skipped"] += 1
+                    skip_reasons["skipped_not_found"] += 1
+                    yield emit_progress(
+                        {
+                            "show_id": show_id_str,
+                            "season_number": season_number,
+                            "stage": "batch_jobs",
+                            "message": f"Skipped {target_id}: target not found.",
+                            "current": current,
+                            "total": total,
+                            "operation": operation,
+                            "origin": origin,
+                            "target_id": target_id,
+                            "skip_reason": "skipped_not_found",
+                        },
+                    )
+                    continue
+
+                if row_show_id != show_id_str:
+                    skipped += 1
+                    operation_counts[operation]["skipped"] += 1
+                    skip_reasons["skipped_out_of_scope_show"] += 1
+                    yield emit_progress(
+                        {
+                            "show_id": show_id_str,
+                            "season_number": season_number,
+                            "stage": "batch_jobs",
+                            "message": f"Skipped {target_id}: target does not belong to this show.",
+                            "current": current,
+                            "total": total,
+                            "operation": operation,
+                            "origin": origin,
+                            "target_id": target_id,
+                            "skip_reason": "skipped_out_of_scope_show",
+                        },
+                    )
+                    continue
+
+                if row_season_number != season_number:
+                    skipped += 1
+                    operation_counts[operation]["skipped"] += 1
+                    skip_reasons["skipped_out_of_scope_season"] += 1
+                    yield emit_progress(
+                        {
+                            "show_id": show_id_str,
+                            "season_number": season_number,
+                            "stage": "batch_jobs",
+                            "message": f"Skipped {target_id}: target does not belong to season {season_number}.",
+                            "current": current,
+                            "total": total,
+                            "operation": operation,
+                            "origin": origin,
+                            "target_id": target_id,
+                            "skip_reason": "skipped_out_of_scope_season",
+                        },
+                    )
+                    continue
+
+            attempted += 1
+            try:
+                operation_result = _execute_target_operation(
+                    origin=origin,
+                    target_id=target_id,
+                    operation=operation,
+                    force=bool(payload.force),
+                    db=db,
+                )
+                succeeded += 1
+                operation_counts[operation]["succeeded"] += 1
+                crop_source = operation_result.get("crop_source") if isinstance(operation_result, dict) else None
+                detail_suffix = (
+                    f" (crop source: {crop_source})."
+                    if operation == "resize" and isinstance(crop_source, str) and crop_source
+                    else "."
+                )
+                yield emit_progress(
+                    {
+                        "show_id": show_id_str,
+                        "season_number": season_number,
+                        "stage": "batch_jobs",
+                        "message": f"{operation} succeeded for {target_id}{detail_suffix}",
+                        "current": current,
+                        "total": total,
+                        "operation": operation,
+                        "origin": origin,
+                        "target_id": target_id,
+                        **({"crop_source": crop_source} if crop_source else {}),
+                    },
+                )
+            except ValueError:
+                skipped += 1
+                operation_counts[operation]["skipped"] += 1
+                skip_reasons["skipped_invalid_target_id"] += 1
+                yield emit_progress(
+                    {
+                        "show_id": show_id_str,
+                        "season_number": season_number,
+                        "stage": "batch_jobs",
+                        "message": f"Skipped {target_id}: invalid target id.",
+                        "current": current,
+                        "total": total,
+                        "operation": operation,
+                        "origin": origin,
+                        "target_id": target_id,
+                        "skip_reason": "skipped_invalid_target_id",
+                    },
+                )
+            except HTTPException as exc:
+                reason = f"http_{int(exc.status_code)}"
+                if int(exc.status_code) in {404, 409}:
+                    skipped += 1
+                    operation_counts[operation]["skipped"] += 1
+                    skip_reasons[f"skipped_{reason}"] += 1
+                    yield emit_progress(
+                        {
+                            "show_id": show_id_str,
+                            "season_number": season_number,
+                            "stage": "batch_jobs",
+                            "message": f"Skipped {target_id}: {exc.detail}",
+                            "current": current,
+                            "total": total,
+                            "operation": operation,
+                            "origin": origin,
+                            "target_id": target_id,
+                            "skip_reason": f"skipped_{reason}",
+                        },
+                    )
+                else:
+                    failed += 1
+                    operation_counts[operation]["failed"] += 1
+                    failure_reasons[reason] += 1
+                    yield emit_progress(
+                        {
+                            "show_id": show_id_str,
+                            "season_number": season_number,
+                            "stage": "batch_jobs",
+                            "message": f"{operation} failed for {target_id}: {exc.detail}",
+                            "current": current,
+                            "total": total,
+                            "operation": operation,
+                            "origin": origin,
+                            "target_id": target_id,
+                            "error": str(exc.detail),
+                        },
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                operation_counts[operation]["failed"] += 1
+                failure_reasons["unhandled_error"] += 1
+                yield emit_progress(
+                    {
+                        "show_id": show_id_str,
+                        "season_number": season_number,
+                        "stage": "batch_jobs",
+                        "message": f"{operation} failed for {target_id}.",
+                        "current": current,
+                        "total": total,
+                        "operation": operation,
+                        "origin": origin,
+                        "target_id": target_id,
+                        "error": str(exc),
+                    },
+                )
+
+    yield _yield_event(
+        "complete",
+        {
+            "show_id": show_id_str,
+            "season_number": season_number,
+            "operations": operations,
+            "content_types": sorted(allowed_content_types),
+            "targets": len(payload.targets),
+            "attempted": attempted,
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "skip_reasons": dict(skip_reasons),
+            "failure_reasons": dict(failure_reasons),
+            "operation_counts": operation_counts_snapshot(),
+            "live_counts": live_counts_snapshot(),
+        },
+    )
+
+
+def build_batch_jobs_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    db: SupabaseAdminClient | None = None,
+):
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    parsed_payload = BatchJobsRequest.model_validate(payload_data)
+    show_id_str = str(request_payload.get("show_id") or "").strip()
+    if not show_id_str:
+        raise ValueError("request_payload.show_id is required")
+    season_number = _parse_season_number(request_payload.get("season_number"))
+
+    def _producer():
+        local_db = db or create_supabase_admin_client()
+        return _run_batch_jobs_events(
+            show_id_str=show_id_str,
+            season_number=season_number,
+            payload=parsed_payload,
+            db=local_db,
+        )
+
+    return _producer
+
+
+def _stream_batch_jobs(
+    *,
+    show_id: UUID,
+    payload: BatchJobsRequest,
+    db: SupabaseAdminClient,
+    request: Request,
+    initiated_by: str | None = None,
+    season_number: int | None = None,
+) -> StreamingResponse:
+    show_id_str = str(show_id)
+    request_payload = {
+        "show_id": show_id_str,
+        "season_number": season_number,
+        "payload": payload.model_dump(mode="json"),
+    }
+    producer = build_batch_jobs_operation_producer(request_payload=request_payload, db=db)
+    operation = start_operation_for_stream(
+        operation_type="admin_asset_batch_jobs",
+        producer=producer,
+        request_payload=request_payload,
+        initiated_by=initiated_by,
+        request=request,
+    )
+    return operation_stream_response(str(operation.get("id")), request=request)
 
 
 @router.post("/{show_id}/assets/batch-jobs/stream")
 def batch_jobs_for_show_stream(
     show_id: UUID,
+    request: Request,
     payload: BatchJobsRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    admin: AdminUser = None,
 ) -> StreamingResponse:
-    return _stream_batch_jobs(show_id=show_id, payload=payload or BatchJobsRequest(operations=["count"]), db=db)
+    actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
+    return _stream_batch_jobs(
+        show_id=show_id,
+        payload=payload or BatchJobsRequest(operations=["count"]),
+        db=db,
+        request=request,
+        initiated_by=actor,
+    )
 
 
 @router.post("/{show_id}/seasons/{season_number}/assets/batch-jobs/stream")
 def batch_jobs_for_show_season_stream(
     show_id: UUID,
     season_number: int,
+    request: Request,
     payload: BatchJobsRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    admin: AdminUser = None,
 ) -> StreamingResponse:
+    actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
     return _stream_batch_jobs(
         show_id=show_id,
         season_number=season_number,
         payload=payload or BatchJobsRequest(operations=["count"]),
         db=db,
+        request=request,
+        initiated_by=actor,
     )

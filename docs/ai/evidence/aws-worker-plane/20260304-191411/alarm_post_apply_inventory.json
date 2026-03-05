@@ -1,0 +1,236 @@
+{
+    "MetricAlarms": [
+        {
+            "AlarmName": "TargetTracking-trr-worker-asg-AlarmHigh-798a415d-f05d-481d-99db-843dad84bac3",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:TargetTracking-trr-worker-asg-AlarmHigh-798a415d-f05d-481d-99db-843dad84bac3",
+            "AlarmDescription": "DO NOT EDIT OR DELETE. For TargetTrackingScaling policy arn:aws:autoscaling:us-east-1:522814694101:scalingPolicy:450d2191-4d72-4ea7-8aa0-e18359aaa55d:autoScalingGroupName/trr-worker-asg:policyName/Target Tracking Policy.",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-03T18:31:52.684000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [
+                "arn:aws:autoscaling:us-east-1:522814694101:scalingPolicy:450d2191-4d72-4ea7-8aa0-e18359aaa55d:autoScalingGroupName/trr-worker-asg:policyName/Target Tracking Policy"
+            ],
+            "InsufficientDataActions": [],
+            "StateValue": "OK",
+            "StateReason": "Threshold Crossed: 1 datapoint [0.2268662309806977 (04/03/26 23:45:00)] was not greater than the threshold (60.0).",
+            "StateReasonData": "{\"version\":\"1.0\",\"queryDate\":\"2026-03-04T23:46:15.224+0000\",\"startDate\":\"2026-03-04T23:45:00.000+0000\",\"statistic\":\"Average\",\"period\":60,\"recentDatapoints\":[0.2268662309806977],\"threshold\":60.0,\"evaluatedDatapoints\":[{\"timestamp\":\"2026-03-04T23:45:00.000+0000\",\"sampleCount\":2.0,\"value\":0.2268662309806977}]}",
+            "StateUpdatedTimestamp": "2026-03-04T18:46:15.225000-05:00",
+            "MetricName": "CPUUtilization",
+            "Namespace": "AWS/EC2",
+            "Statistic": "Average",
+            "Dimensions": [
+                {
+                    "Name": "AutoScalingGroupName",
+                    "Value": "trr-worker-asg"
+                }
+            ],
+            "Period": 60,
+            "EvaluationPeriods": 3,
+            "Threshold": 60.0,
+            "ComparisonOperator": "GreaterThanThreshold",
+            "StateTransitionedTimestamp": "2026-03-04T18:46:15.225000-05:00"
+        },
+        {
+            "AlarmName": "TargetTracking-trr-worker-asg-AlarmLow-a02364bc-cef1-4087-bebe-dce9954991d1",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:TargetTracking-trr-worker-asg-AlarmLow-a02364bc-cef1-4087-bebe-dce9954991d1",
+            "AlarmDescription": "DO NOT EDIT OR DELETE. For TargetTrackingScaling policy arn:aws:autoscaling:us-east-1:522814694101:scalingPolicy:450d2191-4d72-4ea7-8aa0-e18359aaa55d:autoScalingGroupName/trr-worker-asg:policyName/Target Tracking Policy.",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-03T18:45:10.563000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [
+                "arn:aws:autoscaling:us-east-1:522814694101:scalingPolicy:450d2191-4d72-4ea7-8aa0-e18359aaa55d:autoScalingGroupName/trr-worker-asg:policyName/Target Tracking Policy"
+            ],
+            "InsufficientDataActions": [],
+            "StateValue": "ALARM",
+            "StateReason": "Threshold Crossed: 3 datapoints [0.35311770926242575 (03/03/26 23:40:00), 0.35033750068385244 (03/03/26 23:35:00), 0.23735361777091515 (03/03/26 23:30:00)] were less than the threshold (54.0).",
+            "StateReasonData": "{\"version\":\"1.0\",\"queryDate\":\"2026-03-03T23:45:10.349+0000\",\"startDate\":\"2026-03-03T23:30:00.000+0000\",\"statistic\":\"Average\",\"period\":60,\"recentDatapoints\":[0.23735361777091515,null,null,null,null,0.35033750068385244,null,null,null,null,0.35311770926242575],\"threshold\":54.0,\"evaluatedDatapoints\":[{\"timestamp\":\"2026-03-03T23:44:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:43:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:42:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:41:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:40:00.000+0000\",\"sampleCount\":8.0,\"value\":0.35311770926242575},{\"timestamp\":\"2026-03-03T23:39:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:38:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:37:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:36:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:35:00.000+0000\",\"sampleCount\":10.0,\"value\":0.35033750068385244},{\"timestamp\":\"2026-03-03T23:34:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:33:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:32:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:31:00.000+0000\"},{\"timestamp\":\"2026-03-03T23:30:00.000+0000\",\"sampleCount\":6.0,\"value\":0.23735361777091515}]}",
+            "StateUpdatedTimestamp": "2026-03-03T18:45:10.352000-05:00",
+            "MetricName": "CPUUtilization",
+            "Namespace": "AWS/EC2",
+            "Statistic": "Average",
+            "Dimensions": [
+                {
+                    "Name": "AutoScalingGroupName",
+                    "Value": "trr-worker-asg"
+                }
+            ],
+            "Period": 60,
+            "EvaluationPeriods": 15,
+            "Threshold": 42.0,
+            "ComparisonOperator": "LessThanThreshold",
+            "StateTransitionedTimestamp": "2026-03-03T18:45:10.352000-05:00"
+        },
+        {
+            "AlarmName": "trr-api-target-5xx",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:trr-api-target-5xx",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-04T14:23:09.081000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [],
+            "InsufficientDataActions": [],
+            "StateValue": "INSUFFICIENT_DATA",
+            "StateReason": "Unchecked: Initial alarm creation",
+            "StateUpdatedTimestamp": "2026-03-04T14:23:09.081000-05:00",
+            "MetricName": "HTTPCode_Target_5XX_Count",
+            "Namespace": "AWS/ApplicationELB",
+            "Statistic": "Sum",
+            "Dimensions": [
+                {
+                    "Name": "LoadBalancer",
+                    "Value": "app/trr-api-alb/44cfa332d8548fc6"
+                }
+            ],
+            "Period": 60,
+            "EvaluationPeriods": 5,
+            "Threshold": 5.0,
+            "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+            "StateTransitionedTimestamp": "2026-03-04T14:23:09.081000-05:00"
+        },
+        {
+            "AlarmName": "trr-long-job-failures-high",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:trr-long-job-failures-high",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-04T18:56:08.334000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [],
+            "InsufficientDataActions": [],
+            "StateValue": "OK",
+            "StateReason": "manual test reset",
+            "StateUpdatedTimestamp": "2026-03-04T18:56:29.067000-05:00",
+            "MetricName": "long_job_failures",
+            "Namespace": "trr",
+            "Statistic": "Maximum",
+            "Dimensions": [],
+            "Period": 900,
+            "EvaluationPeriods": 1,
+            "Threshold": 10.0,
+            "ComparisonOperator": "GreaterThanThreshold",
+            "TreatMissingData": "notBreaching",
+            "StateTransitionedTimestamp": "2026-03-04T18:56:29.067000-05:00"
+        },
+        {
+            "AlarmName": "trr-queue-depth-high",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:trr-queue-depth-high",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-04T18:56:07.094000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [],
+            "InsufficientDataActions": [],
+            "StateValue": "OK",
+            "StateReason": "manual test reset",
+            "StateUpdatedTimestamp": "2026-03-04T18:56:26.629000-05:00",
+            "MetricName": "queue_depth",
+            "Namespace": "trr",
+            "Statistic": "Maximum",
+            "Dimensions": [],
+            "Period": 300,
+            "EvaluationPeriods": 2,
+            "Threshold": 50.0,
+            "ComparisonOperator": "GreaterThanThreshold",
+            "TreatMissingData": "notBreaching",
+            "StateTransitionedTimestamp": "2026-03-04T18:56:26.629000-05:00"
+        },
+        {
+            "AlarmName": "trr-stale-leases-high",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:trr-stale-leases-high",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-04T18:56:07.704000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [],
+            "InsufficientDataActions": [],
+            "StateValue": "OK",
+            "StateReason": "manual test reset",
+            "StateUpdatedTimestamp": "2026-03-04T18:56:27.891000-05:00",
+            "MetricName": "stale_leases",
+            "Namespace": "trr",
+            "Statistic": "Maximum",
+            "Dimensions": [],
+            "Period": 300,
+            "EvaluationPeriods": 2,
+            "Threshold": 5.0,
+            "ComparisonOperator": "GreaterThanThreshold",
+            "TreatMissingData": "notBreaching",
+            "StateTransitionedTimestamp": "2026-03-04T18:56:27.891000-05:00"
+        },
+        {
+            "AlarmName": "trr-worker-service-failure-signal",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:trr-worker-service-failure-signal",
+            "AlarmDescription": "Worker unit/service failure signal from CloudWatch Logs metric filter",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-04T19:15:06.897000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [],
+            "InsufficientDataActions": [],
+            "StateValue": "OK",
+            "StateReason": "Threshold Crossed: no datapoints were received for 2 periods and 2 missing datapoints were treated as [NonBreaching].",
+            "StateReasonData": "{\"version\":\"1.0\",\"queryDate\":\"2026-03-05T00:16:37.997+0000\",\"statistic\":\"Sum\",\"period\":300,\"recentDatapoints\":[],\"threshold\":5.0,\"evaluatedDatapoints\":[{\"timestamp\":\"2026-03-05T00:11:00.000+0000\"}]}",
+            "StateUpdatedTimestamp": "2026-03-04T19:16:37.998000-05:00",
+            "MetricName": "worker_service_failure_signal",
+            "Namespace": "trr",
+            "Statistic": "Sum",
+            "Dimensions": [],
+            "Period": 300,
+            "EvaluationPeriods": 2,
+            "Threshold": 5.0,
+            "ComparisonOperator": "GreaterThanThreshold",
+            "TreatMissingData": "notBreaching",
+            "StateTransitionedTimestamp": "2026-03-04T19:16:37.998000-05:00"
+        },
+        {
+            "AlarmName": "trr-worker-status-check-failed",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:trr-worker-status-check-failed",
+            "AlarmDescription": "Worker EC2 instance status check failures",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-04T18:55:48.677000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [],
+            "InsufficientDataActions": [],
+            "StateValue": "OK",
+            "StateReason": "manual test reset",
+            "StateUpdatedTimestamp": "2026-03-04T18:56:25.406000-05:00",
+            "MetricName": "StatusCheckFailed",
+            "Namespace": "AWS/EC2",
+            "Statistic": "Maximum",
+            "Dimensions": [
+                {
+                    "Name": "InstanceId",
+                    "Value": "i-0dd68b716caf8d3ca"
+                }
+            ],
+            "Period": 60,
+            "EvaluationPeriods": 2,
+            "Threshold": 1.0,
+            "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+            "TreatMissingData": "notBreaching",
+            "StateTransitionedTimestamp": "2026-03-04T18:56:25.406000-05:00"
+        },
+        {
+            "AlarmName": "trr-worker-zero-inservice",
+            "AlarmArn": "arn:aws:cloudwatch:us-east-1:522814694101:alarm:trr-worker-zero-inservice",
+            "AlarmConfigurationUpdatedTimestamp": "2026-03-04T14:23:09.922000-05:00",
+            "ActionsEnabled": true,
+            "OKActions": [],
+            "AlarmActions": [],
+            "InsufficientDataActions": [],
+            "StateValue": "OK",
+            "StateReason": "Threshold Crossed: 3 datapoints [1.0 (04/03/26 19:22:00), 1.0 (04/03/26 19:21:00), 1.0 (04/03/26 19:20:00)] were not less than the threshold (1.0).",
+            "StateReasonData": "{\"version\":\"1.0\",\"queryDate\":\"2026-03-04T19:23:42.013+0000\",\"startDate\":\"2026-03-04T19:20:00.000+0000\",\"statistic\":\"Minimum\",\"period\":60,\"recentDatapoints\":[1.0,1.0,1.0],\"threshold\":1.0,\"evaluatedDatapoints\":[{\"timestamp\":\"2026-03-04T19:22:00.000+0000\",\"sampleCount\":1.0,\"value\":1.0}]}",
+            "StateUpdatedTimestamp": "2026-03-04T14:23:42.014000-05:00",
+            "MetricName": "GroupInServiceInstances",
+            "Namespace": "AWS/AutoScaling",
+            "Statistic": "Minimum",
+            "Dimensions": [
+                {
+                    "Name": "AutoScalingGroupName",
+                    "Value": "trr-worker-asg"
+                }
+            ],
+            "Period": 60,
+            "EvaluationPeriods": 3,
+            "Threshold": 1.0,
+            "ComparisonOperator": "LessThanThreshold",
+            "StateTransitionedTimestamp": "2026-03-04T14:23:42.014000-05:00"
+        }
+    ],
+    "CompositeAlarms": []
+}

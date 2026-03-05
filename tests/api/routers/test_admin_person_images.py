@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -332,9 +333,9 @@ def test_build_detection_boxes_promotes_single_face_deterministic_assignment_to_
     assert len(face_boxes) == 1
     assert face_boxes[0]["person_id"] == owner_id
     assert face_boxes[0]["person_name"] == "Alan Cumming"
-    assert face_boxes[0]["label_source"] == "deterministic_tag_map"
+    assert face_boxes[0]["label_source"] == "owner_fallback_map"
     assert face_boxes[0]["match_status"] == "matched"
-    assert face_boxes[0]["match_reason"] == "deterministic_tag_map"
+    assert face_boxes[0]["match_reason"] == "owner_fallback_map"
 
 
 def test_build_detection_boxes_applies_similarity_lead_override_before_hybrid_fallback() -> None:
@@ -1753,6 +1754,11 @@ def test_refresh_stream_resizing_heartbeat_includes_operation_progress(client, m
 
     assert response.status_code == 200
     payload = response.text.replace("\r\n", "\n")
+    assert '"operation_id"' in payload
+    event_seq_matches = [int(match) for match in re.findall(r'"event_seq"\s*:\s*(\d+)', payload)]
+    assert event_seq_matches
+    assert event_seq_matches == sorted(event_seq_matches)
+    assert len(event_seq_matches) == len(set(event_seq_matches))
     blocks = [block for block in payload.split("\n\n") if block.strip()]
     saw_progress_heartbeat = False
     for block in blocks:

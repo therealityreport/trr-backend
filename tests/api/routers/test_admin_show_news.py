@@ -619,6 +619,42 @@ def test_google_news_sync_async_returns_job_id(
     assert payload["status"] == "queued"
 
 
+def test_google_news_sync_async_remote_mode_does_not_start_in_api(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_news._show_exists", return_value=True):
+            with patch(
+                "api.routers.admin_show_news._resolve_google_news_link",
+                return_value={
+                    "url": "https://news.google.com/topics/topic-1?ceid=US:en&oc=3",
+                    "status": "approved",
+                },
+            ):
+                with patch("api.routers.admin_show_news._create_google_news_sync_job", return_value=str(uuid4())):
+                    with patch("api.routers.admin_show_news._run_google_news_sync_job") as runner_mock:
+                        response = client.post(
+                            f"/api/v1/admin/shows/{show_id}/google-news/sync",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={"async": True},
+                        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queued"] is True
+    assert payload["execution_owner"] == "remote_worker"
+    assert payload["execution_mode_canonical"] == "remote"
+    assert runner_mock.called is False
+
+
 def test_google_news_sync_featured_image_marks_terminal_when_source_missing() -> None:
     item = {
         "headline": "No image story",

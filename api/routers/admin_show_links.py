@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlunparse
 from uuid import UUID, uuid4
 
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -40,6 +40,7 @@ from trr_backend.integrations.fandom import (
     search_real_housewives_wiki,
 )
 from trr_backend.integrations.fandom_discovery import discover_fandom_candidate_pages
+from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.socials.platforms import infer_platform_from_url
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-links"])
@@ -632,9 +633,7 @@ def _search_fandom_allpages_html_candidates(
     for prefix in _fandom_allpages_prefixes(query):
         if not _can_attempt_fandom_candidate(stats):
             break
-        all_pages_url = (
-            f"https://{host}/wiki/Special:AllPages?from={quote(prefix)}&to=&namespace=0"
-        )
+        all_pages_url = f"https://{host}/wiki/Special:AllPages?from={quote(prefix)}&to=&namespace=0"
         status_code, html, resolved_url, _ = _fetch_html_with_status(
             all_pages_url,
             timeout=_source_timeout_seconds("fandom"),
@@ -951,9 +950,7 @@ def _load_show_link_classifier_context(show_id: str) -> dict[str, Any]:
             )
         )
         fandom_title = _extract_wiki_slug_title(urlparse(str(row.get("fandom_url") or "").strip()).path)
-        fandom_name_norm = _normalize_lookup_value(
-            (fandom_title or "").replace("_", " ").split("(", 1)[0].strip()
-        )
+        fandom_name_norm = _normalize_lookup_value((fandom_title or "").replace("_", " ").split("(", 1)[0].strip())
         person_record = {
             "id": person_id,
             "name": person_name,
@@ -1140,9 +1137,7 @@ def _build_connected_knowledge_rows(
             trakt_id = str(wikidata_summary.get("trakt_id") or "").strip()
             x_topic_id = str(wikidata_summary.get("x_topic_id") or "").strip()
             twitter_usernames = [
-                str(value).strip()
-                for value in (wikidata_summary.get("twitter_usernames") or [])
-                if str(value).strip()
+                str(value).strip() for value in (wikidata_summary.get("twitter_usernames") or []) if str(value).strip()
             ]
             instagram_usernames = [
                 str(value).strip()
@@ -1150,9 +1145,7 @@ def _build_connected_knowledge_rows(
                 if str(value).strip()
             ]
             facebook_usernames = [
-                str(value).strip()
-                for value in (wikidata_summary.get("facebook_usernames") or [])
-                if str(value).strip()
+                str(value).strip() for value in (wikidata_summary.get("facebook_usernames") or []) if str(value).strip()
             ]
             youtube_channel_ids = [
                 str(value).strip()
@@ -1160,14 +1153,10 @@ def _build_connected_knowledge_rows(
                 if str(value).strip()
             ]
             tiktok_usernames = [
-                str(value).strip()
-                for value in (wikidata_summary.get("tiktok_usernames") or [])
-                if str(value).strip()
+                str(value).strip() for value in (wikidata_summary.get("tiktok_usernames") or []) if str(value).strip()
             ]
             reddit_usernames = [
-                str(value).strip()
-                for value in (wikidata_summary.get("reddit_usernames") or [])
-                if str(value).strip()
+                str(value).strip() for value in (wikidata_summary.get("reddit_usernames") or []) if str(value).strip()
             ]
 
             if entity_type == "person" and re.fullmatch(r"nm\d+", imdb_id, flags=re.IGNORECASE):
@@ -2833,11 +2822,7 @@ def _validate_person_knowledge_url(
         return None, "invalid"
 
     timeout_source = (
-        "wikipedia"
-        if normalized_kind == "wikipedia"
-        else "fandom"
-        if normalized_kind == "fandom"
-        else "wikidata"
+        "wikipedia" if normalized_kind == "wikipedia" else "fandom" if normalized_kind == "fandom" else "wikidata"
     )
     status_code, html, final_url, error = _fetch_html_with_status(
         candidate,
@@ -3122,11 +3107,7 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                     )
                 )
                 ranked = sorted(
-                    {
-                        _canonicalize_url(candidate)
-                        for candidate in derived_candidates
-                        if _canonicalize_url(candidate)
-                    },
+                    {_canonicalize_url(candidate) for candidate in derived_candidates if _canonicalize_url(candidate)},
                     key=lambda candidate: _score_fandom_show_candidate_url(candidate, show_name=show_name),
                     reverse=True,
                 )
@@ -3684,10 +3665,7 @@ def _validated_fandom_season_url(
         }
         if expected_tokens:
             candidate_tokens = {
-                token
-                for value in candidates
-                for token in _normalize_lookup_value(value).split()
-                if token
+                token for value in candidates for token in _normalize_lookup_value(value).split() if token
             }
             if not expected_tokens.intersection(candidate_tokens):
                 return None
@@ -3821,9 +3799,7 @@ def _discover_season_links(
                     "label": f"Season {season_number} TMDb",
                     "url": f"https://www.themoviedb.org/tv/{show_tmdb_id}/season/{season_number}",
                     "source": (
-                        "core.seasons.tmdb_season_id"
-                        if re.fullmatch(r"\d+", season_tmdb_id)
-                        else "core.shows.tmdb_id"
+                        "core.seasons.tmdb_season_id" if re.fullmatch(r"\d+", season_tmdb_id) else "core.shows.tmdb_id"
                     ),
                 }
             )
@@ -4411,6 +4387,7 @@ def _discover_people_links(
         row["url"] = canonical_url
         row["link_kind"] = link_kind
         found.append(row)
+
     for row in rows:
         if _stage_budget_exhausted(stats):
             break
@@ -5720,11 +5697,17 @@ def discover_show_links_stream(
     payload: LinkDiscoverRequest,
     db: SupabaseAdminClient,
     admin: AdminUser,
+    request: Request,
 ) -> StreamingResponse:
     show_id_str = str(show_id)
     if not _show_exists(show_id_str):
         raise HTTPException(status_code=404, detail="Show not found")
     actor = str(admin.get("email") or admin.get("id") or "admin")
+    request_payload = {
+        "show_id": show_id_str,
+        "payload": payload.model_dump(mode="json"),
+        "initiated_by": actor,
+    }
 
     def event_stream() -> Iterator[str]:
         event_queue: SimpleQueue[tuple[str, dict[str, Any]]] = SimpleQueue()
@@ -5817,7 +5800,127 @@ def discover_show_links_stream(
                 },
             )
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    if request is None:
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    operation = start_operation_for_stream(
+        operation_type="admin_show_links_discover",
+        producer=event_stream,
+        request_payload=request_payload,
+        initiated_by=actor,
+        request=request,
+    )
+    return operation_stream_response(str(operation.get("id")), request=request)
+
+
+def build_show_links_discovery_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    db: SupabaseAdminClient | None = None,
+):
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    show_id_str = str(request_payload.get("show_id") or "").strip()
+    if not show_id_str:
+        raise ValueError("request_payload.show_id is required")
+
+    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    payload = LinkDiscoverRequest.model_validate(payload_data)
+    actor = str(request_payload.get("initiated_by") or "admin")
+
+    def _producer() -> Iterator[str]:
+        local_db = db or create_supabase_admin_client()
+        event_queue: SimpleQueue[tuple[str, dict[str, Any]]] = SimpleQueue()
+        done = threading.Event()
+        result_box: dict[str, Any] = {}
+        error_box: dict[str, Any] = {}
+        heartbeat_interval_seconds = 5.0
+        stream_started_perf = perf_counter()
+
+        def on_stage(stage: str, stage_payload: dict[str, Any]) -> None:
+            event_queue.put(("progress", {"stage": stage, **stage_payload}))
+
+        def worker() -> None:
+            try:
+                result_box["result"] = _run_show_link_discovery(
+                    show_id_str=show_id_str,
+                    payload=payload,
+                    db=local_db,
+                    actor=actor,
+                    stage_callback=on_stage,
+                )
+            except Exception as exc:  # noqa: BLE001
+                error_box["error"] = str(exc)
+            finally:
+                done.set()
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
+        yield _sse_event(
+            "progress",
+            {
+                "show_id": show_id_str,
+                "stage": "starting",
+                "message": "Starting links discovery...",
+                "timestamp": _iso_utc_now(),
+            },
+        )
+
+        while True:
+            if done.is_set() and event_queue.empty():
+                break
+            try:
+                event_name, event_payload = event_queue.get(timeout=heartbeat_interval_seconds)
+            except Empty:
+                elapsed_ms = int((perf_counter() - stream_started_perf) * 1000)
+                yield _sse_event(
+                    "progress",
+                    {
+                        "show_id": show_id_str,
+                        "stage": "heartbeat",
+                        "heartbeat": True,
+                        "elapsed_ms": elapsed_ms,
+                        "timestamp": _iso_utc_now(),
+                        "message": "Discovery still running...",
+                    },
+                )
+                continue
+            yield _sse_event(event_name, {"show_id": show_id_str, **event_payload})
+
+        error_detail = str(error_box.get("error") or "").strip()
+        if error_detail:
+            yield _sse_event(
+                "error",
+                {
+                    "show_id": show_id_str,
+                    "stage": "error",
+                    "error": "Links discovery failed",
+                    "detail": error_detail,
+                },
+            )
+            return
+
+        result = result_box.get("result") if isinstance(result_box.get("result"), dict) else {}
+        if isinstance(result, dict):
+            yield _sse_event(
+                "complete",
+                {
+                    "show_id": show_id_str,
+                    "run_id": result.get("run_id"),
+                    "duration_ms": result.get("duration_ms"),
+                    "stage_counts": result.get("stage_counts"),
+                    "stage_timings_ms": result.get("stage_timings_ms"),
+                    "status_counts": result.get("status_counts"),
+                    "validation_reasons": result.get("validation_reasons"),
+                    "timed_out": result.get("timed_out"),
+                    "timeout": result.get("timeout"),
+                    "status": result.get("status"),
+                    "discovered": result.get("discovered"),
+                    "result": result,
+                },
+            )
+
+    return _producer
 
 
 @router.post("/{show_id}/links/add")

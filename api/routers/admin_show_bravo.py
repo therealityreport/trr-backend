@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -13,7 +14,7 @@ from typing import Any, Literal
 from urllib.parse import quote, unquote, urlparse
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -22,6 +23,7 @@ from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
 from trr_backend.ingestion.show_cast_matrix_scraper import is_missing_fandom_page
 from trr_backend.integrations.fandom import is_allowlisted_fandom_domain, load_fandom_community_allowlist
+from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.repositories.cast_fandom import upsert_cast_fandom
 from trr_backend.scraping.bravo_parser import (
     parse_bravo_show_bundle,
@@ -62,6 +64,11 @@ _CAST_ANNOUNCEMENT_RE = re.compile(
     r"\b(cast|friend\s*[- ]?of|full\s*[- ]?time|housewife|joins|joined|returning|returns)\b",
     re.IGNORECASE,
 )
+_SSE_OPERATION_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "admin_show_bravo_sse_operation_id",
+    default=None,
+)
+_SSE_EVENT_SEQ: contextvars.ContextVar[int] = contextvars.ContextVar("admin_show_bravo_sse_event_seq", default=0)
 
 
 class BravoPreviewRequest(BaseModel):
@@ -603,7 +610,15 @@ def _merge_person_url_candidates(*groups: list[str]) -> list[str]:
 
 
 def _sse_event(event_type: str, payload: dict[str, Any]) -> str:
-    return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+    merged = dict(payload)
+    operation_id = _SSE_OPERATION_ID.get()
+    if operation_id:
+        merged.setdefault("operation_id", operation_id)
+        if "event_seq" not in merged:
+            next_seq = max(0, int(_SSE_EVENT_SEQ.get() or 0)) + 1
+            _SSE_EVENT_SEQ.set(next_seq)
+            merged["event_seq"] = next_seq
+    return f"event: {event_type}\ndata: {json.dumps(merged)}\n\n"
 
 
 def _sse_error_stream(payload: dict[str, Any]) -> StreamingResponse:
@@ -2836,8 +2851,9 @@ def preview_bravo_import(
 def preview_bravo_import_stream(
     show_id: UUID,
     payload: BravoPreviewRequest,
+    request: Request,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    admin: AdminUser = None,
 ) -> StreamingResponse:
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -2923,6 +2939,12 @@ def preview_bravo_import_stream(
         }
         for candidate_url in fandom_candidate_urls
     ]
+    actor = str((admin or {}).get("email") or (admin or {}).get("id") or "admin")
+    request_payload = {
+        "show_id": show_id_str,
+        "payload": payload.model_dump(mode="json"),
+        "initiated_by": actor,
+    }
 
     def event_stream() -> Any:
         try:
@@ -3370,7 +3392,69 @@ def preview_bravo_import_stream(
                 },
             )
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    operation = start_operation_for_stream(
+        operation_type="admin_show_bravo_preview",
+        producer=event_stream,
+        request_payload=request_payload,
+        initiated_by=actor,
+        request=request,
+    )
+    return operation_stream_response(str(operation.get("id")), request=request)
+
+
+def build_bravo_preview_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    db: SupabaseAdminClient | None = None,
+):
+    from trr_backend.db.admin import create_supabase_admin_client
+
+    show_id_str = str(request_payload.get("show_id") or "").strip()
+    if not show_id_str:
+        raise ValueError("request_payload.show_id is required")
+    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    payload = BravoPreviewRequest.model_validate(payload_data)
+    initiated_by = str(request_payload.get("initiated_by") or "admin")
+
+    def _producer() -> Any:
+        local_db = db or create_supabase_admin_client()
+        yield _sse_event(
+            "start",
+            {
+                "show_id": show_id_str,
+                "message": "Starting Bravo preview...",
+                "actor": initiated_by,
+            },
+        )
+        try:
+            result = preview_bravo_import(
+                show_id=UUID(show_id_str),
+                payload=payload,
+                db=local_db,
+                _={"id": initiated_by},
+            )
+            yield _sse_event("complete", {"show_id": show_id_str, **(result or {})})
+        except HTTPException as exc:
+            yield _sse_event(
+                "error",
+                {
+                    "show_id": show_id_str,
+                    "error": "Bravo preview failed",
+                    "detail": str(exc.detail),
+                    "status": int(exc.status_code),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            yield _sse_event(
+                "error",
+                {
+                    "show_id": show_id_str,
+                    "error": "Bravo preview failed",
+                    "detail": str(exc),
+                },
+            )
+
+    return _producer
 
 
 @router.post("/{show_id}/import-bravo/commit")
@@ -3959,9 +4043,7 @@ def commit_bravo_import(
             "skipped_person_images": skipped_person_images,
             "discovered_links": discovered_links,
             "discovered_links_skipped_invalid_url": discovered_link_skips["invalid_url"],
-            "discovered_links_skipped_person_source_non_approved": discovered_link_skips[
-                "person_source_non_approved"
-            ],
+            "discovered_links_skipped_person_source_non_approved": discovered_link_skips["person_source_non_approved"],
             "role_suggestions": role_suggestion_stats.get("role_suggestions", 0),
             "role_assignments": role_suggestion_stats.get("role_assignments", 0),
             "announcement_people": role_suggestion_stats.get("announcement_people", 0),

@@ -1,0 +1,2 @@
+psql:supabase/migrations/0172_admin_operations_and_events.sql:61: NOTICE:  trigger "core_admin_operation_events_set_seq" for relation "core.admin_operation_events" does not exist, skipping
+psql:supabase/migrations/0172_admin_operations_and_events.sql:73: NOTICE:  trigger "core_admin_operations_set_updated_at" for relation "core.admin_operations" does not exist, skipping

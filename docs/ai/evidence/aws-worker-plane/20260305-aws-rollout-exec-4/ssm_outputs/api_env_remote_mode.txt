@@ -1,0 +1,8 @@
+w
+EnvironmentFiles=/etc/trr-api.env (ignore_errors=no)
+[grep_flags]
+TRR_JOB_PLANE_MODE=remote
+TRR_LONG_JOB_ENFORCE_REMOTE=1
+TRR_JOB_PLANE_MODE=remote
+TRR_LONG_JOB_ENFORCE_REMOTE=1
+

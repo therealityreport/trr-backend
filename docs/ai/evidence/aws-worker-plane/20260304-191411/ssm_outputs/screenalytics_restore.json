@@ -1,0 +1,22 @@
+{
+    "CommandId": "0a38b0a4-a4e6-425e-9ad5-0f32b501d144",
+    "InstanceId": "i-05d7f68c379dc05db",
+    "Comment": "Task11 restore screenalytics outage test",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 0,
+    "ExecutionStartDateTime": "2026-03-05T00:45:42.806Z",
+    "ExecutionElapsedTime": "PT30.201S",
+    "ExecutionEndDateTime": "2026-03-05T00:46:12.806Z",
+    "Status": "Success",
+    "StatusDetails": "Success",
+    "StandardOutputContent": "active\n",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

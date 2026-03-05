@@ -1,0 +1,9 @@
+TargetTracking-trr-worker-asg-AlarmHigh-798a415d-f05d-481d-99db-843dad84bac3
+TargetTracking-trr-worker-asg-AlarmLow-a02364bc-cef1-4087-bebe-dce9954991d1
+trr-api-target-5xx
+trr-long-job-failures-high
+trr-queue-depth-high
+trr-stale-leases-high
+trr-worker-service-failure-signal
+trr-worker-status-check-failed
+trr-worker-zero-inservice

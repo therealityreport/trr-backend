@@ -1,6 +1,776 @@
 # Session Handoff (TRR-Backend)
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
+## Latest Update (2026-03-05) — Social worker heartbeat outage fix (`text = text[]` claim query regression)
+
+- primary_skill: `debugging-wizard`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (queue-claim SQL predicate correction; worker startup stability)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- root_cause:
+  - `_claim_next_jobs` used `j.platform = any((select platforms from worker_caps))`.
+  - PostgreSQL interpreted this as `ANY(subquery)` with subquery rows of type `text[]`, producing `operator does not exist: text = text[]`.
+  - Worker pool exited immediately, so TRR-APP surfaced: `No healthy social ingest workers are reporting heartbeats`.
+- fix_summary:
+  - Replaced predicate with explicit array-membership semantics:
+    - `exists (select 1 from worker_caps wc where j.platform = any(wc.platforms))`
+  - Updated regression assertions to enforce the new SQL shape and prevent reintroduction of `ANY((select ...))`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -k "claim_next_jobs_filters_by_worker_capability or claim_next_jobs_uses_batch_limit_and_run_fairness or claim_next_queued_jobs_treats_empty_platform_filter_as_none"` (pass: `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m compileall -q trr_backend/repositories/social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR && make dev` repro after fix:
+    - `social-worker.log` shows workers starting and processing jobs successfully (no `text = text[]` crash).
+    - controlled shutdown via `Ctrl+C` produced expected `make dev` exit code `130`.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `TRR-APP`: `yes` (admin sync flows now observe healthy worker heartbeats)
+  - `screenalytics`: `no`
+- default_skill_chain_applied: `false`
+- default_skill_chain_used:
+  - `debugging-wizard`
+- default_skill_chain_exception_reason: `User explicitly requested debugging-wizard skill for focused troubleshooting turn.`
+
+## Latest Update (2026-03-05) — Task 11 Phase 7/8/9 validation pack + 7-alarm completion + resilience evidence
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (live AWS runtime mutations + staging resilience checks)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/_common.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/00_discover_context.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/10_validate_ssm_worker_units.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/11_validate_api_remote_env.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/12_validate_cloudwatch_logs.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/20_inventory_alarms.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/21_plan_missing_alarms.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/22_apply_alarms.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/30_resilience_api_recycle.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/31_resilience_worker_recycle.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/32_resilience_sse_replay.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/33_resilience_screenalytics_outage.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/99_run_all.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Implemented Task11 Phase 7/8/9 ops script pack with shared flag contract and evidence outputs.
+  - Executed Phase 7 validation against staging and converged to 7-alarm target by creating missing `trr-worker-service-failure-signal`.
+  - Added cloudwatch evidence/link generation (`cloudwatch_links.md`) and alarm inventory/apply artifacts.
+  - Executed screenalytics outage simulation and verified rollback to healthy API state.
+  - Attempted API recycle, worker recycle, and SSE replay scenarios; all three blocked by inability to obtain operation stream envelope (`operation_id`) from both ALB path and API-host-local fallback.
+- runtime_verification_matrix:
+  | Check | State | Evidence |
+  |---|---|---|
+  | Worker units active + enabled | Pass | `ssm_outputs/worker_units_20260304-191418.json` |
+  | API remote mode env flags | Pass | `ssm_outputs/api_env_20260304-191421.json` |
+  | CloudWatch log discovery coverage | Pass with warning | `cloudwatch_log_presence.json` |
+  | Screenalytics outage rollback | Pass with warning | `scenario_screenalytics_outage.log` |
+  | API recycle continuity | Blocked | `scenario_api_recycle.log` |
+  | Worker recycle continuity | Blocked | `scenario_worker_recycle.log` |
+  | SSE replay from after_seq | Blocked | `scenario_sse_replay.log` |
+- alarm_matrix:
+  | Alarm | Metric | Namespace | State (at capture) |
+  |---|---|---|---|
+  | `trr-api-target-5xx` | `HTTPCode_Target_5XX_Count` | `AWS/ApplicationELB` | `INSUFFICIENT_DATA` |
+  | `trr-worker-zero-inservice` | `GroupInServiceInstances` | `AWS/AutoScaling` | `OK` |
+  | `trr-worker-status-check-failed` | `StatusCheckFailed` | `AWS/EC2` | `OK` |
+  | `trr-queue-depth-high` | `queue_depth` | `trr` | `OK` |
+  | `trr-stale-leases-high` | `stale_leases` | `trr` | `OK` |
+  | `trr-long-job-failures-high` | `long_job_failures` | `trr` | `OK` |
+  | `trr-worker-service-failure-signal` | `worker_service_failure_signal` | `trr` | `OK` |
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && for f in scripts/ops/aws_worker_plane/*.sh; do bash -n "$f"; done` (pass)
+  - `scripts/ops/aws_worker_plane/00_discover_context.sh --env staging --region us-east-1 --profile socializer-admin --evidence-dir /Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-191411` (pass)
+  - `scripts/ops/aws_worker_plane/10_validate_ssm_worker_units.sh ...` (pass)
+  - `scripts/ops/aws_worker_plane/11_validate_api_remote_env.sh ...` (pass)
+  - `scripts/ops/aws_worker_plane/12_validate_cloudwatch_logs.sh ...` (pass with warning: no recent API instance events in `/trr/api/bootstrap`)
+  - `scripts/ops/aws_worker_plane/20_inventory_alarms.sh ...` (pass)
+  - `scripts/ops/aws_worker_plane/21_plan_missing_alarms.sh ...` (pass; missing initially only `trr-worker-service-failure-signal`, now `[]`)
+  - `scripts/ops/aws_worker_plane/22_apply_alarms.sh ... --apply` (pass)
+  - `scripts/ops/aws_worker_plane/33_resilience_screenalytics_outage.sh ...` (pass with warning: before/during response matched)
+- blocked_checks:
+  - `scripts/ops/aws_worker_plane/30_resilience_api_recycle.sh` blocked: no `operation_id` from ALB stream (504) and no payload from API-local SSM fallback (curl timeout 180s, zero bytes).
+  - `scripts/ops/aws_worker_plane/31_resilience_worker_recycle.sh` blocked for same kickoff-envelope reason.
+  - `scripts/ops/aws_worker_plane/32_resilience_sse_replay.sh` blocked for same kickoff-envelope reason.
+  - Blocker evidence:
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-191411/scenario_api_recycle_stream.txt`
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-191411/ssm_outputs/api_recycle_kickoff_fallback.json`
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-191411/ssm_outputs/worker_recycle_kickoff_fallback.json`
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-191411/ssm_outputs/sse_replay_kickoff_fallback.json`
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no` (API dependency simulated only)
+  - `TRR-APP`: `yes` (status checkpoint note only)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-05) — Instagram/TikTok remote-only reliability hardening
+
+- primary_skill: `social-ingestion-reliability`
+- supporting_skills:
+  - `senior-fullstack`
+  - `fullstack-guardian`
+  - `debugging-wizard`
+  - `devops-engineer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (ingest admission behavior + queue pressure defaults)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/start_worker_pool.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added remote-only platform guard (`SOCIAL_REMOTE_ONLY_PLATFORMS`, default `instagram,tiktok`) so inline fallback is blocked and returns `SOCIAL_REMOTE_WORKER_REQUIRED`.
+  - Kept inline fallback behavior for non-remote-only platforms in dev mode.
+  - Reduced queue pressure defaults (`SOCIAL_JOB_CLAIM_BATCH_SIZE_DEFAULT=2`, post-stage fallback claim size `4`, `SOCIAL_RUN_IN_FLIGHT_CAP_DEFAULT=12`).
+  - Fixed worker-pool script defaults and stage-disable behavior to prevent zero-config worker fan-out.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/api/routers/test_socials_season_analytics.py -k "ingest_returns_503_when_queue_enabled_and_worker_missing or ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled or ingest_requires_remote_worker_for_instagram_even_with_inline_fallback_enabled or ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_flag"` (pass; `4 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && bash -n scripts/socials/start_worker_pool.sh` (pass)
+  - Runtime check: run `39ca2203-3fd4-4cf4-b3a9-fba0a5aa4328` currently `cancelled`.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `false`
+- default_skill_chain_used:
+  - `social-ingestion-reliability`
+  - `senior-fullstack`
+  - `fullstack-guardian`
+  - `debugging-wizard`
+  - `devops-engineer`
+- default_skill_chain_exception_reason: `User explicitly invoked multiple non-default skills for this incident.`
+
+## Latest Update (2026-03-05) — Cancel-all-active ingest jobs contract
+
+- primary_skill: `fullstack-guardian`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (new admin cancellation endpoint affecting active queue jobs)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added `cancel_active_jobs` repository operation to cancel all active queue jobs (`queued`, `pending`, `retrying`, `running`, `cancelling`) and finalize impacted runs.
+  - Added admin API endpoint `POST /api/v1/admin/socials/ingest/active-jobs/cancel`.
+  - Verified target run `39ca2203-3fd4-4cf4-b3a9-fba0a5aa4328` status is now `cancelled`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/api/routers/test_socials_season_analytics.py -k "cancel_active_jobs_endpoint_returns_payload or cancel_active_jobs_endpoint_returns_500_on_unhandled_error or cancel_stuck_jobs_endpoint_defaults_to_clear_all"` (pass; `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/repositories/test_social_season_analytics.py -k "cancel_active_jobs_cancels_all_active_and_finalizes_runs or cancel_stuck_jobs_targets_only_requested_ids"` (pass; `2 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `false`
+- default_skill_chain_used:
+  - `fullstack-guardian`
+- default_skill_chain_exception_reason: `User explicitly invoked fullstack-guardian for this task.`
+
+## Latest Update (2026-03-05) — Week sync normalization, live-health, and queue freshness
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (new API surface + progress contract expansion)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added run-progress endpoint for normalized stage telemetry (`posts`, `comments`, `media_mirror`, `comment_media_mirror`, `other`) with per-stage and per-handle counters, recent log shaping, and worker runtime metadata.
+  - Added week live-health endpoint with timezone-aware day/account rows (`posts`, `comments`, `likes`) and asset-health rows (`images`, `videos`, `captions`, `profile_pictures`) including scraped/saved counts.
+  - Extended queue-status endpoint with `fresh=true` cache bypass support and explicit worker bucket fields (`healthy/fresh/stale/total`, stale hidden count).
+  - Preserved authoritative RHOSLC account override semantics so explicit account selections are not expanded to forced dual-account sync.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/api/routers/test_socials_season_analytics.py -k "queue_status_endpoint_forwards_fresh_flag or get_run_progress_endpoint_returns_payload or get_week_live_health_endpoint_returns_payload"` (pass; `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR && pytest -q TRR-Backend/tests/repositories/test_social_season_analytics.py -k "fresh_true_bypasses_cache or includes_dynamic_stages_and_per_handle or week_live_health_snapshot_returns_day_rows_and_asset_health or honors_authoritative_rhoslc_instagram_account_override"` (pass; `4 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-05) — AWS rollout execution (staging) + worker crash hotfixes
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (live staging EC2 hotfix + ASG scaling)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Executed live rollout actions in AWS **staging** (`socializer-admin`, `us-east-1`):
+    - validated runtime mode (`TRR_JOB_PLANE_MODE=remote`, `TRR_LONG_JOB_ENFORCE_REMOTE=1`),
+    - scaled `trr-worker-asg` desired capacity `1 -> 2`,
+    - validated both in-service worker instances with all worker units active.
+  - Resolved live worker crash loop in `admin_operations` claim path:
+    - `UPDATE ... FROM candidate ... RETURNING {_OPERATION_COLUMNS}` caused `AmbiguousColumn` on `id`,
+    - fixed by returning explicit `op.*` columns.
+  - Resolved live `trr-social-worker-pool` crash loop:
+    - fixed worker capability platform predicate on the worker host query path to avoid `text = text[]` and scope errors.
+  - Resolved live `trr-google-news-worker` restart loop:
+    - `_set_google_news_sync_job_running`, `_touch_google_news_sync_job_heartbeat`, and `_set_google_news_sync_job_finished` were using `pg.execute_returning` without `RETURNING`,
+    - added `RETURNING id::text` to each update path.
+- validation_evidence:
+  - Evidence root (final): `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260305-aws-rollout-exec-4`
+  - `00_discover_context.sh`, `10_validate_ssm_worker_units.sh`, `11_validate_api_remote_env.sh`, `12_validate_cloudwatch_logs.sh` all executed successfully in final run (CloudWatch step contains warning-only note for API event recency).
+  - Direct SSM verification confirmed:
+    - both worker instances: `trr-admin-operations-worker`, `trr-reddit-refresh-worker`, `trr-google-news-worker`, `trr-social-worker-pool` all `active=active enabled=enabled`.
+    - ASG state: `trr-worker-asg desired=2 in_service=2`, `trr-api-asg desired=1 in_service=1`.
+- blocked_checks:
+  - Production rollout not executed in this account context; only `/trr/staging/*` SSM parameter namespace exists.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-05) — AWS job-plane worker scaling + ownership metadata hardening
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (runtime routing/worker process controls + additive response metadata)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/start_remote_job_workers.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+- behavior_summary:
+  - Added remote worker-family count knobs for admin operations, reddit refresh, and google-news workers, with per-worker IDs and validation in startup script.
+  - Added explicit unsupported admin-operation telemetry logging with `operation_id`, `operation_type`, and `request_id` in remote claim loop.
+  - Added `execution_owner` to social ingest kickoff response payload (non-breaking additive metadata).
+  - Documented/templated new remote worker controls in `.env.example` and runbook.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && bash -n scripts/start_remote_job_workers.sh` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && . .venv/bin/activate && python -m py_compile trr_backend/pipeline/admin_operations.py api/routers/socials.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && . .venv/bin/activate && pytest -q tests/api/routers/test_socials_reddit_refresh_routes.py` (pass; `20 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-05) — Social ingestion throughput + stale/avatars hardening
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium-high` (queueing behavior + stale recovery + avatar extraction path changes)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/start_worker_pool.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/youtube/test_scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+- behavior_summary:
+  - Enforced a stage worker floor with `SOCIAL_WORKER_MIN_STAGE_RUNNERS=6` and guarded explicit stage disable behind `SOCIAL_WORKER_ALLOW_STAGE_DISABLE=1`.
+  - Raised run-level in-flight fairness cap default from `4` to `24`.
+  - Made claim batch defaults stage-aware: `posts=10`, all other stages `5`.
+  - Added worker idle-loop jitter to reduce claim collisions.
+  - Added platform/stage stale timeout overrides (`YOUTUBE_POSTS=900`, `YOUTUBE_COMMENTS=600`) and unified stale timeout resolution between stuck-job filtering and stale recovery.
+  - Added additive run payload normalization support (`summary_normalized`) for top-level completed count consistency when summary lag exists.
+  - Added YouTube channel-header avatar fallback extraction constrained to `yt3.googleusercontent.com` with `s1024` normalization/upscale.
+  - Hardened non-Instagram post-author avatar mirror behavior to re-check/update when source avatar changes; retains idempotent `up_to_date` behavior when hosted URL is unchanged.
+- validation_evidence:
+  - `source .venv/bin/activate && pytest tests/repositories/test_social_season_analytics.py -k "resolve_social_job_stale_seconds_youtube_stage_overrides or list_runs_applies_filters_and_order or recover_stale_running_jobs_updates_worker_state_and_run_summaries"` (pass: `3 passed`)
+  - `source .venv/bin/activate && pytest tests/socials/youtube/test_scraper.py -k "extract_channel_header_avatar_from_data_upscales_yt3_avatar or parse_video_renderer_uses_header_avatar_fallback_when_renderer_avatar_missing"` (pass)
+  - `source .venv/bin/activate && pytest tests/scripts/test_social_worker.py` (pass: `6 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumer uses additive run summary + hosted avatar preference)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-04) — Plan A remaining Phase 1 stream coverage + dispatcher matrix
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (operation-backed stream ownership + replay semantics)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-APP/docs/cross-collab/TASK11/STATUS.md`
+- behavior_summary:
+  - Migrated remaining targeted streams to operation-backed execution path:
+    - show refresh photos stream
+    - person refresh images stream
+    - person reprocess images stream
+  - Added internal raw-stream bypass for worker reconstruction and remote producer builders for these streams.
+  - Expanded remote operation resolver to include:
+    - `admin_show_refresh_photos`
+    - `admin_person_refresh_images`
+    - `admin_person_reprocess_images`
+  - Hardened operation payload canonicalization so persisted operation identity always overrides producer payload (`operation_id`/`event_seq`).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_show_sync.py api/routers/admin_person_images.py trr_backend/pipeline/admin_operations.py tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_show_links.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check api/routers/admin_show_sync.py api/routers/admin_person_images.py trr_backend/pipeline/admin_operations.py tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_show_links.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_sync.py` (pass; `24 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_links.py` (pass; `104 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py tests/api/routers/test_admin_operations.py tests/repositories/test_admin_operations.py tests/api/routers/test_admin_scrape_contracts.py tests/api/routers/test_admin_asset_batch_jobs.py tests/api/routers/test_admin_show_news.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/api/routers/test_admin_person_images.py::test_refresh_stream_resizing_heartbeat_includes_operation_progress tests/api/routers/test_admin_person_images.py::test_reprocess_stream_emits_terminal_error_for_unhandled_exception tests/api/routers/test_admin_person_images.py::test_refresh_stream_emits_terminal_error_for_unhandled_exception` (pass; `233 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_operations.py tests/repositories/test_admin_operations.py tests/api/routers/test_admin_show_bravo.py tests/api/routers/test_admin_scrape_contracts.py tests/api/routers/test_admin_asset_batch_jobs.py tests/api/routers/test_admin_show_news.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass; `102 passed`)
+- blocked_checks:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_person_images.py` still fails on 3 pre-existing metadata enrichment assertions unrelated to operation stream migration.
+  - AWS console/runtime Phase 2 tasks (worker ASG/alarms/SG split/canary) are external-manual and were not executable from local repo shell.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (freeze refresh consumption note updated)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Agent A remote job plane execution ownership (Plan 1)
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (execution ownership shift + additive schema/contracts + worker runtime wiring)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0173_remote_job_plane_claims.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/job_plane.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_asset_batch_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/main.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/workers/admin_operations_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/workers/reddit_refresh_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/workers/google_news_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/workers/__init__.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/start_remote_job_workers.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/start_worker_pool.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/scripts/dev-workspace.sh`
+  - `/Users/thomashulihan/Projects/TRR/scripts/status-workspace.sh`
+  - `/Users/thomashulihan/Projects/TRR/scripts/stop-workspace.sh`
+  - `/Users/thomashulihan/Projects/TRR/Makefile`
+- behavior_summary:
+  - Added additive claim/lease/heartbeat/retry metadata to `core.admin_operations`, `core.google_news_sync_jobs`, and `social.reddit_refresh_runs`.
+  - Added canonical execution mode helper (`TRR_JOB_PLANE_MODE`, `TRR_LONG_JOB_ENFORCE_REMOTE`) and additive kickoff response fields:
+    - `execution_owner`
+    - `execution_mode_canonical`
+  - Switched reddit refresh and google-news async kickoff routes to enqueue-only in remote mode (no API-local `BackgroundTasks` execution).
+  - Extended admin operation pipeline for remote worker ownership with claim-loop execution path and persisted operation dispatch.
+  - Added worker entrypoints for:
+    - admin operations
+    - reddit refresh
+    - google-news sync jobs
+  - Wired workspace scripts to expose/run job-plane mode and optional remote worker bundle.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/main.py api/routers/socials.py api/routers/admin_show_news.py api/routers/admin_asset_batch_jobs.py trr_backend/pipeline/admin_operations.py trr_backend/repositories/admin_operations.py trr_backend/repositories/reddit_refresh.py scripts/workers/admin_operations_worker.py scripts/workers/reddit_refresh_worker.py scripts/workers/google_news_worker.py tests/api/routers/test_admin_operations.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/api/routers/test_admin_show_news.py tests/repositories/test_admin_operations.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_operations.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/api/routers/test_admin_show_news.py tests/api/routers/test_admin_asset_batch_jobs.py tests/repositories/test_admin_operations.py` (pass; `60 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check .` (fails on broad pre-existing baseline issues outside Task11 scope)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check .` (fails on broad pre-existing formatting drift outside Task11 scope)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest` (baseline suite has unrelated failures/hangs in this worktree; targeted Task11 gates above are green)
+- blocked_checks:
+  - Full-repo lint/format/test baselines are noisy and include unrelated failures; Plan A freeze gate uses targeted contract suites.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no` (API calls remain external)
+  - `TRR-APP`: `yes` (must consume frozen additive kickoff fields and remote ownership semantics)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Runtime/tooling modernization wave (backend surface)
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (CI/runtime/tooling-only changes; no API contract changes intended)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.github/workflows/ci.yml`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.github/workflows/repo_map.yml`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.github/workflows/mirror-media-assets.yml`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/Dockerfile`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/MODEL_GOVERNANCE.md`
+- behavior_summary:
+  - Kept backend CI on Python `3.11.9` primary and added/kept non-blocking Python `3.12` canary lane.
+  - Updated backend repo-map tooling lane to Node `24`.
+  - Normalized `mirror-media-assets` workflow to `actions/checkout@v5` and Python `3.11.9`.
+  - Refreshed container baseline to `python:3.11-slim-bookworm`.
+  - Documented pinned model defaults and promotion/rollback policy in a dedicated governance doc.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && uv pip compile requirements.in --python-version 3.11 -o requirements.lock.txt` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && cp requirements.lock.txt /tmp/requirements.lock.backend.before.txt && uv pip compile requirements.in --python-version 3.11 -o requirements.lock.txt && diff -u /tmp/requirements.lock.backend.before.txt requirements.lock.txt` (pass; no lock drift)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check .` (fails; broad pre-existing lint violations outside this modernization scope)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check .` (fails; broad pre-existing formatting drift)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest` (fails; 20 pre-existing/parallel-workstream test failures, 1497 passed, 18 skipped)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && make schema-docs-check` (fails; `SUPABASE_DB_URL`/DB env not configured in this session)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes` (shared baseline alignment)
+  - `TRR-APP`: `yes` (shared baseline alignment)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Additive reddit run-list endpoint for Plan B manual-attach selectors
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (additive API expansion used by TRR-APP admin run attach UX)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added `GET /api/v1/admin/socials/reddit/runs` with optional filters (`community_id`, `season_id`, `period_key`, `status`, `limit`) to list recent refresh runs.
+  - Kept existing `POST /reddit/runs` and `GET /reddit/runs/{run_id}` semantics unchanged.
+  - Added repository helper `list_refresh_runs(...)` and route-level validation/error mapping.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py trr_backend/repositories/reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check api/routers/socials.py trr_backend/repositories/reddit_refresh.py tests/api/routers/test_socials_reddit_refresh_routes.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_reddit_refresh_routes.py` (pass; `19 passed`)
+- blocked_checks:
+  - Full backend lint/format/test baseline remains noisy in unrelated files; targeted changed-surface suite is green.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumes new endpoint via app proxy)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Plan A contract completion checkpoint (operations + workspace)
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (contract validation + runtime guardrail logging + cross-repo checkpoint publication)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/conftest.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_scrape_contracts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_asset_batch_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added dedicated router/repository tests for admin operation APIs, lifecycle semantics, and replay sequencing.
+  - Added explicit earliest-envelope assertion that first replayed event is `operation` with required keys.
+  - Added additive `operation_id`/`event_seq` assertions in migrated SSE route suites.
+  - Added router-test in-memory operation fixture to preserve operation-backed stream semantics without requiring migration tables in local test DB.
+  - Added structured logging guardrails for create-vs-attach, replay usage, and cancel audit paths.
+  - Published Task 11 contract freeze checkpoint docs including frozen payload envelope examples and Plan B dependency gate.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check tests/api/routers/conftest.py tests/api/routers/test_admin_operations.py tests/repositories/test_admin_operations.py tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_scrape_contracts.py tests/api/routers/test_admin_asset_batch_jobs.py trr_backend/pipeline/admin_operations.py api/routers/admin_operations.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check tests/api/routers/conftest.py tests/api/routers/test_admin_operations.py tests/repositories/test_admin_operations.py tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_show_links.py tests/api/routers/test_admin_show_bravo.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_scrape_contracts.py tests/api/routers/test_admin_asset_batch_jobs.py trr_backend/pipeline/admin_operations.py api/routers/admin_operations.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_operations.py tests/repositories/test_admin_operations.py tests/api/routers/test_admin_scrape_contracts.py` (pass; `15 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_sync.py::TestRefreshShow::test_refresh_stream_emits_complete_event tests/api/routers/test_admin_show_links.py::test_discover_show_links_stream_emits_progress_events_before_complete tests/api/routers/test_admin_show_bravo.py::test_preview_bravo_import_stream_emits_start_progress_and_complete tests/api/routers/test_admin_person_images.py::test_refresh_stream_resizing_heartbeat_includes_operation_progress tests/api/routers/test_admin_asset_batch_jobs.py::TestAssetBatchJobsStream::test_skips_unsupported_origin` (pass; `5 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR && WORKSPACE_BROWSER_TAB_SYNC_MODE=reuse_no_reload bash ./scripts/status-workspace.sh | rg \"WORKSPACE_BROWSER_TAB_SYNC_MODE\"` (pass; prints `reuse_no_reload`)
+- blocked_checks:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check .` fails on broad pre-existing unrelated files in this worktree.
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check .` reports broad pre-existing formatting drift.
+  - Full combined router suite command from plan (`256` collected) was long-running in this local session and did not complete in practical runtime; targeted operation/SSE contract slices pass.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumer checkpoint alignment)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Tab-isolated admin operations + resumable SSE framework (backend)
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (new persistence + execution semantics for admin streams)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0172_admin_operations_and_events.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/main.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_asset_batch_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+- behavior_summary:
+  - Added additive operation/event persistence (`core.admin_operations`, `core.admin_operation_events`) with retention purge function.
+  - Added backend operation lifecycle repository and async execution manager so stream jobs can continue after client disconnect.
+  - Added admin operation APIs:
+    - `GET /api/v1/admin/operations/{operation_id}`
+    - `GET /api/v1/admin/operations/{operation_id}/stream?after_seq=`
+    - `POST /api/v1/admin/operations/{operation_id}/cancel`
+  - Migrated listed admin SSE producers to operation-backed execution with additive `operation_id` + `event_seq` payload fields and stream replay support.
+  - Extended social/reddit run kickoff request models with optional `client_session_id` + `client_workflow_id`; added optional social run list summary filtering by `client_session_id`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/main.py api/routers/admin_operations.py api/routers/admin_asset_batch_jobs.py api/routers/admin_person_images.py api/routers/admin_scrape.py api/routers/admin_show_bravo.py api/routers/admin_show_links.py api/routers/admin_show_sync.py api/routers/socials.py trr_backend/pipeline/admin_operations.py trr_backend/repositories/admin_operations.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check api/routers/admin_operations.py trr_backend/pipeline/admin_operations.py trr_backend/repositories/admin_operations.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_reddit_refresh.py` (pass; `33 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Social ingest worker-unavailable response serialization fix (week-detail Sync YouTube kickoff)
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (ingest failure-path error payload serialization changed; success-path contract unchanged)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Root cause for trace `2ca7cb3f6c6440b3b138dcb691ff85e9`: queue-enabled worker-unavailable path raised `HTTPException(detail=...)` with raw `datetime` values in `worker_health.workers[*]`, causing FastAPI JSON encoding to crash (`TypeError: Object of type datetime is not JSON serializable`) and return 500 instead of intended 503.
+  - Fixed `/api/v1/admin/socials/seasons/{season_id}/ingest` to JSON-encode `worker_health` via `jsonable_encoder(...)` before attaching it to `HTTPException.detail`.
+  - Added regression test covering worker-unavailable payloads that include datetime fields; endpoint now reliably returns 503 with serialized timestamp strings.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_season_analytics.py -k "worker_missing or worker_health_contains_datetimes"` (pass; `5 passed, 78 deselected`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile api/routers/socials.py tests/api/routers/test_socials_season_analytics.py` (pass)
+- blocked_checks:
+  - `ruff check tests/api/routers/test_socials_season_analytics.py` currently fails on pre-existing `E501` long-line violations in unrelated sections already present in this branch/worktree.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumer now receives intended 503/code path instead of generic upstream 500)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-03) — Operation envelope bootstrap event for early resume metadata
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (operation stream event sequencing semantics updated additively)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+- behavior_summary:
+  - `start_operation_for_stream(...)` now appends an immediate `operation` event after create/attach and before stream replay begins.
+  - This guarantees the client receives persisted `operation_id` + first `event_seq` even when producer progress events are delayed.
+  - Existing stream event types and operation status behavior remain backward-compatible and additive.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/pipeline/admin_operations.py api/routers/admin_operations.py trr_backend/repositories/admin_operations.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff format --check trr_backend/pipeline/admin_operations.py` (pass)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+---
+
 
 ## Latest Update (2026-03-03) — Worker platform capability filtering + Cloud Run race fix
 
@@ -11999,3 +12769,223 @@ Continuation (2026-03-02) — queue-status run summary (run-based health popup c
   - `senior-qa`
   - `code-reviewer`
 - default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-04) — AGENTS/CLAUDE consolidation and MCP matrix normalization
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `low` (policy/documentation-only changes)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/AGENTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/CLAUDE.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Promoted `AGENTS.md` to canonical repo policy and converted `CLAUDE.md` to short pointer shim.
+  - Added explicit MCP invocation matrix using Codex MCP inventory.
+  - Removed non-canonical browser automation references and preserved cross-repo order/contract guidance.
+- validation_evidence:
+  - `rg -n "playwright" /Users/thomashulihan/Projects/TRR/TRR-Backend/AGENTS.md /Users/thomashulihan/Projects/TRR/TRR-Backend/CLAUDE.md` (pass; no matches)
+  - `wc -l /Users/thomashulihan/Projects/TRR/TRR-Backend/CLAUDE.md` (pass; `12`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `yes`
+  - `TRR-APP`: `yes`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-05) — Task 11 staging unblock execution and resilience rerun
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (staging infra mutation + canary gate evidence path)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-APP/docs/cross-collab/TASK11/STATUS.md`
+- behavior_summary:
+  - Executed Task 11 unblock plan in staging and created evidence root:
+    - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/evidence/aws-worker-plane/20260304-195705-task11-unblock`
+  - Applied SG/runtime corrections:
+    - `trr-api-sg (sg-09ad087d9a6b689dd)` add `tcp/6543 -> 0.0.0.0/0`
+    - `trr-worker-sg (sg-09b039c604dd9d077)` add `tcp/6543 -> 0.0.0.0/0`
+    - set `/trr/staging/SUPABASE_DB_URL` to match `/trr/staging/DATABASE_URL`
+  - Recycled API ASG instance and verified `/health` recovery.
+  - Re-ran required resilience scripts:
+    - `30_resilience_api_recycle.sh` exit `1`
+    - `31_resilience_worker_recycle.sh` exit `1`
+    - `32_resilience_sse_replay.sh` exit `1`
+  - Post-fix blocker remains:
+    - no emitted `operation_id` / `event_seq` on kickoff
+    - SSM local fallback kickoff returns `Internal Server Error`
+    - `operation_ids.txt` remains missing and replay transcript remains empty
+  - Additional runtime finding from DB checks:
+    - `core.admin_operations` and `core.admin_operation_events` are absent in the staging runtime DB currently referenced by API env (`phase4_db_table_presence_check.txt`).
+- validation_evidence:
+  - `.../phase1_security_groups_after.json` confirms `6543` egress on API/worker SGs.
+  - `.../phase1_ssm_db_params_after.json` confirms `DATABASE_URL` and `SUPABASE_DB_URL` alignment.
+  - `.../phase2_summary.txt` confirms API instance recycle and health recovery.
+  - `.../phase3_rerun_t180_summary.txt` captures rerun exits (`1/1/1`).
+  - `.../ssm_outputs/*kickoff_fallback.json` captures fallback `Internal Server Error`.
+  - `.../phase4_validation_summary.json` confirms required 7 alarms present once with no duplicates.
+- blocked_checks:
+  - Task 11 canary evidence gate is **not** satisfied because operation envelope emission/replay continuity remains blocked.
+  - Required artifacts not complete: `operation_ids.txt` missing; `scenario_sse_replay_stream.txt` empty.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (status checkpoint update only)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-05) — Task 11 DB parity restoration + targeted rerun continuation
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (staging DB migration application + resilience reruns)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-APP/docs/cross-collab/TASK11/STATUS.md`
+- behavior_summary:
+  - Fixed staging DB runtime parity by applying missing migrations `0172` and `0173` directly on `/trr/staging/DATABASE_URL` endpoint.
+  - Inserted migration history rows into `supabase_migrations.schema_migrations` for `0172`/`0173`.
+  - Verified from API host runtime path that `core.admin_operations` and `core.admin_operation_events` are now resolvable.
+  - Re-ran only resilience scripts `30/31/32` against same evidence root:
+    - `30`: operation envelope emitted and `operation_id` captured; scenario still timed out in `pending`.
+    - `31`: operation envelope emitted and `operation_id` captured; scenario still timed out in `pending`.
+    - `32`: kickoff envelope emitted and `operation_id` captured; replay step failed in current script run due malformed `after_seq` value and no replay `event_seq` observed.
+  - Evidence improvement vs previous run:
+    - `operation_ids.txt` now populated (non-empty).
+    - `request_ids.txt` remains populated.
+    - `scenario_sse_replay_stream.txt` still empty.
+- validation_evidence:
+  - `phase_fix_check_admin_operations.out` (`exists=1`)
+  - `phase_fix_check_admin_operation_events.out` (`exists=1`)
+  - `phase_fix_check_migration_rows.out` (`0172`, `0173` present)
+  - `ssm_outputs/phase_fix_db_runtime_gate_v2.json` (`Success`, `(1,1)` table resolution)
+  - `phase_postfix2_rerun_summary.txt` (`run30_postfix_exit=1`, `run31_postfix2_exit=1`, `run32_postfix2_exit=1`)
+  - `db_snapshots/postfix_admin_operations_snapshot.txt` + `db_snapshots/postfix_admin_operation_events_snapshot.txt` + `postfix_api_operation_statuses.txt`
+- blocked_checks:
+  - Canary gate remains blocked: no terminal-state continuity for `30`/`31`; replay transcript remains empty for `32`.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `yes` (consumer checkpoint update only)
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-05) — SSE replay script parse fix + isolated rerun
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (single script fix + targeted resilience rerun)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_worker_plane/32_resilience_sse_replay.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed `event_seq` extraction in `32_resilience_sse_replay.sh` by replacing sed `\s` replacement usage with `[[:space:]]`, making numeric extraction reliable on BSD sed.
+  - Re-ran `32` only against existing evidence root.
+  - Confirmed fix effect:
+    - replay URL now uses `after_seq=1` (correct),
+    - previous malformed URL symptom (`after_seq=\"event_seq\": 1`) is removed.
+  - Scenario still exits non-zero because replay stream returns no `event_seq` (transport/runtime failure), so remaining blocker is no longer parsing-related.
+- validation_evidence:
+  - `bash -n scripts/ops/aws_worker_plane/32_resilience_sse_replay.sh` (pass)
+  - `run32_postfix3.stdout.log` shows `Reconnecting stream from after_seq=1 operation_id=...`
+  - `run32_postfix3.stderr.log` shows `Replay stream contained no event_seq`
+  - `scenario_sse_replay.log` captures HTTP/2 INTERNAL_ERROR and empty replay stream.
+- blocked_checks:
+  - `32` still red (`run32_postfix3_exit=1`) due empty replay stream; canary gate remains blocked.
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `no`
+  - `TRR-APP`: `no`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- default_skill_chain_exception_reason: ``
+
+## Latest Update (2026-03-05) — Social ingest remote enforcement + all-platform reliability hardening
+
+- primary_skill: `social-ingestion-reliability`
+- supporting_skills:
+  - `fastapi-expert`
+  - `senior-backend`
+  - `senior-fullstack`
+  - `debugging-wizard`
+  - `devops-engineer`
+  - `fullstack-guardian`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/start_worker_pool.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/start_remote_job_workers.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Enforced remote job-plane ownership for social ingest when remote mode is enabled, preventing silent local inline execution.
+  - Expanded remote-only platform defaults to all supported social platforms.
+  - Fixed worker claim fallback for legacy NULL worker capabilities to include Facebook and Threads.
+  - Made explicit Bravo account overrides authoritative across supported social platforms (prevents forced extra account injection).
+  - Improved queue status truthfulness by adding `cancelling` status bucket and aggregate worker counts (healthy/fresh/stale/total independent of list cap).
+  - Hardened run cancellation to include `cancelling` jobs and clear worker heartbeat bindings for cancelled jobs.
+  - Reduced local worker claim/poll aggressiveness and added optional social ingest groups to remote worker launcher.
+- validation_evidence:
+  - `pytest -q tests/api/routers/test_socials_season_analytics.py -k "ingest_returns_503_when_queue_enabled_and_worker_missing or ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled or ingest_requires_remote_worker_for_instagram_even_with_inline_fallback_enabled or ingest_returns_503_when_remote_job_plane_enforced_and_queue_disabled or ingest_returns_503_when_remote_job_plane_enforced_and_worker_missing_even_with_inline_fallback or ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_flag"` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py -k "claim_next_jobs_legacy_null_capability_uses_safe_defaults or ingest_season_dedupes_normalized_account_overrides or ingest_season_honors_authoritative_account_override_when_explicit or ingest_season_enforces_bravo_core_accounts_when_no_override or ingest_season_honors_authoritative_rhoslc_instagram_account_override or cancel_run_cancels_cancelling_jobs_and_clears_worker_heartbeats or query_worker_health_uses_aggregate_totals_and_stale_hidden_count or cancel_active_jobs_cancels_all_active_and_finalizes_runs"` (pass)
+  - `pytest -q tests/repositories/test_social_season_analytics.py -k "get_queue_status_uses_cache_ttl_and_skips_recent_failures_when_disabled or get_queue_status_fresh_true_bypasses_cache or get_queue_status_returns_stale_last_good_on_query_failure or get_queue_status_includes_stuck_jobs_payload or get_queue_status_includes_runs_summary or get_queue_status_recent_failures_include_run_id or query_worker_health_uses_aggregate_totals_and_stale_hidden_count"` (pass)
+  - `bash -n scripts/socials/start_worker_pool.sh scripts/start_remote_job_workers.sh` (pass)
+- blocked_checks:
+  - `ruff check` on whole touched backend files remains blocked by substantial pre-existing lint/type issues outside this patch scope.

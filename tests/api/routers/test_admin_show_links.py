@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
@@ -202,27 +203,27 @@ def test_discover_show_links_expands_root_fandom_seed_to_show_page_candidates() 
                 "api.routers.admin_show_links._resolve_wikipedia_url",
                 return_value=(None, None, "missing"),
             ):
+                with patch(
+                    "api.routers.admin_show_links._curated_show_fandom_base_urls",
+                    return_value=(),
+                ):
                     with patch(
-                        "api.routers.admin_show_links._curated_show_fandom_base_urls",
-                        return_value=(),
+                        "api.routers.admin_show_links.load_fandom_community_allowlist",
+                        return_value=("thetraitors.fandom.com", "thetraitorsuk.fandom.com"),
                     ):
                         with patch(
-                            "api.routers.admin_show_links.load_fandom_community_allowlist",
-                            return_value=("thetraitors.fandom.com", "thetraitorsuk.fandom.com"),
+                            "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                            return_value=[],
                         ):
                             with patch(
-                                "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
-                                return_value=[],
+                                "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
+                                return_value=["https://thetraitors.fandom.com/wiki/The_Traitors_(US)"],
                             ):
                                 with patch(
-                                    "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
-                                    return_value=["https://thetraitors.fandom.com/wiki/The_Traitors_(US)"],
+                                    "api.routers.admin_show_links._fetch_html_with_status",
+                                    side_effect=_fetch_html,
                                 ):
-                                    with patch(
-                                        "api.routers.admin_show_links._fetch_html_with_status",
-                                        side_effect=_fetch_html,
-                                    ):
-                                        links = _discover_show_links(show_id)
+                                    links = _discover_show_links(show_id)
 
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
     fandom_urls = {str(link.get("url") or "") for link in fandom_links}
@@ -1195,10 +1196,7 @@ def test_sync_show_wikipedia_links_updates_auto_derived_season_links() -> None:
     show_update_params = execute_returning.call_args_list[0].args[1]
     assert show_update_params[0] == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
     season_update_params = execute_returning.call_args_list[1].args[1]
-    assert (
-        season_update_params[0]
-        == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)_season_2"
-    )
+    assert season_update_params[0] == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)_season_2"
     assert season_update_params[3] == auto_season_link_id
     assert season_update_params[4] == show_id
 
@@ -1308,10 +1306,7 @@ def test_patch_show_link_rejects_missing_show_wikipedia_article() -> None:
 
 
 def test_canonicalize_url_normalizes_host_scheme_port_fragment_and_trailing_slash() -> None:
-    assert (
-        _canonicalize_url("HTTPS://WWW.IMDB.COM:443/name/nm1234567/#bio")
-        == "https://www.imdb.com/name/nm1234567"
-    )
+    assert _canonicalize_url("HTTPS://WWW.IMDB.COM:443/name/nm1234567/#bio") == "https://www.imdb.com/name/nm1234567"
     assert _canonicalize_url("http://example.com:80/path/") == "http://example.com/path"
     assert (
         _canonicalize_url("https://en.wikipedia.org/wiki/The_Traitors_%28American_TV_series%29")
@@ -1687,17 +1682,21 @@ def test_discover_people_links_fetches_tmdb_external_ids_when_missing_social_fie
                                             ):
                                                 links = _discover_people_links(show_id)
 
-    persist_tmdb.assert_called_once_with(person_id, "5190", {
-        "imdb_id": "nm0001086",
-        "wikidata_id": "Q316629",
-        "freebase_id": "",
-        "freebase_mid": "",
-        "facebook_id": "",
-        "instagram_id": "alancummingreally",
-        "tiktok_id": "",
-        "twitter_id": "alan_cumming",
-        "youtube_id": "",
-    })
+    persist_tmdb.assert_called_once_with(
+        person_id,
+        "5190",
+        {
+            "imdb_id": "nm0001086",
+            "wikidata_id": "Q316629",
+            "freebase_id": "",
+            "freebase_mid": "",
+            "facebook_id": "",
+            "instagram_id": "alancummingreally",
+            "tiktok_id": "",
+            "twitter_id": "alan_cumming",
+            "youtube_id": "",
+        },
+    )
     assert any(
         link.get("link_kind") == "imdb"
         and link.get("source") == "tmdb_external_ids"
@@ -1848,9 +1847,7 @@ def test_discover_people_links_discovers_fandom_profiles_across_show_fandom_doma
                 ):
                     with patch(
                         "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                            url if kind == "fandom" else None
-                        ),
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: (url if kind == "fandom" else None),
                     ):
                         links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
@@ -1894,9 +1891,7 @@ def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_searc
                 with patch("api.routers.admin_show_links.search_fandom_community_wiki_candidates", return_value=[]):
                     with patch(
                         "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                            url if kind == "fandom" else None
-                        ),
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: (url if kind == "fandom" else None),
                     ):
                         links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
@@ -3824,7 +3819,9 @@ def test_discover_show_links_stream_emits_progress_events_before_complete() -> N
                 payload=admin_show_links.LinkDiscoverRequest(include_seasons=True, include_people=True),
                 db=db,
                 admin={"email": "admin@example.com"},
+                request=None,  # type: ignore[arg-type]
             )
+
             async def _read_chunks() -> list[str]:
                 chunks: list[str] = []
                 async for chunk in response.body_iterator:
@@ -3847,6 +3844,53 @@ def test_discover_show_links_stream_emits_progress_events_before_complete() -> N
     assert complete_index != -1
     assert start_index < show_started_index < show_completed_index < complete_index
     assert '"stage_timings_ms"' in payload
+
+
+def test_discover_show_links_stream_includes_operation_contract_fields(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_links._show_exists", return_value=True):
+            with patch(
+                "api.routers.admin_show_links._run_show_link_discovery",
+                return_value={
+                    "show_id": show_id,
+                    "run_id": "run-456",
+                    "duration_ms": 25,
+                    "discovered": 1,
+                    "stage_counts": {"show_scanned": 1, "season_scanned": 0, "people_scanned": 0},
+                    "stage_timings_ms": {
+                        "show_stage_ms": 10,
+                        "season_stage_ms": 0,
+                        "people_stage_ms": 0,
+                        "validation_ms": 1,
+                    },
+                    "status_counts": {"approved_added": 1, "deleted_invalid": 0, "skipped_fetch_error": 0},
+                    "validation_reasons": {},
+                    "status": "ok",
+                    "timed_out": False,
+                    "timeout": None,
+                },
+            ):
+                response = client.post(
+                    f"/api/v1/admin/shows/{show_id}/links/discover/stream",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"include_seasons": True, "include_people": True},
+                )
+
+    assert response.status_code == 200
+    assert "event: complete" in response.text
+    assert '"operation_id"' in response.text
+    event_seq_matches = [int(match) for match in re.findall(r'"event_seq"\s*:\s*(\d+)', response.text)]
+    assert event_seq_matches
+    assert event_seq_matches == sorted(event_seq_matches)
+    assert len(event_seq_matches) == len(set(event_seq_matches))
 
 
 def test_validated_or_carried_person_source_url_falls_back_to_candidate_on_fetch_error() -> None:

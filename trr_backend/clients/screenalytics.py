@@ -85,6 +85,8 @@ class FaceBbox:
     match_status: str | None = None
     match_reason: str | None = None
     match_candidates: list[dict[str, object]] | None = None
+    filter_decision: str | None = None
+    filter_metrics: dict[str, float] | None = None
     square_crop_bbox: list[float] | None = None
 
 
@@ -98,6 +100,7 @@ class PeopleCountResult:
     reference_profile: dict[str, object] | None = None
     face_count_raw: int | None = None
     face_count_filtered: int | None = None
+    face_filter_thresholds: dict[str, float | int] | None = None
 
 
 def _clamp(value: float, min_value: float, max_value: float) -> float:
@@ -481,6 +484,7 @@ def _parse_people_count_data(data: dict[str, Any]) -> PeopleCountResult:
     face_count = data.get("face_count", 0)
     face_count_raw = data.get("face_count_raw")
     face_count_filtered = data.get("face_count_filtered")
+    face_filter_thresholds_raw = data.get("face_filter_thresholds")
     detector = data.get("detector", "unknown")
     model = data.get("model")
 
@@ -493,6 +497,19 @@ def _parse_people_count_data(data: dict[str, Any]) -> PeopleCountResult:
         face_count_raw = None
     if not isinstance(face_count_filtered, int):
         face_count_filtered = None
+    face_filter_thresholds: dict[str, float | int] | None = None
+    if isinstance(face_filter_thresholds_raw, dict):
+        min_side_px_raw = face_filter_thresholds_raw.get("min_side_px")
+        min_area_ratio_raw = face_filter_thresholds_raw.get("min_area_ratio")
+        min_side_px = min_side_px_raw if isinstance(min_side_px_raw, int) else None
+        min_area_ratio = float(min_area_ratio_raw) if isinstance(min_area_ratio_raw, (int, float)) else None
+        normalized_thresholds: dict[str, float | int] = {}
+        if isinstance(min_side_px, int) and min_side_px > 0:
+            normalized_thresholds["min_side_px"] = min_side_px
+        if isinstance(min_area_ratio, float) and min_area_ratio >= 0:
+            normalized_thresholds["min_area_ratio"] = min_area_ratio
+        if normalized_thresholds:
+            face_filter_thresholds = normalized_thresholds
 
     if not isinstance(detector, str):
         detector = "unknown"
@@ -513,8 +530,11 @@ def _parse_people_count_data(data: dict[str, Any]) -> PeopleCountResult:
             match_status = det.get("match_status")
             match_reason = det.get("match_reason")
             match_candidates_raw = det.get("match_candidates")
+            filter_decision = det.get("filter_decision")
+            filter_metrics_raw = det.get("filter_metrics")
             square_crop_bbox = det.get("square_crop_bbox")
             match_candidates: list[dict[str, object]] | None = None
+            filter_metrics: dict[str, float] | None = None
             if isinstance(match_candidates_raw, list):
                 normalized_candidates: list[dict[str, object]] = []
                 for candidate in match_candidates_raw:
@@ -535,6 +555,14 @@ def _parse_people_count_data(data: dict[str, Any]) -> PeopleCountResult:
                     normalized_candidates.append(normalized_candidate)
                 if normalized_candidates:
                     match_candidates = normalized_candidates
+            if isinstance(filter_metrics_raw, dict):
+                normalized_metrics: dict[str, float] = {}
+                for metric_key in ("face_w", "face_h", "face_area_ratio"):
+                    raw_metric = filter_metrics_raw.get(metric_key)
+                    if isinstance(raw_metric, (int, float)):
+                        normalized_metrics[metric_key] = float(raw_metric)
+                if normalized_metrics:
+                    filter_metrics = normalized_metrics
             if isinstance(bbox, list) and len(bbox) >= 4:
                 try:
                     detections.append(
@@ -568,6 +596,12 @@ def _parse_people_count_data(data: dict[str, Any]) -> PeopleCountResult:
                                 else None
                             ),
                             match_candidates=match_candidates,
+                            filter_decision=(
+                                str(filter_decision).strip()
+                                if isinstance(filter_decision, str) and filter_decision.strip()
+                                else None
+                            ),
+                            filter_metrics=filter_metrics,
                             square_crop_bbox=(
                                 [
                                     float(square_crop_bbox[0]),
@@ -595,6 +629,7 @@ def _parse_people_count_data(data: dict[str, Any]) -> PeopleCountResult:
         reference_profile=reference_profile,
         face_count_raw=face_count_raw,
         face_count_filtered=face_count_filtered,
+        face_filter_thresholds=face_filter_thresholds,
     )
 
 

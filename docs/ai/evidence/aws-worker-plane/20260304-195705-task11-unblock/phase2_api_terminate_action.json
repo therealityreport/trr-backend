@@ -1,0 +1,12 @@
+{
+    "Activity": {
+        "ActivityId": "50b672ee-1a9e-dcaa-9cea-2b44d91ba478",
+        "AutoScalingGroupName": "trr-api-asg",
+        "Description": "Terminating EC2 instance: i-05d7f68c379dc05db",
+        "Cause": "At 2026-03-05T01:04:50Z instance i-05d7f68c379dc05db was taken out of service in response to a user request.",
+        "StartTime": "2026-03-05T01:04:50.103000+00:00",
+        "StatusCode": "InProgress",
+        "Progress": 0,
+        "Details": "{\"Availability Zone ID\":\"use1-az2\",\"Subnet ID\":\"subnet-0d9834f9f3de2414d\",\"Availability Zone\":\"us-east-1b\"}"
+    }
+}

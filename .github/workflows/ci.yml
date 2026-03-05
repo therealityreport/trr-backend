@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check for unresolved merge markers
         run: |
@@ -69,3 +69,33 @@ jobs:
 
       - name: Schema docs check
         run: make schema-docs-check
+
+  test-py312-canary:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate env contract
+        run: |
+          python scripts/check_env_example.py \
+            --file .env.example \
+            --required SCREENALYTICS_API_URL TRR_INTERNAL_ADMIN_SHARED_SECRET SCREENALYTICS_SERVICE_TOKEN \
+            --allow-hyphen GEMINI-MODEL
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Import gate
+        run: python -c "import api.main"
+
+      - name: Run API smoke subset
+        run: python -m pytest tests/api -q

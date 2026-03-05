@@ -1,0 +1,22 @@
+{
+    "CommandId": "9aea2866-a99a-4a06-a780-a9cb596bea85",
+    "InstanceId": "i-09b52a7ad5f88c0a1",
+    "Comment": "Task11 SSE replay fallback kickoff",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 0,
+    "ExecutionStartDateTime": "2026-03-05T01:20:00.743Z",
+    "ExecutionElapsedTime": "PT0.017S",
+    "ExecutionEndDateTime": "2026-03-05T01:20:00.743Z",
+    "Status": "Success",
+    "StatusDetails": "Success",
+    "StandardOutputContent": "Internal Server Error",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

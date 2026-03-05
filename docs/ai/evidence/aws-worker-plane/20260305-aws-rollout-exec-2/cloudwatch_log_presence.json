@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-03-05T14:09:52Z",
+  "api_instance_id": "i-REDACTED",
+  "worker_instance_id": "i-REDACTED",
+  "discovered_log_groups": [
+    "/aws/lambda/trr-jobplane-metrics-publisher",
+    "/aws/rds/instance/trr-metadata-db/postgresql",
+    "/trr/api/bootstrap",
+    "/trr/ec2/cloud-init",
+    "/trr/ec2/cloud-init-output",
+    "/trr/worker/bootstrap",
+    "RDSOSMetrics"
+  ],
+  "api_groups_csv": "/trr/api/bootstrap",
+  "worker_groups_csv": "/trr/worker/bootstrap",
+  "api_event_sum": 0,
+  "worker_event_sum": 1,
+  "unit_markers_found": 13,
+  "warnings": [
+    "No recent API instance events found in discovered API log groups"
+  ]
+}

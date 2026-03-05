@@ -103,6 +103,49 @@ def test_start_reddit_refresh_run_enqueues_background_job(
     assert sent_payload.get("run_config_hash") == "1234567890abcdef1234567890abcdef12345678"
 
 
+def test_start_reddit_refresh_run_remote_mode_does_not_start_in_api(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    run_id = str(uuid4())
+    payload = {
+        "community_id": str(uuid4()),
+        "season_id": str(uuid4()),
+        "period_key": "pre-season",
+        "subreddit": "BravoRealHousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+    }
+
+    with patch(
+        "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
+        return_value={"id": run_id, "reused": False},
+    ):
+        with patch("trr_backend.repositories.reddit_refresh.execute_refresh_run", return_value={}) as exec_mock:
+            with patch(
+                "trr_backend.repositories.reddit_refresh.get_refresh_run",
+                return_value={"run_id": run_id, "status": "queued"},
+            ):
+                response = client.post(
+                    "/api/v1/admin/socials/reddit/runs",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reused"] is False
+    assert body["execution_owner"] == "remote_worker"
+    assert body["execution_mode_canonical"] == "remote"
+    assert exec_mock.called is False
+
+
 def test_get_reddit_refresh_run_returns_404_for_missing_run(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -122,6 +165,68 @@ def test_get_reddit_refresh_run_returns_404_for_missing_run(
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Refresh run not found"
+
+
+def test_list_reddit_refresh_runs_returns_filtered_rows(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    community_id = str(uuid4())
+    season_id = str(uuid4())
+    mocked_runs = [
+        {
+            "run_id": str(uuid4()),
+            "status": "running",
+            "community_id": community_id,
+            "season_id": season_id,
+        }
+    ]
+
+    with patch("trr_backend.repositories.reddit_refresh.list_refresh_runs", return_value=mocked_runs) as list_mock:
+        response = client.get(
+            "/api/v1/admin/socials/reddit/runs",
+            params={
+                "community_id": community_id,
+                "season_id": season_id,
+                "period_key": "period-preseason",
+                "status": "queued,running",
+                "limit": "10",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runs"][0]["status"] == "running"
+    assert list_mock.call_args.kwargs["community_id"] == community_id
+    assert list_mock.call_args.kwargs["season_id"] == season_id
+    assert list_mock.call_args.kwargs["period_key"] == "period-preseason"
+    assert list_mock.call_args.kwargs["statuses"] == ["queued", "running"]
+    assert list_mock.call_args.kwargs["limit"] == 10
+
+
+def test_list_reddit_refresh_runs_rejects_invalid_status(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.reddit_refresh.list_refresh_runs",
+        side_effect=ValueError("status must be one of: queued, running, completed, partial, failed, cancelled"),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/reddit/runs",
+            params={"status": "bogus"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 400
+    assert "status must be one of" in response.json()["detail"]
 
 
 def test_get_reddit_refresh_run_includes_queue_metrics(

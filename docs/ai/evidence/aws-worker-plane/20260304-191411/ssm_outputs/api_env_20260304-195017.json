@@ -1,0 +1,22 @@
+{
+    "CommandId": "ef91f318-7c34-42f2-9248-f2f2c6b9dff7",
+    "InstanceId": "i-05d7f68c379dc05db",
+    "Comment": "Task11 validate api remote env",
+    "DocumentName": "AWS-RunShellScript",
+    "DocumentVersion": "$DEFAULT",
+    "PluginName": "aws:runShellScript",
+    "ResponseCode": 0,
+    "ExecutionStartDateTime": "2026-03-05T00:50:18.827Z",
+    "ExecutionElapsedTime": "PT0.063S",
+    "ExecutionEndDateTime": "2026-03-05T00:50:18.827Z",
+    "Status": "Success",
+    "StatusDetails": "Success",
+    "StandardOutputContent": "w\nEnvironmentFiles=/etc/trr-api.env (ignore_errors=no)\n[grep_flags]\nTRR_JOB_PLANE_MODE=remote\nTRR_LONG_JOB_ENFORCE_REMOTE=1\nTRR_JOB_PLANE_MODE=remote\nTRR_LONG_JOB_ENFORCE_REMOTE=1\n",
+    "StandardOutputUrl": "",
+    "StandardErrorContent": "",
+    "StandardErrorUrl": "",
+    "CloudWatchOutputConfig": {
+        "CloudWatchLogGroupName": "",
+        "CloudWatchOutputEnabled": false
+    }
+}

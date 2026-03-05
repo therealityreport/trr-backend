@@ -23,10 +23,12 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.auth import AdminUser
+from trr_backend.job_plane import canonical_execution_mode, execution_owner_label, is_remote_job_plane_enabled
 from trr_backend.observability import get_trace_id
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
@@ -38,9 +40,7 @@ _WEEK_DETAIL_CACHE_TTL_SECONDS = int(os.getenv("WEEK_DETAIL_CACHE_TTL_SECONDS", 
 _WEEK_DETAIL_CACHE_MAX_ENTRIES = int(os.getenv("WEEK_DETAIL_CACHE_MAX_ENTRIES", "256"))
 _WEEK_DETAIL_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _WEEK_DETAIL_CACHE_LOCK = Lock()
-_WEEK_SUMMARY_CACHE_TTL_SECONDS = int(
-    os.getenv("WEEK_SUMMARY_CACHE_TTL_SECONDS", str(_WEEK_DETAIL_CACHE_TTL_SECONDS))
-)
+_WEEK_SUMMARY_CACHE_TTL_SECONDS = int(os.getenv("WEEK_SUMMARY_CACHE_TTL_SECONDS", str(_WEEK_DETAIL_CACHE_TTL_SECONDS)))
 _WEEK_SUMMARY_CACHE_MAX_ENTRIES = int(os.getenv("WEEK_SUMMARY_CACHE_MAX_ENTRIES", "256"))
 _WEEK_SUMMARY_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _WEEK_SUMMARY_CACHE_LOCK = Lock()
@@ -117,9 +117,7 @@ def _execute_with_timeout(
     thread.start()
     thread.join(timeout=timeout_seconds)
     if thread.is_alive():
-        raise TimeoutError(
-            f"Inline execution exceeded {timeout_seconds}s timeout"
-        )
+        raise TimeoutError(f"Inline execution exceeded {timeout_seconds}s timeout")
     if exception[0] is not None:
         raise exception[0]
     return result[0]
@@ -154,6 +152,20 @@ def _social_execution_mode_deprecation_payload() -> dict[str, Any]:
     }
 
 
+def _normalize_run_summary_payload(summary: Any) -> dict[str, Any]:
+    payload = dict(summary) if isinstance(summary, dict) else {}
+    if not payload:
+        return {}
+    total_jobs = int(payload.get("total_jobs") or 0)
+    completed_jobs = int(payload.get("completed_jobs") or 0)
+    failed_jobs = int(payload.get("failed_jobs") or 0)
+    active_jobs = int(payload.get("active_jobs") or 0)
+    if completed_jobs == 0 and total_jobs > 0:
+        completed_jobs = max(0, total_jobs - failed_jobs - active_jobs)
+    payload["completed_jobs"] = completed_jobs
+    return payload
+
+
 def _normalize_target_platforms(platforms: list[str] | None) -> list[str]:
     ordered = platforms or list(SOCIAL_SUPPORTED_PLATFORMS)
     deduped: list[str] = []
@@ -163,6 +175,18 @@ def _normalize_target_platforms(platforms: list[str] | None) -> list[str]:
             continue
         deduped.append(normalized)
     return deduped or list(SOCIAL_SUPPORTED_PLATFORMS)
+
+
+def _remote_only_social_platforms() -> set[str]:
+    default_platforms = ",".join(SOCIAL_SUPPORTED_PLATFORMS)
+    raw = str(os.getenv("SOCIAL_REMOTE_ONLY_PLATFORMS") or default_platforms).strip().lower()
+    if not raw or raw in {"none", "off", "disabled"}:
+        return set()
+    return {
+        token.strip()
+        for token in raw.split(",")
+        if token.strip() and token.strip() in set(SOCIAL_SUPPORTED_PLATFORMS)
+    }
 
 
 def _week_detail_cache_key(
@@ -270,7 +294,7 @@ def _set_week_detail_cached_payload(cache_key: tuple[Any, ...], payload: dict[st
             _WEEK_DETAIL_CACHE.items(),
             key=lambda item: item[1][0],
         )
-        for key, _ in items_by_expiry[: - _WEEK_DETAIL_CACHE_MAX_ENTRIES]:
+        for key, _ in items_by_expiry[:-_WEEK_DETAIL_CACHE_MAX_ENTRIES]:
             _WEEK_DETAIL_CACHE.pop(key, None)
 
 
@@ -296,7 +320,7 @@ def _set_week_summary_cached_payload(cache_key: tuple[Any, ...], payload: dict[s
             _WEEK_SUMMARY_CACHE.items(),
             key=lambda item: item[1][0],
         )
-        for key, _ in items_by_expiry[: - _WEEK_SUMMARY_CACHE_MAX_ENTRIES]:
+        for key, _ in items_by_expiry[:-_WEEK_SUMMARY_CACHE_MAX_ENTRIES]:
             _WEEK_SUMMARY_CACHE.pop(key, None)
 
 
@@ -361,7 +385,6 @@ def _value_error_to_bad_request(exc: ValueError) -> HTTPException:
             detail={"code": "INVALID_PLATFORM_FILTER", "message": message.split(":", 1)[-1].strip() or message},
         )
     return HTTPException(status_code=400, detail=message)
-
 
 
 def _is_local_or_dev_runtime() -> bool:
@@ -1486,9 +1509,7 @@ async def scrape_facebook_post(
             thumbnail_url=post.thumbnail_url or None,
             media_urls=[str(u) for u in (post.media_urls or []) if str(u)],
             posted_at=(
-                datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat()
-                if post.posted_at is not None
-                else None
+                datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat() if post.posted_at is not None else None
             ),
             reactions=dict(post.reactions or {}),
         )
@@ -1681,9 +1702,9 @@ class SeasonSocialIngestRequest(BaseModel):
     )
     sync_strategy: Literal["incremental", "full_refresh"] = Field(default="incremental")
     comment_refresh_policy: Literal["balanced", "missing_only"] = Field(default="balanced")
-    comment_anchor_source_ids: dict[
-        Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"], list[str]
-    ] | None = Field(default=None)
+    comment_anchor_source_ids: (
+        dict[Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"], list[str]] | None
+    ) = Field(default=None)
     accounts_override: list[str] | None = Field(default=None)
     hashtags_override: list[str] | None = Field(default=None)
     keywords_override: list[str] | None = Field(default=None)
@@ -1704,6 +1725,8 @@ class SeasonSocialIngestRequest(BaseModel):
     day_weight_profile: Literal["default", "rhoslc_default"] | None = Field(default=None)
     priority_mode: Literal["default", "episode_peak_weighted"] | None = Field(default=None)
     allow_inline_dev_fallback: bool = Field(default=False)
+    client_session_id: str | None = Field(default=None, max_length=200)
+    client_workflow_id: str | None = Field(default=None, max_length=200)
 
 
 class PostCommentRefreshRequest(BaseModel):
@@ -1754,6 +1777,8 @@ class RedditRefreshRunRequest(BaseModel):
     comment_delta_only: bool = Field(default=True)
     max_pages: int = Field(default=10_000, ge=1, le=10_000)
     mode: Literal["sync_posts", "sync_details"] = Field(default="sync_posts")
+    client_session_id: str | None = Field(default=None, max_length=200)
+    client_workflow_id: str | None = Field(default=None, max_length=200)
 
 
 class RedditCacheBulkRequest(BaseModel):
@@ -1860,15 +1885,61 @@ async def ingest_season_social(
 
     try:
         queue_enabled = is_queue_enabled()
+        remote_plane_enforced = is_remote_job_plane_enabled()
         used_inline_fallback = False
         warnings: list[str] = []
         worker_health: dict[str, Any] | None = None
+        if not queue_enabled and remote_plane_enforced:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
+                    "message": (
+                        "Social ingest remote-worker ownership is enforced "
+                        "(TRR_JOB_PLANE_MODE=remote or TRR_LONG_JOB_ENFORCE_REMOTE=1)."
+                    ),
+                    "execution_mode": canonical_execution_mode(),
+                    "execution_owner": execution_owner_label(),
+                },
+            )
         if queue_enabled:
             try:
                 worker_health = assert_worker_available_when_queue_enabled()
             except SocialWorkerUnavailableError as exc:
                 worker_health = exc.worker_health
+                if remote_plane_enforced:
+                    worker_health_detail = jsonable_encoder(worker_health) if worker_health is not None else None
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
+                            "message": (
+                                "Social ingest remote-worker ownership is enforced and no healthy worker "
+                                "is currently reporting heartbeats."
+                            ),
+                            "execution_mode": canonical_execution_mode(),
+                            "execution_owner": execution_owner_label(),
+                            "worker_health": worker_health_detail,
+                        },
+                    ) from exc
                 if payload.allow_inline_dev_fallback and _is_local_or_dev_runtime():
+                    requested_platforms = set(_normalize_target_platforms(payload.platforms))
+                    remote_only_platforms = _remote_only_social_platforms()
+                    blocked_platforms = sorted(requested_platforms & remote_only_platforms)
+                    if blocked_platforms:
+                        worker_health_detail = jsonable_encoder(worker_health) if worker_health is not None else None
+                        raise HTTPException(
+                            status_code=503,
+                            detail={
+                                "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
+                                "message": (
+                                    "Remote worker execution is required for platform(s): "
+                                    + ", ".join(blocked_platforms)
+                                ),
+                                "required_platforms": blocked_platforms,
+                                "worker_health": worker_health_detail,
+                            },
+                        ) from exc
                     queue_enabled = False
                     used_inline_fallback = True
                     warnings.append(
@@ -1879,12 +1950,13 @@ async def ingest_season_social(
                         sid,
                     )
                 else:
+                    worker_health_detail = jsonable_encoder(worker_health) if worker_health is not None else None
                     raise HTTPException(
                         status_code=503,
                         detail={
                             "code": "SOCIAL_WORKER_UNAVAILABLE",
                             "message": str(exc),
-                            "worker_health": worker_health,
+                            "worker_health": worker_health_detail,
                         },
                     ) from exc
 
@@ -1911,6 +1983,8 @@ async def ingest_season_social(
             runner_b_start_offset_hours=payload.runner_b_start_offset_hours,
             day_weight_profile=payload.day_weight_profile,
             priority_mode=payload.priority_mode,
+            client_session_id=payload.client_session_id,
+            client_workflow_id=payload.client_workflow_id,
             date_start=payload.date_start,
             date_end=payload.date_end,
             initiated_by=email,
@@ -2032,6 +2106,7 @@ async def ingest_season_social(
             "queued_or_started_jobs": job_count,
             "job_count": job_count,
             "summary": run_payload.get("summary") or {},
+            "summary_normalized": _normalize_run_summary_payload(run_payload.get("summary")),
             "execution_mode": execution_mode,
             "message": (
                 "Ingest run queued. Poll /ingest/jobs with run_id for stage progress."
@@ -2043,6 +2118,7 @@ async def ingest_season_social(
             response_payload["warnings"] = warnings
         if used_inline_fallback and worker_health is not None:
             response_payload["worker_health"] = worker_health
+        response_payload["execution_owner"] = execution_owner_label()
         response_payload["execution_mode_canonical"] = execution_mode_canonical
         response_payload["execution_mode_legacy"] = execution_mode_legacy
         response_payload["execution_mode_deprecation"] = _social_execution_mode_deprecation_payload()
@@ -2153,11 +2229,14 @@ def purge_social_ingest_inactive_workers(
 
 
 @router.get("/ingest/queue-status")
-def get_social_ingest_queue_status(_: AdminUser = None) -> dict[str, Any]:
+def get_social_ingest_queue_status(
+    fresh: bool = Query(default=False, description="Bypass queue-status TTL cache when true"),
+    _: AdminUser = None,
+) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_queue_status
 
     try:
-        return get_queue_status()
+        return get_queue_status(fresh=fresh)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest queue status")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -2180,6 +2259,21 @@ def cancel_social_ingest_stuck_jobs(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel stuck social ingest jobs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/ingest/active-jobs/cancel")
+def cancel_social_ingest_active_jobs(
+    user: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import cancel_active_jobs
+
+    try:
+        return cancel_active_jobs(cancelled_by=(user or {}).get("email"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to cancel active social ingest jobs")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -2264,10 +2358,25 @@ async def start_reddit_refresh_run(
         run_row = create_or_reuse_refresh_run(payload=serialized)
         run_id = str(run_row.get("id"))
         reused = bool(run_row.get("reused"))
+        remote_mode = is_remote_job_plane_enabled()
+        execution_mode = canonical_execution_mode()
+        execution_owner = execution_owner_label()
         if not reused:
-            background_tasks.add_task(execute_refresh_run, run_id)
+            if remote_mode:
+                logger.info(
+                    "Queued reddit refresh run for remote worker ownership: run_id=%s execution_mode=%s",
+                    run_id,
+                    execution_mode,
+                )
+            else:
+                background_tasks.add_task(execute_refresh_run, run_id)
         run = get_refresh_run(run_id)
-        return {"run": run, "reused": reused}
+        return {
+            "run": run,
+            "reused": reused,
+            "execution_owner": execution_owner,
+            "execution_mode_canonical": execution_mode,
+        }
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
@@ -2276,6 +2385,40 @@ async def start_reddit_refresh_run(
             payload.community_id,
             payload.season_id,
             payload.period_key,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/reddit/runs")
+async def list_reddit_refresh_runs(
+    community_id: UUID | None = Query(default=None),
+    season_id: UUID | None = Query(default=None),
+    period_key: str | None = Query(default=None, min_length=1, max_length=200),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.reddit_refresh import list_refresh_runs
+
+    statuses = [item.strip().lower() for item in (status or "").split(",") if item.strip()]
+    try:
+        runs = list_refresh_runs(
+            community_id=str(community_id) if community_id else None,
+            season_id=str(season_id) if season_id else None,
+            period_key=period_key.strip() if isinstance(period_key, str) else None,
+            statuses=statuses or None,
+            limit=limit,
+        )
+        return {"runs": runs}
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to list reddit refresh runs: community_id=%s season_id=%s period_key=%s status=%s",
+            community_id,
+            season_id,
+            period_key,
+            status,
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -2334,6 +2477,7 @@ async def get_reddit_cached_period_payload_bulk(
     )
 
     try:
+
         def _normalize_period_key(value: str) -> str:
             return str(value or "").strip()
 
@@ -2655,9 +2799,7 @@ async def get_season_ingest_jobs(
     offset: int = Query(default=_INGEST_JOBS_DEFAULT_OFFSET, ge=0, le=_INGEST_JOBS_MAX_OFFSET),
     run_id: UUID | None = Query(default=None),
     status: str | None = Query(default=None),
-    platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"] | None = Query(
-        default=None
-    ),
+    platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"] | None = Query(default=None),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_jobs
@@ -2698,6 +2840,7 @@ async def get_season_ingest_runs(
     ),
     source_scope: Literal["bravo", "creator", "community"] | None = Query(default=None),
     run_id: UUID | None = Query(default=None),
+    client_session_id: str | None = Query(default=None, max_length=200),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_runs
@@ -2710,6 +2853,7 @@ async def get_season_ingest_runs(
             status=status,
             source_scope=source_scope,
             run_id=str(run_id) if run_id else None,
+            client_session_id=(str(client_session_id or "").strip() or None),
         )
         duration_ms = int((perf_counter() - started_at) * 1000)
         logger.info(
@@ -2722,7 +2866,12 @@ async def get_season_ingest_runs(
         )
         return {
             "season_id": str(season_id),
-            "filters": {"status": status, "source_scope": source_scope, "run_id": str(run_id) if run_id else None},
+            "filters": {
+                "status": status,
+                "source_scope": source_scope,
+                "run_id": str(run_id) if run_id else None,
+                "client_session_id": str(client_session_id or "").strip() or None,
+            },
             "runs": runs,
         }
     except Exception as exc:  # noqa: BLE001
@@ -2743,6 +2892,7 @@ async def get_season_ingest_runs_summary(
     season_id: UUID,
     limit: int = Query(default=20, ge=1, le=100),
     source_scope: Literal["bravo", "creator", "community"] | None = Query(default=None),
+    client_session_id: str | None = Query(default=None, max_length=200),
     _: AdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_run_summaries
@@ -2753,6 +2903,7 @@ async def get_season_ingest_runs_summary(
             str(season_id),
             limit=limit,
             source_scope=source_scope,
+            client_session_id=(str(client_session_id or "").strip() or None),
         )
         duration_ms = int((perf_counter() - started_at) * 1000)
         logger.info(
@@ -2764,7 +2915,11 @@ async def get_season_ingest_runs_summary(
         )
         return {
             "season_id": str(season_id),
-            "filters": {"source_scope": source_scope, "limit": limit},
+            "filters": {
+                "source_scope": source_scope,
+                "limit": limit,
+                "client_session_id": str(client_session_id or "").strip() or None,
+            },
             "summaries": summaries,
         }
     except Exception as exc:  # noqa: BLE001
@@ -2774,6 +2929,49 @@ async def get_season_ingest_runs_summary(
             season_id,
             source_scope,
             limit,
+            duration_ms,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/seasons/{season_id}/ingest/runs/{run_id}/progress")
+async def get_season_ingest_run_progress(
+    season_id: UUID,
+    run_id: UUID,
+    recent_log_limit: int = Query(default=20, ge=1, le=100),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_run_progress_snapshot
+
+    started_at = perf_counter()
+    try:
+        payload = get_run_progress_snapshot(
+            str(season_id),
+            str(run_id),
+            recent_log_limit=recent_log_limit,
+        )
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.info(
+            "Social ingest run progress request completed: season=%s run_id=%s recent_log_limit=%s duration_ms=%s",
+            season_id,
+            run_id,
+            recent_log_limit,
+            duration_ms,
+        )
+        return payload
+    except ValueError as exc:
+        message = str(exc)
+        if message == "run_not_found":
+            raise HTTPException(status_code=404, detail=message) from exc
+        if message in {"social_ingest_queue_schema_missing", "run_progress_requires_scrape_jobs_run_id"}:
+            raise HTTPException(status_code=503, detail=message) from exc
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.exception(
+            "Failed to fetch social ingest run progress: season=%s run_id=%s duration_ms=%s",
+            season_id,
+            run_id,
             duration_ms,
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -2794,6 +2992,52 @@ async def cancel_season_ingest_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel social ingest run: season=%s run_id=%s", season_id, run_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/seasons/{season_id}/analytics/week/{week_index}/live-health")
+async def get_season_analytics_week_live_health(
+    season_id: UUID,
+    week_index: int,
+    source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
+    timezone: str = Query(default="America/New_York"),
+    platforms: str | None = Query(default=None, description="Comma-separated platform list"),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_week_live_health_snapshot
+
+    parsed_platforms = _parse_platform_query(platforms)
+    started_at = perf_counter()
+    try:
+        payload = get_week_live_health_snapshot(
+            str(season_id),
+            week_index=week_index,
+            platforms=parsed_platforms,
+            timezone=timezone,
+            source_scope=source_scope,
+        )
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.info(
+            "Social week live-health request completed: season=%s week=%s source_scope=%s platforms=%s duration_ms=%s",
+            season_id,
+            week_index,
+            source_scope,
+            ",".join(parsed_platforms) if parsed_platforms else "all",
+            duration_ms,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        duration_ms = int((perf_counter() - started_at) * 1000)
+        logger.exception(
+            "Failed to compute social week live-health: season=%s week=%s source_scope=%s platforms=%s duration_ms=%s",
+            season_id,
+            week_index,
+            source_scope,
+            ",".join(parsed_platforms) if parsed_platforms else "all",
+            duration_ms,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

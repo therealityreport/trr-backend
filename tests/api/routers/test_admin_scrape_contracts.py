@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
+
+import jwt
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from api.main import app
 from api.routers.admin_scrape import ImportImageItem
 
 
@@ -54,3 +62,89 @@ def test_import_image_item_rejects_unknown_logo_target_type() -> None:
             logo_target_key="foo",
             logo_target_label="Foo",
         )
+
+
+def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
+    now = datetime.now(tz=UTC)
+    payload = {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "role": "service_role",
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def test_import_images_stream_includes_operation_contract_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    operation_id = str(uuid4())
+    seen_after: list[int] = []
+
+    def _fake_stream_events(_operation_id: str, *, after_seq: int = 0, limit: int = 500):
+        seen_after.append(after_seq)
+        if after_seq > 0:
+            return []
+        return [
+            {
+                "operation_id": operation_id,
+                "event_seq": 1,
+                "event_type": "operation",
+                "event_payload": {
+                    "operation_id": operation_id,
+                    "status": "running",
+                    "attached": False,
+                    "request_id": None,
+                },
+            },
+            {
+                "operation_id": operation_id,
+                "event_seq": 2,
+                "event_type": "complete",
+                "event_payload": {
+                    "imported": 0,
+                    "skipped_duplicates": 0,
+                    "errors": [],
+                    "assets": [],
+                },
+            },
+        ]
+
+    with TestClient(app) as client:
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=MagicMock()):
+            with patch("api.routers.admin_scrape.start_operation_for_stream", return_value={"id": operation_id}):
+                with patch(
+                    "trr_backend.repositories.admin_operations.get_operation",
+                    side_effect=[
+                        {"id": operation_id, "status": "running"},
+                        {"id": operation_id, "status": "completed"},
+                    ],
+                ):
+                    with patch(
+                        "trr_backend.repositories.admin_operations.stream_events_after_seq",
+                        side_effect=_fake_stream_events,
+                    ):
+                        response = client.post(
+                            "/api/v1/admin/scrape/import/stream",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={
+                                "entity_type": "show",
+                                "show_id": str(uuid4()),
+                                "source_url": "https://example.com/source",
+                                "images": [
+                                    {
+                                        "candidate_id": "candidate-1",
+                                        "url": "https://example.com/image.jpg",
+                                        "kind": "other",
+                                    }
+                                ],
+                            },
+                        )
+
+    assert response.status_code == 200
+    assert "event: operation" in response.text
+    assert "event: complete" in response.text
+    assert '"operation_id"' in response.text
+    event_seq_matches = [int(match) for match in re.findall(r'"event_seq"\s*:\s*(\d+)', response.text)]
+    assert event_seq_matches == [1, 2]
+    assert seen_after and seen_after[0] == 0

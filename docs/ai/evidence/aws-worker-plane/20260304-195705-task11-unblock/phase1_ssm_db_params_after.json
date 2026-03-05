@@ -1,0 +1,23 @@
+{
+    "Parameters": [
+        {
+            "Name": "/trr/staging/DATABASE_URL",
+            "Type": "SecureString",
+            "Value": "postgresql://postgres.vwxfvzutyufrkhfgoeaa:5lLVvjDaelWfLlXv@aws-1-us-east-1.pooler.supabase.com:6543/postgres",
+            "Version": 2,
+            "LastModifiedDate": "2026-03-03T22:46:49.396000-05:00",
+            "ARN": "arn:aws:ssm:us-east-1:522814694101:parameter/trr/staging/DATABASE_URL",
+            "DataType": "text"
+        },
+        {
+            "Name": "/trr/staging/SUPABASE_DB_URL",
+            "Type": "SecureString",
+            "Value": "postgresql://postgres.vwxfvzutyufrkhfgoeaa:5lLVvjDaelWfLlXv@aws-1-us-east-1.pooler.supabase.com:6543/postgres",
+            "Version": 1,
+            "LastModifiedDate": "2026-03-04T19:59:00.850000-05:00",
+            "ARN": "arn:aws:ssm:us-east-1:522814694101:parameter/trr/staging/SUPABASE_DB_URL",
+            "DataType": "text"
+        }
+    ],
+    "InvalidParameters": []
+}

@@ -1,0 +1,78 @@
+{
+    "Listeners": [
+        {
+            "ListenerArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:listener/app/trr-api-alb/44cfa332d8548fc6/7b4e60cabb69cfc3",
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:loadbalancer/app/trr-api-alb/44cfa332d8548fc6",
+            "Port": 80,
+            "Protocol": "HTTP",
+            "DefaultActions": [
+                {
+                    "Type": "redirect",
+                    "RedirectConfig": {
+                        "Protocol": "HTTPS",
+                        "Port": "443",
+                        "Host": "#{host}",
+                        "Path": "/#{path}",
+                        "Query": "#{query}",
+                        "StatusCode": "HTTP_301"
+                    }
+                }
+            ]
+        },
+        {
+            "ListenerArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:listener/app/trr-api-alb/44cfa332d8548fc6/7cf420c4a8799ba8",
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:loadbalancer/app/trr-api-alb/44cfa332d8548fc6",
+            "Port": 443,
+            "Protocol": "HTTPS",
+            "Certificates": [
+                {
+                    "CertificateArn": "arn:aws:acm:us-east-1:522814694101:certificate/44a29378-9d69-4595-9abd-dcdd7a135b94"
+                }
+            ],
+            "SslPolicy": "ELBSecurityPolicy-TLS13-1-2-2021-06",
+            "DefaultActions": [
+                {
+                    "Type": "forward",
+                    "TargetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc",
+                    "ForwardConfig": {
+                        "TargetGroups": [
+                            {
+                                "TargetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc",
+                                "Weight": 1
+                            }
+                        ],
+                        "TargetGroupStickinessConfig": {
+                            "Enabled": false
+                        }
+                    }
+                }
+            ],
+            "MutualAuthentication": {
+                "Mode": "off"
+            }
+        },
+        {
+            "ListenerArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:listener/app/trr-api-alb/44cfa332d8548fc6/9a2dd07e21a43848",
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:loadbalancer/app/trr-api-alb/44cfa332d8548fc6",
+            "Port": 8000,
+            "Protocol": "HTTP",
+            "DefaultActions": [
+                {
+                    "Type": "forward",
+                    "TargetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc",
+                    "ForwardConfig": {
+                        "TargetGroups": [
+                            {
+                                "TargetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc",
+                                "Weight": 1
+                            }
+                        ],
+                        "TargetGroupStickinessConfig": {
+                            "Enabled": false
+                        }
+                    }
+                }
+            ]
+        }
+    ]
+}

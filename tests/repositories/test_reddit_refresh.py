@@ -645,6 +645,9 @@ def test_replace_period_matches_skips_flair_mode_when_column_missing(monkeypatch
         def execute(self, query, params):  # noqa: ANN001, ANN201
             return None
 
+        def fetchall(self):  # noqa: ANN201
+            return []
+
     monkeypatch.setattr(reddit_refresh, "_column_exists", lambda schema, table, column: False)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh.pg, "db_cursor", lambda conn=None: DummyCursor())  # noqa: ARG005
 
@@ -846,6 +849,7 @@ def test_execute_refresh_run_updates_live_progress(monkeypatch) -> None:
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
     monkeypatch.setattr(reddit_refresh, "_discover_window", fake_discover)
     monkeypatch.setattr(reddit_refresh, "_update_run", fake_update_run)
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
     monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
     monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
@@ -1241,6 +1245,7 @@ def test_execute_refresh_run_adaptive_deep_completes_after_second_pass(monkeypat
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
     monkeypatch.setattr(reddit_refresh, "_discover_window", fake_discover)
     monkeypatch.setattr(reddit_refresh, "_update_run", fake_update_run)
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
     monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
     monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
@@ -1343,6 +1348,7 @@ def test_execute_refresh_run_adaptive_deep_remains_partial_when_second_pass_inco
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
     monkeypatch.setattr(reddit_refresh, "_discover_window", fake_discover)
     monkeypatch.setattr(reddit_refresh, "_update_run", fake_update_run)
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
     monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
     monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
@@ -1439,6 +1445,7 @@ def test_execute_refresh_run_max_coverage_listing_incomplete_backfill_complete_m
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
     monkeypatch.setattr(reddit_refresh, "_discover_window", lambda *args, **kwargs: result_payload)  # noqa: ANN002, ANN003
     monkeypatch.setattr(reddit_refresh, "_update_run", fake_update_run)
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
     monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
     monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
     monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)

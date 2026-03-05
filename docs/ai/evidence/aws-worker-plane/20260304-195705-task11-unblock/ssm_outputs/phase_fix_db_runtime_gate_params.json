@@ -1,0 +1,7 @@
+{
+  "commands": [
+    "set -e",
+    "DB_URL=$(grep -E '^SUPABASE_DB_URL=|^DATABASE_URL=' /etc/trr-api.env | head -n1 | cut -d= -f2-)",
+    "DB_URL=\"$DB_URL\" /opt/trr-backend/.venv/bin/python -c \"import os,psycopg2; c=psycopg2.connect(os.environ['DB_URL'],connect_timeout=10); cur=c.cursor(); cur.execute('select 1 from core.admin_operations limit 1'); print(cur.fetchone()[0]); c.close()\""
+  ]
+}
