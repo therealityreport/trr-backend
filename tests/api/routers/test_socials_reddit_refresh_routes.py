@@ -401,8 +401,16 @@ def test_get_reddit_cached_period_payload_returns_discovery(
     season_id = str(uuid4())
 
     with patch(
-        "trr_backend.repositories.reddit_refresh.get_cached_period_payload",
-        return_value={"subreddit": "bravorealhousewives", "threads": []},
+        "trr_backend.repositories.reddit_refresh.get_cached_period_payload_snapshot",
+        return_value={
+            "discovery": {"subreddit": "bravorealhousewives", "threads": []},
+            "resolved_period_key": "pre-season",
+            "cache_status": "fresh",
+            "cache_age_seconds": None,
+            "run_status": "completed",
+            "phase": None,
+            "partial_failures": [],
+        },
     ):
         response = client.get(
             "/api/v1/admin/socials/reddit/cache",
@@ -428,7 +436,10 @@ def test_get_reddit_cached_period_payload_404_when_missing(
     community_id = str(uuid4())
     season_id = str(uuid4())
 
-    with patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload", return_value=None):
+    with (
+        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload_snapshot", return_value=None),
+        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload", return_value=None),
+    ):
         response = client.get(
             "/api/v1/admin/socials/reddit/cache",
             params={
@@ -452,7 +463,7 @@ def test_get_reddit_cached_period_payload_bulk_returns_first_match_and_misses(
     community_id = str(uuid4())
     season_id = str(uuid4())
     resolve_calls: list[str] = []
-    payload_calls: list[str] = []
+    snapshot_calls: list[str] = []
 
     def _fake_resolve(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
         del community_id, season_id
@@ -461,16 +472,24 @@ def test_get_reddit_cached_period_payload_bulk_returns_first_match_and_misses(
             return period_key
         return None
 
-    def _fake_cached(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
+    def _fake_snapshot(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
         del community_id, season_id
-        payload_calls.append(period_key)
+        snapshot_calls.append(period_key)
         if period_key == "period-preseason":
-            return {"subreddit": "bravorealhousewives", "threads": [{"reddit_post_id": "post-1"}]}
+            return {
+                "discovery": {"subreddit": "bravorealhousewives", "threads": [{"reddit_post_id": "post-1"}]},
+                "resolved_period_key": "period-preseason",
+                "cache_status": "fresh",
+                "cache_age_seconds": None,
+                "run_status": "completed",
+                "phase": None,
+                "partial_failures": [],
+            }
         return None
 
     with (
         patch("trr_backend.repositories.reddit_refresh.resolve_cached_period_key", side_effect=_fake_resolve),
-        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload", side_effect=_fake_cached),
+        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload_snapshot", side_effect=_fake_snapshot),
     ):
         response = client.post(
             "/api/v1/admin/socials/reddit/cache/bulk",
@@ -489,7 +508,7 @@ def test_get_reddit_cached_period_payload_bulk_returns_first_match_and_misses(
     assert payload["discovery"]["threads"][0]["reddit_post_id"] == "post-1"
     assert payload["source"] == "cache"
     assert resolve_calls == ["period-preseason"]
-    assert payload_calls == ["period-preseason"]
+    assert snapshot_calls == ["period-preseason"]
 
 
 def test_get_reddit_cached_period_payload_bulk_returns_all_misses_when_no_payload(
@@ -567,7 +586,7 @@ def test_get_reddit_cached_period_payload_bulk_uses_container_keys_first(
     season_id = str(uuid4())
     derived_key = f"community:{community_id}:season:{season_id}:container:period-preseason"
     resolve_calls: list[str] = []
-    payload_calls: list[str] = []
+    snapshot_calls: list[str] = []
 
     def _fake_resolve(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
         del community_id, season_id
@@ -576,16 +595,24 @@ def test_get_reddit_cached_period_payload_bulk_uses_container_keys_first(
             return period_key
         return None
 
-    def _fake_cached(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
+    def _fake_snapshot(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
         del community_id, season_id
-        payload_calls.append(period_key)
+        snapshot_calls.append(period_key)
         if period_key == derived_key:
-            return {"subreddit": "bravorealhousewives", "threads": [{"reddit_post_id": "post-xyz"}]}
+            return {
+                "discovery": {"subreddit": "bravorealhousewives", "threads": [{"reddit_post_id": "post-xyz"}]},
+                "resolved_period_key": derived_key,
+                "cache_status": "fresh",
+                "cache_age_seconds": None,
+                "run_status": "completed",
+                "phase": None,
+                "partial_failures": [],
+            }
         return None
 
     with (
         patch("trr_backend.repositories.reddit_refresh.resolve_cached_period_key", side_effect=_fake_resolve),
-        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload", side_effect=_fake_cached),
+        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload_snapshot", side_effect=_fake_snapshot),
     ):
         response = client.post(
             "/api/v1/admin/socials/reddit/cache/bulk",
@@ -603,7 +630,7 @@ def test_get_reddit_cached_period_payload_bulk_uses_container_keys_first(
     assert payload["matched_period_key"] == derived_key
     assert payload["source"] == "cache"
     assert resolve_calls == [derived_key]
-    assert payload_calls == [derived_key]
+    assert snapshot_calls == [derived_key]
 
 
 def test_get_reddit_analytics_summary_requires_season_id_for_season_scope(

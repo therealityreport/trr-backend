@@ -298,7 +298,10 @@ def test_list_logo_option_sources_falls_back_without_related_on_variant_error() 
             RuntimeError('column "hosted_logo_black_url" does not exist'),
             {"rows": [{"source_provider": "wikimedia_commons"}], "count": 1},
         ],
-    ) as options_mock:
+    ) as options_mock, patch(
+        "api.routers.admin_brands._load_logo_source_query_overrides",
+        return_value={},
+    ):
         payload = admin_brands._list_logo_option_sources(
             target_type="publication",
             target_key="imdb.com",
@@ -520,6 +523,10 @@ def test_sync_brand_logos_reports_related_pair_metrics() -> None:
         patch(
             "api.routers.admin_brands.collect_free_logo_candidates",
             return_value=[],
+        ),
+        patch(
+            "api.routers.admin_brands._load_logo_source_query_overrides",
+            return_value={},
         ),
     ):
         result = admin_brands._sync_brand_logos(

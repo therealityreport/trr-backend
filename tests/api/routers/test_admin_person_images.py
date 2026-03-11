@@ -200,6 +200,7 @@ def test_import_nbcumv_person_media_persists_getty_unmatched_urls_and_imports_on
         return None
 
     monkeypatch.setattr(nbcumv_integration, "fetch_image_by_identity", _fake_fetch_image_by_identity)
+    monkeypatch.setattr(nbcumv_integration, "resolve_show_by_title", lambda title: None)
 
     def _fake_persist_snapshot(db, *, person_id, payload, status="success", error=None):
         captured_snapshot["person_id"] = person_id

@@ -298,32 +298,36 @@ def test_discover_show_links_falls_back_to_ranked_candidate_discovery_for_show_p
                     return_value=(),
                 ):
                     with patch(
-                        "api.routers.admin_show_links.load_fandom_community_allowlist",
-                        return_value=("real-housewives.fandom.com",),
+                        "api.routers.admin_show_links.search_real_housewives_wiki",
+                        return_value=None,
                     ):
                         with patch(
-                            "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
-                            return_value=[],
+                            "api.routers.admin_show_links.load_fandom_community_allowlist",
+                            return_value=("real-housewives.fandom.com",),
                         ):
                             with patch(
-                                "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
+                                "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
                                 return_value=[],
                             ):
                                 with patch(
-                                    "api.routers.admin_show_links.discover_fandom_candidate_pages",
-                                    return_value=[
-                                        SimpleNamespace(
-                                            url="https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
-                                            title="The Real Housewives of Salt Lake City",
-                                            source="search",
-                                        )
-                                    ],
+                                    "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
+                                    return_value=[],
                                 ):
                                     with patch(
-                                        "api.routers.admin_show_links._fetch_html_with_status",
-                                        side_effect=_fetch_html,
+                                        "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                                        return_value=[
+                                            SimpleNamespace(
+                                                url="https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                                                title="The Real Housewives of Salt Lake City",
+                                                source="search",
+                                            )
+                                        ],
                                     ):
-                                        links = _discover_show_links(show_id)
+                                        with patch(
+                                            "api.routers.admin_show_links._fetch_html_with_status",
+                                            side_effect=_fetch_html,
+                                        ):
+                                            links = _discover_show_links(show_id)
 
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
     fandom_urls = {str(link.get("url") or "") for link in fandom_links}
@@ -4011,15 +4015,19 @@ def test_discover_show_links_defaults_knowledge_rows_to_approved() -> None:
                                         "api.routers.admin_show_links._promote_pending_links_to_approved",
                                         return_value=0,
                                     ):
-                                        result = admin_show_links.discover_show_links(
-                                            show_id=show_id,
-                                            payload=admin_show_links.LinkDiscoverRequest(
-                                                include_seasons=False,
-                                                include_people=False,
-                                            ),
-                                            db=db,
-                                            admin={"email": "admin@example.com"},
-                                        )
+                                        with patch(
+                                            "api.routers.admin_show_links._normalize_existing_social_handle_urls",
+                                            return_value={"scanned": 0, "normalized": 0, "deleted_duplicates": 0},
+                                        ):
+                                            result = admin_show_links.discover_show_links(
+                                                show_id=show_id,
+                                                payload=admin_show_links.LinkDiscoverRequest(
+                                                    include_seasons=False,
+                                                    include_people=False,
+                                                ),
+                                                db=db,
+                                                admin={"email": "admin@example.com"},
+                                            )
 
     assert upsert.call_count == 4
     assert all(call.kwargs["status"] == "approved" for call in upsert.call_args_list)
