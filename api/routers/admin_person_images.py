@@ -10,6 +10,7 @@ Provides endpoints to:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -48,10 +49,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/person", tags=["admin-person"])
 TChunk = TypeVar("TChunk")
+_GETTY_SOURCE_ID = "getty"
+_GETTY_PERSON_GALLERY_VARIANT = "person_gallery_nbcumv_crosswalk"
 
 # Valid sources for person images
-SourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery"]
-ALL_SOURCES: list[SourceType] = ["imdb", "tmdb", "fandom", "fandom-gallery"]
+SourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"]
+ALL_SOURCES: list[SourceType] = ["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"]
 TEXT_OVERLAY_FAILURE_REASONS = (
     "download_failed",
     "gemini_request_failed",
@@ -123,7 +126,7 @@ class RefreshImagesRequest(BaseModel):
     limit_per_source: int = Field(
         default=50,
         ge=1,
-        le=200,
+        le=1000,
         description="Max images per source",
     )
     skip_mirror: bool = Field(
@@ -215,6 +218,15 @@ class RefreshImagesResponse(BaseModel):
     cast_photos_failed: int = 0
     media_assets_mirrored: int = 0
     media_assets_failed: int = 0
+    nbcumv_photos_fetched: int = 0
+    nbcumv_assets_imported: int = 0
+    nbcumv_assets_skipped: int = 0
+    nbcumv_gallery_links_created: int = 0
+    nbcumv_failed: int = 0
+    getty_candidates_total: int = 0
+    getty_matched_total: int = 0
+    getty_unmatched_total: int = 0
+    getty_snapshot_saved: bool = False
     photos_pruned: int
     imdb_pages_scanned: int = 0
     imdb_candidates_seen: int = 0
@@ -481,6 +493,51 @@ def _chunked(items: list[TChunk], size: int) -> list[list[TChunk]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
 
 
+def _snapshot_payload_sha(payload: dict[str, Any]) -> str:
+    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _persist_person_getty_snapshot(
+    db: SupabaseAdminClient,
+    *,
+    person_id: str,
+    payload: dict[str, Any],
+    status: str = "success",
+    error: str | None = None,
+) -> dict[str, Any]:
+    fetched_at = datetime.now(UTC).isoformat()
+    payload_sha = _snapshot_payload_sha(payload)
+    row = {
+        "person_id": person_id,
+        "source_id": _GETTY_SOURCE_ID,
+        "variant": _GETTY_PERSON_GALLERY_VARIANT,
+        "fetched_at": fetched_at,
+        "fetch_method": "admin_person_nbcumv_crosswalk",
+        "status": status,
+        "error": error,
+        "payload": payload,
+        "payload_sha256": payload_sha,
+    }
+    latest_resp = (
+        db.schema("core").table("person_source_latest").upsert(row, on_conflict="person_id,source_id,variant").execute()
+    )
+    if getattr(latest_resp, "error", None):
+        raise HTTPException(status_code=502, detail=f"Failed to persist Getty person snapshot: {latest_resp.error}")
+
+    history_resp = db.schema("core").table("person_source_history").insert(row).execute()
+    if getattr(history_resp, "error", None):
+        logger.warning("Failed to persist Getty person snapshot history for %s: %s", person_id, history_resp.error)
+
+    return {
+        "person_id": person_id,
+        "source_id": _GETTY_SOURCE_ID,
+        "variant": _GETTY_PERSON_GALLERY_VARIANT,
+        "fetched_at": fetched_at,
+        "payload_sha256": payload_sha,
+    }
+
+
 def _is_transient_stage_error(exc: Exception) -> bool:
     lowered = str(exc).lower()
     return any(
@@ -527,6 +584,271 @@ def _resolve_refresh_sources(
     if not request.enforce_show_source_policy:
         return requested_sources, False
     return _apply_show_source_policy(db, request.show_id, requested_sources)
+
+
+def _import_nbcumv_person_media(
+    db: SupabaseAdminClient,
+    *,
+    person_id: str,
+    person_name: str | None,
+    show_id: UUID | None,
+    show_name: str | None,
+    limit: int,
+    progress_cb: Callable[[int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    from api.routers.admin_nbcumv import NbcumvImportItem, _ensure_sources, _import_single_item
+    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    def _summarize_getty_asset(
+        asset: dict[str, Any],
+        *,
+        reason: str,
+        image: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        summary = {
+            "detail_url": str(asset.get("detail_url") or "").strip() or None,
+            "editorial_id": str(asset.get("editorial_id") or "").strip() or None,
+            "object_name": str(asset.get("object_name") or "").strip() or None,
+            "title": str(asset.get("title") or "").strip() or None,
+            "caption": str(asset.get("caption") or "").strip() or None,
+            "reason": reason,
+        }
+        if isinstance(image, dict):
+            summary["nbcumv_lbx_id"] = str(image.get("lbx_id") or "").strip() or None
+            summary["nbcumv_filename"] = str(image.get("lbx_filename") or "").strip() or None
+            summary["nbcumv_show_title"] = str(image.get("lbx_showTitle") or "").strip() or None
+        return {key: value for key, value in summary.items() if value not in (None, "", [])}
+
+    result: dict[str, Any] = {
+        "fetched": 0,
+        "imported": 0,
+        "skipped": 0,
+        "failed": 0,
+        "gallery_links_created": 0,
+        "asset_ids": [],
+        "errors": [],
+        "show_title": str(show_name or "").strip() or None,
+        "nbcumv_show_id": None,
+        "getty_candidates_total": 0,
+        "getty_matched_total": 0,
+        "getty_unmatched_total": 0,
+        "getty_snapshot_saved": False,
+    }
+    normalized_person_name = str(person_name or "").strip()
+    if not normalized_person_name:
+        return result
+
+    def _normalize_show_title_key(value: str | None) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        if text.endswith(", the"):
+            text = f"the {text[:-5].strip()}"
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        return " ".join(text.split())
+
+    def _candidate_show_titles_from_getty(asset: dict[str, Any]) -> list[str]:
+        candidates: list[str] = []
+        title = str(asset.get("title") or "").strip()
+        if title:
+            candidates.append(title)
+            if " - " in title:
+                candidates.append(title.split(" - ", 1)[0].strip())
+        caption = str(asset.get("caption") or "").strip()
+        if caption and " -- " in caption:
+            candidates.append(caption.split(" -- ", 1)[0].strip().title())
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for candidate in candidates:
+            normalized = _normalize_show_title_key(candidate)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(candidate)
+        return deduped
+
+    def _emit_progress(current: int, total: int, message: str) -> None:
+        if progress_cb is None:
+            return
+        progress_cb(max(0, int(current)), max(0, int(total)), str(message or "").strip())
+
+    resolved_show_name = str(show_name or _get_show_name(db, show_id) or "").strip()
+    result["show_title"] = resolved_show_name or None
+    search_phrase = f"{normalized_person_name} Bravo"
+    _emit_progress(0, 0, f"Searching Getty for '{normalized_person_name} Bravo'...")
+    getty_assets = getty_integration.search_editorial_assets(
+        search_phrase,
+        limit=max(1, int(limit)),
+        progress_cb=_emit_progress,
+    )
+    result["getty_candidates_total"] = len(getty_assets)
+    if not getty_assets:
+        result["errors"].append(f"Getty search returned no assets for '{normalized_person_name} Bravo'.")
+        return result
+
+    _ensure_sources(db)
+    matched_assets: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    matched_summaries: list[dict[str, Any]] = []
+    unmatched_assets: list[dict[str, Any]] = []
+    seen_lbx_ids: set[str] = set()
+    normalized_show = _normalize_show_title_key(resolved_show_name)
+    resolved_getty_show_cache: dict[str, dict[str, Any] | None] = {}
+    show_image_indexes: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def _resolve_asset_show(asset: dict[str, Any]) -> dict[str, Any] | None:
+        for candidate in _candidate_show_titles_from_getty(asset):
+            if candidate in resolved_getty_show_cache:
+                show = resolved_getty_show_cache[candidate]
+            else:
+                show = nbcumv_integration.resolve_show_by_title(candidate)
+                resolved_getty_show_cache[candidate] = show
+            if show:
+                return show
+        return None
+
+    def _lookup_show_index(show_id_value: str) -> dict[str, dict[str, Any]]:
+        normalized_id = str(show_id_value or "").strip()
+        if normalized_id not in show_image_indexes:
+            show_image_indexes[normalized_id] = nbcumv_integration.build_show_image_index(normalized_id)
+        return show_image_indexes[normalized_id]
+
+    match_total = len(getty_assets)
+    _emit_progress(0, match_total, f"Matching {match_total} Getty assets against NBCUMV...")
+    for match_index, asset in enumerate(getty_assets, start=1):
+        filename = str(asset.get("object_name") or "").strip()
+        _emit_progress(
+            match_index - 1,
+            match_total,
+            f"Matching Getty asset {match_index}/{match_total}: {filename or asset.get('editorial_id') or 'unknown'}",
+        )
+        if not filename:
+            unmatched_assets.append(_summarize_getty_asset(asset, reason="missing_object_name"))
+            continue
+        image = None
+        resolved_asset_show = _resolve_asset_show(asset)
+        if isinstance(resolved_asset_show, dict):
+            show_id_value = str(resolved_asset_show.get("id") or "").strip()
+            if show_id_value:
+                image = _lookup_show_index(show_id_value).get(filename.lower())
+        if not isinstance(image, dict):
+            image = nbcumv_integration.fetch_image_by_identity(filename=filename)
+        if not isinstance(image, dict):
+            unmatched_assets.append(_summarize_getty_asset(asset, reason="no_nbcumv_match"))
+            _emit_progress(match_index, match_total, f"No NBCUMV match for Getty asset {match_index}/{match_total}.")
+            continue
+        image_show_title = str(image.get("lbx_showTitle") or "").strip()
+        if normalized_show:
+            image_show_folded = _normalize_show_title_key(image_show_title)
+            if normalized_show not in image_show_folded and image_show_folded not in normalized_show:
+                unmatched_assets.append(_summarize_getty_asset(asset, reason="show_mismatch", image=image))
+                _emit_progress(
+                    match_index,
+                    match_total,
+                    (
+                        f"Skipped {filename}: NBCUMV show '{image_show_title or 'unknown'}' "
+                        f"did not match '{resolved_show_name}'."
+                    ),
+                )
+                continue
+        lbx_id = str(image.get("lbx_id") or "").strip()
+        if not lbx_id or lbx_id in seen_lbx_ids:
+            unmatched_assets.append(
+                _summarize_getty_asset(
+                    asset,
+                    reason="duplicate_or_invalid_nbcumv_asset",
+                    image=image,
+                )
+            )
+            _emit_progress(match_index, match_total, f"Skipped duplicate or invalid NBCUMV asset for {filename}.")
+            continue
+        seen_lbx_ids.add(lbx_id)
+        matched_assets.append((asset, image))
+        matched_summaries.append(_summarize_getty_asset(asset, reason="matched", image=image))
+        _emit_progress(match_index, match_total, f"Matched NBCUMV asset {len(matched_assets)}: {filename}")
+
+    result["fetched"] = len(matched_assets)
+    result["getty_matched_total"] = len(matched_assets)
+    result["getty_unmatched_total"] = len(unmatched_assets)
+    snapshot_payload = {
+        "person_id": person_id,
+        "person_name": normalized_person_name,
+        "search_phrase": search_phrase,
+        "requested_limit": max(1, int(limit)),
+        "show_filter": {
+            "show_id": str(show_id) if show_id else None,
+            "show_name": resolved_show_name or None,
+        },
+        "candidate_count": len(getty_assets),
+        "matched_count": len(matched_assets),
+        "unmatched_count": len(unmatched_assets),
+        "matched": matched_summaries,
+        "unmatched": unmatched_assets,
+    }
+    try:
+        _persist_person_getty_snapshot(
+            db,
+            person_id=person_id,
+            payload=snapshot_payload,
+            status="success",
+        )
+        result["getty_snapshot_saved"] = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to persist Getty person snapshot for %s: %s", person_id, exc)
+        result["errors"].append(f"Getty snapshot persistence failed: {exc}")
+    if not matched_assets:
+        if resolved_show_name:
+            result["errors"].append(
+                f"No Getty/NBCUMV crosswalk matches found for '{normalized_person_name}' on '{resolved_show_name}'."
+            )
+        else:
+            result["errors"].append(f"No Getty/NBCUMV crosswalk matches found for '{normalized_person_name}'.")
+        return result
+
+    total = len(matched_assets)
+    _emit_progress(0, total, f"Importing {total} NBCUMV assets...")
+    for index, (asset, image) in enumerate(matched_assets, start=1):
+        filename = str(image.get("lbx_filename") or "").strip()
+        lbx_id = str(image.get("lbx_id") or "").strip()
+        _emit_progress(index - 1, total, f"Importing NBCUMV {index}/{total}: {filename or lbx_id}")
+        if not filename or not lbx_id:
+            result["failed"] += 1
+            result["errors"].append("NBCUMV item missing lbx_id or filename.")
+            continue
+        try:
+            import_result = _import_single_item(
+                db=db,
+                item=NbcumvImportItem(
+                    lbx_id=lbx_id,
+                    lbx_filename=filename,
+                    location=image.get("location"),
+                    nbcumv_image=image,
+                    show_ids=[value for value in image.get("showIds") or [] if isinstance(value, str)],
+                    link_show_ids=[show_id] if show_id else [],
+                    getty_detail_url=str(asset.get("detail_url") or "").strip() or None,
+                    person_ids=[UUID(person_id)],
+                ),
+                assign_people=True,
+                people_index={},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("NBCUMV person import failed person_id=%s lbx_id=%s", person_id, lbx_id)
+            result["failed"] += 1
+            result["errors"].append(f"{filename or lbx_id}: {exc}")
+            continue
+
+        if import_result.get("asset_id"):
+            result["asset_ids"].append(str(import_result["asset_id"]))
+        created_links = len(import_result.get("created_person_ids") or []) + len(
+            import_result.get("created_show_ids") or []
+        )
+        result["gallery_links_created"] += created_links
+        if import_result.get("already_imported") and created_links == 0:
+            result["skipped"] += 1
+        else:
+            result["imported"] += 1
+        _emit_progress(index, total, f"Imported NBCUMV {index}/{total}: {filename or lbx_id}")
+    return result
 
 
 def _extract_imdb_id(external_ids: dict | None) -> str | None:
@@ -2146,7 +2468,8 @@ def _fetch_person_media_link_rows(
         .table("media_assets")
         .select(
             "id, source, source_url, hosted_url, hosted_sha256, hosted_key, hosted_bucket, "
-            "hosted_content_type, hosted_bytes, hosted_etag, width, height, caption, metadata"
+            "hosted_content_type, hosted_bytes, hosted_etag, width, height, caption, metadata, "
+            "ingest_status, ingest_last_error"
         )
         .in_("id", asset_ids)
         .execute()
@@ -2182,6 +2505,8 @@ def _fetch_person_media_link_rows(
                 "height": asset.get("height"),
                 "caption": asset.get("caption"),
                 "metadata": asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {},
+                "ingest_status": asset.get("ingest_status"),
+                "ingest_last_error": asset.get("ingest_last_error"),
             }
         )
     return rows
@@ -2652,6 +2977,21 @@ def _mirror_person_media_assets(
     unique_assets = list(assets_by_id.values())
     if not unique_assets:
         return 0, 0
+
+    if not force:
+        filtered_assets: list[dict[str, Any]] = []
+        for row in unique_assets:
+            if str(row.get("ingest_status") or "").strip().lower() == "failed":
+                logger.info(
+                    "Skipping previously failed media asset during ingest-only mirror run asset_id=%s error=%s",
+                    row.get("media_asset_id"),
+                    row.get("ingest_last_error"),
+                )
+                continue
+            filtered_assets.append(row)
+        unique_assets = filtered_assets
+        if not unique_assets:
+            return 0, 0
 
     mirrored = 0
     failed = 0
@@ -5868,8 +6208,10 @@ def refresh_person_images(
     imdb_person_id = _extract_imdb_id(external_ids)
     tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
     person_name = person.get("full_name")
+    show_name = request.show_name or _get_show_name(db, request.show_id)
     wwhl_credit_episode_imdb_ids = _load_person_wwhl_episode_imdb_ids_from_credits(db, person_id_str)
     sources, fandom_skipped = _resolve_refresh_sources(db, request)
+    cast_photo_sources = [source for source in sources if source != "nbcumv"]
     errors: list[str] = []
     tmdb_profile_status: Literal["ok", "skipped", "failed"] | None = None
     tmdb_profile_error_code: str | None = None
@@ -5914,7 +6256,7 @@ def refresh_person_images(
             imdb_person_id=imdb_person_id,
             tmdb_person_id=tmdb_person_id,
             person_name=person_name,
-            sources=list(sources),
+            sources=list(cast_photo_sources),
             limit_per_source=request.limit_per_source,
             imdb_allowed_title_imdb_ids=imdb_allowed_title_ids,
             imdb_allowed_title_keywords=imdb_allowed_keywords,
@@ -6038,6 +6380,52 @@ def refresh_person_images(
             errors.append(f"Mirror: {exc}")
     photos_mirrored = cast_photos_mirrored + media_assets_mirrored
     photos_failed = cast_photos_failed + media_assets_failed
+
+    nbcumv_photos_fetched = 0
+    nbcumv_assets_imported = 0
+    nbcumv_assets_skipped = 0
+    nbcumv_gallery_links_created = 0
+    nbcumv_failed = 0
+    getty_candidates_total = 0
+    getty_matched_total = 0
+    getty_unmatched_total = 0
+    getty_snapshot_saved = False
+    if "nbcumv" in sources:
+        try:
+            nbcumv_result = _import_nbcumv_person_media(
+                db,
+                person_id=person_id_str,
+                person_name=person_name,
+                show_id=request.show_id,
+                show_name=show_name,
+                limit=request.limit_per_source,
+            )
+            nbcumv_photos_fetched = int(nbcumv_result.get("fetched") or 0)
+            nbcumv_assets_imported = int(nbcumv_result.get("imported") or 0)
+            nbcumv_assets_skipped = int(nbcumv_result.get("skipped") or 0)
+            nbcumv_gallery_links_created = int(nbcumv_result.get("gallery_links_created") or 0)
+            nbcumv_failed = int(nbcumv_result.get("failed") or 0)
+            getty_candidates_total = int(nbcumv_result.get("getty_candidates_total") or 0)
+            getty_matched_total = int(nbcumv_result.get("getty_matched_total") or 0)
+            getty_unmatched_total = int(nbcumv_result.get("getty_unmatched_total") or 0)
+            getty_snapshot_saved = bool(nbcumv_result.get("getty_snapshot_saved"))
+            errors.extend(
+                [
+                    str(error)
+                    for error in (nbcumv_result.get("errors") or [])
+                    if isinstance(error, str) and error.strip()
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("NBCUMV import stage failed for person_id=%s", person_id_str)
+            nbcumv_failed += 1
+            errors.append(f"NBCUMV: {exc}")
+
+    photos_mirrored += nbcumv_assets_imported
+    media_assets_mirrored += nbcumv_assets_imported
+    photos_failed += nbcumv_failed
+    photos_fetched_total = len(photos) + nbcumv_photos_fetched
+    photos_upserted_total = photos_upserted + nbcumv_assets_imported
 
     # 4.5 Auto-count people for newly upserted TMDb/Fandom photos (only when no manual tags)
     auto_counts_attempted = 0
@@ -6231,14 +6619,23 @@ def refresh_person_images(
         tmdb_profile_error_code=tmdb_profile_error_code,
         tmdb_profile_error_detail=tmdb_profile_error_detail,
         sources_used=list(sources),
-        photos_fetched=len(photos),
-        photos_upserted=photos_upserted,
+        photos_fetched=photos_fetched_total,
+        photos_upserted=photos_upserted_total,
         photos_mirrored=photos_mirrored,
         photos_failed=photos_failed,
         cast_photos_mirrored=cast_photos_mirrored,
         cast_photos_failed=cast_photos_failed,
         media_assets_mirrored=media_assets_mirrored,
         media_assets_failed=media_assets_failed,
+        nbcumv_photos_fetched=nbcumv_photos_fetched,
+        nbcumv_assets_imported=nbcumv_assets_imported,
+        nbcumv_assets_skipped=nbcumv_assets_skipped,
+        nbcumv_gallery_links_created=nbcumv_gallery_links_created,
+        nbcumv_failed=nbcumv_failed,
+        getty_candidates_total=getty_candidates_total,
+        getty_matched_total=getty_matched_total,
+        getty_unmatched_total=getty_unmatched_total,
+        getty_snapshot_saved=getty_snapshot_saved,
         photos_pruned=photos_pruned,
         imdb_pages_scanned=int(imdb_diagnostics.get("imdb_pages_scanned", 0)),
         imdb_candidates_seen=int(imdb_diagnostics.get("imdb_candidates_seen", 0)),
@@ -6343,6 +6740,15 @@ async def refresh_person_images_stream(
         photos_mirrored = 0
         cast_photos_mirrored = 0
         media_assets_mirrored = 0
+        nbcumv_photos_fetched = 0
+        nbcumv_assets_imported = 0
+        nbcumv_assets_skipped = 0
+        nbcumv_gallery_links_created = 0
+        nbcumv_failed = 0
+        getty_candidates_total = 0
+        getty_matched_total = 0
+        getty_unmatched_total = 0
+        getty_snapshot_saved = False
         auto_counts_succeeded = 0
         auto_count_diagnostics = _empty_auto_count_diagnostics()
         auto_count_stage_stats = _empty_stage_row_stats()
@@ -6438,6 +6844,7 @@ async def refresh_person_images_stream(
             imdb_person_id = _extract_imdb_id(external_ids)
             tmdb_person_id = await asyncio.to_thread(_get_tmdb_id, db, person_id_str, external_ids)
             person_name = person.get("full_name")
+            show_name = request.show_name or await asyncio.to_thread(_get_show_name, db, request.show_id)
             wwhl_credit_episode_imdb_ids = await asyncio.to_thread(
                 _load_person_wwhl_episode_imdb_ids_from_credits,
                 db,
@@ -7049,6 +7456,141 @@ async def refresh_person_images_stream(
         photos_mirrored = cast_photos_mirrored + media_assets_mirrored
         photos_failed = cast_photos_failed + media_assets_failed
 
+        if "nbcumv" in sources:
+            if await _client_disconnected("nbcumv_import"):
+                return
+            nbcumv_progress = {
+                "current": 0,
+                "total": 0,
+                "message": "Importing NBCUMV press photos...",
+            }
+            nbcumv_progress_events: list[dict[str, Any]] = []
+            nbcumv_progress_lock = Lock()
+
+            def _update_nbcumv_progress(current: int, total: int, message: str) -> None:
+                snapshot = {
+                    "current": max(0, int(current)),
+                    "total": max(0, int(total)),
+                    "message": str(message or "Importing NBCUMV press photos...").strip(),
+                }
+                with nbcumv_progress_lock:
+                    nbcumv_progress.update(snapshot)
+                    nbcumv_progress_events.append(snapshot)
+
+            yield progress(
+                {
+                    "stage": "nbcumv_import",
+                    "message": "Importing NBCUMV press photos...",
+                    "current": 0,
+                    "total": 0,
+                }
+            )
+            try:
+                nbcumv_started_at = time.perf_counter()
+                nbcumv_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        _import_nbcumv_person_media,
+                        db,
+                        person_id=person_id_str,
+                        person_name=person_name,
+                        show_id=request.show_id,
+                        show_name=show_name,
+                        limit=request.limit_per_source,
+                        progress_cb=_update_nbcumv_progress,
+                    )
+                )
+                while not nbcumv_task.done():
+                    await asyncio.sleep(2)
+                    if nbcumv_task.done():
+                        break
+                    if await _client_disconnected("nbcumv_import"):
+                        nbcumv_task.cancel()
+                        return
+                    with nbcumv_progress_lock:
+                        nbcumv_snapshot = dict(nbcumv_progress)
+                        nbcumv_pending_events = list(nbcumv_progress_events)
+                        nbcumv_progress_events.clear()
+                    for pending_event in nbcumv_pending_events:
+                        yield progress(
+                            {
+                                "stage": "nbcumv_import",
+                                "message": str(pending_event.get("message") or "Importing NBCUMV press photos..."),
+                                "current": int(pending_event.get("current") or 0),
+                                "total": int(pending_event.get("total") or 0),
+                            }
+                        )
+                    yield progress(
+                        {
+                            "stage": "nbcumv_import",
+                            "message": str(nbcumv_snapshot.get("message") or "Importing NBCUMV press photos..."),
+                            "current": int(nbcumv_snapshot.get("current") or 0),
+                            "total": int(nbcumv_snapshot.get("total") or 0),
+                            "heartbeat": True,
+                            "elapsed_ms": int((time.perf_counter() - nbcumv_started_at) * 1000),
+                        }
+                    )
+                nbcumv_result = await nbcumv_task
+                nbcumv_photos_fetched = int(nbcumv_result.get("fetched") or 0)
+                nbcumv_assets_imported = int(nbcumv_result.get("imported") or 0)
+                nbcumv_assets_skipped = int(nbcumv_result.get("skipped") or 0)
+                nbcumv_gallery_links_created = int(nbcumv_result.get("gallery_links_created") or 0)
+                nbcumv_failed = int(nbcumv_result.get("failed") or 0)
+                getty_candidates_total = int(nbcumv_result.get("getty_candidates_total") or 0)
+                getty_matched_total = int(nbcumv_result.get("getty_matched_total") or 0)
+                getty_unmatched_total = int(nbcumv_result.get("getty_unmatched_total") or 0)
+                getty_snapshot_saved = bool(nbcumv_result.get("getty_snapshot_saved"))
+                errors.extend(
+                    [
+                        str(error)
+                        for error in (nbcumv_result.get("errors") or [])
+                        if isinstance(error, str) and error.strip()
+                    ]
+                )
+                with nbcumv_progress_lock:
+                    nbcumv_snapshot = dict(nbcumv_progress)
+                    nbcumv_pending_events = list(nbcumv_progress_events)
+                    nbcumv_progress_events.clear()
+                for pending_event in nbcumv_pending_events:
+                    yield progress(
+                        {
+                            "stage": "nbcumv_import",
+                            "message": str(pending_event.get("message") or "Importing NBCUMV press photos..."),
+                            "current": int(pending_event.get("current") or 0),
+                            "total": int(pending_event.get("total") or 0),
+                        }
+                    )
+                photos_upserted += nbcumv_assets_imported
+                photos_mirrored += nbcumv_assets_imported
+                media_assets_mirrored += nbcumv_assets_imported
+                photos_failed += nbcumv_failed
+                yield progress(
+                    {
+                        "stage": "nbcumv_import",
+                        "message": (
+                            f"{str(nbcumv_snapshot.get('message') or 'NBCUMV import complete')}. "
+                            f"Summary: {nbcumv_assets_imported} imported, "
+                            f"{nbcumv_assets_skipped} skipped, {nbcumv_failed} failed)."
+                        ),
+                        "current": max(nbcumv_photos_fetched, int(nbcumv_snapshot.get("current") or 0)),
+                        "total": max(nbcumv_photos_fetched, int(nbcumv_snapshot.get("total") or 0)),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("NBCUMV stream import failed for person_id=%s", person_id_str)
+                nbcumv_failed += 1
+                photos_failed += 1
+                errors.append(f"NBCUMV: {exc}")
+                with nbcumv_progress_lock:
+                    nbcumv_snapshot = dict(nbcumv_progress)
+                yield progress(
+                    {
+                        "stage": "nbcumv_import",
+                        "message": f"NBCUMV import failed: {exc}",
+                        "current": int(nbcumv_snapshot.get("current") or 0),
+                        "total": int(nbcumv_snapshot.get("total") or 0),
+                    }
+                )
+
         # 5. Prune
         photos_pruned = 0
         if not request.skip_mirror and not request.skip_prune:
@@ -7101,7 +7643,7 @@ async def refresh_person_images_stream(
                         yield progress(
                             {
                                 "stage": "auto_count",
-                                "message": "Skipping auto-count (Screenalytics unavailable).",
+                                "message": "Skipping auto-count (vision unavailable).",
                                 "current": 0,
                                 "total": 0,
                                 "skip_reason": "service_unavailable",
@@ -7381,12 +7923,12 @@ async def refresh_person_images_stream(
                             if service_unavailable_error is not None:
                                 auto_counts_failed += 1
                                 retry_after = max(int(service_unavailable_error.retry_after_s), 1)
-                                detail = str(service_unavailable_error) or "Screenalytics unavailable"
+                                detail = str(service_unavailable_error) or "Vision unavailable"
                                 errors.append(f"Auto-count service unavailable: {detail}")
                                 yield progress(
                                     {
                                         "stage": "auto_count",
-                                        "message": "Auto-count paused (Screenalytics unavailable).",
+                                        "message": "Auto-count paused (vision unavailable).",
                                         "current": max(0, idx - 1),
                                         "total": total_to_count,
                                         "reviewed_rows": max(0, idx - 1),
@@ -7494,11 +8036,13 @@ async def refresh_person_images_stream(
                                             metadata_changed = True
                                     if metadata_changed:
                                         await asyncio.to_thread(
-                                            lambda metadata_payload=metadata, entry_id=entry["id"]: db.schema("core")
-                                            .table("cast_photos")
-                                            .update({"metadata": metadata_payload})
-                                            .eq("id", entry_id)
-                                            .execute()
+                                            lambda metadata_payload=metadata, entry_id=entry["id"]: (
+                                                db.schema("core")
+                                                .table("cast_photos")
+                                                .update({"metadata": metadata_payload})
+                                                .eq("id", entry_id)
+                                                .execute()
+                                            )
                                         )
                                     auto_count_diagnostics["auto_persist_success_rows"] += 1
                                 else:
@@ -7571,16 +8115,18 @@ async def refresh_person_images_stream(
                                     ):
                                         context["thumbnail_crop"] = crop_payload
                                     await asyncio.to_thread(
-                                        lambda context_payload=context, entry_id=entry["id"]: db.schema("core")
-                                        .table("media_links")
-                                        .update(
-                                            {
-                                                "context": context_payload,
-                                                "updated_at": datetime.now(UTC).isoformat(),
-                                            }
+                                        lambda context_payload=context, entry_id=entry["id"]: (
+                                            db.schema("core")
+                                            .table("media_links")
+                                            .update(
+                                                {
+                                                    "context": context_payload,
+                                                    "updated_at": datetime.now(UTC).isoformat(),
+                                                }
+                                            )
+                                            .eq("id", entry_id)
+                                            .execute()
                                         )
-                                        .eq("id", entry_id)
-                                        .execute()
                                     )
                                     auto_count_diagnostics["auto_persist_success_rows"] += 1
                                 auto_counts_succeeded += 1
@@ -7849,7 +8395,7 @@ async def refresh_person_images_stream(
                         yield progress(
                             {
                                 "stage": "centering_cropping",
-                                "message": "Skipping centering/cropping (Screenalytics unavailable).",
+                                "message": "Skipping centering/cropping (vision unavailable).",
                                 "current": 0,
                                 "total": 0,
                                 "skip_reason": "service_unavailable",
@@ -7950,12 +8496,12 @@ async def refresh_person_images_stream(
                             if service_unavailable_error is not None:
                                 centering_failed += 1
                                 retry_after = max(int(service_unavailable_error.retry_after_s), 1)
-                                detail = str(service_unavailable_error) or "Screenalytics unavailable"
+                                detail = str(service_unavailable_error) or "Vision unavailable"
                                 errors.append(f"Centering service unavailable: {detail}")
                                 yield progress(
                                     {
                                         "stage": "centering_cropping",
-                                        "message": "Centering/cropping paused (Screenalytics unavailable).",
+                                        "message": "Centering/cropping paused (vision unavailable).",
                                         "current": max(0, idx - 1),
                                         "total": total_crop,
                                         "reviewed_rows": max(0, idx - 1),
@@ -7980,26 +8526,30 @@ async def refresh_person_images_stream(
                                     metadata = dict(entry["metadata"] or {})
                                     metadata["thumbnail_crop"] = crop_payload
                                     await asyncio.to_thread(
-                                        lambda metadata_payload=metadata, entry_id=entry["id"]: db.schema("core")
-                                        .table("cast_photos")
-                                        .update({"metadata": metadata_payload})
-                                        .eq("id", entry_id)
-                                        .execute()
+                                        lambda metadata_payload=metadata, entry_id=entry["id"]: (
+                                            db.schema("core")
+                                            .table("cast_photos")
+                                            .update({"metadata": metadata_payload})
+                                            .eq("id", entry_id)
+                                            .execute()
+                                        )
                                     )
                                 else:
                                     context = dict(entry["context"] or {})
                                     context["thumbnail_crop"] = crop_payload
                                     await asyncio.to_thread(
-                                        lambda context_payload=context, entry_id=entry["id"]: db.schema("core")
-                                        .table("media_links")
-                                        .update(
-                                            {
-                                                "context": context_payload,
-                                                "updated_at": datetime.now(UTC).isoformat(),
-                                            }
+                                        lambda context_payload=context, entry_id=entry["id"]: (
+                                            db.schema("core")
+                                            .table("media_links")
+                                            .update(
+                                                {
+                                                    "context": context_payload,
+                                                    "updated_at": datetime.now(UTC).isoformat(),
+                                                }
+                                            )
+                                            .eq("id", entry_id)
+                                            .execute()
                                         )
-                                        .eq("id", entry_id)
-                                        .execute()
                                     )
                                 centering_succeeded += 1
                             except Exception as exc:  # noqa: BLE001
@@ -8165,7 +8715,7 @@ async def refresh_person_images_stream(
         complete_data = {
             "run_id": run_id,
             "person_id": person_id_str,
-            "photos_fetched": len(photos),
+            "photos_fetched": len(photos) + nbcumv_photos_fetched,
             "photos_upserted": photos_upserted,
             "tmdb_profile_status": tmdb_profile_status,
             "tmdb_profile_error_code": tmdb_profile_error_code,
@@ -8176,6 +8726,15 @@ async def refresh_person_images_stream(
             "cast_photos_failed": cast_photos_failed,
             "media_assets_mirrored": media_assets_mirrored,
             "media_assets_failed": media_assets_failed,
+            "nbcumv_photos_fetched": nbcumv_photos_fetched,
+            "nbcumv_assets_imported": nbcumv_assets_imported,
+            "nbcumv_assets_skipped": nbcumv_assets_skipped,
+            "nbcumv_gallery_links_created": nbcumv_gallery_links_created,
+            "nbcumv_failed": nbcumv_failed,
+            "getty_candidates_total": getty_candidates_total,
+            "getty_matched_total": getty_matched_total,
+            "getty_unmatched_total": getty_unmatched_total,
+            "getty_snapshot_saved": getty_snapshot_saved,
             "photos_pruned": photos_pruned,
             "imdb_pages_scanned": int(imdb_diagnostics.get("imdb_pages_scanned", 0)),
             "imdb_candidates_seen": int(imdb_diagnostics.get("imdb_candidates_seen", 0)),

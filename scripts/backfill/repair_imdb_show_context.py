@@ -163,16 +163,14 @@ def main(argv: list[str] | None = None) -> int:
                 for row in rows_before
                 if isinstance(row, dict)
                 and isinstance(row.get("metadata"), dict)
-                and str(row["metadata"].get("show_context_source") or "").strip().lower()
-                == "request_context_rejected"
+                and str(row["metadata"].get("show_context_source") or "").strip().lower() == "request_context_rejected"
             )
             rejected_after = sum(
                 1
                 for row in rows_after
                 if isinstance(row, dict)
                 and isinstance(row.get("metadata"), dict)
-                and str(row["metadata"].get("show_context_source") or "").strip().lower()
-                == "request_context_rejected"
+                and str(row["metadata"].get("show_context_source") or "").strip().lower() == "request_context_rejected"
             )
             rejected_delta = max(0, rejected_after - rejected_before)
             summary["repaired"] += int(repaired)

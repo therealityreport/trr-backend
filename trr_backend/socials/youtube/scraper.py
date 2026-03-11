@@ -264,6 +264,64 @@ class YouTubeScraper:
                 return normalized
         return None
 
+    def _extract_channel_title_from_data(self, data: dict[str, Any]) -> str | None:
+        if not isinstance(data, dict):
+            return None
+
+        metadata = (
+            data.get("metadata", {}).get("channelMetadataRenderer", {})
+            if isinstance(data.get("metadata"), dict)
+            else {}
+        )
+        if isinstance(metadata, dict):
+            title = str(metadata.get("title") or "").strip()
+            if title:
+                return title
+
+        stack: list[Any] = [data.get("header")]
+        visited = 0
+        while stack and visited < 600:
+            node = stack.pop()
+            visited += 1
+            if isinstance(node, dict):
+                for key in ("title", "pageTitle", "channelName"):
+                    value = str(node.get(key) or "").strip()
+                    if value:
+                        return value
+                for nested in node.values():
+                    if isinstance(nested, (dict, list)):
+                        stack.append(nested)
+            elif isinstance(node, list):
+                stack.extend(node)
+
+        return None
+
+    def _extract_channel_avatar_from_data(self, data: dict[str, Any]) -> str | None:
+        if not isinstance(data, dict):
+            return None
+
+        metadata = (
+            data.get("metadata", {}).get("channelMetadataRenderer", {})
+            if isinstance(data.get("metadata"), dict)
+            else {}
+        )
+        candidates: list[Any] = []
+        if isinstance(metadata, dict):
+            candidates.extend(
+                [
+                    self._pick_largest_thumbnail_url(metadata.get("avatar")),
+                    metadata.get("avatarUrl"),
+                    metadata.get("avatar"),
+                ]
+            )
+
+        candidates.append(self._extract_channel_header_avatar_from_data(data))
+        for candidate in candidates:
+            normalized = self._normalize_channel_avatar_url(candidate, require_yt3_host=True)
+            if normalized:
+                return normalized
+        return None
+
     def _extract_channel_avatar_from_renderer(
         self,
         renderer: dict[str, Any],
@@ -296,6 +354,7 @@ class YouTubeScraper:
             if value:
                 return value
         return self._normalize_channel_avatar_url(fallback_channel_avatar_url, require_yt3_host=True)
+
     COMMENT_API_URL = "https://www.youtube.com/youtubei/v1/next"
     YTINITAL_DATA_PATTERN = re.compile(r"var ytInitialData = ({.*?});", re.DOTALL)
     PUBLISHED_DATE_PATTERNS = (
@@ -318,6 +377,8 @@ class YouTubeScraper:
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_TIMEOUT_SECONDS = (10, 45)
     PRE_WINDOW_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_PRE_WINDOW_PAGE_CAP", 12)
+    INITIAL_DATE_WINDOW_NO_HIT_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_INITIAL_DATE_WINDOW_NO_HIT_PAGE_CAP", 8)
+    DATE_WINDOW_NO_HIT_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_DATE_WINDOW_NO_HIT_PAGE_CAP", 5)
     YTDLP_SEARCH_TIMEOUT_SECONDS = _env_int("SOCIAL_YOUTUBE_YTDLP_TIMEOUT_SECONDS", 120)
     COMMENT_CONTINUATION_RETRY_ATTEMPTS = _env_int("SOCIAL_YOUTUBE_COMMENT_CONTINUATION_RETRY_ATTEMPTS", 3)
     COMMENT_CONTINUATION_RETRY_BACKOFF_SECONDS = _env_int(
@@ -567,16 +628,12 @@ class YouTubeScraper:
         in 2025.  This shim extracts the available fields so that the existing
         ``_parse_video_renderer`` path can handle shorts transparently.
         """
-        reel_ep = (
-            model.get("onTap", {})
-            .get("innertubeCommand", {})
-            .get("reelWatchEndpoint", {})
-        )
+        reel_ep = model.get("onTap", {}).get("innertubeCommand", {}).get("reelWatchEndpoint", {})
         video_id = reel_ep.get("videoId", "")
         if not video_id:
             entity_id = model.get("entityId", "")
             if entity_id.startswith("shorts-shelf-item-"):
-                video_id = entity_id[len("shorts-shelf-item-"):]
+                video_id = entity_id[len("shorts-shelf-item-") :]
 
         # Parse title + views from overlay or accessibilityText
         overlay = model.get("overlayMetadata", {})
@@ -1230,6 +1287,8 @@ class YouTubeScraper:
         first_page_counts: dict[str, int] = {"videos": 0, "shorts": 0}
         canonical_handle = self._normalize_handle(handle)
         canonical_channel_id = ""
+        resolved_channel_title: str | None = None
+        resolved_channel_avatar_url: str | None = None
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
@@ -1254,6 +1313,10 @@ class YouTubeScraper:
                 canonical_handle = resolved_handle
             if resolved_channel_id:
                 canonical_channel_id = resolved_channel_id
+            if not resolved_channel_title:
+                resolved_channel_title = self._extract_channel_title_from_data(data)
+            if not resolved_channel_avatar_url:
+                resolved_channel_avatar_url = self._extract_channel_avatar_from_data(data)
 
             initial_result = self._process_video_data(
                 data,
@@ -1280,12 +1343,16 @@ class YouTubeScraper:
             timestamp_unknown_count += int(initial_stats.get("timestamp_unknown") or 0)
             in_range_hits += int(initial_stats.get("in_range_hits") or 0)
             if config.date_start or config.date_end:
-                before_only = bool(initial_stats.get("before_window_items")) and not bool(
-                    initial_stats.get("window_candidate_items")
-                ) and not bool(initial_stats.get("after_window_items"))
-                after_only = bool(initial_stats.get("after_window_items")) and not bool(
-                    initial_stats.get("window_candidate_items")
-                ) and not bool(initial_stats.get("before_window_items"))
+                before_only = (
+                    bool(initial_stats.get("before_window_items"))
+                    and not bool(initial_stats.get("window_candidate_items"))
+                    and not bool(initial_stats.get("after_window_items"))
+                )
+                after_only = (
+                    bool(initial_stats.get("after_window_items"))
+                    and not bool(initial_stats.get("window_candidate_items"))
+                    and not bool(initial_stats.get("before_window_items"))
+                )
                 if before_only:
                     pre_window_pages += 1
                     surface_pre_window_pages += 1
@@ -1345,12 +1412,16 @@ class YouTubeScraper:
                 in_range_hits += int(page_stats.get("in_range_hits") or 0)
                 timestamp_unknown_count += int(page_stats.get("timestamp_unknown") or 0)
 
-                page_before_only = bool(page_stats.get("before_window_items")) and not bool(
-                    page_stats.get("window_candidate_items")
-                ) and not bool(page_stats.get("after_window_items"))
-                page_after_only = bool(page_stats.get("after_window_items")) and not bool(
-                    page_stats.get("window_candidate_items")
-                ) and not bool(page_stats.get("before_window_items"))
+                page_before_only = (
+                    bool(page_stats.get("before_window_items"))
+                    and not bool(page_stats.get("window_candidate_items"))
+                    and not bool(page_stats.get("after_window_items"))
+                )
+                page_after_only = (
+                    bool(page_stats.get("after_window_items"))
+                    and not bool(page_stats.get("window_candidate_items"))
+                    and not bool(page_stats.get("before_window_items"))
+                )
 
                 if page_before_only:
                     surface_pre_window_pages += 1
@@ -1398,7 +1469,11 @@ class YouTubeScraper:
                     no_hit_pages += 1
                     # Before/after-window pages can be noisy.
                     # Give a wider no-hit runway until we get an in-range hit.
-                    no_hit_threshold = 25 if (config.date_start or config.date_end) and in_range_hits == 0 else 5
+                    no_hit_threshold = (
+                        self.INITIAL_DATE_WINDOW_NO_HIT_PAGE_CAP
+                        if (config.date_start or config.date_end) and in_range_hits == 0
+                        else self.DATE_WINDOW_NO_HIT_PAGE_CAP
+                    )
                     if surface_no_hit_pages >= no_hit_threshold and (config.date_start or config.date_end):
                         logger.info(
                             "Stopping %s continuation crawl after %d no-hit pages",
@@ -1453,6 +1528,14 @@ class YouTubeScraper:
                 max_results=config.max_results,
             )
 
+        for video in unique_videos:
+            if not video.channel_id and canonical_channel_id:
+                video.channel_id = canonical_channel_id
+            if not video.channel_title and resolved_channel_title:
+                video.channel_title = resolved_channel_title
+            if not video.user_avatar_url and resolved_channel_avatar_url:
+                video.user_avatar_url = resolved_channel_avatar_url
+
         logger.info(f"Scrape complete: found {len(unique_videos)} videos")
         self._emit_progress(
             progress_cb,
@@ -1489,6 +1572,8 @@ class YouTubeScraper:
             "precise_publish_failures": self._precise_publish_failures,
             "canonical_handle": canonical_handle or handle,
             "canonical_channel_id": canonical_channel_id or None,
+            "resolved_channel_title": resolved_channel_title,
+            "resolved_channel_avatar_url": resolved_channel_avatar_url,
         }
         return unique_videos
 
@@ -1507,12 +1592,10 @@ class YouTubeScraper:
             return
 
         needs_enrichment = [
-            v for v in videos
+            v
+            for v in videos
             if isinstance(v, YouTubeVideo)
-            and (
-                (v.likes == 0 and v.comments == 0)
-                or int(getattr(v, "duration_seconds", 0) or 0) <= 0
-            )
+            and ((v.likes == 0 and v.comments == 0) or int(getattr(v, "duration_seconds", 0) or 0) <= 0)
         ]
         if not needs_enrichment:
             return

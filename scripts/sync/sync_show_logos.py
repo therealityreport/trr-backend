@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -56,7 +55,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         prog="sync_show_logos",
         description="Harvest show logo candidates from show homepage and Wikipedia URLs.",
     )
-    parser.add_argument("--all", action="store_true", help="Accepted for parity; script processes used shows by default.")
+    parser.add_argument(
+        "--all", action="store_true", help="Accepted for parity; script processes used shows by default."
+    )
     parser.add_argument("--force", action="store_true", help="Re-link/import even when logo links already exist.")
     parser.add_argument("--dry-run", action="store_true", help="Collect and score candidates without writing.")
     parser.add_argument("--skip-s3", action="store_true", help="Skip downloading + mirroring candidate logos.")

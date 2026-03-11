@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from trr_backend.socials.facebook.scraper import FacebookScraper
-
 
 # Minimal SSR HTML fragment that mirrors the real Facebook feedback JSON structure
 _SAMPLE_FEEDBACK_HTML = """
@@ -137,19 +134,19 @@ class TestBuildPostEngagement:
     def test_build_post_populates_engagement(self) -> None:
         scraper = FacebookScraper()
         html = (
-            '<html><head>'
+            "<html><head>"
             '<meta property="og:url" content="https://www.facebook.com/Bravo/videos/123" />'
             '<meta property="og:title" content="Test Video" />'
             '<meta property="og:description" content="A test video" />'
-            '</head><body><script>'
+            "</head><body><script>"
             '{"feedback":{"id":"abc","comment_rendering_instance":{"comments":{"total_count":10}}'
             ',"reaction_count":{"count":200,"is_empty":false}'
             ',"top_reactions":{"edges":[{"visible_in_bling_bar":true,"node":{"id":"1","localized_name":"Like"},"i18n_reaction_count":"180","reaction_count":180}'
             ',{"visible_in_bling_bar":false,"node":{"id":"2","localized_name":"Love"},"i18n_reaction_count":"20","reaction_count":20}]}'
             ',"total_comment_count":10'
             ',"video_view_count_renderer":{"__typename":"UFI2ViewCountRenderer","feedback":{"video_view_count":5000,"play_count":8000,"id":"abc"}}'
-            '}}'
-            '</script></body></html>'
+            "}}"
+            "</script></body></html>"
         )
         post = scraper._build_post_from_html(
             url="https://www.facebook.com/Bravo/videos/123",
@@ -167,10 +164,10 @@ class TestBuildPostEngagement:
     def test_build_post_zero_engagement_when_no_data(self) -> None:
         scraper = FacebookScraper()
         html = (
-            '<html><head>'
+            "<html><head>"
             '<meta property="og:url" content="https://www.facebook.com/TestPage/posts/456" />'
             '<meta property="og:title" content="Simple Post" />'
-            '</head><body></body></html>'
+            "</head><body></body></html>"
         )
         post = scraper._build_post_from_html(
             url="https://www.facebook.com/TestPage/posts/456",
@@ -186,7 +183,10 @@ class TestBuildPostEngagement:
 
     def test_build_post_uses_deterministic_fallback_post_id(self) -> None:
         scraper = FacebookScraper()
-        html = "<html><head><meta property=\"og:url\" content=\"https://www.facebook.com/?utm_source=one&fbclid=abc\" /></head><body></body></html>"
+        html = (
+            '<html><head><meta property="og:url" '
+            'content="https://www.facebook.com/?utm_source=one&fbclid=abc" /></head><body></body></html>'
+        )
         post_one = scraper._build_post_from_html(
             url="https://www.facebook.com/?utm_source=one&fbclid=abc",
             html_text=html,

@@ -954,6 +954,7 @@ def test_create_or_reuse_refresh_run_recovers_stale_queued_runs(monkeypatch) -> 
         "fetch_all",
         lambda *args, **kwargs: [],  # noqa: ANN002, ANN003
     )
+
     def fake_fetch_one(query, params=None):  # noqa: ANN001
         request_payload = (params or [None, None, None, None, "{}"])[4]
         inserted_payloads.append({"query": query, "request_payload": request_payload})
@@ -1503,6 +1504,86 @@ def test_get_reddit_community_analytics_summary_season_scope_filters_season(monk
     assert payload["diagnostics"]["row_count"] == 5
     assert "m.season_id = %s" in str(captured["query"])
     assert captured["params"] == ["community-1", "season-1"]
+
+
+def test_run_reddit_refresh_worker_loop_once_returns_one_when_no_work(monkeypatch) -> None:
+    monkeypatch.setattr(reddit_refresh, "claim_next_refresh_run", lambda **kwargs: None)
+
+    result = reddit_refresh.run_reddit_refresh_worker_loop(worker_id="worker-1", once=True, poll_seconds=0.2)
+
+    assert result == 1
+
+
+def test_execute_refresh_run_sync_details_emits_terminal_summary(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000099"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "community:community-1:season:season-1:container:period-preseason",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {"mode": "sync_details", "force_rescrape": False},
+        "status": "running",
+        "claim_token": "claim-token-1",
+        "updated_at": datetime.now(tz=UTC),
+    }
+    updates: list[dict] = []
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda *args, **kwargs: False)  # noqa: ANN002, ANN003
+    monkeypatch.setattr(reddit_refresh, "_fetch_post_comments_tree", lambda post_id: [])  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_upsert_comments", lambda rows, *, conn: 0)  # noqa: ARG005
+    monkeypatch.setattr(
+        reddit_refresh, "get_refresh_run", lambda run_id_arg: {"run_id": run_id_arg, "status": "completed"}
+    )  # noqa: ARG005
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_update_run",
+        lambda run_id_arg, **kwargs: updates.append({"run_id": run_id_arg, **kwargs}),
+    )
+
+    class _FakeCursor:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ANN204
+            return False
+
+        def execute(self, sql, params):  # noqa: ANN001
+            self.sql = sql
+            self.params = params
+
+        def fetchall(self):  # noqa: ANN204
+            return [
+                {
+                    "reddit_post_id": "abc123",
+                    "url": "https://reddit.com/r/BravoRealHousewives/comments/abc123/thread/",
+                    "raw_payload": {},
+                }
+            ]
+
+    class _FakeConnection:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ANN204
+            return False
+
+    monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: _FakeConnection())
+    monkeypatch.setattr(reddit_refresh.pg, "db_cursor", lambda conn=None: _FakeCursor())  # noqa: ARG005
+
+    result = reddit_refresh.execute_refresh_run(run_id, worker_id="worker-1")
+
+    assert result["status"] == "completed"
+    completed_update = next(item for item in updates if item.get("status") in {"completed", "partial"})
+    diagnostics = completed_update["diagnostics"]
+    assert diagnostics["terminal_summary"]["mode"] == "sync_details"
+    assert diagnostics["terminal_summary"]["status"] == "completed"
+    assert diagnostics["terminal_summary"]["detail_posts_total"] == 1
+    assert diagnostics["terminal_summary"]["detail_posts_done"] == 1
+    assert diagnostics["progress"]["detail_posts_total"] == 1
+    assert diagnostics["progress"]["detail_posts_done"] == 1
 
 
 def test_list_reddit_community_posts_applies_flair_and_container_filters(monkeypatch) -> None:

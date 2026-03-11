@@ -1032,9 +1032,7 @@ def _build_detection_boxes(
                 tagged_people_ids=tagged_people_ids,
                 tagged_people_names=tagged_people_names,
             )
-            owner_name_for_assignment = (
-                resolved_owner_name if (normalized_owner_id or explicit_owner_name) else None
-            )
+            owner_name_for_assignment = resolved_owner_name if (normalized_owner_id or explicit_owner_name) else None
             _promote_owner_similarity_assignment(
                 out,
                 owner_person_id=owner_person_id,

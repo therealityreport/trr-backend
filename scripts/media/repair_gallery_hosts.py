@@ -375,9 +375,7 @@ def _collect_candidates(
     explicit_person_ids.update(_resolve_show_person_ids(db, show_ids))
     gallery_links = _fetch_gallery_link_rows(db, explicit_person_ids or None)
     person_scope = explicit_person_ids or {
-        person_id
-        for person_id in (_get_str(row.get("entity_id")) for row in gallery_links)
-        if person_id
+        person_id for person_id in (_get_str(row.get("entity_id")) for row in gallery_links) if person_id
     }
 
     media_asset_ids = [
@@ -404,9 +402,7 @@ def _collect_candidates(
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
         source_url = _get_str(asset.get("source_url"))
         hosted_url = _get_str(asset.get("hosted_url"))
-        source_page_url = (
-            _get_str(metadata.get("source_page_url")) or _get_str(metadata.get("page_url")) or None
-        )
+        source_page_url = _get_str(metadata.get("source_page_url")) or _get_str(metadata.get("page_url")) or None
         link_context = link.get("context") if isinstance(link.get("context"), dict) else {}
         candidates.append(
             RepairCandidate(
@@ -597,11 +593,7 @@ def repair_gallery_hosts(
                 continue
 
             confirmation_probe: ReachabilityProbeResult | None = None
-            if (
-                confirm_unreachable_pass
-                and not hosted_probe.transient_failure
-                and not source_probe.transient_failure
-            ):
+            if confirm_unreachable_pass and not hosted_probe.transient_failure and not source_probe.transient_failure:
                 confirmation_probe = _probe_url_reachability(
                     url=candidate.source_url,
                     source=candidate.source,

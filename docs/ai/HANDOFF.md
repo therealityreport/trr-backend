@@ -1,6 +1,1506 @@
 # Session Handoff (TRR-Backend)
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
+## Latest Update (2026-03-07 19:50 EST) — Admin vision Modal function deployed live on staging API host
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.mcp__awslabs-core__prompt_understanding`
+  - `functions.mcp__awslabs-aws-api__call_aws`
+  - `functions.exec_command`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+- behavior_summary:
+  - Deployed `run_admin_vision` into the existing Modal app `trr-backend-jobs`; all seven expected functions now resolve:
+    - `run_admin_operation`
+    - `run_google_news_sync`
+    - `run_reddit_refresh`
+    - `run_social_job`
+    - `sweep_social_dispatch_queue`
+    - `heartbeat_remote_executors`
+    - `run_admin_vision`
+  - Built and uploaded the staging overlay artifact:
+    - `s3://trr-backend/artifacts/trr-backend/20260307-194422/trr_backend_modal_vision_cutover_20260307-194422.tar.gz`
+  - Updated staging SSM runtime parameters:
+    - `TRR_MODAL_VISION_FUNCTION=run_admin_vision`
+    - `TRR_ADMIN_IMAGE_EXECUTION_BACKEND=modal`
+    - `TRR_BACKEND_ARTIFACT_S3_URI=s3://trr-backend/artifacts/trr-backend/20260307-194422/trr_backend_modal_vision_cutover_20260307-194422.tar.gz`
+  - Applied the overlay on staging API host `i-01a7b672f5946d19a`, restarted `trr-api`, and verified the host can hydrate `run_admin_vision` with its own Modal credentials.
+  - This completes the staging cutover for the covered admin image-analysis jobs; those paths no longer require the Screenalytics HTTP service even though `SCREENALYTICS_API_URL` remains present for non-admin surfaces.
+  - The worker plane remains retired in this AWS account:
+    - `trr-worker-asg` is absent
+    - only `trr-api-asg` remains visible
+- validation_evidence:
+  - Local Modal readiness:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && .venv/bin/python -m modal deploy -m trr_backend.modal_jobs` (pass; created `run_admin_vision`)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && .venv/bin/python scripts/modal/verify_modal_readiness.py --json` (pass; `ok=true`, seven functions resolved, no missing secrets)
+  - Live staging rollout:
+    - artifact upload:
+      - `aws s3 cp /tmp/trr_backend_modal_vision_cutover_20260307-194422.tar.gz s3://trr-backend/artifacts/trr-backend/20260307-194422/trr_backend_modal_vision_cutover_20260307-194422.tar.gz --region us-east-1` (pass)
+    - SSM parameter writes:
+      - `/trr/staging/TRR_MODAL_VISION_FUNCTION=run_admin_vision`
+      - `/trr/staging/TRR_ADMIN_IMAGE_EXECUTION_BACKEND=modal`
+      - `/trr/staging/TRR_BACKEND_ARTIFACT_S3_URI=s3://trr-backend/artifacts/trr-backend/20260307-194422/trr_backend_modal_vision_cutover_20260307-194422.tar.gz`
+    - API artifact/env rollout SSM command: `2cbccd6c-0b34-4390-ba59-0f36df203009`
+      - `curl -fsS http://127.0.0.1:8000/health` -> `{"status":"healthy"}`
+      - `systemctl is-active trr-api` -> `active`
+      - `modal_function_ok=run_admin_vision`
+      - `/etc/trr-api.env` contains the new vision keys and updated artifact URI
+    - ALB target health:
+      - `trr-api-tg` -> `i-01a7b672f5946d19a` healthy
+    - worker-plane status:
+      - `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names trr-api-asg trr-worker-asg --region us-east-1` -> only `trr-api-asg` exists
+- blocked_checks:
+  - No production rollout was possible in this session because the current AWS account still exposes no `/trr/production/*` namespace or separate production worker/API target.
+## Latest Update (2026-03-07 19:25 EST) — Staging cut over to remote+Modal, production target not present in current AWS account
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.mcp__awslabs-core__prompt_understanding`
+  - `functions.mcp__awslabs-aws-api__call_aws`
+  - `functions.exec_command`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+- behavior_summary:
+  - Performed the live staging runtime cutover for the Modal-backed remote job plane.
+  - Created the named Modal secrets from the backend runtime source:
+    - `trr-backend-runtime`
+    - `trr-social-auth`
+  - Re-deployed the Modal app `trr-backend-jobs` so all six functions now resolve:
+    - `run_admin_operation`
+    - `run_google_news_sync`
+    - `run_reddit_refresh`
+    - `run_social_job`
+    - `sweep_social_dispatch_queue`
+    - `heartbeat_remote_executors`
+  - Built and uploaded the staging rollout artifact:
+    - `s3://trr-backend/artifacts/trr-backend/20260307-191044/trr_backend_modal_remote_cutover_20260307-191044.tar.gz`
+  - Updated staging SSM runtime parameters to the canonical `remote + modal` contract:
+    - `TRR_JOB_PLANE_MODE=remote`
+    - `TRR_LONG_JOB_ENFORCE_REMOTE=1`
+    - `TRR_REMOTE_EXECUTOR=modal`
+    - `TRR_MODAL_ENABLED=1`
+    - `TRR_MODAL_APP_NAME=trr-backend-jobs`
+    - `TRR_MODAL_ADMIN_OPERATION_FUNCTION=run_admin_operation`
+    - `TRR_MODAL_GOOGLE_NEWS_FUNCTION=run_google_news_sync`
+    - `TRR_MODAL_REDDIT_REFRESH_FUNCTION=run_reddit_refresh`
+    - `TRR_MODAL_SOCIAL_JOB_FUNCTION=run_social_job`
+    - `TRR_MODAL_SOCIAL_RECOVERY_FUNCTION=sweep_social_dispatch_queue`
+    - `TRR_MODAL_RUNTIME_SECRET_NAME=trr-backend-runtime`
+    - `TRR_MODAL_SOCIAL_SECRET_NAME=trr-social-auth`
+    - `SOCIAL_QUEUE_ENABLED=true`
+    - `TRR_BACKEND_ARTIFACT_S3_URI=s3://trr-backend/artifacts/trr-backend/20260307-191044/trr_backend_modal_remote_cutover_20260307-191044.tar.gz`
+  - Added host-side Modal credentials on the staging API instance by storing:
+    - `/trr/staging/MODAL_TOKEN_ID`
+    - `/trr/staging/MODAL_TOKEN_SECRET`
+    and reconciling `/etc/trr-api.env` to include `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`.
+  - Applied the artifact over `/opt/trr-backend` on staging API host `i-01a7b672f5946d19a`, restarted `trr-api`, and verified the host can hydrate all six Modal functions.
+  - Triggered `heartbeat_remote_executors` after cutover so the staging social worker-health surface has a fresh Modal dispatcher heartbeat immediately.
+  - Production rollout could not be executed in this session because the current AWS account context exposes only staging:
+    - SSM parameters exist only under `/trr/staging/*`
+    - `/trr/production/*` is empty
+    - only one ASG is present: `trr-api-asg`
+- validation_evidence:
+  - Local pre-rollout checks:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && source .venv/bin/activate && pytest -q tests/test_modal_jobs.py tests/api/routers/test_admin_operations.py tests/api/routers/test_admin_show_news.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/api/routers/test_socials_season_analytics.py -k 'modal or remote or worker_health or queue_status'` (pass; `18 passed, 139 deselected`)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && source .venv/bin/activate && python3.11 -m py_compile trr_backend/modal_jobs.py trr_backend/modal_dispatch.py trr_backend/job_plane.py trr_backend/pipeline/admin_operations.py trr_backend/repositories/social_season_analytics.py trr_backend/repositories/reddit_refresh.py api/routers/socials.py api/routers/admin_show_news.py` (pass)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && source .venv/bin/activate && ruff check trr_backend/modal_jobs.py trr_backend/modal_dispatch.py trr_backend/job_plane.py trr_backend/pipeline/admin_operations.py trr_backend/repositories/social_season_analytics.py trr_backend/repositories/reddit_refresh.py api/routers/socials.py api/routers/admin_show_news.py` (pass)
+  - Modal readiness:
+    - `source .venv/bin/activate && python scripts/modal/prepare_named_secrets.py --apply` (pass; created `trr-backend-runtime` and `trr-social-auth`)
+    - `source .venv/bin/activate && python -m modal deploy -m trr_backend.modal_jobs` (pass)
+    - `source .venv/bin/activate && python scripts/modal/verify_modal_readiness.py --json` (pass; `ok=true`, all six functions resolved)
+  - Live staging rollout:
+    - API artifact/env rollout SSM command: `41f65990-8dcb-41e1-b65c-8b2419fe6dc5`
+      - command reported failure only because the on-host Modal verification step hit missing credentials
+      - artifact overlay, env rewrite, API restart, and localhost health check all completed before the auth failure
+    - staging Modal token SSM parameter write:
+      - `/trr/staging/MODAL_TOKEN_ID`
+      - `/trr/staging/MODAL_TOKEN_SECRET`
+    - API Modal token reconcile SSM command: `669c2b17-9688-452a-b11d-ca2604a41aea` (pass)
+      - `systemctl is-active trr-api` -> `active`
+      - `curl -fsS http://127.0.0.1:8000/health` -> `{\"status\":\"healthy\"}`
+      - all six `modal_function_ok=*` checks passed on-host
+    - live API target health:
+      - `aws elbv2 describe-target-health --region us-east-1 --target-group-arn arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc` -> instance `i-01a7b672f5946d19a` is `healthy`
+    - live social executor proof from staging host:
+      - worker-health SSM command `b15f3b57-08b5-407f-b79d-c4e466694e35` returned `healthy=true`, `healthy_workers=4`, `fresh_workers=4`
+      - returned workers include:
+        - `modal:social-dispatcher`
+        - `modal:reddit-dispatcher`
+        - `modal:google-news-dispatcher`
+        - `modal:admin-dispatcher`
+      - each dispatcher row reports `execution_backend_canonical=modal`
+  - AWS account context:
+    - `aws sts get-caller-identity --region us-east-1` -> account `522814694101`, user `arn:aws:iam::522814694101:user/trr-backend`
+    - `aws ssm get-parameters-by-path --path /trr/production --recursive --region us-east-1` -> empty
+    - `aws autoscaling describe-auto-scaling-groups --region us-east-1` -> only `trr-api-asg` present
+- blocked_checks:
+  - Production rollout is blocked by account visibility, not by code readiness.
+  - No separate production SSM namespace, API ASG, or target group is available in the current AWS credentials, so the rollout executed only for staging in this session.
+## Latest Update (2026-03-07 19:16 EST) — Modal cutover prep finished with Supabase schema applied, browser proof, and clean Ruff
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.mcp__chrome-devtools__navigate_page`
+  - `functions.mcp__chrome-devtools__take_snapshot`
+  - `functions.mcp__chrome-devtools__take_screenshot`
+  - `functions.mcp__chrome-devtools__evaluate_script`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/prepare_named_secrets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_verify_modal_readiness.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Finished the non-mutating Modal cutover prep work for the backend:
+    - named Modal secrets are now the required production path in `trr_backend/modal_jobs.py`
+    - `.env` fallback remains local/dev only
+    - added non-mutating operator tooling for secret rendering and rollout command generation
+    - added `scripts/modal/verify_modal_readiness.py` to verify named secrets, the deployed `trr-backend-jobs` app, and all six required functions before rollout
+  - Fixed the worker-health payload gap in `get_worker_health(...)` so Modal-backed executor metadata is returned in the same cached/non-cached code paths used by the admin UI.
+  - Cleaned the backend Ruff baseline fully; `ruff check .` now passes repo-wide, including the previously noisy `trr_backend/repositories/social_season_analytics.py`.
+  - Updated the workspace launcher defaults so local-lite now boots the backend with the canonical Modal remote-executor env contract:
+    - `TRR_JOB_PLANE_MODE=remote`
+    - `TRR_LONG_JOB_ENFORCE_REMOTE=1`
+    - `TRR_REMOTE_EXECUTOR=modal`
+    - `TRR_MODAL_ENABLED=1`
+    - `TRR_MODAL_APP_NAME=trr-backend-jobs`
+    - `TRR_MODAL_ADMIN_OPERATION_FUNCTION=run_admin_operation`
+    - `TRR_MODAL_GOOGLE_NEWS_FUNCTION=run_google_news_sync`
+    - `TRR_MODAL_REDDIT_REFRESH_FUNCTION=run_reddit_refresh`
+    - `TRR_MODAL_SOCIAL_JOB_FUNCTION=run_social_job`
+    - `TRR_MODAL_SOCIAL_RECOVERY_FUNCTION=sweep_social_dispatch_queue`
+    - `TRR_MODAL_RUNTIME_SECRET_NAME=trr-backend-runtime`
+    - `TRR_MODAL_SOCIAL_SECRET_NAME=trr-social-auth`
+    - `SOCIAL_QUEUE_ENABLED=true`
+  - Applied `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0179_shared_social_account_ingest.sql` to the linked Supabase project via MCP migration tooling.
+  - The shared social ingest schema is now present in the linked database:
+    - `social.shared_account_sources`
+    - `social.shared_post_matches`
+    - `social.shared_post_review_queue`
+- validation_evidence:
+  - Backend checks:
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check .` (pass)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/repositories/test_social_season_analytics.py -k 'get_worker_health_wraps_modal_executor_payload or assert_worker_available_when_queue_enabled_modal_returns_executor_payload'` (pass; `2 passed`)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/test_modal_jobs.py tests/api/routers/test_admin_operations.py -k 'modal or remote'` (pass; `7 passed, 6 deselected`)
+    - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python3.11 -m py_compile trr_backend/repositories/social_season_analytics.py trr_backend/modal_jobs.py trr_backend/modal_dispatch.py scripts/modal/prepare_named_secrets.py scripts/modal/render_cutover_commands.py scripts/modal/verify_modal_readiness.py` (pass)
+  - Workspace/runtime checks:
+    - `make env-contract` regenerated `/Users/thomashulihan/Projects/TRR/docs/workspace/env-contract.md`
+    - `bash -n /Users/thomashulihan/Projects/TRR/scripts/dev-workspace.sh && bash -n /Users/thomashulihan/Projects/TRR/scripts/workspace-env-contract.sh` (pass)
+    - local workspace restart via `make stop && make dev-lite` showed `Job plane mode: remote (enforce_remote=1, executor=modal, modal_enabled=1)`
+  - Supabase schema verification:
+    - `apply_migration(name='shared_social_account_ingest', ...)` (pass)
+    - `select table_name from information_schema.tables ...` returned:
+      - `shared_account_sources`
+      - `shared_post_matches`
+      - `shared_post_review_queue`
+  - Managed Chrome verification against local workspace:
+    - `/Users/thomashulihan/Projects/TRR/.tmp/system-health-modal-modal-local.png`
+      - system health modal now shows `Execution owner: Remote executor`
+      - system health modal now shows `Execution backend: Modal`
+      - live-worker copy now reads `Remote executor processes checking the social sync queues...`
+    - `/Users/thomashulihan/Projects/TRR/.tmp/social-media-shared-ingest-after-0179.png`
+      - shared-ingest inventory now loads and shows 11 active account rows instead of failing on missing tables
+      - shared review queue now renders `0 open` instead of a fetch error
+    - `/Users/thomashulihan/Projects/TRR/.tmp/system-health-modal-after-0179.png`
+      - post-migration system health modal still shows `Execution backend: Modal`
+    - `/Users/thomashulihan/Projects/TRR/.tmp/rhoslc-social-after-0179.png`
+      - RHOSLC season social page contains `Classification Rules` and `Shared Async Pipeline`
+      - managed-Chrome DOM check confirmed `{hasEC2:false, hasAWSWorkers:false, hasClassificationRules:true, hasSharedAsyncPipeline:true}`
+- blocked_checks:
+  - No staging or production mutations were performed in this pass.
+  - This pass intentionally did not perform a full staging or production runtime rollout; it updated the linked Supabase schema and local workspace verification only.
+## Latest Update (2026-03-07 16:18 EST) — API cut over to local+Modal execution and EC2 worker ASG drained toward zero
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-devops`
+  - `aws-solution-architect`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.mcp__awslabs-core__prompt_understanding`
+  - `functions.mcp__awslabs-aws-api__call_aws`
+  - `functions.exec_command`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_dispatch.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.lock.txt`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Finished the no-worker cutover for the long-job plane:
+    - supported admin operations dispatch to Modal from the API even when `TRR_JOB_PLANE_MODE=local`
+    - Google News async jobs dispatch to Modal first, then fall back to API background execution if Modal is unavailable
+    - Reddit refresh jobs dispatch to Modal first, then fall back to API background execution if Modal is unavailable
+    - social ingest routes now run inline/background on the API when queue mode is disabled instead of requiring the EC2 social worker pool
+  - Deployed the Modal app cleanly:
+    - `trr-backend-jobs`
+    - deployed app id: `ap-zCguzD3kS4CL6v7tLJElyv`
+    - functions: `run_admin_operation`, `run_google_news_sync`, `run_reddit_refresh`
+  - Built and uploaded targeted API rollout artifact:
+    - `s3://trr-backend/artifacts/trr-backend/20260307-161237/trr_backend_modal_worker_cutover_20260307-161237.tar.gz`
+  - Applied the artifact to the live API host `i-01a7b672f5946d19a`, installed the missing `modal` dependency into `/opt/trr-backend/.venv`, and switched `/etc/trr-api.env` to:
+    - `TRR_JOB_PLANE_MODE=local`
+    - `TRR_LONG_JOB_ENFORCE_REMOTE=0`
+    - `TRR_MODAL_ENABLED=1`
+    - `TRR_MODAL_APP_NAME=trr-backend-jobs`
+    - `TRR_MODAL_ADMIN_OPERATION_FUNCTION=run_admin_operation`
+    - `TRR_MODAL_GOOGLE_NEWS_FUNCTION=run_google_news_sync`
+    - `TRR_MODAL_REDDIT_REFRESH_FUNCTION=run_reddit_refresh`
+    - `SOCIAL_QUEUE_ENABLED=false`
+  - Updated staging bootstrap parameters so future API replacement comes up in no-worker mode:
+    - `/trr/staging/TRR_JOB_PLANE_MODE=local`
+    - `/trr/staging/TRR_LONG_JOB_ENFORCE_REMOTE=0`
+    - `/trr/staging/TRR_BACKEND_ARTIFACT_S3_URI=s3://trr-backend/artifacts/trr-backend/20260307-161237/trr_backend_modal_worker_cutover_20260307-161237.tar.gz`
+  - Scaled `trr-worker-asg` to `MinSize=0`, `DesiredCapacity=0`. At evidence capture time, two worker instances were already `terminated` and the last one (`i-02e0d952e67e302a0`) was still draining in `shutting-down` / `Terminating`.
+- validation_evidence:
+  - Local validation:
+    - `./.venv/bin/pytest tests/api/routers/test_admin_operations.py tests/api/routers/test_admin_show_news.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/api/routers/test_socials_season_analytics.py` (pass; `153 passed`)
+    - `ruff check trr_backend/modal_jobs.py trr_backend/modal_dispatch.py trr_backend/pipeline/admin_operations.py api/routers/admin_show_news.py api/routers/socials.py` (pass)
+    - `./.venv/bin/python -m modal deploy -m trr_backend.modal_jobs` (pass; clean deploy, no stuck initializing app)
+  - Live API rollout:
+    - SSM rollout command `ddbd3ce1-0a2e-43d6-97a3-336134308343`
+      - note: command exited non-zero only because the immediate post-restart `curl` hit `127.0.0.1:8000` too early; code overlay, dependency install, env update, and restart all completed before that failed check
+    - verification SSM command `2cf72270-1df6-4130-a8e7-70e3ba065d57`
+      - `systemctl is-active trr-api` -> `active`
+      - `/opt/trr-backend/.venv/bin/python` reports `modal_installed=True`
+      - `modal.Function.from_name('trr-backend-jobs', 'run_admin_operation')` resolved successfully on-host
+      - `curl -fsS http://127.0.0.1:8000/health` returned `{\"status\":\"healthy\"}`
+  - Live AWS verification:
+    - `aws elbv2 describe-target-health --region us-east-1 --target-group-arn arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc` -> API target `healthy`
+    - pre-scale DB activity check via API-host SSM showed:
+      - `admin_operations={}`
+      - `google_news_sync_jobs={}`
+      - `social_scrape_jobs={}`
+      - `social_scrape_runs={\"queued\": 2}`
+      - `reddit_refresh_runs={\"partial\": 38}`
+    - `aws autoscaling update-auto-scaling-group --region us-east-1 --auto-scaling-group-name trr-worker-asg --min-size 0 --desired-capacity 0` (pass)
+    - follow-up inventory:
+      - `trr-worker-asg` now reports `MinSize=0`, `DesiredCapacity=0`
+      - worker instances `i-048f605583d2a11dd` and `i-0c4934e80de1dd89d` reached `terminated`
+      - worker instance `i-02e0d952e67e302a0` was still `shutting-down` at final snapshot
+- residual_risks:
+  - `trr-worker-asg` still exists with `MaxSize=8`, so the fleet is drained but not deleted. Manual scale-up would bring EC2 workers back unless the ASG/launch template is removed later.
+  - `reddit_refresh_runs` still contains historical `partial` rows and `social_scrape_runs` still has two queued run envelopes with no active scrape jobs behind them. They were not active during this cutover, but they remain backlog/state cleanup candidates.
+## Latest Update (2026-03-07 15:55 EST) — Modal-backed show refresh foundation added for on-demand metadata scraping
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-devops`
+  - `aws-solution-architect`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_dispatch.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.in`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.lock.txt`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added a first Modal execution slice for the existing `admin_show_refresh` and `admin_show_refresh_photos` admin operations, which already cover show details, TMDb entities/providers, seasons/episodes, cast/credits, and show/season/episode image refresh flows.
+  - Remote-mode admin operation kickoff now attempts a Modal dispatch for those two operation types instead of relying solely on always-on EC2 polling workers. The queue/SSE/admin operation contract stays intact; only the remote executor changes.
+  - Added a targeted claim-by-operation-id path in `trr_backend.repositories.admin_operations` plus `claim_and_execute_operation()` in the pipeline so a one-shot Modal worker can claim and run the specific queued operation triggered by the UI.
+  - Added `trr_backend/modal_jobs.py` as the Modal app entrypoint and `trr_backend/modal_dispatch.py` as the backend-side submission helper. Config is controlled with `TRR_MODAL_ENABLED`, `TRR_MODAL_APP_NAME`, `TRR_MODAL_ADMIN_OPERATION_FUNCTION`, and optional `TRR_MODAL_SECRET_NAME`.
+- validation_evidence:
+  - `./.venv/bin/pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_operations.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_sync.py` (pass; `32 passed`)
+  - `uv pip compile /Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.in --python-version 3.11 -o /Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.lock.txt` (pass)
+  - `./.venv/bin/python -m modal token set ...` had already succeeded earlier in the session and `./.venv/bin/python -m modal deploy -m trr_backend.modal_jobs` reached Modal, built image `im-XDMgrvI8KoQARQdS82Xq6V`, and created app `ap-uxZH6zFjkjmzFfyvSoGkbt`
+- blocked_checks:
+  - The first real Modal deploy did not finish cleanly: the local CLI heartbeat timed out while the app stayed in `initializing` state in `modal app list`. The code and image build are valid, but the deployed app still needs a clean Modal-side finalize before production backend instances can target it.
+  - No AWS rollout was executed in this pass, because the Modal deployment itself has not fully stabilized yet and backend runtime env propagation for production remains pending.
+## Latest Update (2026-03-07 13:13 EST) — Social coverage + week-detail status semantics aligned across platforms
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added lifecycle-filter parity for Facebook comment coverage, TikTok comment-media coverage, and Instagram/TikTok/Facebook week-detail comment counts and comment rows so deleted comments stop inflating saved coverage or drill-down results.
+  - Extended social status builders to support `queued` / `running` mirror states, `not_attempted` / `unknown` comment and mirror states, additive `active_job_summary`, and stale suppression while the same week/platform still has active jobs.
+  - Week-detail and coverage payloads now preserve platform-specific failure reasons, stop using `posted_at` as a synthetic refresh timestamp, and expose richer per-platform/per-post sync metadata including YouTube post `status`.
+  - Twitter, Facebook, Threads, and YouTube week-detail posts now derive hosted-media and thumbnail status from stored row fields instead of hardcoded fallback assumptions; Twitter no longer fabricates `https://x.com/i/status/...` links when no real author handle exists.
+- validation_evidence:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -q -k 'comment_media_coverage_uses_tiktok_comment_lifecycle_filter or comment_media_coverage_supports_twitter_quote_media or comments_coverage_facebook_uses_comment_lifecycle_filter or get_week_detail_overrides_zero_post_status_with_active_run_jobs or get_week_detail_uses_loaded_platform_posts_for_refresh_metadata or build_platform_status_payload_clears_stale_when_active_jobs_present or week_detail_youtube_includes_status_payload or week_detail_twitter_uses_hosted_media_without_fallback_handle'` (pass; `8 passed`)
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py` (pass)
+- blocked_checks:
+  - No deploy was performed in this pass. Validation stayed local to repository tests and compile checks.
+## Latest Update (2026-03-07 11:11 EST) — Week-detail social status now respects live week jobs and loaded post refresh metadata
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - `get_week_detail()` now resolves the most relevant run for the requested week and overlays per-platform `queued` / `running` state from active scrape jobs before returning `status_by_platform`. This prevents week cards from reporting terminal `failed` / `partial` states while the same platform still has in-flight jobs for that week.
+  - Fixed a separate metadata bug where week-card refresh timestamps and `worker_run_id` were always empty because status extraction was reading `platform_results[platform].posts` before paged posts were assigned. Status metadata now uses the loaded handler posts instead of the still-empty paged payload slot.
+- validation_evidence:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -q -k 'get_week_detail_fetches_platforms_concurrently or get_week_detail_overrides_zero_post_status_with_active_run_jobs or get_week_detail_uses_loaded_platform_posts_for_refresh_metadata'` (pass; `3 passed`)
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py` (pass)
+- blocked_checks:
+  - This pass was not deployed to the EC2 worker/API plane. Validation stayed local against the repo code path and UI-facing payload tests.
+## Latest Update (2026-03-07 16:12 EST) — TikTok poisoned-API preflight now short-circuits to yt-dlp; X loader sees canonical cookie file and live search succeeds again
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - TikTok now treats `non_json_response` / challenge-style preflight failures as poisoned API sessions and skips API pagination entirely once the profile HTML bootstrap has recovered `secUid`. This avoids repeated dead API calls and drops directly into the working `yt-dlp` fallback path.
+  - X/Twitter search now has a Playwright search fallback wired into the main scrape chain after GraphQL and syndication failures, and the Twitter auth loader now honors explicit source precedence while also checking the canonical default cookie file path. That fixed a real bug where a saved `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/twitter/twitter_cookies.json` session was invisible to `_load_twitter_auth()`.
+  - A persistent watcher session captured fresh X cookies via Google login and wrote them to `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/twitter/twitter_cookies.json`. The canonical validator now resolves that file and sees `auth_token` + `ct0`.
+- validation_evidence:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py -q -k 'tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_ytdlp or twitter_scrape_from_query_falls_back_to_playwright_after_syndication or twitter_scrape_uses_graphql_first_for_from_query_without_ct0 or tiktok_scrape_emits_progress_callback or tiktok_scrape_skips_items_without_valid_timestamp'` (pass; `5 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -q -k 'load_twitter_auth_reads_default_cookie_file_when_env_unset or load_twitter_auth_accepts_cookie_list_file or load_twitter_auth_accepts_storage_state_json_env or load_twitter_auth_falls_back_to_browser_cookies'` (pass; `4 passed`)
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/scraper.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/scraper.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py` (pass)
+  - `python3.11 -m scripts.socials.refresh_cookies --platform twitter --validate-only` (pass; validated `true`, cookie file `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/twitter/twitter_cookies.json`)
+  - Live TikTok smoke:
+    - `TikTokScraper(...).scrape(TikTokScrapeConfig(username='bravotv', date_start=2026-01-01Z, date_end=2026-03-08Z, max_pages=1))`
+    - result: `{"count": 823, "meta": {"retrieval_mode": "ytdlp_fallback", "api_fail_reason": "non_json_response", "api_preflight_fail_reason": "non_json_response", "api_pagination_blocked_reason": "non_json_response"}}`
+  - Live X smoke:
+    - `TwitterScraper(...).scrape(TwitterScrapeConfig(query='from:BravoTV', date_start=2026-01-01Z, date_end=2026-03-08Z, max_pages=1))`
+    - result: `{"count": 20, "meta": {"retrieval_mode": "twikit", "fallback_attempts": ["twikit"], "graphql_404_count": 1, "fallback_triggered": true}}`
+- remaining_limits:
+  - X GraphQL SearchTimeline is still unstable and returns `404` in this environment, so successful search still depends on the twikit fallback even with fresh cookies present.
+  - TikTok’s direct web/API path still returns poisoned `non_json_response` payloads here, so runtime success continues to depend on the `yt-dlp` fallback rather than a restored native API path.
+## Latest Update (2026-03-07 09:53 EST) — NBCUMV now remains enabled for all-person refresh runs without show context
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+- behavior_summary:
+  - Removed the person-refresh source gate that stripped `nbcumv` whenever `show_id/show_name` was absent. The NBCUMV/Getty importer already supports unscoped person-wide discovery, so this gate was incorrectly preventing all-person runs from ever attempting NBCUMV.
+  - Person-gallery `Get Images` requests can now keep `nbcumv` in the source list for cross-show imports, while explicit show-scoped runs still apply their chosen `show_id/show_name` filter downstream.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_person_images.py -q -k 'resolve_refresh_sources'` (pass; `1 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py` (pass)
+- blocked_checks:
+  - No live person-gallery run was executed from this thread after the backend change; validation stayed on targeted source-resolution coverage.
+## Latest Update (2026-03-07 09:55 EST) — Person refresh API now accepts larger all-person source limits
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+- behavior_summary:
+  - Increased `RefreshImagesRequest.limit_per_source` from `<= 200` to `<= 1000` so person-gallery all-person Getty/NBCUMV imports can request the larger per-source batches the frontend now sends.
+  - Added a targeted request-model test to lock the expanded limit and prevent the old validation mismatch from resurfacing.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_person_images.py -q -k 'resolve_refresh_sources or expanded_limit_per_source'` (pass; `2 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py` (pass)
+- blocked_checks:
+  - No live person-gallery run was executed from this thread after the request-model change; validation stayed on targeted request parsing and source-resolution coverage.
+## Latest Update (2026-03-07 15:31 EST) — Threads profile bootstrap now falls back to anonymous HTML fetch when auth cookies trigger false 404s
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_threads_scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed a real Threads scrape failure where the initial profile-page document request returned `404` only when authenticated cookies were attached, even though the same profile URL returned `200` anonymously.
+  - The scraper now retries that first profile bootstrap request without cookies when an authenticated `404` occurs, then continues with the existing authenticated GraphQL or fallback extraction paths after the HTML is recovered.
+  - Retrieval metadata now records `profile_fetch_mode`, making it visible when a scrape succeeded only because of the anonymous bootstrap fallback instead of looking like a normal authenticated fetch.
+- validation_evidence:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_threads_scraper.py -q` (pass; `5 passed`)
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/scraper.py` (pass)
+  - Live smoke re-run:
+    - `ThreadsScraper(...).scrape(ThreadsScrapeConfig(username='bravotv', date_start=2026-01-01Z, date_end=2026-03-08Z, max_pages=1))`
+    - result: `{"count": 0, "ok": true, "meta": {"source": "playwright_profile_discovery", "pages_scanned": 1, "posts_checked": 4, "matched_posts": 0, "cookies_supplied": true, "profile_fetch_mode": "anonymous_fallback"}}`
+  - Same-session authenticated smoke checks completed earlier in this pass:
+    - Instagram `@bravotv`: success (`12` posts, GraphQL mode)
+    - Facebook `Bravo`: success (`4` matched posts)
+    - TikTok `@bravotv`: success via `yt-dlp` fallback (`359` items returned from fallback pipeline)
+- remaining_limits:
+  - X/Twitter auth validates, but the current scrape surface still sees GraphQL hash churn plus syndication `429` rate limits for `from:BravoTV` smoke checks, so that platform remains operationally flaky even though cookie refresh is working.
+  - TikTok still depends on the existing `yt-dlp` fallback because the direct web/API path continues returning `non_json_response` in this environment.
+## Latest Update (2026-03-07 09:45 EST) — Brand-logo sync now honors saved source-query overrides for existing-covered targets
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Root cause for the `bravotv.com` brands/news issue was twofold:
+    - page sync ignored saved `admin.brand_logo_source_queries` overrides entirely, so the saved `logos_fandom` page override `https://logos.fandom.com/wiki/Bravo_(United_States)/Other` was never used during `/admin/brands/logos/sync`.
+    - page sync also skipped targets that already had any wordmark/icon coverage, which blocked source-hydration for `bravotv.com` because it already had non-Fandom logo assets.
+  - Added sync-only source-query override merging plus provider-priority candidate collection so saved per-source queries are evaluated before default discovery.
+  - When `only_missing=true`, saved source-query overrides now force a small role refresh (`existing_count + 1`, capped by the role cap) so configured sources can still be hydrated for already-covered targets without turning the whole sync into a full-force refresh.
+- validation_evidence:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands_sync.py` (pass; `20 passed`)
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands_sync.py` (pass)
+  - Managed Chrome re-run on `http://admin.localhost:3000/brands/news` after workspace restart:
+    - page sync POST to `/api/admin/trr-api/brands/logos/sync` returned `200`
+  - Direct backend verification:
+    - `admin_brands._load_existing_logo_role_flags(target_type='publication', target_key='bravotv.com', target_label='bravotv.com')` returned `{'wordmark': True, 'icon': True, 'wordmark_count': 2, 'icon_count': 1}`
+    - `collect_free_logo_candidates(... source_provider='logos_fandom', query_override='https://logos.fandom.com/wiki/Bravo_(United_States)/Other')` returned `5` candidates for `bravotv.com`
+    - `admin_brands._list_logo_option_sources(... target_key='bravotv.com', logo_role='wordmark')` now reports `logos_fandom.total_count == 1`
+- remaining_limits:
+  - The modal source-discovery panel was not fully re-walked to completion in Chrome because the options-source requests were noisy/pending under local HMR; the backend source-count verification above is the stronger proof point for this fix.
+## Latest Update (2026-03-07 09:48 EST) — Admin operation event sequencing is now concurrency-safe for streamed NBCUMV/Getty person refresh jobs
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_admin_operations.py`
+- behavior_summary:
+  - Reworked `append_operation_event(...)` so per-operation event sequences are assigned under a row lock on `core.admin_operations` instead of relying on the database trigger’s unlocked `max(event_seq)+1` calculation.
+  - This removes the race that was producing `duplicate key value violates unique constraint "admin_operation_events_op_seq_unique"` during streamed admin jobs, including person-gallery `Get Images` runs that combine the immediate operation envelope with active worker progress for NBCUMV/Getty imports.
+  - The repository now preserves explicit `event_seq` values when supplied, while automatically assigned sequences remain monotonic and serialized per operation.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_admin_operations.py tests/api/routers/test_admin_operations.py -q` (pass; `14 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/admin_operations.py tests/repositories/test_admin_operations.py` (pass)
+- blocked_checks:
+  - No live browser re-run was executed in this pass; verification stayed focused on the shared admin-operation persistence layer and its stream replay tests.
+## Latest Update (2026-03-07 15:05 EST) — Canonical cookie-refresh CLI added and scrape tooling now uses fresh-cookie loaders
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+  - `social-ingestion-reliability`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/refresh_cookies.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/instagram/scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/tiktok/scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_refresh_social_cookies.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Added `python -m scripts.socials.refresh_cookies` as the canonical operator CLI for Instagram, TikTok, X/Twitter, Facebook, and Threads. It reuses the same backend load/validate/refresh functions as production syncs, supports `--platform`, `--force`, `--validate-only`, and `--headed`, and prints JSON status per platform.
+  - Updated the standalone Instagram and TikTok scrape CLIs to load environment, go through the canonical repo auth loaders, and therefore benefit from the same invalid-cookie auto-refresh behavior as the main season ingest/sync pipeline.
+  - Fixed cookie-source precedence so platform loaders prefer an actually authenticated cookie candidate across env/file fallbacks instead of blindly taking the first non-empty file. This resolved a real TikTok issue where a stale guest-cookie file was masking a newer authenticated session file.
+- validation_evidence:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_refresh_social_cookies.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -q -k 'refresh_social_cookies or load_tiktok_cookies_refreshes_when_existing_cookie_is_invalid or load_tiktok_cookies_prefers_authenticated_file_candidate or load_twitter_auth_refreshes_invalid_cookie_pair or load_facebook_cookies_refreshes_invalid_cookie_pair or load_threads_cookies_refreshes_invalid_cookie_pair or load_instagram_cookies_refreshes_when_existing_cookie_is_invalid'` (pass; `11 passed`)
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/refresh_cookies.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/instagram/scrape.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/tiktok/scrape.py` (pass)
+  - `python3.11 -m scripts.socials.refresh_cookies --platform instagram --validate-only` (pass; validated true)
+  - `python3.11 -m scripts.socials.refresh_cookies --platform tiktok --validate-only` (pass; validated true)
+  - `python3.11 -m scripts.socials.refresh_cookies --platform twitter --validate-only` (pass; validated true)
+  - `python3.11 -m scripts.socials.refresh_cookies --platform facebook --validate-only` (pass; validated true)
+  - `python3.11 -m scripts.socials.refresh_cookies --platform threads --validate-only` (pass; validated true)
+- blocked_checks:
+  - No end-to-end worker-pool run was executed in this pass; validation stayed at the loader/CLI/auth-selection layer.
+
+## Latest Update (2026-03-07 15:04 EST) — `bravotv.com` logos.fandom override updated to direct Bravo wiki page
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Updated the live Supabase override row for `publication / bravotv.com / wordmark / logos_fandom` from the flattened search text `Bravo (United States) Other` to the direct wiki URL `https://logos.fandom.com/wiki/Bravo_(United_States)/Other`.
+  - This environment still has the legacy single-value `query_value` schema for `admin.brand_logo_source_queries`, so the direct URL is stored there instead of `query_values`.
+  - With the current backend normalization patch in place, the admin UI should now surface that row as a direct Fandom page link instead of a `Special:Search` URL on the next reload/open.
+- validation_evidence:
+  - Supabase verify query:
+    - `select target_type, target_key, logo_role, source_provider, query_value from admin.brand_logo_source_queries where target_type = 'publication' and target_key = 'bravotv.com' and logo_role = 'wordmark' and source_provider = 'logos_fandom';`
+    - result: `query_value = https://logos.fandom.com/wiki/Bravo_(United_States)/Other`
+- remaining_limits:
+  - I did not reload the live browser modal after writing the row, so UI verification is inferred from the stored value and the backend normalization change.
+## Latest Update (2026-03-07 14:56 EST) — logos.fandom query links now preserve direct wiki page paths
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - `logos_fandom` query normalization now preserves direct wiki page slugs when the user pastes or saves a `logos.fandom.com/wiki/...` URL instead of flattening it into a search term.
+  - Source-query profiles now emit direct Fandom page URLs for wiki-path values such as `Bravo_(United_States)` and `Bravo_(United_States)/Other`, while plain free-text values still render the search and image-only search presets.
+  - Fandom discovery now derives its search term from the preserved wiki slug, so an overridden page path still produces a sensible scrape term instead of a raw slash-delimited path.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/integrations/test_free_logo_sources.py` (pass; `17 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m pytest -q tests/integrations/test_free_logo_sources.py -k 'logos_fandom or source_query_profile'` (pass; `5 passed, 12 deselected`)
+- remaining_limits:
+  - This slice only changed backend normalization/profile generation; I did not rerun the live admin modal in browser after the patch.
+## Latest Update (2026-03-07 14:37 EST) — Multi-platform auth refresh hardening + live login verification
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_cookie_refresh_flows.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/browser_cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/facebook/cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/cookie_refresh.py`
+- behavior_summary:
+  - Hardened the shared Playwright cookie-refresh helper so it only persists authenticated cookies, validates the completed session in a fresh browser context, and exposes explicit login/checkpoint failures instead of silently writing guest cookies.
+  - Tightened TikTok refresh success criteria to require real authenticated session cookies (`sessionid`/`sessionid_ss`/`sid_tt`) rather than guest cookies like `ttwid`.
+  - Hardened Facebook refresh detection for login checkpoints and two-step verification pages.
+  - Updated Threads refresh to prefer the Instagram entrypoint but fall back to the direct login form if that path lands on the public shell.
+  - Added `SOCIAL_TWITTER_COOKIE_REFRESH_ALLOW_HEADED_FALLBACK` and made the X/Twitter refresh fail fast when the password step never materializes instead of hanging for the full timeout.
+- live_verification:
+  - `Threads`: successful live refresh with the supplied Instagram credentials. Fresh cookies were written to `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/threads/threads_cookies.json`, and `_validate_threads_cookie_health(...)` returned `(True, None)` for the stored file.
+  - `TikTok`: direct username/password login still does not mint an authenticated session. The refresh helper now fails loudly instead of accepting guest cookies. A separate live Google OAuth probe reached the Google consent screen and completed `Allow`, but TikTok still returned to `https://www.tiktok.com/login` without `sessionid`/`sid_tt`.
+  - `Facebook`: live login reaches `https://www.facebook.com/two_step_verification/...`; refresh now fails loudly on that checkpoint instead of pretending cookies are valid.
+  - `X/Twitter`: headless login still serves the `Something went wrong. Try reloading.` shell and no Google login option is exposed there. The headed fallback now exits faster with `Twitter login never reached the password step`. Earlier manual probing in this session also showed the provided identifiers never issued `auth_token`/`ct0`.
+- validation_evidence:
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/browser_cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/facebook/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py` (pass)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_cookie_refresh_flows.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k 'cookie_refresh or load_tiktok_cookies_refreshes_when_existing_cookie_is_invalid or load_twitter_auth_refreshes_invalid_cookie_pair or load_facebook_cookies_refreshes_invalid_cookie_pair or load_threads_cookies_refreshes_invalid_cookie_pair'` (pass; `9 passed`)
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/browser_cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/facebook/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_cookie_refresh_flows.py` (pass)
+- remaining_limits:
+  - TikTok still blocks this account from converting either direct login or Google OAuth into an authenticated web session.
+  - Facebook still requires completing the account’s two-step verification challenge outside the scraper.
+  - X/Twitter still needs either a valid account identifier for this login or a provider-side change away from the current headless error shell / non-authenticated flow.
+
+## Latest Update (2026-03-07 03:12 EST) — Multi-platform cookie auto-refresh scaffolding added for TikTok, X, Facebook, and Threads
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/browser_cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/facebook/cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added shared Playwright-backed browser helpers for cookie validation and simple username/password cookie refresh flows.
+  - TikTok, Twitter/X, Facebook, and Threads now mirror the Instagram pattern in `social_season_analytics.py`: source-load cookies, validate them with TTL caching, keep runtime overrides after successful refresh, and auto-refresh when enabled credentials are present.
+  - Worker auth capability reporting now includes `twitter_authenticated`, `facebook_authenticated`, and `threads_authenticated` in addition to Instagram and TikTok.
+  - `.env.example` now documents the missing Facebook / Threads cookie envs plus auto-refresh knobs for TikTok, Twitter/X, Facebook, and Threads.
+- validation_evidence:
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/browser_cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/facebook/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/cookie_refresh.py` (pass)
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/browser_cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/twitter/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/facebook/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/threads/cookie_refresh.py` (pass)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k 'load_tiktok_cookies_refreshes_when_existing_cookie_is_invalid or load_twitter_auth_refreshes_invalid_cookie_pair or load_facebook_cookies_refreshes_invalid_cookie_pair or load_threads_cookies_refreshes_invalid_cookie_pair'` (pass; `4 passed`)
+  - Live selector inspection via Playwright confirmed current login surfaces for TikTok (`input[name=username]` + password + submit), Facebook (`input[name=email]` / `input[name=pass]`), and Threads (`autocomplete=username` / `current-password` + `Log in`).
+  - X/Twitter login still returns the current “Something went wrong. Retry” shell in headless first-load for this environment, so its refresh module is implemented defensively with multiple entry URLs but was not end-to-end credential-tested here.
+- residual_limits:
+  - No TikTok, X, Facebook, or Threads credentials were configured in this shell during this pass, so live cookie minting was only completed for Instagram. The other four refresh paths are implemented but still need real credentials to be proven end-to-end.
+  - Chrome DevTools MCP remained unstable in this session (`Transport closed`), so live selector verification fell back to Playwright for this pass.
+
+## Latest Update (2026-03-07 02:55 EST) — Instagram cookie auto-refresh implemented and live-validated
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/cookie_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/__init__.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.in`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/requirements.lock.txt`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Instagram cookie loading now validates cached cookies and automatically refreshes them through a Playwright-backed login flow whenever the stored `sessionid` is missing or the validation probe fails.
+  - The refresh flow uses the current live Instagram login form (`input[name=email]`, `input[name=pass]`, `Log In` role button), persists a flat cookie map back into `scripts/socials/instagram/instagram_cookies.json`, and keeps an in-process runtime override so repeated worker calls do not thrash the login path.
+  - New env controls were documented for auto-refresh enablement, validation username, validation TTL, headless mode, and refresh timeout.
+  - Backend dependency metadata now explicitly includes `playwright`, which was already relied on elsewhere in the repo but not pinned in `requirements.in` / `requirements.lock.txt`.
+- validation_evidence:
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/__init__.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py` (pass)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k 'load_instagram_cookies_prefers_env_json or load_instagram_cookies_uses_file_when_env_json_invalid or load_instagram_cookies_refreshes_when_existing_cookie_is_invalid or load_instagram_cookies_keeps_existing_when_refresh_fails'` (pass; `4 passed`)
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/cookie_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/__init__.py` (pass)
+  - `uv pip compile requirements.in --python-version 3.11 -o requirements.lock.txt` (pass; added `playwright==1.58.0` and `greenlet==3.3.2`)
+  - Live login probe against `https://www.instagram.com/accounts/login/` using the configured operational account succeeded in headless Chrome, reached `/accounts/onetap/`, and produced a real `sessionid`.
+  - Live call to `trr_backend.socials.instagram.cookie_refresh.refresh_instagram_cookies(...)` rewrote `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/instagram/instagram_cookies.json` and returned a valid cookie payload (`sessionid` present).
+  - Follow-up `from trr_backend.repositories.social_season_analytics import _load_instagram_cookies, _validate_instagram_cookie_health` confirmed `valid == True` and `reason is None` for the current repo cookie file.
+- runtime_notes:
+  - Auto-refresh is enabled by default when both `SOCIAL_AUTH_INSTAGRAM_USERNAME` and `SOCIAL_AUTH_INSTAGRAM_PASSWORD` are present, unless `SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH` is explicitly disabled.
+  - The refresh helper prefers Playwright `channel="chrome"` and falls back to bundled Chromium if the channel launch is unavailable.
+- residual_limits:
+  - If Instagram introduces a checkpoint / MFA / challenge flow for the account, the refresh helper now fails explicitly with a verification-required error instead of silently returning empty cookies.
+  - The automation depends on Playwright browsers being installed in the runtime environment that owns the worker.
+
+## Latest Update (2026-03-07 16:41 EST) — Instagram auth-aware worker gating, explicit filter diagnostics, Bravo target repair
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_bravo_missing_platform_targets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Worker heartbeats now publish `metadata.auth_capabilities`, currently including `instagram_authenticated` and `tiktok_authenticated`, so queueing and diagnostics can distinguish workers that actually have usable platform auth.
+  - `_claim_next_jobs(...)` now gates Instagram work to auth-capable workers whenever at least one healthy Instagram-auth worker is available, which prevents older-window Instagram jobs from landing on cookie-less workers and returning false-empty results.
+  - `put_targets(...)` now persists Bravo core platform accounts on write for Instagram/TikTok/Twitter instead of relying only on runtime account injection, so future target edits keep `bravowwhl` stored in `social.season_targets`.
+  - Instagram and TikTok post-stage metadata now emit explicit `posts_filter_counters` with `candidate_posts_found`, `matched_posts`, and filtered-out counts, making “found but filtered out by show terms / checkpoint / already up to date” visible in job detail instead of looking like the account was skipped.
+  - Expanded the Bravo backfill script to repair stale stored accounts on existing Instagram/TikTok/Twitter rows in addition to inserting missing platform rows. Applied it to RHOSLC season `e9161955-6ee4-4985-865e-3386a0f670fb`, which updated the stored Instagram/TikTok/Twitter Bravo rows from `["bravotv"]` to `["bravotv", "bravowwhl"]`.
+- validation_evidence:
+  - `python3 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_bravo_missing_platform_targets.py` (pass)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k 'put_targets_enforces_bravo_core_platform_accounts_on_write or claim_next_jobs_prefers_instagram_auth_workers_when_available or ingest_instagram_posts_stage_reports_filtered_candidates or ingest_tiktok_posts_stage_reports_filtered_candidates or update_worker_heartbeat_persists_supported_platforms or claim_next_jobs_filters_by_worker_capability'` (pass; `6 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py -k 'worker_heartbeat_seeds_auth_capabilities'` (pass; `1 passed`)
+  - `python3.11 -m scripts.socials.backfill_bravo_missing_platform_targets --season-id e9161955-6ee4-4985-865e-3386a0f670fb --dry-run` before apply reported `rows_updated: 3` for Instagram/TikTok/Twitter.
+  - `python3.11 -m scripts.socials.backfill_bravo_missing_platform_targets --season-id e9161955-6ee4-4985-865e-3386a0f670fb` applied the repair (`rows_updated: 3`).
+  - `python3.11 -m scripts.socials.backfill_bravo_missing_platform_targets --season-id e9161955-6ee4-4985-865e-3386a0f670fb --dry-run` after apply reported `rows_updated: 0`.
+- runtime_notes:
+  - On this Mac, bare `python3` resolves to the Xcode Python 3.9 runtime. Use `python3.11` or the repo venv interpreter for backend scripts; otherwise Python 3.11-only imports such as `datetime.UTC` will fail before the script even reaches repo code.
+- residual_limits:
+  - This closes the worker-misrouting and target-visibility issues, but “any username on any time period” still depends on the underlying platform auth/session health. Instagram deep history now routes to the right workers; it does not remove the need for valid cookies on at least one worker.
+  - TikTok direct API bootstrap can still fail with `non_json_response`; when that happens the system may rely on `yt-dlp` fallback and then filter non-show posts explicitly rather than persisting them.
+
+## Latest Update (2026-03-07 02:12 EST) — Week summary/detail totals now match for RHOSLC social week payloads
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Applied Twitter comment lifecycle filtering to `_week_detail_twitter(...)` recursive/direct reply loads so full week-detail no longer counts replies that fast summary and coverage helpers exclude as missing.
+  - Added `_normalize_week_totals_payload(...)` and used it in `get_week_detail(...)` / `get_week_detail_summary(...)` so zero-post platforms now emit stable `comments_saved_pct: 0.0` instead of `null`.
+  - Verified that RHOSLC week-1 fast summary and full detail now match exactly on overall totals and per-platform totals, including Twitter, YouTube, and Facebook zero-post payloads.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -q -k 'normalize_week_totals_payload_defaults_zero_comment_pct or week_detail_twitter_recursive_replies_apply_comment_lifecycle_filters or week_summary_fast_threads_excludes_irrelevant_rows'`
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - Live/admin contract compare after backend restart: summary and detail payloads both return identical totals for `http://admin.localhost:3000/rhoslc/s6/social/w1`
+- blocked_checks:
+  - No broader backend integration suite was run; validation stayed targeted to the week-analytics repository layer and live admin endpoint comparison.
+## Latest Update (2026-03-07 02:00 EST) — RHOSLC Threads fast-summary filtering now matches week-detail relevance rules
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Added `_threads_post_matches_show_terms(...)` and reused it in the RHOSLC Threads week-detail path so the explicit-show relevance rule is expressed in one place.
+  - Reworked `_week_summary_fast_threads(...)` away from the raw SQL aggregate path so it now loads candidate anchors, applies the same RHOSLC relevance filter as `_week_detail_threads(...)`, and then aggregates only the surviving rows.
+  - Updated the fast week-summary dispatcher to forward `source_scope` into the Threads summary helper so summary totals now converge with the live week-detail post counts for RHOSLC week views.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -q -k 'threads_post_matches_show_terms or week_summary_fast_threads_excludes_irrelevant_rows or youtube_post_matches_show_terms or week_summary_fast_youtube_excludes_cross_show_rows'`
+  - Live verification via managed Chrome + admin proxy after backend restart: `All(53)`, `Threads(3)`, `YouTube(0)` on `http://admin.localhost:3000/rhoslc/s6/social/w1`
+- blocked_checks:
+  - Week summary and week detail still have a residual grand-total drift for comment/saved-comment counts (`5523/5998` vs `5525/6000`) even after the post-count mismatch was fixed; this likely sits in another fast-summary platform aggregator and was not resolved in this pass.
+## Latest Update (2026-03-07 01:12 EST) — Additive social sync status contracts + Reddit run/cache normalization landed for admin season/week pages
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Added explicit additive platform status payloads to season comments coverage, mirror coverage, and week-detail responses: `sync_status`, `comment_sync_status`, `media_mirror_status`, `last_refresh_at`, `last_refresh_reason`, `stale`, and `worker_run_id`.
+  - Added per-post `status` payloads across Instagram, TikTok, Twitter/X, Facebook, and Threads so the admin week-detail UI can render explicit sync/mirror state without inferring health from partial metrics alone.
+  - Extended week-detail payloads with Instagram `metadata_error`, Threads `topic_path`, and a `status_by_platform` map built from the same coverage primitives used elsewhere in the admin routes.
+  - Hardened auth/cookie preflight for Instagram, TikTok, Facebook, and Threads scrape/preview surfaces with typed `503` failures instead of generic downstream scraper errors.
+  - Normalized Reddit run/cache payloads to expose `cache_status`, `cache_age_seconds`, `phase`, `partial_failures`, and stalled-run hints while preserving backward compatibility for existing cache readers.
+  - Expanded comment-media coverage accounting to include Twitter/X reply-media rows so mirror coverage no longer under-reports that platform.
+- validation_evidence:
+  - `python3 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_socials_reddit_refresh_routes.py -q`
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_social_season_analytics.py -q -k "additive_sync_status or supports_twitter_reply_media"`
+- blocked_checks:
+  - No broader backend integration run was executed in this session; the validation lane was targeted to the new admin contract and Reddit route changes only.
+## Latest Update (2026-03-07 10:15 EST) — Social analytics/live-health/coverage routes now cache hot admin payloads
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `debugging-wizard`
+  - `senior-qa`
+  - `code-reviewer`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+- behavior_summary:
+  - Added in-memory TTL caches for season analytics, week live-health, comments coverage, and mirror coverage admin endpoints.
+  - Normalized platform order in cache keys so equivalent platform filters reuse the same cached payloads.
+  - Wired the new caches into the existing week-detail invalidation path so ingest mutations clear these admin read models alongside week-detail/week-summary cache state.
+  - This materially reduces repeated cold-query cost for the RHOSLC social dashboard and week detail flows, especially after the initial analytics payload has been computed once.
+- validation_evidence:
+  - `python -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py` (pass)
+  - RHOSLC admin proxy timings after the patch:
+    - season analytics cold hit completed successfully and cached (`200` in `30.28s`; cached repeat `0.024s`)
+    - week detail cached repeat `0.078s`
+    - mirror coverage cached repeat `1.54s`
+- blocked_checks:
+  - No dedicated backend pytest target exists for these router-level TTL caches in this session; validation relied on compile checks plus live admin endpoint timings through the app proxy.
+## Latest Update (2026-03-07 00:52 EST) — Instagram and YouTube now backfill account avatars across scraped posts when per-post payloads omit them
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (social scraper enrichment only; no schema change)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/instagram/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added an Instagram fallback that pulls the account profile image from `web_profile_info` and backfills `owner_profile_pic_url` on matched posts when the GraphQL/profile node payload omits owner avatar fields.
+  - Added a YouTube fallback that resolves channel title/avatar from channel metadata and applies those values across scraped videos when renderer-level payloads omit `channel_title`, `channel_id`, or `user_avatar_url`.
+  - Verified that Twitter/X and Facebook already populate author avatar fields through their existing extraction paths; the new targeted validation explicitly exercised those paths alongside the new Instagram/YouTube fallbacks.
+  - Live Supabase sampling before the patch showed the current season still has severe avatar under-population in stored rows (`youtube_videos` 0/389 with avatar, `instagram_posts` 3/1032 with avatar), so reruns/backfills are still required for already-saved historical rows.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/socials/test_comment_scraper_fixes.py -k "instagram_scrape_graphql_backfills_owner_avatar_from_profile_payload or youtube_scrape_backfills_channel_avatar_and_title_from_channel_metadata or facebook_extract_owner_avatar_url_prefers_owner_fields or twitter_parse_tweet_result_reads_username_from_core_fallback or youtube_parse_video_renderer_extracts_channel_avatar" -q`
+  - result: pass (`5 targeted tests`)
+- blocked_checks:
+  - No deploy or historical backfill was run in this session, so existing stored rows remain unchanged until a rerun or explicit repair job is executed.
+
+## Latest Update (2026-03-07 00:35 EST) — Stale social runs now reconcile from job truth, and TikTok avatar/profile fallbacks are backfilled during scrape
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-frontend`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (social progress/read-path reconciliation plus TikTok scrape enrichment)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/tiktok/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_comment_scraper_fixes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - `get_run_progress_snapshot` now reconciles stale parent run summary/status from the actual child jobs before returning data, including finalizing a `running` run when all jobs are already terminal.
+  - This directly addresses run `9addf5d4`, whose six Instagram jobs were complete in Supabase while the parent run row still reported `status=running` and `active_jobs=1`.
+  - TikTok post scraping now backfills missing post avatar URLs from the fetched account-level user detail when individual post payloads omit avatar data.
+  - TikTok comment parsing now broadens avatar extraction candidates and synthesizes canonical profile URLs from usernames when source payloads omit `user_url`.
+  - Existing historical rows still need a rerun/backfill to populate newly derived avatar/profile fields in storage; this patch affects future scrapes and refreshes.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/repositories/test_social_season_analytics.py -k "get_run_progress_snapshot" -q`
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/socials/test_comment_scraper_fixes.py -k "tiktok_scrape_backfills_post_avatar_from_user_detail or tiktok_parse_comment_falls_back_to_profile_url_from_username" -q`
+  - result: pass (`3 + 2 targeted tests`)
+- blocked_checks:
+  - No deploy was required because this session stopped at code/test validation and did not roll backend changes to AWS.
+
+## Latest Update (2026-03-06 19:31 EST) — Social season run scoping + bounded single-platform scheduling deployed live
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-backend`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+  - `senior-devops`
+  - `aws-solution-architect`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - supporting: `functions.mcp__awslabs-core__prompt_understanding`, `functions.mcp__awslabs-aws-api__call_aws`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (Supabase-backed social run creation/listing semantics changed and the backend runtime was rolled to live AWS API/worker hosts)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+- behavior_summary:
+  - Added season social run scoping filters to run listing and run summaries: `client_workflow_id`, `platforms`, `week_index`, `date_start`, `date_end`.
+  - Added canonical week-window resolution and scope metadata on ingest routes so week/day/platform-specific syncs are represented consistently in run config and API responses.
+  - Added orchestration entrypoint support for grouped season fanout while keeping run list lookups scoped to the current page context.
+  - Added bounded single-platform schedule coercion so bounded one-platform season/week/date-window syncs no longer fan out into hundreds of shard jobs. The backend now coerces those runs to `single_runner`, `runner_count=1`, and coarse shard windows (`12h` for Instagram/TikTok, `24h` for other platforms).
+- validation_evidence:
+  - local checks:
+    - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k 'list_runs_filters_by_scope_config_fields or creator_scope_ingest_season' -q`
+    - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py -k 'get_ingest_runs_supports_filters' -q`
+  - live rollout:
+    - payload uploaded: `s3://trr-backend/artifacts/trr-backend/20260306-192954/trr_backend_social_scope_fix.tar.gz`
+    - API SSM rollout command: `4545406d-cfda-454a-acc4-4b4f64de41d9`
+    - worker SSM rollout command: `549b720d-a51d-43cc-897c-4e44ac0b461e`
+    - post-rollout verification command: `c2ac9e3f-2769-44f6-96d3-ca6774c128c2`
+    - restarted services: `trr-api`, `trr-social-worker-pool.service`
+  - live bounded-run verification:
+    - created run `09765051-9627-4e3a-8977-60087fce671c` on shared Supabase queue with intentionally broad caller settings (`adaptive_dual_runner`, `runner_count=2`, `window_shard_hours=6`, bounded Twitter date window)
+    - persisted run config was correctly coerced to:
+      - `runner_strategy=single_runner`
+      - `runner_count=1`
+      - `window_shard_hours=24`
+      - `execution_owner=remote_worker`
+    - resulting run summary: `total_jobs=2`, `completed_jobs=2`
+    - resulting jobs were exactly one posts job per account (`bravotv`, `bravowwhl`) instead of the previous 408-job explosion
+- blocked_checks:
+  - No full backend suite was run because the worktree contains unrelated dirty runtime changes outside the scoped social fix.
+
+## Latest Update (2026-03-06) — backend policy now requires auto-deploy for deployable AWS rollout work
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `skillcreator`
+  - `senior-devops`
+  - `aws-solution-architect`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `low` (repo policy/shim-only change)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/AGENTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/CLAUDE.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added a backend AWS deploy rule requiring deployable AWS/cloud-infra/backend implementation work to include successful AWS rollout after checks pass.
+  - Trimmed repo `CLAUDE.md` back to a pure pointer shim with no quickstart content.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR && make check-policy` (pass)
+- blocked_checks:
+  - No backend runtime tests were run because no application code changed.
+
+## Latest Update (2026-03-06) — backend policy now requires skill review before each plan
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `skillcreator`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `low` (repo policy-only change)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/AGENTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added a mandatory `Before Each Plan` subsection requiring backend-scope skill review, minimal skill selection, explicit plan-writing and implementation skill selection, and canonical fallback order.
+  - Kept `CLAUDE.md` pointer-only behavior unchanged.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR && make check-policy` (pass)
+- blocked_checks:
+  - No backend runtime tests were run because no application code changed.
+
+## Latest Update (2026-03-06) — Repo-local backend skill canonicalized
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `skillcreator`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `low` (repo policy and skill-governance only)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/skills/senior-backend/SKILL.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/skills/senior-backend/agents/openai.yaml`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/AGENTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added repo-local canonical `senior-backend` ownership under `TRR-Backend/skills/`.
+  - Folded FastAPI/Pydantic/async and secure-backend review prompts into the repo-local backend skill.
+  - Updated repo policy to prefer local/backend and workspace-local TRR skills over global custom copies.
+- validation_evidence:
+  - `find /Users/thomashulihan/Projects/TRR/TRR-Backend/skills -type f | sort` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR && make check-policy` (pass)
+- blocked_checks:
+  - No backend runtime tests were run because no application code changed.
+## Latest Update (2026-03-06 17:56 EST) — Brand logo normalization + official-site filtering follow-up
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (provider normalization and discovery filtering changed for admin logo ingestion)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Search-term query normalization now extracts usable titles/slugs from pasted provider URLs instead of storing the full URL string.
+  - Pasted `logos.fandom` page URLs like `/wiki/Bravo_(United_States)/Other` now normalize to `Bravo (United States) Other`, which prevents the UI from re-wrapping a full domain into the preset search URL structure.
+  - `official_site` discovery results are now filtered to PNG/SVG assets only; non-PNG/SVG homepage assets remain eligible only if they are reassigned to another provider such as `favicon_appicons`.
+  - Preset `logos.fandom` query links still include both the standard search URL and the image-only search URL.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/integrations/test_free_logo_sources.py tests/api/routers/test_admin_brands.py tests/api/routers/test_admin_brands_sync.py`
+  - result: pass (`54 passed`)
+- blocked_checks:
+  - Live browser/runtime validation for the new pasted-URL normalization path was not rerun in this pass.
+## Latest Update (2026-03-06 17:42 EST) — Brand logo source queries now support multiple values and extra Fandom preset links
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (additive admin logo discovery contract; persistence path touched)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0178_brand_logo_source_query_values.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Extended persisted source-query overrides from a single `query_value` to additive `query_values` with migration `0178_brand_logo_source_query_values.sql`, while keeping legacy fallback behavior when the new column is absent.
+  - Brand logo source summaries and query-save responses now carry `query_values` so the TRR-APP modal can add, edit, remove, and refresh multiple query variants per provider.
+  - Discovery now accepts multi-value overrides and aggregates provider candidates across those normalized values before deduping and paging.
+  - Added an additional `logos_fandom` preset query link for the internal image-only search URL: `Special:Search?scope=internal&query=...&ns[0]=6&filter=imageOnly`.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_brands.py tests/api/routers/test_admin_brands_sync.py tests/integrations/test_free_logo_sources.py`
+  - result: pass (`51 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/integrations/test_free_logo_sources.py`
+  - result: pass (`14 passed`)
+- blocked_checks:
+  - Deferred by user for a follow-up pass:
+    - global `Slugs` control shared across providers
+    - provider-specific pasted-URL slug normalization cleanup (notably full `logos.fandom` wiki URLs)
+    - source pill sorting/hiding refinements (`related_network_streaming`, count-based ordering)
+    - stricter `official_site` asset filtering to PNG/SVG only
+## Latest Update (2026-03-06) — Fandom show-link metadata now includes `site_title`
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `low` (additive metadata only; no endpoint shape break)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Extended Fandom link metadata generation so show-link rows can store `metadata.site_title` in addition to existing `page_title`, `fandom_title`, and `favicon_url`.
+  - Manual add / classifier flow now fetches Fandom page HTML for non-seed page URLs and extracts site title from page metadata when present.
+  - Discovery flow now also carries parsed Fandom site title into discovered show/season/person rows.
+  - Root/community Fandom URLs remain acceptable persisted seeds, but the metadata helpers keep them distinguishable from true `/wiki/...` page URLs.
+- validation_evidence:
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+  - result: pass (`104 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `TRR-APP`: `yes` (paired consumer/UI rendering now reads `metadata.site_title`)
+  - `screenalytics`: `no`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-backend`
+  - `senior-qa`
+- default_skill_chain_exception_reason: `none`
+## Latest Update (2026-03-06) — Worker cancel probe hardened and active-worker counts narrowed to true running jobs
+
+- Root cause from review follow-up:
+  - `scripts/socials/worker.py` was doing a pre-process cancel probe outside the existing `process_claimed_job(...)` guard path.
+  - Any transient DB error in that probe could crash the queue loop before `_execute_claimed_job(...)` had a chance to apply its own cancellation/failure handling.
+  - The worker-side probe also only honored run-level cancellation, while repository execution already supported both job-level and run-level cancellation.
+  - `get_run_progress_snapshot(...)` counted any active-status row with a `worker_id` as an active worker, which could overstate live worker utilization when queued/retrying rows retained a worker id.
+- Fix:
+  - moved the pre-process cancellation entrypoint into `trr_backend/repositories/social_season_analytics.py` as public helper `cancel_claimed_job_before_processing(...)`, backed by the existing repository cancellation semantics
+  - `scripts/socials/worker.py` now calls that public helper and fails open on probe errors instead of crashing the worker loop
+  - repository-side cancel probe now covers both cancelled jobs and cancelled runs before heavy execution starts
+  - `get_run_progress_snapshot(...)` now counts only `running` rows toward `active_workers_now`
+- Regression coverage added:
+  - `tests/scripts/test_social_worker.py::test_main_queue_once_continues_when_cancel_probe_fails`
+  - `tests/repositories/test_social_season_analytics.py::test_cancel_claimed_job_before_processing_aborts_cancelled_job`
+  - `tests/repositories/test_social_season_analytics.py::test_get_run_progress_snapshot_counts_only_running_workers_as_active`
+- Validation:
+  - `python3.11 -m py_compile scripts/socials/worker.py trr_backend/repositories/social_season_analytics.py tests/scripts/test_social_worker.py tests/repositories/test_social_season_analytics.py`
+  - `pytest tests/scripts/test_social_worker.py -k "cancel_probe or discards_claimed_jobs_for_cancelled_runs or uses_claim_batch_and_processes_claimed_job" -q`
+  - `pytest tests/repositories/test_social_season_analytics.py -k "cancel_claimed_job_before_processing_aborts_cancelled_job or execute_claimed_job_aborts_cancelled_run_before_stage_execution or get_run_progress_snapshot" -q`
+  - `ruff check scripts/socials/worker.py tests/scripts/test_social_worker.py`
+- Lint note:
+  - full-file `ruff check` on `trr_backend/repositories/social_season_analytics.py` is still blocked by large pre-existing baseline violations unrelated to this change set
+
+## Latest Update (2026-03-06) — Week-detail timeout `f95ddd...` fixed by parallelizing platform fanout
+
+- Root cause for recurring `TRR-Backend request timed out` failures on the admin social week-detail route was the backend week-detail aggregator still fetching all platform detail handlers serially inside `trr_backend/repositories/social_season_analytics.py::get_week_detail(...)`.
+- The traced failing app request was:
+  - `trace_id = f95ddd756271447687d3d32c5a832fb2`
+  - `/api/admin/trr-api/shows/7782652f-783a-488b-8860-41b97de32e75/seasons/6/social/analytics/week/0?source_scope=bravo&timezone=America/New_York&max_comments_per_post=0&post_limit=20&post_offset=0&sort_field=posted_at&sort_dir=desc`
+  - app proxy timeout was `40s`
+- Evidence:
+  - local backend logs showed the week-detail path was healthy but slow under concurrent admin traffic
+  - direct repository profiling before the fix took about `11.98s` for the RHOSLC S6 week-0 call with `max_comments_per_post=0`
+  - per-platform serial durations were roughly:
+    - instagram `~2.1s`
+    - tiktok `~2.8s`
+    - youtube `~1.8s`
+    - twitter `~1.3s`
+    - facebook `~0.8s`
+    - threads `~1.0s`
+  - under concurrent admin requests, that serial fanout was enough to push the app-side proxy over its `40s` abort window
+- Fix:
+  - `get_week_detail(...)` now fans the per-platform handlers out with `ThreadPoolExecutor` and `as_completed`, while preserving response ordering and the existing response shape
+  - no API contract changes were made
+- Validation:
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py`
+  - `pytest tests/repositories/test_social_season_analytics.py -k 'get_week_detail_fetches_platforms_concurrently or get_week_detail_summary_returns_totals_without_posts' -q`
+  - both passed locally
+- New regression:
+  - `tests/repositories/test_social_season_analytics.py::test_get_week_detail_fetches_platforms_concurrently`
+  - three fake platform handlers each sleep `0.25s`; total wall time stays under `0.55s`, proving the fanout is parallel rather than serial
+- Live verification after local backend restart:
+  - direct repository call for RHOSLC S6 week-0 dropped to about `7.58s`
+  - the exact traced app proxy request now returns `200` in about `4.95s` instead of timing out at `40s`
+
+## Latest Update (2026-03-05) — Season social analytics timeout fixed for admin.localhost
+
+- Root cause for `http://admin.localhost:3000/rhoslc/s6/social` hanging at the shell state was not missing Supabase data. The backend analytics endpoint was timing out on cold loads because `trr_backend/repositories/social_season_analytics.py::_build_rows(...)` fetched each platform's full-season post/comment rows serially.
+- Live profiling against the Supabase-backed TRR database showed the dominant cost was per-platform row materialization:
+  - `instagram`: `53,611` rows in `25.637s`
+  - `tiktok`: `74,787` rows in `22.962s`
+  - `youtube`: `14,175` rows in `8.238s`
+  - `twitter`: `5,101` rows in `3.217s`
+  - `facebook`: `18` rows in `0.365s`
+  - `threads`: `261` rows in `0.983s`
+  - other season/target/sentiment setup work was comparatively cheap, so the app-side `UPSTREAM_TIMEOUT` was caused by serialized platform fetches rather than auth or metadata lookup failure
+- Implemented fix in `trr_backend/repositories/social_season_analytics.py`:
+  - `_build_rows(...)` now fans out `_rows_for_platform(...)` concurrently with `ThreadPoolExecutor`
+  - preserves deterministic platform ordering when stitching results back together
+  - retains the existing backward-compat `TypeError` shim for tests/mocks that still use the older helper signature
+- Added regression coverage in `tests/repositories/test_social_season_analytics.py::test_build_rows_fetches_platforms_concurrently`
+  - test injects three `0.25s` platform loaders and asserts total wall time stays below `0.55s`, proving the platform scans happen in parallel
+- Validation:
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py`
+  - `pytest tests/repositories/test_social_season_analytics.py -k 'build_rows_fetches_platforms_concurrently or get_analytics' -q`
+  - both passed locally
+- Live verification after restarting the local backend process:
+  - direct app-proxy request to `/api/admin/trr-api/shows/{show_id}/seasons/6/social/analytics?...` completed in `0.48s`
+  - payload included populated analytics summary and `24` weekly rows with `1182` posts and `146771` comments for RHOSLC S6
+
+## Latest Update (2026-03-05) — Social stuck-job leak fixed and rolled out
+
+- Root cause for the March 5 AWS social `running_stale_heartbeat` jobs was a leak in `trr_backend/repositories/social_season_analytics.py::_execute_claimed_job(...)`:
+  - claim-time fields (`started_at`, `claimed_at`, `heartbeat_at`) were written in `_claim_next_jobs(...)`
+  - `_execute_claimed_job(...)` still had a large preflight region outside its `try/except`
+  - if that preflight crashed before `_touch_job_heartbeat(...)`, the job stayed `running` with only the original claim heartbeat and no failure metadata
+  - the worker loop then continued on later jobs, so the same worker IDs appeared healthy while the old rows became stale
+- Implemented fix:
+  - moved the risky preflight/config/context setup inside `_execute_claimed_job(...)`'s guarded `try/except`
+  - this now forces preflight failures through `_finish_job(...)` instead of leaking `running` rows
+  - added regression coverage in `tests/repositories/test_social_season_analytics.py::test_execute_claimed_job_finalizes_preflight_crashes`
+- Validation:
+  - `python -m py_compile trr_backend/repositories/social_season_analytics.py tests/repositories/test_social_season_analytics.py`
+  - `pytest tests/repositories/test_social_season_analytics.py -k "execute_claimed_job or recover_stale_running_jobs" -q`
+  - both passed locally
+- Live remediation:
+  - manually ran `recover_stale_running_jobs(stage='posts', limit=20)` against the active queue; it recovered the six leaked jobs immediately
+  - after recovery, `get_queue_status(fresh=True)` returned `stuck_jobs_total=0`
+  - uploaded targeted payload `s3://trr-backend/artifacts/trr-backend/20260306-042032/trr_backend_stuck_jobs_fix.tar.gz`
+  - applied it over `/opt/trr-backend` on:
+    - API: `i-01a7b672f5946d19a`
+    - workers: `i-02e0d952e67e302a0`, `i-048f605583d2a11dd`, `i-0c4934e80de1dd89d`
+  - restarted `trr-api` on the API host and `trr-social-worker-pool.service` on the worker hosts via SSM command `37f10d90-faf9-402e-9d40-1c188f08c062`
+- Post-rollout state:
+  - queue status: `stuck_jobs_total=0`
+  - stale claims: `0`
+  - note: worker restart briefly doubled fresh worker heartbeat rows until the pre-restart rows age out; this is heartbeat retention behavior, not active duplicate work ownership
+
+## Latest Update (2026-03-05) — Social worker plane reset, local worker cleanup, and fresh AWS-only season restart
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `senior-fullstack`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - aws: `functions.mcp__awslabs-core__prompt_understanding`
+  - aws_exec: `functions.mcp__awslabs-aws-api__call_aws`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (live queue cancellation, worker-plane reset, and fresh remote orchestration start)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+- behavior_summary:
+  - Investigated the mixed worker list and confirmed the `thomass-MacBook-Pro.local` entries were real local processes, not stale-only rows:
+    - detached launcher shell `3411`
+    - orphaned worker children re-parented to PID `1`
+  - Performed live cleanup/reset:
+    - terminated the detached local worker launcher and orphaned local worker children
+    - deleted all remaining `.local` heartbeat rows from `social.scrape_workers`
+    - cancelled all active social jobs; queue state is now fully terminal (`cancelled`)
+    - restarted `trr-social-worker-pool.service` on all three EC2 worker instances:
+      - `i-048f605583d2a11dd`
+      - `i-02e0d952e67e302a0`
+      - `i-0c4934e80de1dd89d`
+    - purged stale worker heartbeat rows so the fresh worker list now contains AWS workers only
+  - Post-reset worker-plane state:
+    - no `.local` heartbeat rows remain
+    - fresh workers are AWS-only and idle before restart
+    - stale working rows from cancelled jobs were purged
+  - Started a new full-season/all-platform RHOSLC remote orchestration using canonical backend orchestration flow:
+    - season `e9161955-6ee4-4985-865e-3386a0f670fb`
+    - source scope `bravo`
+    - workflow id `reset-rhoslc-s6-season-all-20260306-033558`
+    - `resume_existing=false`
+    - lightweight dry-run style settings preserved from prior matrix:
+      - `posts_only`
+      - `max_posts_per_target=1`
+      - `max_comments_per_post=0`
+      - `max_replies_per_post=0`
+      - `fetch_replies=false`
+  - Verified replacement run is AWS-owned:
+    - current `working` worker rows all map to EC2 hostnames and the new workflow id
+    - no local workers are claiming any new jobs
+  - Latest observed replacement-run progress during handoff:
+    - child runs: `28 completed`, `9 running`, `37 queued`
+    - child jobs: `63 completed`, `15 running`, `46 queued`
+- validation_evidence:
+  - local process verification:
+    - `ps -p 3411,3531,3532,3533,3534 ...` before cleanup showed detached local worker pool
+    - `ps -ax ... | rg 'social-worker:thomass-MacBook-Pro.local'` after cleanup showed no remaining local worker processes
+  - DB / queue verification:
+    - no `.local` rows remain in `social.scrape_workers`
+    - `social.scrape_jobs` active-state query now returns only `cancelled`
+    - fresh worker snapshot now shows AWS-only hosts
+  - AWS worker reset:
+    - SSM restart command succeeded on all three worker instances; `trr-social-worker-pool.service` returned `active`
+  - replacement run verification:
+    - `social.scrape_runs` rows with `client_workflow_id='reset-rhoslc-s6-season-all-20260306-033558'`
+    - `social.scrape_workers` `working` rows joined back to the same workflow id
+- downstream_repos_impacted:
+  - `TRR-Backend`: `operational only`
+  - `TRR-APP`: `yes` (paired UI filter landed separately)
+  - `screenalytics`: `no`
+- default_skill_chain_applied: `true`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-qa`
+  - `social-ingestion-reliability`
+- default_skill_chain_exception_reason: `none`
+## Latest Update (2026-03-05) — AWS worker plane verified live + running-instance rollout + season dry-run matrix
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `senior-devops`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - secondary: `functions.mcp__awslabs-core__prompt_understanding`
+  - validation: `functions.mcp__awslabs-aws-api__call_aws`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (live AWS runtime mutation + remote season-run execution against the worker plane)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+- behavior_summary:
+  - Verified the remote worker plane directly in `us-east-1` after IAM expansion:
+    - API instance `i-01a7b672f5946d19a`
+    - worker instance `i-02e0d952e67e302a0`
+    - API target healthy, worker SSM online, alarms/log groups readable
+  - Confirmed runtime ownership contract on the API host:
+    - `TRR_JOB_PLANE_MODE=remote`
+    - `TRR_LONG_JOB_ENFORCE_REMOTE=1`
+  - Confirmed worker services are active on the worker host:
+    - `trr-admin-operations-worker.service`
+    - `trr-reddit-refresh-worker.service`
+    - `trr-google-news-worker.service`
+    - `trr-social-worker-pool.service`
+  - Reddit OAuth is now configured on the live API/worker hosts:
+    - installed `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, and `REDDIT_USER_AGENT` into `/etc/trr-api.env`
+    - installed the same values into `/etc/trr-worker.env`
+    - restarted `trr-api` and `trr-reddit-refresh-worker.service`
+    - verified app-only OAuth succeeds on the worker host with HTTP `200` and bearer token issuance from Reddit
+  - Deployed the current local backend runtime fixes to the running API and worker instances by uploading `s3://trr-backend/artifacts/trr-backend/20260305-190623/trr_backend_rollout_payload.tar.gz`, applying it over `/opt/trr-backend` via SSM, and restarting `trr-api` plus all remote worker services.
+  - Running hosts now contain the expected social/job-plane fixes:
+    - season orchestration endpoint logic in `api/routers/socials.py`
+    - remote-only Google News async enforcement and corrected image import behavior in `api/routers/admin_show_news.py`
+    - orchestration/run metadata support in `trr_backend/repositories/social_season_analytics.py`
+    - child-worker isolation/heartbeat fixes in `scripts/socials/worker.py`
+  - Bootstrap artifact drift is now corrected:
+    - `/trr/staging/TRR_BACKEND_ARTIFACT_S3_URI` now points to canonical full artifact `s3://trr-backend/artifacts/trr-backend/20260305-202656/trr-backend.tar.gz`
+    - ASG replacement/scale-out should now boot the refreshed runtime tree rather than the prior March 4 artifact
+  - Executed a live social season dry-run matrix against RHOSLC season `e9161955-6ee4-4985-865e-3386a0f670fb` with lightweight limits (`posts_only`, `max_posts_per_target=1`, no comments/replies):
+    - one week / one platform: `dryrun-rhoslc-s6-week1-instagram-20260305`
+    - one week / all platforms: `dryrun-rhoslc-s6-week1-all-20260305`
+    - full season / one platform: `dryrun-rhoslc-s6-season-instagram-20260305`
+    - full season / all platforms: `dryrun-rhoslc-s6-season-all-20260305`
+  - Live progress showed small-scope runs draining immediately, full-season/one-platform progressing slowly, and full-season/all-platform remaining fully queued during the observation window. Queue status reported stale claims `0`, so the current limiter is worker capacity/backlog rather than stuck claims or dead workers.
+  - Scaled the worker plane for backlog relief:
+    - `trr-worker-asg` has target-tracking CPU scaling with scale-in enabled, so `DesiredCapacity` alone reverted immediately
+    - pinned `MinSize=3` and `DesiredCapacity=3` on `trr-worker-asg`
+    - verified three `c7i.xlarge` workers in service:
+      - `i-02e0d952e67e302a0`
+      - `i-048f605583d2a11dd`
+      - `i-0c4934e80de1dd89d`
+- validation_evidence:
+  - AWS identity / inventory:
+    - `aws sts get-caller-identity --region us-east-1` (pass; account `522814694101`)
+    - `aws ec2 describe-instances --region us-east-1 --filters Name=instance-state-name,Values=running` (pass)
+    - `aws ssm describe-instance-information --region us-east-1` (pass)
+    - `aws autoscaling describe-auto-scaling-groups --region us-east-1` (pass)
+    - `aws elbv2 describe-target-health --region us-east-1 --target-group-arn <staging-api-target-group>` (pass)
+    - `aws cloudwatch describe-alarms --region us-east-1` (pass)
+    - `aws logs describe-log-groups --region us-east-1` / `aws logs filter-log-events ...` (pass)
+  - SSM runtime checks:
+    - `systemctl status trr-api`
+    - `systemctl status trr-admin-operations-worker.service`
+    - `systemctl status trr-reddit-refresh-worker.service`
+    - `systemctl status trr-google-news-worker.service`
+    - `systemctl status trr-social-worker-pool.service`
+    - env inspection from `/etc/trr-api.env` and `/etc/trr-worker.env`
+  - Deployment verification:
+    - uploaded rollout payload: `s3://trr-backend/artifacts/trr-backend/20260305-190623/trr_backend_rollout_payload.tar.gz`
+    - on-host `python -m py_compile` against touched files (pass)
+    - service restarts after rollout completed successfully on both instances
+    - canonical bootstrap artifact verified at `s3://trr-backend/artifacts/trr-backend/20260305-202656/trr-backend.tar.gz`
+    - Reddit OAuth env install verified on both hosts; worker token exchange returned HTTP `200` with bearer token
+  - Live API dry runs:
+    - `GET /api/v1/admin/socials/seasons/e9161955-6ee4-4985-865e-3386a0f670fb/ingest/schedule-preview?platforms=instagram&week_index=1&timezone=America/New_York&max_comments_per_post=0` (pass)
+    - `POST /api/v1/admin/socials/seasons/{season_id}/ingest/orchestrations` for all four dry-run workflows (pass)
+    - `GET /api/v1/admin/socials/ingest/runs?client_workflow_id=<workflow_id>` and `GET /api/v1/admin/socials/ingest/queue-status?fresh=true` (pass)
+  - Scaling verification:
+    - `aws autoscaling describe-policies --auto-scaling-group-name trr-worker-asg --region us-east-1` (pass; confirmed target-tracking CPU policy with scale-in enabled)
+    - `aws autoscaling update-auto-scaling-group --auto-scaling-group-name trr-worker-asg --min-size 3 --desired-capacity 3 --region us-east-1` (pass)
+    - `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names trr-worker-asg --region us-east-1` (pass; `MinSize=3`, `DesiredCapacity=3`)
+    - `aws ec2 describe-instances --region us-east-1 --filters Name=tag:aws:autoscaling:groupName,Values=trr-worker-asg Name=instance-state-name,Values=pending,running` (pass; three worker instances present/running)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `TRR-APP`: `indirect` (existing admin observability now reflects live remote-plane state)
+  - `screenalytics`: `no`
+- default_skill_chain_applied: `false`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-devops`
+  - `senior-qa`
+- default_skill_chain_exception_reason: `User explicitly requested live AWS verification, runtime deployment, and real remote dry runs instead of another local-only implementation pass.`
+## Latest Update (2026-03-05) — AWS verification blocker recorded + social orchestration / remote-only worker-plane hardening
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - secondary: `functions.mcp__awslabs-core__prompt_understanding`
+  - validation: `functions.mcp__awslabs-aws-api__call_aws`
+  - fallback: `functions.apply_patch`
+- risk_class: `high` (worker-plane contract changes + new season run orchestration)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Verified the current AWS principal can authenticate (`sts:GetCallerIdentity`) but still cannot inspect the worker plane in `us-east-1` via `ec2:DescribeInstances`, `ssm:DescribeInstanceInformation`, `ecs:ListClusters`, `autoscaling:DescribeAutoScalingGroups`, `elasticloadbalancing:DescribeLoadBalancers`, `cloudwatch:DescribeAlarms`, or `logs:DescribeLogGroups`. Deployment-state verification remains IAM-blocked.
+  - Added a first-class social orchestration backend path for canonical season fanout:
+    - full season, all platforms
+    - full season, single platform
+    - single week, all platforms
+    - single week, single platform
+  - Social orchestration now persists resumable grouping metadata in run config (`orchestration_id`, slot keys, ordering, week/platform scope) and reuses existing non-failed child runs when the same orchestration is reissued.
+  - Social run configs now persist `execution_owner`, `execution_mode_canonical`, and orchestration metadata so long-running runs carry worker-plane ownership directly.
+  - `list_runs` / `list_run_summaries` now expose execution ownership plus orchestration metadata and support filtering by `client_workflow_id`.
+  - Social queue status now exposes:
+    - `remote_plane` ownership contract metadata
+    - queue depth by stage
+    - queue depth by stage+platform
+    - stale claimed job summaries by reason/platform/stage
+    - worker summaries by stage/platform
+  - Async Instagram ingest no longer silently falls back to local execution. It now requires queue mode unless explicit `allow_inline_dev_fallback=true` is supplied in local/dev runtime and remote enforcement is off.
+  - Async Google News sync is now remote-worker-only and returns a structured `503` with `GOOGLE_NEWS_REMOTE_JOB_PLANE_ENFORCED` instead of spawning an in-process background task.
+  - Fixed a real Google News media pipeline bug: featured-image imports were sending `source_logo` on non-logo images, which violated the image import contract and prevented media mirroring.
+- validation_evidence:
+  - AWS verification:
+    - `aws sts get-caller-identity --region us-east-1` (pass; account `522814694101`)
+    - `aws ec2 describe-instances --region us-east-1 --filters Name=instance-state-name,Values=running` (blocked: `UnauthorizedOperation`)
+    - `aws ssm describe-instance-information --region us-east-1` (blocked: `AccessDeniedException`)
+    - `aws ecs list-clusters --region us-east-1` (blocked: `AccessDeniedException`)
+    - `aws autoscaling describe-auto-scaling-groups --region us-east-1` (blocked: `AccessDenied`)
+    - `aws elbv2 describe-load-balancers --region us-east-1` (blocked: `AccessDenied`)
+    - `aws cloudwatch describe-alarms --region us-east-1` (blocked: `AccessDenied`)
+    - `aws logs describe-log-groups --region us-east-1` (blocked: `AccessDeniedException`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile api/routers/socials.py api/routers/admin_show_news.py trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/api/routers/test_admin_show_news.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py tests/api/routers/test_admin_show_news.py tests/repositories/test_social_season_analytics.py -q` (pass; `375 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/socials.py api/routers/admin_show_news.py trr_backend/repositories/social_season_analytics.py tests/api/routers/test_socials_season_analytics.py tests/api/routers/test_admin_show_news.py tests/repositories/test_social_season_analytics.py` (fails due large preexisting backlog in `social_season_analytics.py`, including unrelated undefined names and style debt outside this pass)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `TRR-APP`: `yes` (system health UI now consumes richer queue/worker-plane payloads)
+  - `screenalytics`: `no`
+- default_skill_chain_applied: `false`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-backend`
+  - `senior-qa`
+- default_skill_chain_exception_reason: `User explicitly requested AWS worker-plane verification plus another social-job/ingest hardening pass.`
+## Latest Update (2026-03-05) — Week-scoped social ingest contract + Reddit remote-only enforcement
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `fullstack-guardian`
+  - `python-pro`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - secondary: `functions.mcp__awslabs-core__prompt_understanding`
+  - validation: `functions.mcp__awslabs-aws-api__call_aws`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (social ingest request contract + reddit execution-plane enforcement)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added first-class `week_index` + `timezone` support for social ingest and schedule preview requests, resolving those inputs against the backend’s canonical season week windows instead of relying on app-side date math alone.
+  - Persisted week/run-scope metadata into social run configs and job configs so week-scoped, date-window, and full-season runs are distinguishable during recovery/debugging.
+  - Added response `scope` metadata for ingest kickoff so clients can confirm whether a run is week-scoped, date-window scoped, or full-season.
+  - Enforced Reddit refresh creation as remote-worker-only; the API no longer starts Reddit refresh jobs in-process when the worker plane is not remote.
+  - Added `execution_owner` and `execution_mode_canonical` to Reddit run/list payloads so app/admin consumers can show worker-plane ownership consistently.
+  - AWS verification note: `sts get-caller-identity` succeeded for account `522814694101`, but live EC2/SSM inspection was blocked by IAM `UnauthorizedOperation` / `AccessDeniedException`, so cloud-worker verification in this pass is code-contract level rather than deployment-state level.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile api/routers/socials.py trr_backend/repositories/social_season_analytics.py trr_backend/repositories/reddit_refresh.py tests/api/routers/test_socials_season_analytics.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_socials_season_analytics.py tests/api/routers/test_socials_reddit_refresh_routes.py tests/repositories/test_social_season_analytics.py -q` (pass; `370 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `TRR-APP`: `yes` (week/reddit execution metadata now available to app routes/UI)
+  - `screenalytics`: `indirect`
+- default_skill_chain_applied: `false`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `fullstack-guardian`
+  - `python-pro`
+  - `social-ingestion-reliability`
+- default_skill_chain_exception_reason: `User explicitly named non-default skills for the session and requested a focused social-ingest/reddit worker pass.`
+## Latest Update (2026-03-05) — Social worker crash isolation + admin scrape contract tightening
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `fullstack-guardian`
+  - `python-pro`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+- risk_class: `medium` (worker lifecycle control + additive request validation)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_scrape_contracts.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added child-worker orchestration helpers so queue fanout, parallel run mode, and tandem mode terminate sibling workers when one child exits non-zero instead of leaving orphan workers behind.
+  - Added bounded cleanup behavior for interrupted/failed child worker groups and preserved the first non-zero exit code for operator visibility.
+  - Hardened the queue loop so transient claim failures and unexpected `process_claimed_job(...)` crashes no longer bring down the entire worker; once-mode now exits non-zero for those failures.
+  - Normalized heartbeat completion metadata for `--run-id` execution so consumers no longer receive mixed string/int `processed_jobs` semantics.
+  - Tightened `ImportImageItem` validation so invalid logo payloads fail at request-parse time instead of deep in import execution:
+    - logo images now require a resolvable target type
+    - logo payloads reject `person_ids`
+    - non-logo payloads reject logo-only fields
+    - duplicate `person_ids` are deduped and optional text fields are trimmed
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check scripts/socials/worker.py api/routers/admin_scrape.py tests/scripts/test_social_worker.py tests/api/routers/test_admin_scrape_contracts.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/scripts/test_social_worker.py tests/api/routers/test_admin_scrape_contracts.py` (pass; `17 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/socials tests/scripts/test_social_worker.py` (pass; `155 passed`)
+- downstream_repos_impacted:
+  - `TRR-Backend`: `yes`
+  - `screenalytics`: `indirect` (worker/ingest stability affects downstream consumption)
+  - `TRR-APP`: `yes` (social admin routes depend on these worker and scrape contracts)
+- default_skill_chain_applied: `false`
+- default_skill_chain_used:
+  - `orchestrate-plan-execution`
+  - `fullstack-guardian`
+  - `python-pro`
+- default_skill_chain_exception_reason: `User explicitly named non-default skills for this turn; applied them alongside the required orchestration entrypoint.`
 ## Latest Update (2026-03-05) — Social worker heartbeat outage fix (`text = text[]` claim query regression)
 
 - primary_skill: `debugging-wizard`
@@ -12989,3 +14489,738 @@ Continuation (2026-03-02) — queue-status run summary (run-based health popup c
   - `bash -n scripts/socials/start_worker_pool.sh scripts/start_remote_job_workers.sh` (pass)
 - blocked_checks:
   - `ruff check` on whole touched backend files remains blocked by substantial pre-existing lint/type issues outside this patch scope.
+
+## Latest Update (2026-03-05) — NBCUMV/Gettty gallery preview + import pipeline
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - primary: `functions.exec_command`
+  - fallback: `functions.apply_patch`
+  - supporting: `functions.mcp__supabase__execute_sql`
+- risk_class: `medium` (new admin import surface + media persistence behavior)
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/main.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_nbcumv.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/nbcumv.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/getty.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/media_assets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0176_add_nbcumv_getty_sources.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_nbcumv.py`
+- behavior_summary:
+  - Added `POST /api/v1/admin/nbcumv/preview` for exact filename/date-window discovery against NBCUMV with optional Getty enrichment and auto-resolved eligible `person_ids`.
+  - Added `POST /api/v1/admin/nbcumv/import` to download hi-res NBCUMV originals, mirror them into `core.media_assets`, and attach them to `core.media_links(kind='gallery')` for eligible people.
+  - Stored raw namespaced source metadata on `media_assets.metadata` under `nbcumv`, `getty`, and `embedded_file`, while keeping convenience fields like `object_name`, `resolved_people`, and `unmatched_people` at the top level.
+  - Implemented person assignment policy as “any show-linked TRR person,” backed by `core.v_person_show_seasons`, with `people_overrides.full_name_override` used as an additional alias source.
+  - Added Getty detail-page search/parsing and NBCUMV AppSync + batch ZIP helpers, including embedded EXIF/XMP/IPTC extraction from downloaded JPEGs.
+  - Bootstrapped `core.sources` rows for `nbcumv` and `getty` via migration `0176`.
+- validation_evidence:
+  - `ruff check api/main.py api/routers/admin_nbcumv.py trr_backend/integrations/nbcumv.py trr_backend/integrations/getty.py trr_backend/repositories/media_assets.py tests/api/routers/test_admin_nbcumv.py` (pass)
+  - `pytest tests/api/routers/test_admin_nbcumv.py -q` (pass)
+- blocked_checks:
+  - End-to-end live import was not run against production credentials/S3 from this session, so network-path regressions remain unvalidated beyond mocked tests.
+  - Repo-wide checks were not rerun because the worktree already contains unrelated in-progress changes in backend/admin/social files.
+
+## Latest Update (2026-03-06) — Social ingest cancel-guard + Supabase-backed run reset
+
+- primary_skill: `social-ingestion-reliability`
+- supporting_skills:
+  - `debugging-wizard`
+  - `senior-backend`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py`
+- behavior_summary:
+  - Added an early claimed-job cancellation guard in `social_season_analytics._execute_claimed_job(...)` so a job/run already cancelled in Supabase is finalized as `cancelled` before any expensive scrape stage starts.
+  - Cleared worker heartbeat `run_id` when a job is terminal, reducing stale worker ownership after cancellation/finish transitions.
+  - Added a worker-loop guard in `scripts/socials/worker.py` so already-claimed cancelled runs are discarded before `process_claimed_job(...)` executes.
+  - Confirmed there was no local database to migrate: the local backend shell/runtime was already using `SUPABASE_DB_URL` against the Supabase pooler.
+  - Live operations completed against Supabase + AWS worker plane:
+    - cancelled stale RHOSLC Twitter run `02df9a2c-9458-4163-9c2f-920bb1fda706`
+    - hot-patched `worker.py` on the three worker EC2 hosts via S3 + SSM
+    - hard-reset `trr-social-worker-pool.service` and purged stale worker heartbeat rows
+    - created fresh remote-worker Twitter preseason run `be9e2637-c738-46bb-8b21-683c794358fe`
+  - Replacement run shape is now correct for a single-platform kickoff: `4` jobs total instead of `408`.
+- validation_evidence:
+  - `python -m py_compile scripts/socials/worker.py trr_backend/repositories/social_season_analytics.py tests/scripts/test_social_worker.py tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest tests/scripts/test_social_worker.py -k "default_claim_batch_size_for_posts_is_single_claim or main_queue_once_discards_claimed_jobs_for_cancelled_runs or main_queue_once_uses_claim_batch_and_processes_claimed_job" -q` (pass)
+  - `pytest tests/repositories/test_social_season_analytics.py -k "execute_claimed_job_aborts_cancelled_run_before_stage_execution or get_run_progress_snapshot_includes_dynamic_stages_and_per_handle or execute_claimed_job_finalizes_preflight_crashes" -q` (pass)
+  - Live Supabase snapshot after reset:
+    - queue had `0` queued, `0` pending, `0` stale claims before replacement run
+    - replacement run `be9e2637-c738-46bb-8b21-683c794358fe` reported `4` total jobs, `3` completed, `1` running, `0` stuck
+- blocked_checks:
+  - Remote API hosts were not fully rolled to the new repository helper code in this pass; the live worker-plane hotfix was applied directly to worker hosts because that was the failure owner.
+
+## Latest Update (2026-03-06 15:37 EST) — Brand logo source query overrides + discover metadata
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0177_brand_logo_source_query_overrides.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_free_logo_sources.py`
+- behavior_summary:
+  - Added `admin.brand_logo_source_queries` to persist provider-specific query overrides by `target_type + target_key + logo_role + source_provider`.
+  - Extended brand logo source summaries so each provider now reports `editable`, `refreshable`, `query_kind`, `default_query_value`, `effective_query_value`, and backend-owned `query_links`.
+  - Added `POST /api/v1/admin/brands/logos/options/source-query` to upsert or reset a single provider override; empty query values delete the override and fall back to the computed default.
+  - Extended logo discovery to accept `query_override` and return `total_count` alongside the discovered candidate page.
+  - Moved provider query shaping into the backend, including provider-specific handling for `logos1000` slug overrides, search-term providers, host-or-URL seed providers, and the read-only `related_network_streaming` host match.
+- validation_evidence:
+  - `python -m py_compile TRR-Backend/api/routers/admin_brands.py TRR-Backend/trr_backend/integrations/free_logo_sources.py` (pass)
+  - `cd TRR-Backend && pytest -q tests/api/routers/test_admin_brands.py tests/api/routers/test_admin_brands_sync.py tests/integrations/test_free_logo_sources.py` (pass; `49 passed`)
+- blocked_checks:
+  - No live provider scrape validation was run against external sites from this backend session; coverage is limited to targeted router/integration tests.
+
+## Latest Update (2026-03-06 17:03 EST) — Brand logo runtime smoke unblocked by applied `0177`
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0177_brand_logo_source_query_overrides.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Verified the active Supabase-backed runtime used by local `make dev-lite` did not yet contain `admin.brand_logo_source_queries`, which caused live logo-source query saves to fail with `relation "admin.brand_logo_source_queries" does not exist`.
+  - Applied the `0177` DDL to the connected Supabase environment so the new source-query save path could execute in runtime, then reran the live browser smoke successfully.
+  - After the schema was present, the live `peacocktv.com` wordmark modal accepted a `logos1000` slug override, preserved the `official_site` query/count unchanged, supported per-source refresh, and accepted manual import from the header action.
+- validation_evidence:
+  - `select to_regclass('admin.brand_logo_source_queries') as relation_name;` before apply => `null`
+  - Supabase migration apply: `brand_logo_source_query_overrides` (pass)
+  - `select to_regclass('admin.brand_logo_source_queries') as relation_name;` after apply => `admin.brand_logo_source_queries`
+- blocked_checks:
+  - The active Supabase project migration ledger still did not list repo migrations beyond `0173` before the manual apply, so broader environment migration drift remains to be reconciled separately from this feature smoke.
+
+## Latest Update (2026-03-06 16:47 EST) — Reddit admin reliability hardening + worker diagnostics
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `fullstack-guardian`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/specs/reddit_admin_redesign_and_reliability_design.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/start_remote_job_workers.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/workers/reddit_refresh_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py`
+- behavior_summary:
+  - Added a Reddit-specific design/impact doc covering route changes, worker/runtime hardening, resolver validation boundaries, and additive contract expectations.
+  - Hardened the Reddit refresh worker boot path with explicit enable/disable handling, startup metadata logging, and deterministic once/no-work exit behavior for local smoke and CI runs.
+  - Normalized `start_remote_job_workers.sh` flag parsing/logging so worker-family enablement is explicit at boot and cleanly exits when nothing is enabled.
+  - Fixed a launcher portability regression by replacing non-portable lowercase expansion with a `tr`-based normalization path compatible with the system Bash in this workspace.
+  - Extended Reddit refresh diagnostics so sync-details runs always carry stable progress keys, terminal summaries, and lifecycle metadata (`worker_id`, claim token prefix, claim release flag) in terminal payloads.
+  - Added repository coverage for the new sync-details terminal summary contract and the no-work once-loop path.
+- validation_evidence:
+  - `pytest -q TRR-Backend/tests/repositories/test_reddit_refresh.py TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py` (pass; `52 passed`)
+  - `env TRR_ADMIN_OPERATION_WORKER_ENABLED=0 TRR_REDDIT_REFRESH_WORKER_ENABLED=0 TRR_GOOGLE_NEWS_WORKER_ENABLED=0 TRR_SOCIAL_INGEST_WORKER_ENABLED=0 bash scripts/start_remote_job_workers.sh` from `/Users/thomashulihan/Projects/TRR/TRR-Backend` (pass; clean no-worker exit)
+- blocked_checks:
+  - Live Reddit worker execution against a real queue/database was not run in this session; runtime validation is limited to targeted tests plus launcher smoke.
+
+## Latest Update (2026-03-06 23:31 EST) — YouTube sync bounded crawl + media mirror skip for already-hosted posts
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Clarified the slow YouTube behavior: comments can finish before posts because comments refresh already-known videos from Supabase-backed `youtube_videos` while the posts job is still crawling YouTube continuation pages for new matches.
+  - Reduced the YouTube continuation crawl runway for date-bounded syncs by replacing the old hardcoded `25` pre-hit no-match page cap with configurable limits (`SOCIAL_YOUTUBE_INITIAL_DATE_WINDOW_NO_HIT_PAGE_CAP`, default `8`; `SOCIAL_YOUTUBE_DATE_WINDOW_NO_HIT_PAGE_CAP`, default `5`).
+  - Added an additional incremental-window page cap when the run is date-bounded, unlimited (`max_posts_per_target <= 0`), and the database already contains videos in the target window. That cap defaults to `6` pages for windows up to `45` days and `10` pages for larger windows, overridable via `SOCIAL_YOUTUBE_INCREMENTAL_EXISTING_WINDOW_MAX_PAGES`.
+  - Hardened post refresh and direct media mirror execution so YouTube posts with complete hosted media (`hosted_thumbnail_url` + hosted video asset) skip mirror work entirely instead of re-downloading or re-updating media files.
+- validation_evidence:
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/youtube/scraper.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py` (pass)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k "refresh_post_skips_media_sync_when_post_already_mirrored or run_platform_media_mirror_stage_youtube_skips_when_media_is_already_hosted or ingest_youtube_incremental_existing_window_applies_page_cap_when_unlimited or ingest_youtube_posts_stage_reports_filter_diagnostics or ingest_youtube_post_limit_soft_cap_persists_video_and_short" -q` (pass; `5 passed`)
+- live_rollout:
+  - uploaded runtime payload: `s3://trr-backend/artifacts/trr-backend/20260306-235206/trr_backend_youtube_sync_fix.tar.gz`
+  - API rollout SSM command: `dd607685-954c-439b-9e38-fcf2110278e6`
+  - worker rollout SSM command: `520d9c51-6569-449f-8223-fa53d4983562`
+  - verification SSM command: `e78e28d0-a67b-4f07-a554-6b489ccc5dd9`
+  - applied to:
+    - API: `i-01a7b672f5946d19a`
+    - workers: `i-02e0d952e67e302a0`, `i-048f605583d2a11dd`, `i-0c4934e80de1dd89d`
+  - restarted services:
+    - `trr-api`
+    - `trr-social-worker-pool.service`
+  - on-host verification confirmed both deployed files contain the bounded YouTube crawl logic and incremental existing-window page-cap logic.
+- live_runtime_note:
+  - The in-flight YouTube run `e015bcd3-20c1-45ed-bda7-b9c955047b30` is now terminal (`cancelled`) after the rollout restart window; to benefit from the new crawl bounds, restart the run as a fresh sync.
+- blocked_checks:
+  - No fresh post-rollout YouTube sync was started in this pass, so live runtime impact is verified at deploy/file/service level rather than by a brand-new remote run measurement.
+
+## Latest Update (2026-03-07 00:25 EST) — NBCUMV media imports now include Getty search flow for cast refreshes and show gallery sync
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-fullstack`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_nbcumv.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_bravo.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/getty.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/nbcumv.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_nbcumv.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_bravo.py`
+- behavior_summary:
+  - Added a Getty editorial search flow for person-driven Bravo/NBCUMV imports. Cast refreshes can now search Getty using `<person name> Bravo`, extract `Object name`, crosswalk back into NBCUMV by `lbx_filename`, and import the matching NBCUMV originals plus Getty metadata into `core.media_assets`.
+  - Added public NBCUMV show-title resolution and show-photo ingestion for Bravo show imports. `commit_bravo_import` now supplements selected Bravo CMS images with NBCUMV show images, links them to the show gallery, and auto-links eligible show-linked TRR people through the existing gallery link model.
+  - Hardened NBCUMV search behavior by using local caption filtering when `search_caption` is requested, because the AppSync/Dynamo index does not support reliable server-side caption search.
+  - Made the generic NBCUMV importer more fault-tolerant: Getty enrichment failures no longer abort NBCUMV asset imports, and show-link lookups only run when explicit show links were requested.
+  - Updated Bravo show-image imports to satisfy the newer logo-routing contract by setting `logo_target_type="show"` on imported logo assets.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_nbcumv.py api/routers/admin_person_images.py api/routers/admin_show_bravo.py trr_backend/integrations/nbcumv.py trr_backend/integrations/getty.py tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_show_bravo.py tests/api/routers/test_admin_nbcumv.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_person_images.py tests/api/routers/test_admin_show_bravo.py tests/api/routers/test_admin_nbcumv.py -q` (pass; `116 passed`)
+- blocked_checks:
+  - No live end-to-end admin run was executed against production NBCUMV/Getty during this implementation pass. Getty search HTML parsing and NBCUMV AppSync/show resolution are covered by targeted tests and prior live probing, not by a fresh production import in this session.
+
+## Latest Update (2026-03-06 18:52 EST) — Show link discovery progress snapshots + stronger Fandom show-page fallback
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+- behavior_summary:
+  - Enriched show-link discovery progress events with stable run snapshot fields (`current_stage`, `discovered_rows`, `scan_targets`, `fandom_candidates_tested`, `stage_fandom_candidates_tested`, `stage_budget`, `stage_started_elapsed_ms`) so the frontend can render detailed live status instead of a generic heartbeat string.
+  - Updated the SSE stream heartbeat wrapper to carry forward the last known stage snapshot and recompute stage elapsed time while the worker is quiet, which keeps the UI informative during long Fandom or validation stretches.
+  - Deduped the discovered show-level Fandom URLs before fan-out into season and people discovery so later stages do not repeat the same root/page seed work unnecessarily.
+  - Hardened `_discover_show_links` with a ranked `discover_fandom_candidate_pages(...)` fallback for show pages, matching the stronger candidate discovery already used for seasons. This materially improves cases where a Fandom community root exists but the direct show-page derivation path misses the correct `/wiki/...` title.
+- validation_evidence:
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py` (pass; `106 passed`)
+- blocked_checks:
+  - No live production/admin refresh run was executed against a real show in this session; Fandom show-page improvement is validated by targeted router tests, not by a live RHOSLC refresh.
+
+## Latest Update (2026-03-06 22:18 EST) — RHOSLC link refresh hardening: @ preservation, Fandom show-page filtering, social repair
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+  - `code-reviewer`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+- behavior_summary:
+  - Updated URL canonicalization to preserve `@` in social profile paths, so TikTok/YouTube handles no longer normalize into `%40...`.
+  - Added a refresh-time social URL repair pass that canonicalizes existing stored social rows and drops duplicate legacy `%40` variants safely.
+  - Tightened Fandom show-page validation so show discovery and cleanup reject season pages and wrong same-franchise pages (for example, RHOSLC no longer accepts a RHONY page just because they share `Real Housewives` tokens).
+  - Added people-stage progress details to the discovery snapshot payload (`processed_targets`, `total_targets`, `current_target_label`, `links_discovered`, `targets_with_links`) and exposed social URL repair counts in the refresh result.
+  - Live RHOSLC verification after restarting the local non-reload backend showed the bad show-level Season 4 Fandom row removed, the wrong RHONY Fandom row removed, and encoded show social URLs eliminated. The refresh now reports `social_url_duplicates_deleted` in `status_counts`.
+- validation_evidence:
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py` (pass; `110 passed`)
+  - Live local verification via `http://127.0.0.1:3000/api/admin/trr-api/shows/7782652f-783a-488b-8860-41b97de32e75/links/discover` after backend watchdog restart:
+    - refresh returned `status: ok`
+    - `status_counts.social_url_duplicates_deleted: 1`
+    - active show fandom rows reduced to the RHOSLC `/wiki/...` page plus the persisted seed roots
+    - active show TikTok/YouTube URLs no longer contained `%40`
+- runtime_notes:
+  - Workspace local-lite runs the backend in non-reload mode (`TRR_BACKEND_RELOAD=0`), so live verification required manually cycling the backend process and letting the workspace watchdog restart it.
+
+## Latest Update (2026-03-06 22:17 EST) — Bulk-add classifier accepts Google News topic URLs as show links
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_links.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_links.py`
+- behavior_summary:
+  - Added explicit classifier support for `https://news.google.com/topics/...` inputs in the show-links bulk-add path.
+  - Google News topic URLs now classify as show-level `link_kind='google_news_url'`, `season_number=0`, and are persisted through the same entity-link path used by other manually added show links.
+  - This removes the frontend need for a dedicated top-of-page Google News settings form and makes News-tab auto-sync configuration compatible with the standard Add Links workflow.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/api/routers/test_admin_show_links.py` (pass; `111 passed`)
+## Latest Update (2026-03-07 10:10 EST) — NBCUMV/Getty Lisa Barlow fixes deployed to EC2 worker plane
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-devops`
+  - `aws-solution-architect`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.mcp__awslabs-core__prompt_understanding`
+  - `functions.mcp__awslabs-aws-api__call_aws`
+  - `functions.exec_command`
+- behavior_summary:
+  - Confirmed the user-facing Lisa Barlow `Get Images` issue was no longer a local validation bug. The active admin operation was being claimed by the shared EC2 admin worker host (`ip-172-31-115-238.ec2.internal`), so local backend changes were not affecting remote execution.
+  - Built a targeted rollout payload from the current local backend tree containing:
+    - `api/routers/admin_person_images.py`
+    - `api/routers/admin_nbcumv.py`
+    - `trr_backend/integrations/getty.py`
+    - `trr_backend/integrations/nbcumv.py`
+    - `trr_backend/repositories/media_assets.py`
+    - `trr_backend/repositories/admin_operations.py`
+  - Uploaded payload to:
+    - `s3://trr-backend/artifacts/trr-backend/20260307-100709/trr_backend_lisa_remote_worker_fix.tar.gz`
+  - Applied the payload over `/opt/trr-backend` via SSM to:
+    - API: `i-01a7b672f5946d19a`
+    - workers: `i-02e0d952e67e302a0`, `i-048f605583d2a11dd`, `i-0c4934e80de1dd89d`
+  - Restarted:
+    - `trr-api` on the API host
+    - `trr-admin-operations-worker.service` on all worker hosts
+  - Switched the local workspace back to remote job-plane mode after rollout:
+    - `WORKSPACE_TRR_JOB_PLANE_MODE=remote`
+    - `WORKSPACE_TRR_LONG_JOB_ENFORCE_REMOTE=1`
+    - local remote worker loops remain disabled because the shared EC2 worker plane is healthy
+  - Invalidated stale operation `c0f88997-97c1-44e8-9c04-6f1f029263d3` so future Lisa Barlow refreshes start a fresh remote-owned operation instead of attaching to the previous EC2-claimed row.
+- validation_evidence:
+  - AWS identity / inventory:
+    - `aws sts get-caller-identity --region us-east-1` (pass; account `522814694101`)
+    - `aws ec2 describe-instances --region us-east-1 --filters Name=instance-state-name,Values=running ...` (pass)
+    - `aws ssm describe-instance-information --region us-east-1 ...` (pass)
+    - `aws autoscaling describe-auto-scaling-groups --region us-east-1 --auto-scaling-group-names trr-api-asg trr-worker-asg` (pass)
+  - Artifact verification:
+    - `python -m py_compile api/routers/admin_person_images.py api/routers/admin_nbcumv.py trr_backend/integrations/getty.py trr_backend/integrations/nbcumv.py trr_backend/repositories/media_assets.py trr_backend/repositories/admin_operations.py` (pass locally before upload)
+    - `aws s3 cp /tmp/trr_backend_rollout_20260307-100709.tar.gz s3://trr-backend/artifacts/trr-backend/20260307-100709/trr_backend_lisa_remote_worker_fix.tar.gz --region us-east-1` (pass)
+  - SSM rollout verification:
+    - API SSM command `57647c77-018a-4aea-a5ce-ab4996725982` -> `Success`; `systemctl is-active trr-api` returned `active`
+    - worker SSM command `67a9b1cb-483c-4811-a8db-ec6089b18bcf` -> `Success` on all three workers; `systemctl is-active trr-admin-operations-worker.service` returned `active`
+  - AWS worker-plane validation scripts:
+    - `scripts/ops/aws_worker_plane/00_discover_context.sh --env staging --region us-east-1 --profile socializer-admin --evidence-dir docs/ai/evidence/aws-worker-plane/20260307-ec2-lisa-verify` (pass)
+    - `scripts/ops/aws_worker_plane/10_validate_ssm_worker_units.sh ...` (pass)
+    - `scripts/ops/aws_worker_plane/11_validate_api_remote_env.sh ...` (pass)
+- residual_risks:
+  - The rollout was targeted to the currently running API and worker instances only. It did not update `/trr/staging/TRR_BACKEND_ARTIFACT_S3_URI`, so future ASG replacement/scale-out could still boot the older canonical artifact until that bootstrap parameter is refreshed.
+  - Manual browser verification of the Lisa Barlow gallery remains pending in this Codex thread because the managed Chrome DevTools MCP transport is still unreliable at session level.
+
+Latest Update (2026-03-07 10:25 EST) — Remote S3 env fix plus NBCUMV/Getty progress rollout
+
+- what changed:
+  - Confirmed the active EC2 API/worker runtimes were missing:
+    - `AWS_REGION`
+    - `AWS_DEFAULT_REGION`
+    - `AWS_S3_BUCKET`
+    - `AWS_CDN_BASE_URL`
+  - Patched `/etc/trr-api.env` on `i-01a7b672f5946d19a` and `/etc/trr-worker.env` on:
+    - `i-02e0d952e67e302a0`
+    - `i-048f605583d2a11dd`
+    - `i-0c4934e80de1dd89d`
+  - Set:
+    - `AWS_REGION=us-east-1`
+    - `AWS_DEFAULT_REGION=us-east-1`
+    - `AWS_S3_BUCKET=trr-backend`
+    - `AWS_CDN_BASE_URL=https://d1fmdyqfafwim3.cloudfront.net`
+    - `TRR_BACKEND_ARTIFACT_S3_URI=s3://trr-backend/artifacts/trr-backend/20260307-100709/trr_backend_lisa_remote_worker_fix.tar.gz`
+  - Added incremental Getty discovery progress in `trr_backend/integrations/getty.py`.
+  - Updated the NBCUMV stage bridge in `api/routers/admin_person_images.py` so stream clients receive queued progress events from the background Getty/NBCUMV import thread instead of waiting silently at `0/0`.
+
+- validation:
+  - Local targeted checks:
+    - `pytest tests/integrations/test_getty.py tests/api/routers/test_admin_person_images.py -q -k 'nbcumv_progress_updates or getty_reports_progress or refresh_with_show_context_includes_nbcumv_counts'` (pass)
+    - `ruff check trr_backend/integrations/getty.py api/routers/admin_person_images.py tests/integrations/test_getty.py tests/api/routers/test_admin_person_images.py` (pass)
+  - New artifact:
+    - `s3://trr-backend/artifacts/trr-backend/20260307-102300/trr_backend_nbcumv_progress_fix.tar.gz`
+  - EC2 rollout:
+    - worker SSM command `026fd8b3-0d00-448f-a377-94608b550588` -> `Success` on all three workers
+    - API SSM command `6b6abec0-1dbe-4335-8ceb-8f19119a4ce6` -> `Success`
+  - Post-rollout verification:
+    - worker env now contains the required AWS mirror variables plus the updated artifact URI
+    - API env now contains the required AWS mirror variables plus the updated artifact URI
+    - `systemctl is-active trr-admin-operations-worker.service` -> `active` on all workers
+    - `systemctl is-active trr-api` -> `active` on API host
+    - deployed file hashes:
+      - `admin_person_images.py` -> `608564f591a6c6293a18fb611752565fb47057537c485ed27e5daf5c61124898`
+      - `getty.py` -> `27bf25308ff67b1c1a220df563f1d0bc826770b41bebbedda88060bf9d3f7cbd`
+
+- expected runtime effect:
+  - `S3 Mirroring` should stop failing with `Missing required environment variable: AWS_S3_BUCKET`.
+  - `NBCUMV IMPORT` should now emit intermediate Getty/NBCUMV progress messages instead of sitting at `0/0` with a stale message.
+
+Latest Update (2026-03-07 10:41 EST) — NBCUMV source-row fix and mirror retry hardening
+
+- issue traced from live operation `7489f3ad-2cb1-4a26-9ad1-eed12ecadad0`:
+  - `NBCUMV` failed with:
+    - `Failed to ensure source rows: malformed array literal`
+  - `S3 Mirroring` was no longer failing on missing env, but repeated stale person-linked `media_assets` with `ingest_status='failed'` were being retried on every ingest-only run and surfacing as stage failures.
+- code changes:
+  - `api/routers/admin_nbcumv.py`
+    - added `_postgres_text_array_literal(...)`
+    - changed `_ensure_sources(...)` to write PostgreSQL array literal text for `core.sources.aliases`
+  - `api/routers/admin_person_images.py`
+    - `_fetch_person_media_link_rows(...)` now includes `ingest_status` and `ingest_last_error`
+    - `_mirror_person_media_assets(...)` now skips previously failed media assets on normal ingest-only runs unless `force=True`
+- local validation:
+  - `pytest tests/api/routers/test_admin_nbcumv.py tests/api/routers/test_admin_person_images.py -q -k 'postgres_text_array_literal or mirror_person_media_assets_skips_previously_failed_rows_without_force or nbcumv_progress_updates or refresh_with_show_context_includes_nbcumv_counts'` (pass)
+  - `ruff check api/routers/admin_nbcumv.py api/routers/admin_person_images.py tests/api/routers/test_admin_nbcumv.py tests/api/routers/test_admin_person_images.py` (pass)
+- new artifact:
+  - `s3://trr-backend/artifacts/trr-backend/20260307-103200/trr_backend_nbcumv_mirror_fix.tar.gz`
+- EC2 rollout:
+  - worker SSM command `c42dfc72-c395-468a-b7cc-8c110dd40ac4` -> `Success` on all three workers
+  - API SSM command `b4784f92-292c-4b74-a4c9-e770b20df26a` -> `Success`
+  - `/etc/trr-worker.env` and `/etc/trr-api.env` now point `TRR_BACKEND_ARTIFACT_S3_URI` at the new `20260307-103200` artifact
+  - deployed file hashes:
+    - `admin_person_images.py` -> `5e3b69d782372dddeab556defed3466addb539d15ae1197f1bbec5d46e43a769`
+    - `admin_nbcumv.py` -> `b84bb72eb98103660ff9dde7068c0a632f9e4fcf50988ae068b9f116aaee2dbf`
+    - `getty.py` -> `27bf25308ff67b1c1a220df563f1d0bc826770b41bebbedda88060bf9d3f7cbd`
+
+Latest Update (2026-03-07 10:48 EST) — Social run stall fix for comment workers borrowing post shards
+
+- issue traced from live social run `e5663bf6-7bf6-4c98-ad9c-89ac4aa0bab7`:
+  - all `9` dedicated `posts` workers were occupied by long-running YouTube post shards
+  - all `comments` workers were idle because the comments stage had already completed
+  - queue growth was not caused by stale workers or delayed jobs; the remaining `327` queued jobs were claimable but stage-pinned workers could not help
+- code changes:
+  - `scripts/socials/worker.py`
+    - added `_claim_stage_candidates(...)` and `_claim_jobs_for_stage_candidates(...)`
+    - comments workers now prefer `comments` first, then borrow `posts` with single-claim safety when no comment jobs are available
+  - `trr_backend/repositories/social_season_analytics.py`
+    - added `_stage_claim_candidates(...)`
+    - `execute_run(...)` now applies the same comments-to-posts fallback for run-specific/tandem execution paths
+  - tests:
+    - `tests/scripts/test_social_worker.py`
+    - `tests/repositories/test_social_season_analytics.py`
+- local validation:
+  - `pytest tests/scripts/test_social_worker.py -q -k 'comments_worker_claims_posts_when_comment_queue_empty or claim_stage_candidates_allow_comments_workers_to_borrow_posts or main_queue_once_uses_claim_batch_and_processes_claimed_job'` (pass)
+  - `pytest tests/repositories/test_social_season_analytics.py -q -k 'execute_run_comments_stage_claims_posts_when_comments_empty or claim_next_jobs_uses_batch_limit_and_run_fairness or claim_next_queued_jobs_treats_empty_platform_filter_as_none'` (pass)
+  - `python3.11 -m py_compile scripts/socials/worker.py trr_backend/repositories/social_season_analytics.py` (pass)
+- rollout artifact:
+  - `s3://trr-backend/artifacts/trr-backend/20260307-104630/trr_backend_social_stage_borrow_fix.tar.gz`
+- EC2 rollout:
+  - worker SSM command `b70834c1-8364-4dae-9753-9824bae464a3` -> `Success` on:
+    - `i-02e0d952e67e302a0`
+    - `i-048f605583d2a11dd`
+    - `i-0c4934e80de1dd89d`
+  - API SSM command `8c275d23-a7ff-4012-8fe0-b24ce88ea863` -> `Success` on `i-01a7b672f5946d19a`
+  - `/etc/trr-worker.env` and `/etc/trr-api.env` now point `TRR_BACKEND_ARTIFACT_S3_URI` at the new `20260307-104630` artifact
+  - restarted:
+    - `trr-admin-operations-worker.service`
+    - `trr-social-worker-pool.service`
+    - `trr-api`
+  - post-rollout verification:
+  - both worker units reported `active=active` on all three worker hosts
+  - `trr-api` reported `active`
+  - live run `e5663bf6-7bf6-4c98-ad9c-89ac4aa0bab7` advanced immediately after rollout:
+    - before rollout: `98 completed`, `327 queued`, `9 running`, `5896 items_found`
+    - after rollout check: `112 completed`, `310 queued`, `12 running`, `6184 items_found`
+    - running jobs now include non-YouTube post work again (`instagram running=1`)
+
+Latest Update (2026-03-07 10:58 EST) — YouTube shard optimization and claim fairness hardening
+
+- issue traced from live run `e5663bf6-7bf6-4c98-ad9c-89ac4aa0bab7`:
+  - the run had created `42` YouTube post shards for a one-week window because multi-platform week runs were still using 4h/6h generic shard sizes
+  - each YouTube shard was repeatedly crawling the full `@bravo` channel surfaces and filtering date/title locally, with live running jobs showing `~270` items checked across `9` continuation pages while often matching `0` posts
+  - YouTube had monopolized `11/12` running post slots before recovery, even though other platforms had ready queued work
+- code changes:
+  - `trr_backend/repositories/social_season_analytics.py`
+    - added `_build_platform_posts_shards(...)` so YouTube week/narrow-window post runs collapse to a single full-window shard for windows `<= 14` days instead of dozens of 4h shards
+    - added `_resolve_youtube_narrow_window_page_cap(...)` and applied it in `_ingest_youtube(...)` so narrow windows get a hard continuation-page cap even when the window has no existing rows
+    - added `_resolve_youtube_run_in_flight_cap()` and updated `_claim_next_jobs(...)` to cap YouTube in-flight claims when other platforms in the same run still have ready work
+    - job config now records `platform_window_shard_hours`
+- local validation:
+  - `pytest tests/repositories/test_social_season_analytics.py -q -k 'build_platform_posts_shards_collapses_youtube_week_window_to_single_shard or resolve_youtube_narrow_window_page_cap_for_week_window or claim_next_jobs_caps_youtube_when_other_platforms_are_ready or claim_next_jobs_prefers_instagram_auth_workers_when_available or claim_next_jobs_uses_batch_limit_and_run_fairness'` (pass)
+  - `python3.11 -m py_compile trr_backend/repositories/social_season_analytics.py` (pass)
+- rollout artifact:
+  - `s3://trr-backend/artifacts/trr-backend/20260307-105536/trr_backend_youtube_shard_optimization_fix.tar.gz`
+- EC2 rollout:
+  - worker SSM command `8e598bf4-4a13-4849-adbb-4de261f73580` -> `Success` on:
+    - `i-02e0d952e67e302a0`
+    - `i-048f605583d2a11dd`
+    - `i-0c4934e80de1dd89d`
+  - API SSM command `46a798da-049c-40bc-921b-7f6556f790af` -> `Success` on `i-01a7b672f5946d19a`
+  - restarted:
+    - `trr-admin-operations-worker.service`
+    - `trr-social-worker-pool.service`
+    - `trr-api`
+- current-run recovery:
+  - because the live run already had pre-rollout YouTube shards marked `running` under old worker IDs, I forced stale recovery for that run only:
+    - `recover_stale_running_jobs(run_id='e5663bf6-7bf6-4c98-ad9c-89ac4aa0bab7', stage='posts', platform='youtube', stale_after_seconds=120, limit=50)`
+  - recovered `11` abandoned YouTube post jobs back to `retrying`
+  - post-recovery verification:
+  - run snapshot moved to:
+    - `156 completed`
+    - `256 queued`
+    - `10 retrying`
+    - `12 running`
+    - `9556 items_found`
+  - running jobs are now diversified instead of YouTube-only:
+    - `facebook running=2`
+    - `instagram running=5`
+    - `threads running=1`
+    - `youtube running=4`
+
+Latest Update (2026-03-07 13:08 EST) — Getty/NBCUMV overlap-only import, Getty-only URL snapshotting, and batched Getty detail fetches
+
+- problem:
+  - person-gallery `nbcumv` imports were still paying the full Getty-detail crawl cost up front and only then deciding which assets existed in NBCUMV
+  - unmatched Getty assets were not being persisted anywhere durable
+  - the user requirement is now:
+    - import/mirror only assets that exist in both Getty and NBCUMV
+    - persist the URLs/details for all Getty-only results
+    - batch the Getty detail crawl to reduce worker runtime and outbound request overhead
+- code changes:
+  - `trr_backend/integrations/getty.py`
+    - `search_editorial_assets(...)` now fetches detail pages in concurrent batches
+    - new knobs:
+      - `detail_batch_size` (default `25`)
+      - `detail_max_workers` (default `8`)
+    - progress messaging now emits batch ranges like `Fetching Getty assets 1-25/600...`
+  - `api/routers/admin_person_images.py`
+    - `_import_nbcumv_person_media(...)` now:
+      - imports only Getty/NBCUMV crosswalk matches
+      - classifies all non-imported Getty assets into `unmatched`
+      - persists a Getty person-source snapshot to:
+        - `core.person_source_latest`
+        - `core.person_source_history`
+      - snapshot source metadata:
+        - `source_id = getty`
+        - `variant = person_gallery_nbcumv_crosswalk`
+      - snapshot payload includes:
+        - `search_phrase`
+        - `candidate_count`
+        - `matched_count`
+        - `unmatched_count`
+        - condensed `matched[]`
+        - condensed `unmatched[]` with `detail_url` / `editorial_id` / `object_name` / `reason`
+    - refresh response/result payload now includes:
+      - `getty_candidates_total`
+      - `getty_matched_total`
+      - `getty_unmatched_total`
+      - `getty_snapshot_saved`
+- local validation:
+  - `pytest tests/integrations/test_getty.py tests/api/routers/test_admin_person_images.py -q` -> `79 passed`
+  - `ruff check api/routers/admin_person_images.py trr_backend/integrations/getty.py tests/integrations/test_getty.py tests/api/routers/test_admin_person_images.py` -> pass
+- EC2 runtime cost estimate for the current worker plane (us-east-1, On-Demand Linux):
+  - live fleet types:
+    - API: `c7i.large` -> `$0.08925/hr`
+    - workers: `3 x c7i.xlarge` -> `$0.1785/hr` each
+  - cost math:
+    - one worker for `5 min`: about `$0.0149`
+    - all `3` workers for `5 min`: about `$0.0446`
+    - full current fleet (`3` workers + `1` API) for `5 min`: about `$0.0521`
+  - interpretation:
+    - the real “expense” here is runtime/throughput and `600+` Getty HTTP requests, not a large AWS dollar burn
+- rollout artifact:
+  - `s3://trr-backend/artifacts/trr-backend/20260307-125833/trr_backend_getty_crosswalk_batch_fix.tar.gz`
+- EC2 rollout:
+  - API SSM command:
+    - `cfe9bb4c-5034-4715-8a99-11bf79af73f0` -> `Success`
+  - worker SSM command:
+    - `fd3ebd42-ff04-4dac-a10e-10a33fb51f93` -> `Success` on:
+      - `i-02e0d952e67e302a0`
+      - `i-048f605583d2a11dd`
+      - `i-0c4934e80de1dd89d`
+  - post-rollout verification:
+    - `/etc/trr-api.env` and `/etc/trr-worker.env` now point `TRR_BACKEND_ARTIFACT_S3_URI` at the `20260307-125833` artifact
+    - `systemctl is-active trr-api` -> `active`
+    - `systemctl is-active trr-admin-operations-worker.service` -> `active`
+    - deployed file hashes:
+      - `admin_person_images.py` -> `81a0a2b9249065ebaa4f13ca27911bcc073054c685c1af4004072d9f597248ca`
+      - `getty.py` -> `b71c41af75d5c8718a9429a1acf960f1d1a91c04852214ddaf22d48f84ee568a`
+
+Latest Update (2026-03-07 14:18 EST) — Social admin status payloads now preserve live job state, failure detail, and week-detail mirror parity
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+  - `code-reviewer`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Week-detail status assembly now prefers platform/post-specific failure reasons over generic week-level gaps, preserves live `active_job_summary` overlays without forcing stale=true, and keeps refresh metadata tied to actual attempt state instead of synthetic post timestamps.
+  - YouTube, Twitter, Facebook, and Threads week-detail cards now derive hosted-media completeness from stored hosted fields when explicit mirror status is absent, so recovered assets render as complete instead of hardcoded partial.
+  - Twitter comment drill-down no longer fabricates the fallback author handle `i`; post/comment URLs are emitted only when a real author handle exists.
+  - Coverage endpoints now degrade safely when week/run metadata or comment-media enrichment cannot be resolved, while still attaching additive active-job summaries when the job plane data is available.
+  - Media refresh and mirror-stage helpers were hardened so sparse post snapshots still carry source IDs into mirror decisions, Instagram failed/partial rows remain eligible for shortcode re-resolution, env cookie JSON keeps precedence over file cookies, and ingest fallback shards are reused per target when the schedule collapses to a single synthetic shard.
+- validation_evidence:
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py` (pass; `305 passed`)
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py` (pass)
+- notes:
+  - Corrected one inconsistent repository test assertion in `test_ingest_season_creates_sharded_posts_for_adaptive_dual_runner`; the coerced single-runner path produces one job, which matches the existing run-config assertions in that test.
+
+Latest Update (2026-03-07 15:51 EST) — Shared account ingest now runs as a preserved-new pipeline beside legacy season targeting
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-qa`
+  - `senior-devops`
+  - `aws-solution-architect`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0179_shared_social_account_ingest.sql`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/start_worker_pool.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py`
+- behavior_summary:
+  - Added a new `shared_account_async` ingest mode beside the preserved `legacy_season_targeted` path. Production/admin-triggered shared ingest now creates canonical account-scrape runs, classification jobs, season materialization jobs, and analytics refresh jobs on the existing DB-backed worker plane.
+  - Added canonical shared-ingest persistence: shared account source config, shared post matches, and a review queue for ambiguous or unmatched posts, while keeping the existing season-scoped social tables as the downstream materialized view.
+  - Extended worker/routing support for the new stages (`shared_account_posts`, `post_classify`, `season_materialize`, `analytics_refresh`) and exposed additive admin APIs for shared sources, shared ingest runs, review-queue actions, and season-level shared pipeline status.
+  - Fixed the analytics router coverage cache helper so coverage endpoints no longer fail on an undefined `_iso` helper, and hardened the new shared-ingest tests against local env drift around hosted-media CDN settings.
+- validation_evidence:
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py` (pass; `422 passed`)
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/worker.py` (pass)
+- notes:
+  - No EC2/AWS runtime validation or rollout was performed in this session. The user explicitly redirected the infra path away from EC2 verification because the worker-plane migration target is now Modal.
+
+Latest Update (2026-03-07 16:39 EST) — Remote job plane now supports Modal-backed social dispatch and executor metadata
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `orchestrate-plan-execution`
+  - `social-ingestion-reliability`
+  - `senior-devops`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/job_plane.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_dispatch.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_news.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Added `TRR_REMOTE_EXECUTOR` and `execution_backend_canonical` so the backend can distinguish `local`, `legacy_worker`, and `modal` while preserving `execution_owner=remote_worker` compatibility.
+  - Social queue mode now supports direct Modal dispatch: queued social runs write dispatch metadata onto jobs, dispatch specific `job_id` units to `run_social_job`, heartbeat dispatcher state through `social.scrape_workers`, and expose executor health fields like dispatch enablement, active invocations, oldest queued age, stale running count, and last dispatch error/success.
+  - Added Modal app entrypoints for `run_social_job`, `sweep_social_dispatch_queue`, and executor heartbeat cron alongside the existing admin operation, Google News, and Reddit functions.
+  - Social ingest, shared ingest, admin operations, Google News, and Reddit refresh start responses now carry additive `execution_backend_canonical` metadata. Reddit/Google News/admin-op payloads remain backward-compatible.
+  - Updated default social worker-pool/env tuning toward the Modal migration profile: posts/comments `8`, classify/materialize `10`, analytics refresh `4`, mirror unchanged at `6`, and DB upsert batches increased to posts `100` / comments `300`.
+- validation_evidence:
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_dispatch.py /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/admin_operations.py /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_news.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/reddit_refresh.py` (pass)
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_operations.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_show_news.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k 'modal or worker_health or queue_status or dispatch_due_social_jobs or claim_and_process_social_job or assert_worker_available_when_queue_enabled_modal'` (pass; `18 passed, 446 deselected`)
+- notes:
+  - This session did not deploy Modal, set up Modal secrets, or cut over schedules. The code path is in place, but runtime rollout remains a separate infra operation.
+
+Latest Update (2026-03-07 18:35 EST) — Modal operator readiness checks now cover secrets, deployed functions, and EC2-retirement guardrails
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/prepare_named_secrets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_verify_modal_readiness.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+- behavior_summary:
+  - Added a non-mutating Modal readiness verifier that checks the named secrets, confirms the deployed `trr-backend-jobs` app exists, and hydrates all six required Modal functions before rollout.
+  - Tightened the secret-prep operator path so `prepare_named_secrets.py --apply` deletes rendered env files by default after publishing unless the operator explicitly keeps them.
+  - Updated the cutover checklist and runbook so readiness now requires the verifier step and explicitly distinguishes social Modal cutover from full EC2 retirement for Screenalytics-backed admin image jobs.
+- validation_evidence:
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_verify_modal_readiness.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/test_modal_jobs.py` (pass; `7 passed`)
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/prepare_named_secrets.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py` (pass)
+- notes:
+  - This session did not provision secrets or deploy the Modal app. The new verifier is intended to gate those future operator steps.
+
+Latest Update (2026-03-07 19:30 EST) — Admin image-analysis now routes through the backend-owned Modal vision runtime
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-qa`
+  - `senior-devops`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/vision/people_count_engine.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/clients/screenalytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_show_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/clients/test_screenalytics_adapter.py`
+- behavior_summary:
+  - Ported the covered people-count and crop-analysis execution path into a backend-owned callable vision engine instead of relying on the Screenalytics HTTP service for admin jobs.
+  - Kept `trr_backend.clients.screenalytics` as a compatibility adapter, but rewired `count_people(...)` and `count_people_batch(...)` to use either the local vision engine or a dedicated Modal function based on `TRR_ADMIN_IMAGE_EXECUTION_BACKEND`.
+  - Added a dedicated `run_admin_vision` Modal entrypoint and updated readiness/cutover tooling so the Modal app contract now includes the vision function alongside the existing six functions.
+  - Replaced Screenalytics-specific unavailable messaging in the covered admin routes with neutral vision-runtime wording.
+- validation_evidence:
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/vision/people_count_engine.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/clients/screenalytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py` (pass)
+  - `python3.11 -m pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/clients/test_screenalytics_adapter.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_verify_modal_readiness.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_image_counts_fallback.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images_auto_count_enrichment.py` (pass; `35 passed`)
+  - `python3.11 -m ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/vision/people_count_engine.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/clients/screenalytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/clients/test_screenalytics_adapter.py` (pass)
+- notes:
+  - This completes the code-path cutover for the covered admin image-analysis jobs, but it does not complete live EC2 retirement. Modal deployment, host env rollout, and worker ASG decommissioning remain separate rollout steps.
+
+Latest Update (2026-03-07 20:15 EST) — Modal now serves the TRR backend API with the canonical remote executor contract
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+  - `aws-solution-architect`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/prepare_named_secrets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/test_modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_prepare_named_secrets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_verify_modal_readiness.py`
+- behavior_summary:
+  - Added a first-class Modal ASGI entrypoint, `serve_backend_api`, so the FastAPI API can be hosted from the same Modal app as the job functions.
+  - Hardened named-secret rendering so the runtime secret now injects the canonical `remote + modal` backend contract by default and excludes deploy-only Modal token vars from function runtime secrets.
+  - Fixed the secret-apply operator path to reuse the invoking Python interpreter instead of shelling out to a plain `python3.11` that may not have the Modal package installed.
+  - Made the Modal module force the canonical backend runtime flags at import time so the hosted API reports `execution_owner=remote_worker`, `execution_backend_canonical=modal`, and `TRR_JOB_PLANE_MODE=remote` consistently.
+  - Updated readiness and cutover tooling to require the deployed API web endpoint in addition to the existing job functions.
+- deployment_evidence:
+  - Modal app: `trr-backend-jobs`
+  - Deployment URL: [Modal deployment](https://modal.com/apps/admin-56995/main/deployed/trr-backend-jobs)
+  - Hosted API URL: [https://admin-56995--trr-backend-api.modal.run](https://admin-56995--trr-backend-api.modal.run)
+  - `python3 scripts/modal/verify_modal_readiness.py --json` reported:
+    - `ok=true`
+    - `api_web_url=https://admin-56995--trr-backend-api.modal.run`
+    - all eight functions resolved with no missing secrets or web endpoints
+- validation_evidence:
+  - `python3.11 -m py_compile /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/prepare_named_secrets.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py` (pass)
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/test_modal_jobs.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_prepare_named_secrets.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_verify_modal_readiness.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_admin_operations.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_operations.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py` (pass)
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend` (pass)
+- notes:
+  - This session deployed the Modal backend API surface and updated named Modal secrets, but it did not cut staging or production frontend runtime configuration over to the Modal URL globally.
+  - The old EC2/AWS backend retirement steps remain operational follow-up work after environment-level URL cutover and smoke validation.
+
+Latest Update (2026-03-07 20:30 EST) — Modal-backend retirement slice validation is clean again after test isolation fixes
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-devops`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py`
+- behavior_summary:
+  - Kept the Modal-hosted backend runtime behavior intact and fixed the remaining backend regressions by isolating tests from immediate queue dispatch and Modal-first readiness behavior.
+  - Ingest-season unit tests that only assert run/job planning now stub `dispatch_due_social_jobs(...)` so they do not depend on UUID-shaped run ids or live DB dispatch queries.
+  - Legacy worker-health assertions now explicitly force the non-Modal branch, while the dedicated Modal executor tests continue to cover the new path separately.
+  - Reddit route tests now set explicit local, legacy-worker, and modal env contracts so execution-owner assertions are deterministic and do not inherit environment bleed from the Modal deployment shell.
+- validation_evidence:
+  - `pytest -q /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/test_modal_jobs.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_verify_modal_readiness.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_prepare_named_secrets.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_admin_operations.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_operations.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_reddit_refresh.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py` (pass; `498 passed`)
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend` (pass)
+- notes:
+  - The remaining work for full EC2 retirement is no longer code/test debt inside `TRR-Backend`; it is environment-level traffic/base-URL cutover and eventual legacy AWS runtime retirement.

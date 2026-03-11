@@ -14,6 +14,7 @@ REDDIT_ENABLED="${TRR_REDDIT_REFRESH_WORKER_ENABLED:-1}"
 GOOGLE_NEWS_ENABLED="${TRR_GOOGLE_NEWS_WORKER_ENABLED:-1}"
 SOCIAL_INGEST_ENABLED="${TRR_SOCIAL_INGEST_WORKER_ENABLED:-0}"
 ADMIN_COUNT="${TRR_ADMIN_OPERATION_WORKER_COUNT:-1}"
+ADMIN_EXCLUDE_TYPES="${TRR_ADMIN_OPERATION_WORKER_EXCLUDE_TYPES:-}"
 REDDIT_COUNT="${TRR_REDDIT_REFRESH_WORKER_COUNT:-1}"
 GOOGLE_NEWS_COUNT="${TRR_GOOGLE_NEWS_WORKER_COUNT:-1}"
 POLL_SECONDS="${TRR_REMOTE_WORKER_POLL_SECONDS:-2}"
@@ -25,6 +26,16 @@ SOCIAL_MEDIA_MIRROR_WORKERS="${TRR_SOCIAL_INGEST_WORKER_MEDIA_MIRROR:-1}"
 SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS="${TRR_SOCIAL_INGEST_WORKER_COMMENT_MEDIA_MIRROR:-1}"
 
 PIDS=()
+
+flag_is_enabled() {
+  local raw="${1:-}"
+  local normalized
+  normalized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  case "$normalized" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 start_worker() {
   local label="$1"
@@ -83,19 +94,31 @@ stop_all() {
 
 trap stop_all EXIT INT TERM
 
-if [[ "$ADMIN_ENABLED" == "1" ]]; then
+echo "[remote-workers] config admin=${ADMIN_ENABLED}/${ADMIN_COUNT} reddit=${REDDIT_ENABLED}/${REDDIT_COUNT} google_news=${GOOGLE_NEWS_ENABLED}/${GOOGLE_NEWS_COUNT} social_ingest=${SOCIAL_INGEST_ENABLED} poll=${POLL_SECONDS}s"
+
+if flag_is_enabled "$ADMIN_ENABLED"; then
   ADMIN_COUNT="$(normalize_count "$ADMIN_COUNT" "TRR_ADMIN_OPERATION_WORKER_COUNT")"
-  start_worker_group "admin-operations" "$ADMIN_COUNT" python -m scripts.workers.admin_operations_worker --poll-seconds "$POLL_SECONDS"
+  admin_cmd=(python -m scripts.workers.admin_operations_worker --poll-seconds "$POLL_SECONDS")
+  if [[ -n "$ADMIN_EXCLUDE_TYPES" ]]; then
+    IFS=',' read -r -a admin_excludes <<<"$ADMIN_EXCLUDE_TYPES"
+    for excluded in "${admin_excludes[@]}"; do
+      excluded="$(printf '%s' "$excluded" | xargs)"
+      if [[ -n "$excluded" ]]; then
+        admin_cmd+=(--exclude-operation-type "$excluded")
+      fi
+    done
+  fi
+  start_worker_group "admin-operations" "$ADMIN_COUNT" "${admin_cmd[@]}"
 fi
-if [[ "$REDDIT_ENABLED" == "1" ]]; then
+if flag_is_enabled "$REDDIT_ENABLED"; then
   REDDIT_COUNT="$(normalize_count "$REDDIT_COUNT" "TRR_REDDIT_REFRESH_WORKER_COUNT")"
   start_worker_group "reddit-refresh" "$REDDIT_COUNT" python -m scripts.workers.reddit_refresh_worker --poll-seconds "$POLL_SECONDS"
 fi
-if [[ "$GOOGLE_NEWS_ENABLED" == "1" ]]; then
+if flag_is_enabled "$GOOGLE_NEWS_ENABLED"; then
   GOOGLE_NEWS_COUNT="$(normalize_count "$GOOGLE_NEWS_COUNT" "TRR_GOOGLE_NEWS_WORKER_COUNT")"
   start_worker_group "google-news" "$GOOGLE_NEWS_COUNT" python -m scripts.workers.google_news_worker --poll-seconds "$POLL_SECONDS" --lease-seconds "$GOOGLE_NEWS_LEASE_SECONDS"
 fi
-if [[ "$SOCIAL_INGEST_ENABLED" == "1" ]]; then
+if flag_is_enabled "$SOCIAL_INGEST_ENABLED"; then
   SOCIAL_POSTS_WORKERS="$(normalize_optional_count "$SOCIAL_POSTS_WORKERS" "TRR_SOCIAL_INGEST_WORKER_POSTS")"
   SOCIAL_COMMENTS_WORKERS="$(normalize_optional_count "$SOCIAL_COMMENTS_WORKERS" "TRR_SOCIAL_INGEST_WORKER_COMMENTS")"
   SOCIAL_MEDIA_MIRROR_WORKERS="$(normalize_optional_count "$SOCIAL_MEDIA_MIRROR_WORKERS" "TRR_SOCIAL_INGEST_WORKER_MEDIA_MIRROR")"
@@ -115,9 +138,9 @@ if [[ "$SOCIAL_INGEST_ENABLED" == "1" ]]; then
 fi
 
 if [[ "${#PIDS[@]}" -eq 0 ]]; then
-  echo "[remote-workers] no workers enabled; exiting"
-  exit 1
+  echo "[remote-workers] no workers enabled; exiting cleanly"
+  exit 0
 fi
 
-echo "[remote-workers] workers started"
+echo "[remote-workers] workers started count=${#PIDS[@]}"
 wait

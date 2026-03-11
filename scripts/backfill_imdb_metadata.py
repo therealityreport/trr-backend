@@ -14,9 +14,9 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from api.routers import admin_person_images
-from trr_backend.db.admin import create_supabase_admin_client
-from trr_backend.utils.env import load_env
+from api.routers import admin_person_images  # noqa: E402
+from trr_backend.db.admin import create_supabase_admin_client  # noqa: E402
+from trr_backend.utils.env import load_env  # noqa: E402
 
 DEFAULT_BATCH_SIZE = 50
 DEFAULT_PAGE_SIZE = 1000
@@ -33,7 +33,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "the admin Refresh/Reprocess pipeline."
         ),
     )
-    parser.add_argument("--dry-run", action="store_true", help="Inspect and report rows needing repair without writing.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Inspect and report rows needing repair without writing."
+    )
     parser.add_argument("--limit", type=int, default=None, help="Optional cap on number of person_ids to process.")
     parser.add_argument(
         "--batch-size",
@@ -68,10 +70,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--backoff-base-seconds",
         type=float,
         default=DEFAULT_BACKOFF_BASE_SECONDS,
-        help=(
-            "Base seconds for exponential backoff between retries. Delay uses "
-            "base * 2^(attempt-1) plus jitter."
-        ),
+        help=("Base seconds for exponential backoff between retries. Delay uses base * 2^(attempt-1) plus jitter."),
     )
     parser.add_argument(
         "--person-id",
@@ -165,12 +164,7 @@ def _resolve_person_ids_by_name(
         if not full_name:
             continue
         response = (
-            db.schema("core")
-            .table("people")
-            .select("id,full_name")
-            .eq("full_name", full_name)
-            .limit(1)
-            .execute()
+            db.schema("core").table("people").select("id,full_name").eq("full_name", full_name).limit(1).execute()
         )
         if hasattr(response, "error") and response.error:
             raise RuntimeError(f"Supabase error resolving person-name '{full_name}': {response.error}")
@@ -301,7 +295,9 @@ def main(argv: list[str] | None = None) -> int:
         "repair_failures_reported": 0,
     }
 
-    dry_run_lookups: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]] | None = None
+    dry_run_lookups: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]] | None = (
+        None
+    )
     if args.dry_run:
         dry_run_lookups = admin_person_images._build_show_lookup_maps(db)
 

@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from hashlib import sha1
@@ -21,6 +21,7 @@ import requests
 from psycopg2.extras import Json
 
 from trr_backend.db import pg
+from trr_backend.job_plane import canonical_execution_mode, execution_backend_canonical, execution_owner_label
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,52 @@ def _default_worker_id() -> str:
     return f"reddit-refresh:{socket.gethostname()}:{os.getpid()}"
 
 
+def _base_progress_snapshot() -> dict[str, Any]:
+    return {
+        "stage": "discovering_posts",
+        "listing_pages_fetched": 0,
+        "search_pages_fetched": 0,
+        "rows_discovered_raw": 0,
+        "rows_matched": 0,
+        "comments_targets_total": 0,
+        "comments_targets_done": 0,
+        "comments_rows_upserted": 0,
+        "detail_posts_total": 0,
+        "detail_posts_done": 0,
+        "comments_upserted": 0,
+        "media_queued": 0,
+        "media_mirrored": 0,
+        "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _build_terminal_summary(
+    *,
+    mode: str,
+    status: str,
+    progress: dict[str, Any],
+    error_count: int = 0,
+    force_rescrape: bool | None = None,
+) -> dict[str, Any]:
+    summary = {
+        "mode": mode,
+        "status": status,
+        "stage": str(progress.get("stage") or "unknown"),
+        "rows_matched": _safe_int(progress.get("rows_matched")),
+        "comments_rows_upserted": _safe_int(progress.get("comments_rows_upserted")),
+        "detail_posts_total": _safe_int(progress.get("detail_posts_total")),
+        "detail_posts_done": _safe_int(progress.get("detail_posts_done")),
+        "comments_upserted": _safe_int(progress.get("comments_upserted")),
+        "media_queued": _safe_int(progress.get("media_queued")),
+        "media_mirrored": _safe_int(progress.get("media_mirrored")),
+        "error_count": max(0, int(error_count)),
+        "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+    }
+    if force_rescrape is not None:
+        summary["force_rescrape"] = bool(force_rescrape)
+    return summary
+
+
 def _collapse_whitespace(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
@@ -265,6 +312,126 @@ def _iso_utc(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _derive_refresh_run_phase(diagnostics: dict[str, Any], status: str) -> str | None:
+    progress = diagnostics.get("progress") if isinstance(diagnostics.get("progress"), dict) else {}
+    phase = str(progress.get("stage") or diagnostics.get("phase") or "").strip().lower()
+    if phase:
+        return phase
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status in {"queued", "running", "cancelling"}:
+        return normalized_status
+    return None
+
+
+def _collect_partial_failures(
+    *,
+    status: str,
+    diagnostics: dict[str, Any],
+    error_message: str | None,
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    normalized_status = str(status or "").strip().lower()
+    normalized_error = str(error_message or "").strip()
+    if normalized_error and normalized_status in {"partial", "failed"}:
+        failures.append(
+            {"phase": _derive_refresh_run_phase(diagnostics, normalized_status), "reason": normalized_error}
+        )
+
+    final_completeness = (
+        diagnostics.get("final_completeness") if isinstance(diagnostics.get("final_completeness"), dict) else {}
+    )
+    if final_completeness.get("listing_complete") is False:
+        failures.append({"phase": "listing", "reason": "listing_incomplete"})
+    if final_completeness.get("backfill_complete") is False:
+        failures.append({"phase": "search_backfill", "reason": "backfill_incomplete"})
+
+    result_payload = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+    search_backfill = (
+        result_payload.get("search_backfill") if isinstance(result_payload.get("search_backfill"), dict) else {}
+    )
+    query_diagnostics = (
+        search_backfill.get("query_diagnostics") if isinstance(search_backfill.get("query_diagnostics"), list) else []
+    )
+    for query_diag in query_diagnostics:
+        if not isinstance(query_diag, dict):
+            continue
+        if query_diag.get("complete") is True and not query_diag.get("error"):
+            continue
+        failures.append(
+            {
+                "phase": str(query_diag.get("query_kind") or "search_backfill"),
+                "reason": str(query_diag.get("error") or "incomplete_query"),
+                "query": str(query_diag.get("query") or "").strip() or None,
+                "label": str(query_diag.get("flair") or "").strip() or None,
+            }
+        )
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for failure in failures:
+        key = json.dumps(failure, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(failure)
+    return deduped
+
+
+def _is_refresh_run_stalled(
+    *,
+    status: str,
+    heartbeat_at: datetime | None,
+    updated_at: datetime | None,
+    created_at: datetime | None,
+) -> bool:
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status not in {"queued", "running", "cancelling"}:
+        return False
+    now_utc = datetime.now(tz=UTC)
+    last_activity = heartbeat_at or updated_at or created_at
+    if last_activity is None:
+        return False
+    age_seconds = max(0.0, (now_utc - last_activity).total_seconds())
+    if normalized_status == "queued":
+        return age_seconds >= REDDIT_REFRESH_STALE_QUEUED_SECONDS_DEFAULT
+    return age_seconds >= REDDIT_REFRESH_STALE_RUNNING_SECONDS_DEFAULT
+
+
+def _build_refresh_run_meta(row: Mapping[str, Any]) -> dict[str, Any]:
+    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+    status = str(row.get("status") or "").strip().lower()
+    heartbeat_at = _parse_iso(row.get("heartbeat_at"))
+    updated_at = _parse_iso(row.get("updated_at"))
+    created_at = _parse_iso(row.get("created_at"))
+    completed_at = _parse_iso(row.get("completed_at"))
+    cache_age_seconds = (
+        max(0, int((datetime.now(tz=UTC) - completed_at).total_seconds())) if completed_at is not None else None
+    )
+    if status == "partial":
+        cache_status = "partial"
+    elif completed_at is not None:
+        cache_status = "stale" if cache_age_seconds is not None and cache_age_seconds > 86_400 else "fresh"
+    else:
+        cache_status = "miss"
+    return {
+        "phase": _derive_refresh_run_phase(diagnostics, status),
+        "partial_failures": _collect_partial_failures(
+            status=status,
+            diagnostics=diagnostics,
+            error_message=str(row.get("error_message") or "").strip() or None,
+        ),
+        "stalled": _is_refresh_run_stalled(
+            status=status,
+            heartbeat_at=heartbeat_at,
+            updated_at=updated_at,
+            created_at=created_at,
+        ),
+        "cache_status": cache_status,
+        "cache_age_seconds": cache_age_seconds,
+        "run_status": status,
+    }
 
 
 def _build_terms(show_name: str, show_aliases: list[str]) -> list[str]:
@@ -2102,6 +2269,40 @@ def get_cached_period_payload(*, community_id: str, season_id: str, period_key: 
     }
 
 
+def get_cached_period_payload_snapshot(*, community_id: str, season_id: str, period_key: str) -> dict[str, Any] | None:
+    resolved_period_key = _resolve_cached_period_key(
+        community_id=community_id,
+        season_id=season_id,
+        period_key=period_key,
+    )
+    if not resolved_period_key:
+        return None
+    run = _fetch_cached_run_row(
+        community_id=community_id,
+        season_id=season_id,
+        period_key=resolved_period_key,
+    )
+    if not run:
+        return None
+    discovery = get_cached_period_payload(
+        community_id=community_id,
+        season_id=season_id,
+        period_key=resolved_period_key,
+    )
+    if discovery is None:
+        return None
+    run_meta = _build_refresh_run_meta(run)
+    return {
+        "discovery": discovery,
+        "resolved_period_key": resolved_period_key,
+        "cache_status": run_meta.get("cache_status"),
+        "cache_age_seconds": run_meta.get("cache_age_seconds"),
+        "run_status": run_meta.get("run_status"),
+        "phase": run_meta.get("phase"),
+        "partial_failures": run_meta.get("partial_failures") or [],
+    }
+
+
 def _update_run(
     run_id: str,
     *,
@@ -2944,18 +3145,7 @@ def execute_refresh_run(
     claim_token = str(run.get("claim_token") or "").strip() or None
 
     request_payload = run.get("request_payload") if isinstance(run.get("request_payload"), dict) else {}
-
-    progress: dict[str, Any] = {
-        "stage": "discovering_posts",
-        "listing_pages_fetched": 0,
-        "search_pages_fetched": 0,
-        "rows_discovered_raw": 0,
-        "rows_matched": 0,
-        "comments_targets_total": 0,
-        "comments_targets_done": 0,
-        "comments_rows_upserted": 0,
-        "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
-    }
+    progress: dict[str, Any] = _base_progress_snapshot()
     last_progress_emit = 0.0
     monotonic_fields = {
         "listing_pages_fetched",
@@ -2965,7 +3155,20 @@ def execute_refresh_run(
         "comments_targets_total",
         "comments_targets_done",
         "comments_rows_upserted",
+        "detail_posts_total",
+        "detail_posts_done",
+        "comments_upserted",
+        "media_queued",
+        "media_mirrored",
     }
+
+    logger.info(
+        "[reddit_refresh_execute_start] run_id=%s mode=%s worker_id=%s claim_token=%s",
+        run_id[:8],
+        str(request_payload.get("mode") or "sync_posts").strip() or "sync_posts",
+        str(worker_id or "").strip() or _default_worker_id(),
+        claim_token[:8] if claim_token else None,
+    )
 
     def emit_progress(*, force: bool = False) -> None:
         nonlocal last_progress_emit
@@ -3247,6 +3450,13 @@ def execute_refresh_run(
             apply_progress({"stage": "finalizing"}, force=True)
 
             status = "completed" if not detail_errors else "partial"
+            terminal_summary = _build_terminal_summary(
+                mode="sync_details",
+                status=status,
+                progress={**progress, "stage": "finalizing"},
+                error_count=len(detail_errors),
+                force_rescrape=force_rescrape,
+            )
             diagnostics = {
                 "mode": "sync_details",
                 "force_rescrape": force_rescrape,
@@ -3257,12 +3467,29 @@ def execute_refresh_run(
                 "media_mirrored": media_mirrored,
                 "errors": detail_errors[:50],  # cap to avoid oversized diagnostics
                 "error_count": len(detail_errors),
+                "terminal_summary": terminal_summary,
+                "lifecycle": {
+                    "worker_id": str(worker_id or "").strip() or None,
+                    "claim_token_prefix": claim_token[:8] if claim_token else None,
+                    "claim_released": True,
+                },
                 "progress": {
                     **progress,
                     "stage": "finalizing",
                     "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
                 },
             }
+
+            logger.info(
+                (
+                    "[reddit_refresh_execute_complete] run_id=%s mode=sync_details "
+                    "status=%s detail_posts_done=%s error_count=%s"
+                ),
+                run_id[:8],
+                status,
+                detail_posts_done,
+                len(detail_errors),
+            )
 
             _update_run(
                 run_id,
@@ -3556,6 +3783,17 @@ def execute_refresh_run(
                 if listing_incomplete_non_fatal
                 else "strict_completeness"
             ),
+            "terminal_summary": _build_terminal_summary(
+                mode="sync_posts",
+                status=status,
+                progress={**progress, "stage": "finalizing"},
+                error_count=comment_errors,
+            ),
+            "lifecycle": {
+                "worker_id": str(worker_id or "").strip() or None,
+                "claim_token_prefix": claim_token[:8] if claim_token else None,
+                "claim_released": True,
+            },
             "progress": {
                 **progress,
                 "stage": "finalizing",
@@ -3563,6 +3801,14 @@ def execute_refresh_run(
             },
             "result": result,
         }
+
+        logger.info(
+            "[reddit_refresh_execute_complete] run_id=%s mode=sync_posts status=%s rows_matched=%s comment_errors=%s",
+            run_id[:8],
+            status,
+            int(result.get("totals", {}).get("matched_rows") or 0),
+            comment_errors,
+        )
 
         _update_run(
             run_id,
@@ -3583,6 +3829,17 @@ def execute_refresh_run(
             status="failed",
             diagnostics={
                 "error_type": exc.__class__.__name__,
+                "terminal_summary": _build_terminal_summary(
+                    mode=str(request_payload.get("mode") or "sync_posts").strip() or "sync_posts",
+                    status="failed",
+                    progress=progress,
+                    error_count=1,
+                ),
+                "lifecycle": {
+                    "worker_id": str(worker_id or "").strip() or None,
+                    "claim_token_prefix": claim_token[:8] if claim_token else None,
+                    "claim_released": True,
+                },
                 "progress": {
                     **progress,
                     "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
@@ -3604,11 +3861,18 @@ def run_reddit_refresh_worker_loop(
 ) -> int:
     normalized_worker = str(worker_id or "").strip() or _default_worker_id()
     safe_poll = max(0.2, float(poll_seconds))
+    logger.info(
+        "[reddit_refresh_worker_loop_start] worker_id=%s once=%s poll_seconds=%.2f",
+        normalized_worker,
+        once,
+        safe_poll,
+    )
 
     while True:
         claimed = claim_next_refresh_run(worker_id=normalized_worker)
         if not claimed:
             if once:
+                logger.info("[reddit_refresh_worker_no_work] worker_id=%s once=true", normalized_worker)
                 return 1
             time.sleep(safe_poll)
             continue
@@ -3622,6 +3886,7 @@ def run_reddit_refresh_worker_loop(
         )
         execute_refresh_run(run_id, preclaimed_run=claimed, worker_id=normalized_worker)
         if once:
+            logger.info("[reddit_refresh_worker_once_complete] worker_id=%s run_id=%s", normalized_worker, run_id[:8])
             return 0
 
 
@@ -3685,12 +3950,16 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
     payload = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else None
     request_payload = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
 
+    run_meta = _build_refresh_run_meta(row)
     return {
         "run_id": row.get("id"),
         "community_id": row.get("community_id"),
         "season_id": row.get("season_id"),
         "period_key": row.get("period_key"),
         "subreddit": row.get("subreddit"),
+        "execution_owner": execution_owner_label(),
+        "execution_mode_canonical": canonical_execution_mode(),
+        "execution_backend_canonical": execution_backend_canonical(),
         "status": row.get("status"),
         "error": row.get("error_message"),
         "totals": {
@@ -3721,6 +3990,9 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
         "completed_at": _iso_utc(_parse_iso(row.get("completed_at"))),
         "created_at": _iso_utc(_parse_iso(row.get("created_at"))),
         "updated_at": _iso_utc(_parse_iso(row.get("updated_at"))),
+        "phase": run_meta.get("phase"),
+        "partial_failures": run_meta.get("partial_failures"),
+        "stalled": run_meta.get("stalled"),
     }
 
 
@@ -3788,6 +4060,7 @@ def list_refresh_runs(
     results: list[dict[str, Any]] = []
     for row in rows:
         payload = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
+        run_meta = _build_refresh_run_meta(row)
         results.append(
             {
                 "run_id": row.get("id"),
@@ -3795,6 +4068,9 @@ def list_refresh_runs(
                 "season_id": row.get("season_id"),
                 "period_key": row.get("period_key"),
                 "subreddit": row.get("subreddit"),
+                "execution_owner": execution_owner_label(),
+                "execution_mode_canonical": canonical_execution_mode(),
+                "execution_backend_canonical": execution_backend_canonical(),
                 "status": row.get("status"),
                 "error": row.get("error_message"),
                 "client_session_id": str(payload.get("client_session_id") or "").strip() or None,
@@ -3808,6 +4084,9 @@ def list_refresh_runs(
                 "completed_at": _iso_utc(_parse_iso(row.get("completed_at"))),
                 "created_at": _iso_utc(_parse_iso(row.get("created_at"))),
                 "updated_at": _iso_utc(_parse_iso(row.get("updated_at"))),
+                "phase": run_meta.get("phase"),
+                "partial_failures": run_meta.get("partial_failures"),
+                "stalled": run_meta.get("stalled"),
             }
         )
     return results

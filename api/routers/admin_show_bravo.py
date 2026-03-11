@@ -60,6 +60,7 @@ _BRAVO_PREVIEW_SIGNATURE_VERSION = "v1"
 _BRAVO_VIDEO_THUMBNAIL_CONTEXT_SECTION = "bravo_video"
 _BRAVO_VIDEO_THUMBNAIL_CONTEXT_TYPE = "thumbnail"
 _BRAVO_VIDEO_THUMBNAIL_ASSET_NAME = "Bravo video thumbnail"
+_NBCUMV_SHOW_IMPORT_LIMIT = 500
 _CAST_ANNOUNCEMENT_RE = re.compile(
     r"\b(cast|friend\s*[- ]?of|full\s*[- ]?time|housewife|joins|joined|returning|returns)\b",
     re.IGNORECASE,
@@ -154,6 +155,91 @@ def _ensure_bravo_source(db: SupabaseAdminClient) -> None:
 def _payload_sha(payload: dict[str, Any]) -> str:
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _import_nbcumv_show_images(
+    db: SupabaseAdminClient,
+    *,
+    show_id: str,
+    show_title: str | None,
+    limit: int = _NBCUMV_SHOW_IMPORT_LIMIT,
+) -> dict[str, Any]:
+    from api.routers.admin_nbcumv import (
+        NbcumvImportItem,
+        _ensure_sources,
+        _import_single_item,
+        _load_eligible_people_index,
+    )
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    result: dict[str, Any] = {
+        "fetched": 0,
+        "imported": 0,
+        "skipped": 0,
+        "failed": 0,
+        "created_person_links": 0,
+        "created_show_links": 0,
+        "asset_ids": [],
+        "errors": [],
+        "nbcumv_show_id": None,
+    }
+    normalized_title = str(show_title or "").strip()
+    if not normalized_title:
+        result["errors"].append("NBCUMV skipped: missing show title.")
+        return result
+
+    resolved_show = nbcumv_integration.resolve_show_by_title(normalized_title)
+    if not isinstance(resolved_show, dict) or not str(resolved_show.get("id") or "").strip():
+        result["errors"].append(f"NBCUMV skipped: no show match for '{normalized_title}'.")
+        return result
+
+    result["nbcumv_show_id"] = str(resolved_show.get("id") or "")
+    images = nbcumv_integration.search_images(
+        nbcumv_integration.SearchFilters(show_id=result["nbcumv_show_id"], limit=max(1, int(limit)))
+    )
+    result["fetched"] = len(images)
+    if not images:
+        return result
+
+    _ensure_sources(db)
+    people_index = _load_eligible_people_index(db)
+    for image in images:
+        filename = str(image.get("lbx_filename") or "").strip()
+        lbx_id = str(image.get("lbx_id") or "").strip()
+        if not filename or not lbx_id:
+            result["failed"] += 1
+            result["errors"].append("NBCUMV item missing lbx_id or filename.")
+            continue
+        try:
+            import_result = _import_single_item(
+                db=db,
+                item=NbcumvImportItem(
+                    lbx_id=lbx_id,
+                    lbx_filename=filename,
+                    location=image.get("location"),
+                    show_ids=[value for value in image.get("showIds") or [] if isinstance(value, str)],
+                    link_show_ids=[UUID(show_id)],
+                ),
+                assign_people=True,
+                people_index=people_index,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("NBCUMV show import failed show_id=%s lbx_id=%s", show_id, lbx_id)
+            result["failed"] += 1
+            result["errors"].append(f"{filename or lbx_id}: {exc}")
+            continue
+
+        if import_result.get("asset_id"):
+            result["asset_ids"].append(str(import_result["asset_id"]))
+        created_person_links = len(import_result.get("created_person_ids") or [])
+        created_show_links = len(import_result.get("created_show_ids") or [])
+        result["created_person_links"] += created_person_links
+        result["created_show_links"] += created_show_links
+        if import_result.get("already_imported") and created_person_links == 0 and created_show_links == 0:
+            result["skipped"] += 1
+        else:
+            result["imported"] += 1
+    return result
 
 
 def _slugify(value: str | None) -> str:
@@ -3963,6 +4049,11 @@ def commit_bravo_import(
 
     imported_show_images = 0
     imported_show_images_skipped = 0
+    imported_nbcumv_show_images = 0
+    skipped_nbcumv_show_images = 0
+    nbcumv_gallery_links_created = 0
+    nbcumv_person_gallery_links_created = 0
+    nbcumv_show_gallery_links_created = 0
     image_import_errors: list[str] = []
 
     selected_show_images: list[dict[str, str]] = []
@@ -4008,6 +4099,7 @@ def commit_bravo_import(
                         url=image["url"],
                         caption=f"Bravo import ({image['kind']})",
                         kind=image["kind"],
+                        logo_target_type="show" if image["kind"] == "logo" else None,
                     )
                     for image in selected_show_images
                 ],
@@ -4019,6 +4111,33 @@ def commit_bravo_import(
         except Exception as exc:  # noqa: BLE001
             logger.exception("Bravo show image import failed")
             image_import_errors.append(str(exc))
+
+    if not payload.cast_only:
+        show_title = str((normalized.get("show") or {}).get("title") or "").strip() or None
+        try:
+            nbcumv_result = _import_nbcumv_show_images(
+                db,
+                show_id=show_id_str,
+                show_title=show_title,
+            )
+            imported_nbcumv_show_images = int(nbcumv_result.get("imported") or 0)
+            skipped_nbcumv_show_images = int(nbcumv_result.get("skipped") or 0)
+            nbcumv_person_gallery_links_created = int(nbcumv_result.get("created_person_links") or 0)
+            nbcumv_show_gallery_links_created = int(nbcumv_result.get("created_show_links") or 0)
+            nbcumv_gallery_links_created = nbcumv_person_gallery_links_created + nbcumv_show_gallery_links_created
+            imported_show_images += imported_nbcumv_show_images
+            imported_show_images_skipped += skipped_nbcumv_show_images
+            imported_person_images += nbcumv_person_gallery_links_created
+            image_import_errors.extend(
+                [
+                    str(error)
+                    for error in (nbcumv_result.get("errors") or [])
+                    if isinstance(error, str) and error.strip()
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("NBCUMV show image import failed show_id=%s", show_id_str)
+            image_import_errors.append(f"NBCUMV: {exc}")
 
     return {
         "show_snapshot": show_snapshot,
@@ -4039,6 +4158,11 @@ def commit_bravo_import(
             "unmatched_people": len(unmatched_people),
             "imported_show_images": imported_show_images,
             "skipped_show_images": imported_show_images_skipped,
+            "imported_nbcumv_show_images": imported_nbcumv_show_images,
+            "skipped_nbcumv_show_images": skipped_nbcumv_show_images,
+            "nbcumv_gallery_links_created": nbcumv_gallery_links_created,
+            "nbcumv_person_gallery_links_created": nbcumv_person_gallery_links_created,
+            "nbcumv_show_gallery_links_created": nbcumv_show_gallery_links_created,
             "imported_person_images": imported_person_images,
             "skipped_person_images": skipped_person_images,
             "discovered_links": discovered_links,

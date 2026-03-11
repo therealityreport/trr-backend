@@ -109,9 +109,7 @@ def _collect_run_diagnostics(*, season_id: str, run_id: str) -> dict[str, Any]:
         metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
         retrieval_meta = metadata.get("retrieval_meta") if isinstance(metadata.get("retrieval_meta"), dict) else {}
         scrape_counters = (
-            retrieval_meta.get("scrape_counters")
-            if isinstance(retrieval_meta.get("scrape_counters"), dict)
-            else {}
+            retrieval_meta.get("scrape_counters") if isinstance(retrieval_meta.get("scrape_counters"), dict) else {}
         )
         diagnostics["posts_scanned"] += int(scrape_counters.get("posts") or 0)
         diagnostics["views_updated"] += int(retrieval_meta.get("details_refresh_views_updated") or 0)

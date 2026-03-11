@@ -592,9 +592,7 @@ def _run_sync_all(context: SeasonContext, state: dict[str, Any]) -> ScenarioResu
     counters = {
         "posts": int(tw_posts + tt_posts + yt_posts),
         "comments": int(tw_comments + tt_comments + yt_comments),
-        "comments_upserted": int(
-            (tw_meta.get("comment_stats") or {}).get("comments_upserted") or 0
-        )
+        "comments_upserted": int((tw_meta.get("comment_stats") or {}).get("comments_upserted") or 0)
         + int((tt_meta.get("comment_stats") or {}).get("comments_upserted") or 0)
         + int((yt_meta.get("comment_stats") or {}).get("comments_upserted") or 0),
         "quotes_upserted": int((tw_meta.get("quote_stats") or {}).get("quotes_upserted") or 0),
@@ -628,8 +626,8 @@ def _run_concurrent_backlog(context: SeasonContext, state: dict[str, Any]) -> Sc
             state["twitter_quotes"][tweet_id] = 7
         rows_by_account[account] = rows
 
-    social_repo._load_existing_posts = (
-        lambda _platform, _context, account, *args, **kwargs: rows_by_account.get(str(account), [])
+    social_repo._load_existing_posts = lambda _platform, _context, account, *args, **kwargs: rows_by_account.get(
+        str(account), []
     )  # type: ignore[method-assign]
     social_repo._load_comment_lifecycle_snapshots = lambda *args, **kwargs: {}  # type: ignore[method-assign]
     opts = IngestOptions(

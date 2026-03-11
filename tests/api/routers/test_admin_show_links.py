@@ -6,6 +6,7 @@ import re
 import time
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -177,7 +178,15 @@ def test_discover_show_links_expands_root_fandom_seed_to_show_page_candidates() 
         if url == "https://thetraitors.fandom.com/wiki/The_Traitors_(US)":
             return (
                 200,
-                "<html><body><h1>The Traitors (US)</h1></body></html>",
+                """
+                <html>
+                  <head>
+                    <meta property="og:site_name" content="The Traitors Wiki" />
+                    <title>The Traitors (US) | The Traitors Wiki | Fandom</title>
+                  </head>
+                  <body><h1>The Traitors (US)</h1></body>
+                </html>
+                """,
                 "https://thetraitors.fandom.com/wiki/The_Traitors_(US)",
                 None,
             )
@@ -230,6 +239,195 @@ def test_discover_show_links_expands_root_fandom_seed_to_show_page_candidates() 
     assert "https://thetraitors.fandom.com/" in fandom_urls
     assert "https://thetraitors.fandom.com/wiki/The_Traitors_(US)" in fandom_urls
     assert any(str(link.get("source") or "").endswith(":derived_show_page") for link in fandom_links)
+    derived_page = next(
+        link for link in fandom_links if link.get("url") == "https://thetraitors.fandom.com/wiki/The_Traitors_(US)"
+    )
+    assert derived_page["metadata"]["site_title"] == "The Traitors Wiki"
+
+
+def test_discover_show_links_falls_back_to_ranked_candidate_discovery_for_show_pages() -> None:
+    show_id = str(uuid4())
+
+    def _fetch_html(url: str, *, timeout: float = 20.0):
+        if url == "https://real-housewives.fandom.com/":
+            return (
+                200,
+                "<html><body><h1>The Real Housewives Wiki</h1></body></html>",
+                "https://real-housewives.fandom.com/",
+                None,
+            )
+        if url == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City":
+            return (
+                200,
+                """
+                <html>
+                  <head>
+                    <meta property="og:site_name" content="The Real Housewives Wiki" />
+                    <title>The Real Housewives of Salt Lake City | The Real Housewives Wiki | Fandom</title>
+                  </head>
+                  <body><h1>The Real Housewives of Salt Lake City</h1></body>
+                </html>
+                """,
+                url,
+                None,
+            )
+        return (404, "<html><body>Missing</body></html>", url, None)
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch(
+            "api.routers.admin_show_links.pg.fetch_all",
+            return_value=[{"url": "https://real-housewives.fandom.com/"}],
+        ):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Real Housewives of Salt Lake City",
+                    "networks": ["bravo"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=(None, None, "missing"),
+            ):
+                with patch(
+                    "api.routers.admin_show_links._curated_show_fandom_base_urls",
+                    return_value=(),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.load_fandom_community_allowlist",
+                        return_value=("real-housewives.fandom.com",),
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                            return_value=[],
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
+                                return_value=[],
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                                    return_value=[
+                                        SimpleNamespace(
+                                            url="https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                                            title="The Real Housewives of Salt Lake City",
+                                            source="search",
+                                        )
+                                    ],
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._fetch_html_with_status",
+                                        side_effect=_fetch_html,
+                                    ):
+                                        links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    fandom_urls = {str(link.get("url") or "") for link in fandom_links}
+    assert "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City" in fandom_urls
+    derived_page = next(
+        link
+        for link in fandom_links
+        if link.get("url") == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+    )
+    assert derived_page["metadata"]["site_title"] == "The Real Housewives Wiki"
+    assert str(derived_page.get("source") or "").endswith(":derived_show_page")
+
+
+def test_discover_show_links_skips_fandom_season_pages_when_only_season_candidate_exists() -> None:
+    show_id = str(uuid4())
+
+    def _fetch_html(url: str, *, timeout: float = 20.0):
+        if url == "https://real-housewives.fandom.com/":
+            return (
+                200,
+                "<html><body><h1>The Real Housewives Wiki</h1></body></html>",
+                url,
+                None,
+            )
+        if url == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_4":
+            return (
+                200,
+                """
+                <html>
+                  <head>
+                    <meta property="og:site_name" content="The Real Housewives Wiki" />
+                    <title>The Real Housewives of Salt Lake City - Season 4 | The Real Housewives Wiki | Fandom</title>
+                  </head>
+                  <body><h1>The Real Housewives of Salt Lake City - Season 4</h1></body>
+                </html>
+                """,
+                url,
+                None,
+            )
+        return (404, "<html><body>Missing</body></html>", url, None)
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch(
+            "api.routers.admin_show_links.pg.fetch_all",
+            return_value=[{"url": "https://real-housewives.fandom.com/"}],
+        ):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Real Housewives of Salt Lake City",
+                    "networks": ["bravo"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=(None, None, "missing"),
+            ):
+                with patch(
+                    "api.routers.admin_show_links._curated_show_fandom_base_urls",
+                    return_value=(),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.load_fandom_community_allowlist",
+                        return_value=("real-housewives.fandom.com",),
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                            return_value=[
+                                "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_4"
+                            ],
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
+                                return_value=[],
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                                    return_value=[],
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._fetch_html_with_status",
+                                        side_effect=_fetch_html,
+                                    ):
+                                        links = _discover_show_links(show_id)
+
+    fandom_urls = {
+        str(link.get("url") or "")
+        for link in links
+        if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"
+    }
+    assert "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_4" not in fandom_urls
+
+
+def test_score_fandom_show_candidate_url_rejects_wrong_same_franchise_show_page() -> None:
+    score = admin_show_links._score_fandom_show_candidate_url(
+        "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_New_York_City",
+        show_name="The Real Housewives of Salt Lake City",
+    )
+
+    assert score == 0
 
 
 def test_discover_show_links_skips_missing_fandom_pages() -> None:
@@ -672,6 +870,39 @@ def test_classify_submitted_link_input_recognizes_network_blog_urls() -> None:
     assert nbc_rows[0]["link_kind"] == "network_blog"
 
 
+def test_classify_submitted_link_input_recognizes_google_news_topic_urls() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_name_norm": "the real housewives of salt lake city",
+        "show_imdb_id": "tt11363282",
+        "show_tmdb_id": "110381",
+        "show_wikidata_id": None,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    rows, error = _classify_submitted_link_input(
+        "https://news.google.com/topics/CAAqKAgKIiJDQkFTRXdvTkwyY3ZNVEZvYlhBeGVtUndNQklDWlc0b0FBUAE?ceid=US:en&oc=3",
+        context,
+    )
+
+    assert error is None
+    assert rows[0]["entity_type"] == "show"
+    assert rows[0]["entity_id"] == show_id
+    assert rows[0]["season_number"] == 0
+    assert rows[0]["link_group"] == "official"
+    assert rows[0]["link_kind"] == "google_news_url"
+    assert rows[0]["label"] == "Google News"
+
+
 def test_classify_submitted_link_input_accepts_traitors_fandom_base_urls() -> None:
     show_id = str(uuid4())
     context = {
@@ -693,10 +924,28 @@ def test_classify_submitted_link_input_accepts_traitors_fandom_base_urls() -> No
         "people_by_wikidata": {},
     }
 
-    rows, error = _classify_submitted_link_input("https://thetraitors.fandom.com/wiki/The_Traitors_(US)", context)
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(
+            200,
+            """
+            <html>
+              <head>
+                <meta property="og:site_name" content="The Traitors Wiki" />
+                <title>The Traitors (US) | The Traitors Wiki | Fandom</title>
+              </head>
+              <body><h1>The Traitors (US)</h1></body>
+            </html>
+            """,
+            "https://thetraitors.fandom.com/wiki/The_Traitors_(US)",
+            None,
+        ),
+    ):
+        rows, error = _classify_submitted_link_input("https://thetraitors.fandom.com/wiki/The_Traitors_(US)", context)
     assert error is None
     assert rows[0]["entity_type"] == "show"
     assert rows[0]["link_kind"] == "fandom"
+    assert rows[0]["metadata"]["site_title"] == "The Traitors Wiki"
 
 
 def test_classify_submitted_link_input_accepts_traitors_fandom_root_domain_seed_without_scheme() -> None:
@@ -1312,6 +1561,7 @@ def test_canonicalize_url_normalizes_host_scheme_port_fragment_and_trailing_slas
         _canonicalize_url("https://en.wikipedia.org/wiki/The_Traitors_%28American_TV_series%29")
         == "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)"
     )
+    assert _canonicalize_url("https://www.tiktok.com/%40BravoTV/") == "https://www.tiktok.com/@BravoTV"
 
 
 def test_normalize_link_kind_maps_wikia_to_fandom() -> None:
@@ -1756,6 +2006,7 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
     assert len(fandom_links) == 1
     assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
+    assert fandom_links[0]["metadata"]["site_title"] == "Real Housewives Wiki"
 
 
 def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_pages() -> None:
@@ -1847,7 +2098,7 @@ def test_discover_people_links_discovers_fandom_profiles_across_show_fandom_doma
                 ):
                     with patch(
                         "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: (url if kind == "fandom" else None),
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
                     ):
                         links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
@@ -1891,7 +2142,7 @@ def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_searc
                 with patch("api.routers.admin_show_links.search_fandom_community_wiki_candidates", return_value=[]):
                     with patch(
                         "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: (url if kind == "fandom" else None),
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
                     ):
                         links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
@@ -2293,6 +2544,7 @@ def test_discover_season_links_uses_later_valid_fandom_candidate_when_first_is_m
         season_fandom_links[0]["url"]
         == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_season_4"
     )
+    assert season_fandom_links[0]["metadata"]["site_title"] == "The Real Housewives Wiki"
 
 
 def test_discover_people_links_uses_show_wikidata_cast_claims_when_missing_on_person() -> None:
@@ -3283,6 +3535,57 @@ def test_cleanup_invalid_show_knowledge_links_keeps_bravo_fandom_domains_without
     fetch_html.assert_not_called()
 
 
+def test_cleanup_invalid_show_knowledge_links_deletes_show_level_fandom_season_pages() -> None:
+    show_id = str(uuid4())
+    invalid_link_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={
+            "name": "The Real Housewives of Salt Lake City",
+            "wikidata_id": None,
+            "networks": ["Bravo TV"],
+        },
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": invalid_link_id,
+                    "entity_type": "show",
+                    "link_kind": "fandom",
+                    "status": "approved",
+                    "url": "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_4",
+                    "source": "backend_discovery",
+                    "discovered_by": "backend_discovery",
+                }
+            ]
+            with patch(
+                "api.routers.admin_show_links._fetch_html_with_status",
+                return_value=(
+                    200,
+                    """
+                    <html>
+                      <head>
+                        <title>
+                          The Real Housewives of Salt Lake City - Season 4 | The Real Housewives Wiki | Fandom
+                        </title>
+                      </head>
+                      <body><h1>The Real Housewives of Salt Lake City - Season 4</h1></body>
+                    </html>
+                    """,
+                    "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_4",
+                    None,
+                ),
+            ):
+                with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                    with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1):
+                        result = _cleanup_invalid_show_knowledge_links(show_id)
+
+    assert result["invalid"] == 1
+    assert result["deleted"] == 1
+    assert result["deleted_by_reason"]["fandom_not_show_level"] == 1
+
+
 def test_cleanup_invalid_show_knowledge_links_deletes_manual_invalid_rows() -> None:
     show_id = str(uuid4())
     invalid_manual_link_id = str(uuid4())
@@ -3347,6 +3650,30 @@ def test_cleanup_invalid_show_knowledge_links_deletes_manual_pending_rows() -> N
     assert result["manual_skipped"] == 0
     assert result["deleted_by_reason"]["fandom_domain_mismatch"] == 1
     assert result["validation_failures"] == 0
+
+
+def test_normalize_existing_social_handle_urls_repairs_encoded_handles() -> None:
+    show_id = str(uuid4())
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[{"id": str(uuid4())}], [{"id": str(uuid4())}]]
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_all",
+        return_value=[
+            {
+                "id": str(uuid4()),
+                "url": "https://www.tiktok.com/%40BravoTV",
+            },
+            {
+                "id": str(uuid4()),
+                "url": "https://www.youtube.com/%40Bravo",
+            },
+        ],
+    ):
+        with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+            with patch("api.routers.admin_show_links.pg.db_cursor", return_value=nullcontext(cursor)):
+                result = admin_show_links._normalize_existing_social_handle_urls(show_id, include_people=True)
+
+    assert result == {"scanned": 2, "normalized": 2, "deleted_duplicates": 0}
 
 
 def test_cleanup_invalid_show_knowledge_links_rejects_season_wikipedia_variant_mismatch() -> None:
@@ -3769,15 +4096,19 @@ def test_run_show_link_discovery_returns_structured_timeout_context() -> None:
                                             "api.routers.admin_show_links._promote_pending_links_to_approved",
                                             return_value=0,
                                         ):
-                                            result = admin_show_links._run_show_link_discovery(
-                                                show_id_str=show_id,
-                                                payload=admin_show_links.LinkDiscoverRequest(
-                                                    include_seasons=True,
-                                                    include_people=True,
-                                                ),
-                                                db=db,
-                                                actor="admin@example.com",
-                                            )
+                                            with patch(
+                                                "api.routers.admin_show_links._normalize_existing_social_handle_urls",
+                                                return_value={"scanned": 0, "normalized": 0, "deleted_duplicates": 0},
+                                            ):
+                                                result = admin_show_links._run_show_link_discovery(
+                                                    show_id_str=show_id,
+                                                    payload=admin_show_links.LinkDiscoverRequest(
+                                                        include_seasons=True,
+                                                        include_people=True,
+                                                    ),
+                                                    db=db,
+                                                    actor="admin@example.com",
+                                                )
 
     assert result["timed_out"] is True
     assert result["status"] == "timed_out"
@@ -3787,6 +4118,127 @@ def test_run_show_link_discovery_returns_structured_timeout_context() -> None:
     assert isinstance(timeout.get("stage"), str)
     assert isinstance(timeout.get("elapsed_ms"), int)
     assert isinstance(timeout.get("budget_ms"), int)
+
+
+def test_run_show_link_discovery_emits_stage_progress_snapshots() -> None:
+    progress_events: list[tuple[str, dict[str, object]]] = []
+
+    def _discover_people_links(_show_id: str, *, show_fandom_seed_urls=None, stats=None):
+        assert stats is not None
+        stats["people_total_targets"] = 9
+        stats["people_processed"] = 4
+        stats["people_links_discovered"] = 11
+        stats["people_with_links"] = 3
+        stats["current_person_name"] = "Heather Gay"
+        return []
+
+    with patch(
+        "api.routers.admin_show_links._count_discovery_scan_targets",
+        return_value={"show_scanned": 1, "season_scanned": 4, "people_scanned": 9},
+    ):
+        with patch(
+            "api.routers.admin_show_links._discover_show_links",
+            return_value=[
+                {
+                    "entity_type": "show",
+                    "entity_id": "show-1",
+                    "season_number": 0,
+                    "link_group": "knowledge",
+                    "link_kind": "fandom",
+                    "url": "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                    "source": "derived",
+                    "metadata": {
+                        "page_title": "The Real Housewives of Salt Lake City",
+                        "site_title": "The Real Housewives Wiki",
+                    },
+                }
+            ],
+        ):
+            with patch("api.routers.admin_show_links._discover_season_links", return_value=[]):
+                with patch("api.routers.admin_show_links._discover_people_links", side_effect=_discover_people_links):
+                    with patch("api.routers.admin_show_links._upsert_link", return_value=None):
+                        with patch(
+                            "api.routers.admin_show_links._normalize_legacy_knowledge_link_kinds",
+                            return_value=0,
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._cleanup_invalid_person_knowledge_links",
+                                return_value={
+                                    "scanned": 0,
+                                    "deleted": 0,
+                                    "promoted": 0,
+                                    "deleted_by_reason": {},
+                                    "validation_failures": 0,
+                                },
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._cleanup_invalid_person_social_links",
+                                    return_value={
+                                        "scanned": 0,
+                                        "deleted": 0,
+                                        "promoted": 0,
+                                        "deleted_by_reason": {},
+                                        "validation_failures": 0,
+                                    },
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._cleanup_invalid_show_knowledge_links",
+                                        return_value={
+                                            "scanned": 0,
+                                            "deleted": 0,
+                                            "manual_skipped": 0,
+                                            "deleted_by_reason": {},
+                                            "validation_failures": 0,
+                                        },
+                                    ):
+                                        with patch(
+                                            "api.routers.admin_show_links._promote_pending_links_to_approved",
+                                            return_value=0,
+                                        ):
+                                            with patch(
+                                                "api.routers.admin_show_links._normalize_existing_social_handle_urls",
+                                                return_value={"scanned": 2, "normalized": 1, "deleted_duplicates": 0},
+                                            ):
+                                                admin_show_links._run_show_link_discovery(
+                                                    show_id_str="show-1",
+                                                    payload=admin_show_links.LinkDiscoverRequest(
+                                                        include_seasons=True,
+                                                        include_people=True,
+                                                    ),
+                                                    db=MagicMock(),
+                                                    actor="admin@example.com",
+                                                    stage_callback=lambda stage, payload: progress_events.append(
+                                                        (stage, payload)
+                                                    ),
+                                                )
+
+    show_start_payload = next(payload for stage, payload in progress_events if stage == "show_discovery_started")
+    show_complete_payload = next(payload for stage, payload in progress_events if stage == "show_discovery_completed")
+    people_complete_payload = next(
+        payload for stage, payload in progress_events if stage == "people_discovery_completed"
+    )
+
+    assert show_start_payload["current_stage"] == "show_discovery_started"
+    assert show_start_payload["discovered_rows"] == 0
+    assert show_start_payload["scan_targets"] == {"show_scanned": 1, "season_scanned": 4, "people_scanned": 9}
+    assert isinstance(show_start_payload["stage_budget"], dict)
+    assert show_start_payload["stage_budget"]["max_fandom_candidates"] > 0
+
+    assert show_complete_payload["current_stage"] == "show_discovery_completed"
+    assert show_complete_payload["discovered_rows"] == 1
+    assert show_complete_payload["rows"] == 1
+    assert isinstance(show_complete_payload["stage_elapsed_ms"], int)
+    assert people_complete_payload["stage_progress"] == {
+        "processed_targets": 4,
+        "total_targets": 9,
+        "current_target_label": "Heather Gay",
+        "links_discovered": 11,
+        "targets_with_links": 3,
+    }
+    social_repair_payload = next(
+        payload for stage, payload in progress_events if stage == "social_url_repair_completed"
+    )
+    assert social_repair_payload["normalized"] == 1
 
 
 def test_discover_show_links_stream_emits_progress_events_before_complete() -> None:
@@ -3844,6 +4296,7 @@ def test_discover_show_links_stream_emits_progress_events_before_complete() -> N
     assert complete_index != -1
     assert start_index < show_started_index < show_completed_index < complete_index
     assert '"stage_timings_ms"' in payload
+    assert '"current_stage"' in payload
 
 
 def test_discover_show_links_stream_includes_operation_contract_fields(

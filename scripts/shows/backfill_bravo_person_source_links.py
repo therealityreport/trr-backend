@@ -455,11 +455,7 @@ def _run_show(*, db: Any, show_id: str, actor: str, apply: bool) -> dict[str, An
         entity_type = str(row.get("entity_type") or "").strip().lower()
         link_kind = admin_show_links._normalize_link_kind(str(row.get("link_kind") or "").strip().lower())
         status = str(row.get("status") or "pending").strip().lower()
-        if (
-            entity_type == "person"
-            and link_kind in admin_show_links._PERSON_SOURCE_LINK_KINDS
-            and status != "approved"
-        ):
+        if entity_type == "person" and link_kind in admin_show_links._PERSON_SOURCE_LINK_KINDS and status != "approved":
             discovery_skipped_person_source_non_approved += 1
             continue
         discovered_upserted += 1

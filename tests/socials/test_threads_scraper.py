@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+import requests
 
 from trr_backend.socials.threads.scraper import (
     _THREADS_POST_VIEW_COUNT_DOC_ID,
@@ -145,9 +146,7 @@ def test_threads_scrape_via_graphql_keeps_feed_impression_count_without_activity
 def test_threads_scrape_post_populates_views_from_activity_query(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = ThreadsScraper(cookies={"csrftoken": "token"})
     html_payload = (
-        '{"DTSGInitialData":{"token":"fb-dtsg-token"}}'
-        '{"LSD":{"token":"lsd-token"}}'
-        '{"post_id":"3699063449418169480"}'
+        '{"DTSGInitialData":{"token":"fb-dtsg-token"}}{"LSD":{"token":"lsd-token"}}{"post_id":"3699063449418169480"}'
     )
 
     monkeypatch.setattr(scraper, "_fetch_html", lambda *_args, **_kwargs: html_payload)
@@ -190,3 +189,44 @@ def test_threads_scrape_post_populates_views_from_activity_query(monkeypatch: py
     assert comments == []
     assert captured["post_pk"] == "3699063449418169480"
     assert post.raw_data.get("text_post_app_info", {}).get("impression_count") == 6829
+
+
+def test_threads_scrape_retries_profile_fetch_without_cookies_on_authenticated_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = ThreadsScraper(cookies={"csrftoken": "token"})
+    calls: list[dict[str, str] | None] = []
+
+    def _fake_fetch_html_with_cookies(
+        _url: str,
+        *,
+        delay_seconds: float,
+        referer: str | None = None,
+        document: bool = False,
+        cookies_override: dict[str, str] | None = None,
+    ) -> str:
+        del delay_seconds, referer, document
+        calls.append(cookies_override)
+        if cookies_override is None:
+            response = requests.Response()
+            response.status_code = 404
+            raise requests.HTTPError(response=response)
+        return "<html></html>"
+
+    monkeypatch.setattr(scraper, "_fetch_html_with_cookies", _fake_fetch_html_with_cookies)
+    monkeypatch.setattr(scraper, "_scrape_via_graphql", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_scrape_via_fallback", lambda *_args, **_kwargs: [])
+
+    posts = scraper.scrape(
+        ThreadsScrapeConfig(
+            username="bravotv",
+            date_start=datetime(2026, 1, 1, tzinfo=UTC),
+            date_end=datetime(2026, 3, 8, tzinfo=UTC),
+            delay_seconds=0,
+            max_pages=1,
+        )
+    )
+
+    assert posts == []
+    assert calls == [None, {}]
+    assert scraper.last_retrieval_meta["profile_fetch_mode"] == "anonymous_fallback"

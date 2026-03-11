@@ -11,7 +11,8 @@ from trr_backend.db import pg
 from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.utils.env import load_env
 
-TARGET_PLATFORMS = {"facebook", "threads"}
+TARGET_PLATFORMS = {"instagram", "tiktok", "twitter", "facebook", "threads"}
+CORE_ACCOUNT_PLATFORMS = set(social_repo._BRAVO_CORE_PLATFORM_ACCOUNTS)
 
 
 @dataclass(slots=True)
@@ -19,18 +20,19 @@ class BackfillCounters:
     seasons_scanned: int = 0
     seasons_with_rows: int = 0
     rows_inserted: int = 0
+    rows_updated: int = 0
     rows_skipped_existing: int = 0
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Backfill missing bravo season_targets rows for facebook/threads."
+        description="Backfill missing Bravo season_targets rows and repair stale core-platform accounts."
     )
     parser.add_argument("--season-id", default="", help="Optional season UUID filter.")
     parser.add_argument(
         "--updated-by",
         default="system:backfill-bravo-missing-platform-targets",
-        help="updated_by value for inserted rows.",
+        help="updated_by value for inserted/updated rows.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Compute inserts without writing.")
     return parser.parse_args()
@@ -72,6 +74,16 @@ def _load_existing_platform_rows(*, season_id: str) -> list[dict[str, Any]]:
           and source_scope = 'bravo'
         """,
         [season_id],
+    )
+
+
+def _normalize_accounts(accounts: list[Any] | None) -> list[str]:
+    return social_repo._normalize_unique_terms(  # noqa: SLF001
+        [
+            normalized
+            for normalized in (social_repo._normalize_account_handle(item) for item in (accounts or []))  # noqa: SLF001
+            if normalized
+        ]
     )
 
 
@@ -139,6 +151,35 @@ def _insert_target_row(
         )
 
 
+def _update_target_accounts(
+    *,
+    season_id: str,
+    platform: str,
+    accounts: list[str],
+    updated_by: str | None,
+) -> None:
+    with pg.db_cursor() as cur:
+        cur.execute(
+            """
+            update social.season_targets
+            set
+              accounts = %s::jsonb,
+              updated_by = %s,
+              updated_at = %s
+            where season_id = %s::uuid
+              and platform = %s
+              and source_scope = 'bravo'
+            """,
+            [
+                json.dumps(accounts),
+                updated_by,
+                datetime.now(tz=UTC),
+                season_id,
+                platform,
+            ],
+        )
+
+
 def main() -> int:
     load_env()
     args = _parse_args()
@@ -160,11 +201,12 @@ def main() -> int:
             continue
 
         counters.seasons_with_rows += 1
-        present_platforms = {
-            str(row.get("platform") or "").strip().lower()
+        existing_by_platform = {
+            str(row.get("platform") or "").strip().lower(): row
             for row in existing_rows
             if str(row.get("platform") or "").strip()
         }
+        present_platforms = set(existing_by_platform)
 
         context = social_repo.SeasonContext(
             season_id=sid,
@@ -181,27 +223,56 @@ def main() -> int:
         }
 
         inserted_platforms: list[str] = []
+        updated_platforms: list[dict[str, Any]] = []
         for platform in sorted(TARGET_PLATFORMS):
-            if platform in present_platforms:
-                counters.rows_skipped_existing += 1
+            existing_row = existing_by_platform.get(platform)
+            if existing_row is None:
+                target = default_map.get(platform)
+                if not target:
+                    continue
+                if not args.dry_run:
+                    _insert_target_row(
+                        season_id=sid,
+                        show_id=show_id,
+                        target=target,
+                        updated_by=str(args.updated_by or "").strip() or None,
+                    )
+                counters.rows_inserted += 1
+                inserted_platforms.append(platform)
                 continue
-            target = default_map.get(platform)
-            if not target:
-                continue
-            if not args.dry_run:
-                _insert_target_row(
-                    season_id=sid,
-                    show_id=show_id,
-                    target=target,
-                    updated_by=str(args.updated_by or "").strip() or None,
+
+            if platform in CORE_ACCOUNT_PLATFORMS:
+                current_accounts = _normalize_accounts(existing_row.get("accounts") or [])
+                repaired_accounts = social_repo._ensure_bravo_core_platform_accounts(  # noqa: SLF001
+                    source_scope="bravo",
+                    platform=platform,
+                    accounts=current_accounts,
                 )
-            counters.rows_inserted += 1
-            inserted_platforms.append(platform)
+                if repaired_accounts != current_accounts:
+                    if not args.dry_run:
+                        _update_target_accounts(
+                            season_id=sid,
+                            platform=platform,
+                            accounts=repaired_accounts,
+                            updated_by=str(args.updated_by or "").strip() or None,
+                        )
+                    counters.rows_updated += 1
+                    updated_platforms.append(
+                        {
+                            "platform": platform,
+                            "accounts_before": current_accounts,
+                            "accounts_after": repaired_accounts,
+                        }
+                    )
+                    continue
+
+            counters.rows_skipped_existing += 1
 
         by_season[sid] = {
             "show_id": show_id,
             "season_number": int(season_row.get("season_number") or 0),
             "inserted_platforms": inserted_platforms,
+            "updated_platforms": updated_platforms,
             "existing_platforms": sorted(present_platforms),
         }
 
@@ -215,6 +286,7 @@ def main() -> int:
                     "seasons_scanned": counters.seasons_scanned,
                     "seasons_with_existing_bravo_rows": counters.seasons_with_rows,
                     "rows_inserted": counters.rows_inserted,
+                    "rows_updated": counters.rows_updated,
                     "rows_skipped_existing": counters.rows_skipped_existing,
                 },
                 "by_season": by_season,

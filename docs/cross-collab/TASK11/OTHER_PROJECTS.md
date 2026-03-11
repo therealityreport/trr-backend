@@ -3,6 +3,24 @@
 Repo: TRR-Backend
 Last updated: March 4, 2026
 
+## March 7, 2026 admin-vision rollout follow-up
+
+- TRR-Backend staging now covers the remaining admin image-analysis cutover item:
+  - `run_admin_vision` is deployed in Modal
+  - staging API host env now points admin image execution at Modal
+- TRR-APP docs should treat the covered image-analysis and social entries as `Modal` current runtime after this rollout.
+- screenalytics remains outside the execution path for documented TRR admin jobs in staging, but may still be retained for non-admin surfaces outside this task scope.
+
+## March 7, 2026 rollout checkpoint
+
+- Staging backend runtime is now live on the canonical `remote + modal` contract.
+- Modal named secrets and host-side Modal credentials were provisioned during the staging rollout.
+- Social/admin/google-news/reddit dispatchers now surface as Modal-backed executor rows on staging worker-health.
+- Production remains unaddressable in the current AWS account context:
+  - no `/trr/production/*` SSM namespace
+  - no separate production ASG visible
+- TRR-APP remains contract-compatible; no additional consumer wire-shape changes were required for this live backend cutover.
+
 ## Cross-Repo Snapshot
 
 - `TRR-Backend`: Plan A contract surface implemented and freeze checkpoint published; additive reddit run-list endpoint shipped for Plan B manual-attach parity.

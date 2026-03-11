@@ -15,6 +15,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from trr_backend.socials.tiktok import (
     TikTokScrapeConfig,
     TikTokScraper,
 )
+from trr_backend.utils.env import load_env
 
 logging.basicConfig(
     level=logging.INFO,
@@ -216,6 +218,16 @@ Examples:
 
     # Common arguments
     parser.add_argument(
+        "--cookies",
+        default="tiktok_cookies.json",
+        help="Path to TikTok cookies JSON file",
+    )
+    parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="Run without authentication (may limit availability)",
+    )
+    parser.add_argument(
         "--output",
         help="Output file prefix (default: {username}_tiktok_posts or {video_id}_comments)",
     )
@@ -256,8 +268,27 @@ Examples:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    env_path = load_env()
+    if env_path:
+        logger.debug("Loaded environment from %s", env_path)
+
     # Create scraper
-    scraper = TikTokScraper()
+    tiktok_cookies: dict[str, str] = {}
+    if not args.no_auth:
+        try:
+            from trr_backend.repositories.social_season_analytics import _load_tiktok_cookies
+
+            if args.cookies and args.cookies != "tiktok_cookies.json":
+                os.environ["SOCIAL_TIKTOK_COOKIES_FILE"] = str(Path(args.cookies).expanduser())
+            tiktok_cookies = _load_tiktok_cookies()
+            if tiktok_cookies:
+                logger.info("Loaded TikTok cookies via canonical repo auth loader")
+            else:
+                logger.warning("No TikTok cookies resolved; continuing unauthenticated")
+        except Exception as exc:
+            logger.error("Failed to load TikTok cookies: %s", exc)
+            logger.warning("Running TikTok scrape without authenticated cookies")
+    scraper = TikTokScraper(cookies=tiktok_cookies)
 
     # Comment scraping mode
     if args.comments:

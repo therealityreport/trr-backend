@@ -409,7 +409,7 @@ def patch_family(*, family_id: str, payload: dict[str, Any], actor: str) -> dict
     rows = pg.execute_returning(
         f"""
         update admin.brand_families
-        set {', '.join(updates)}
+        set {", ".join(updates)}
         where id = %s::uuid
         returning *
         """,
@@ -444,9 +444,7 @@ def add_family_member(*, family_id: str, payload: dict[str, Any], actor: str) ->
     )
     if conflicting:
         conflict_family = str(conflicting.get("display_name") or conflicting.get("family_id"))
-        raise ValueError(
-            f"Entity already belongs to active family {conflict_family}"
-        )
+        raise ValueError(f"Entity already belongs to active family {conflict_family}")
 
     entity_display_name = _normalize_text(payload.get("entity_display_name")) or _resolve_entity_display_name(
         entity_type,
@@ -553,7 +551,7 @@ def list_family_links(*, family_id: str, active_only: bool = False) -> dict[str,
         f"""
         select *
         from admin.brand_family_link_rules
-        where {' and '.join(clauses)}
+        where {" and ".join(clauses)}
         order by priority asc, updated_at desc, created_at desc
         """,
         params,
@@ -727,7 +725,7 @@ def patch_family_link_rule(*, family_id: str, rule_id: str, payload: dict[str, A
     rows = pg.execute_returning(
         f"""
         update admin.brand_family_link_rules
-        set {', '.join(updates)}
+        set {", ".join(updates)}
         where id = %s::uuid
           and family_id = %s::uuid
         returning *
@@ -1077,7 +1075,7 @@ def apply_family_links(
         f"""
         select *
         from admin.brand_family_link_rules
-        where {' and '.join(clauses)}
+        where {" and ".join(clauses)}
         order by priority asc, updated_at desc
         """,
         params,

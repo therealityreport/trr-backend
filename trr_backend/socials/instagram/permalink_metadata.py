@@ -470,9 +470,7 @@ def _extract_child_posts_data(media: dict[str, Any]) -> list[dict[str, Any]]:
             "video_url": _best_video_url(item),
             "width": int(item.get("original_width")) if isinstance(item.get("original_width"), (int, float)) else None,
             "height": (
-                int(item.get("original_height"))
-                if isinstance(item.get("original_height"), (int, float))
-                else None
+                int(item.get("original_height")) if isinstance(item.get("original_height"), (int, float)) else None
             ),
             "alt": str(item.get("accessibility_caption") or "").strip() or None,
             "tagged_users_detail": _extract_tagged_users_detail(item),

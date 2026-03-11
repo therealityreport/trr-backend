@@ -44,6 +44,7 @@ def test_admin_brands_endpoints_require_authentication(client: TestClient) -> No
             "/api/v1/admin/brands/logos/options/sources?target_type=publication&target_key=instagram.com&logo_role=wordmark",
         ),
         ("POST", "/api/v1/admin/brands/logos/options/discover"),
+        ("POST", "/api/v1/admin/brands/logos/options/source-query"),
         ("POST", "/api/v1/admin/brands/logos/options/select"),
         ("GET", "/api/v1/admin/brands/logo-targets?target_type=network"),
         ("POST", "/api/v1/admin/brands/logos/sync"),
@@ -260,13 +261,27 @@ def test_get_brand_logo_option_sources_success(client: TestClient, monkeypatch: 
         "target_type": "publication",
         "target_key": "instagram.com",
         "logo_role": "wordmark",
-        "sources": [{"source_provider": "wikimedia_commons", "total_count": 2, "has_more": False}],
+        "sources": [
+            {
+                "source_provider": "wikimedia_commons",
+                "total_count": 2,
+                "has_more": False,
+                "editable": True,
+                "refreshable": True,
+                "query_kind": "search_term",
+                "default_query_value": "instagram",
+                "effective_query_value": "instagram",
+                "query_values": ["instagram", "instagram tv"],
+                "query_links": ["https://commons.wikimedia.org/example"],
+                "logo_role": "wordmark",
+            }
+        ],
     }
     with patch("api.routers.admin_brands._list_logo_option_sources", return_value=expected) as mocked:
         response = client.get(
             (
                 "/api/v1/admin/brands/logos/options/sources"
-                "?target_type=publication&target_key=instagram.com&logo_role=wordmark&include_related=true"
+                "?target_type=publication&target_key=instagram.com&target_label=Instagram&logo_role=wordmark&include_related=true"
             ),
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -275,6 +290,7 @@ def test_get_brand_logo_option_sources_success(client: TestClient, monkeypatch: 
     assert mocked.call_args.kwargs == {
         "target_type": "publication",
         "target_key": "instagram.com",
+        "target_label": "Instagram",
         "logo_role": "wordmark",
         "include_related": True,
     }
@@ -316,9 +332,12 @@ def test_get_brand_logos_include_related_survives_missing_related_variant_column
     def _fake_fetch_all(_query: str, _params: list[object] | None = None) -> list[dict[str, object]]:
         return base_rows
 
-    with patch("api.routers.admin_brands.pg.fetch_all", side_effect=_fake_fetch_all), patch(
-        "api.routers.admin_brands._find_related_network_streaming_assets_by_host",
-        side_effect=RuntimeError('column "hosted_logo_black_url" does not exist'),
+    with (
+        patch("api.routers.admin_brands.pg.fetch_all", side_effect=_fake_fetch_all),
+        patch(
+            "api.routers.admin_brands._find_related_network_streaming_assets_by_host",
+            side_effect=RuntimeError('column "hosted_logo_black_url" does not exist'),
+        ),
     ):
         response = client.get(
             (
@@ -370,9 +389,12 @@ def test_get_brand_logo_option_sources_include_related_survives_missing_related_
     def _fake_fetch_all(_query: str, _params: list[object] | None = None) -> list[dict[str, object]]:
         return base_rows
 
-    with patch("api.routers.admin_brands.pg.fetch_all", side_effect=_fake_fetch_all), patch(
-        "api.routers.admin_brands._find_related_network_streaming_assets_by_host",
-        side_effect=RuntimeError('column "hosted_logo_black_url" does not exist'),
+    with (
+        patch("api.routers.admin_brands.pg.fetch_all", side_effect=_fake_fetch_all),
+        patch(
+            "api.routers.admin_brands._find_related_network_streaming_assets_by_host",
+            side_effect=RuntimeError('column "hosted_logo_black_url" does not exist'),
+        ),
     ):
         response = client.get(
             (
@@ -391,7 +413,7 @@ def test_get_brand_logo_option_sources_include_related_survives_missing_related_
 def test_post_brand_logo_option_discover_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
-    expected = {"candidates": [], "next_offset": 0, "has_more": False}
+    expected = {"candidates": [], "total_count": 0, "next_offset": 0, "has_more": False}
     payload = {
         "target_type": "publication",
         "target_key": "instagram.com",
@@ -410,6 +432,41 @@ def test_post_brand_logo_option_discover_success(client: TestClient, monkeypatch
     assert response.json() == expected
     assert mocked.call_args.args[0].target_type == "publication"
     assert mocked.call_args.args[0].target_key == "instagram.com"
+
+
+def test_post_brand_logo_option_source_query_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "logo_role": "wordmark",
+        "source": {
+            "source_provider": "logos1000",
+            "effective_query_value": "instagram-logo",
+            "query_values": ["instagram-logo", "instagram-icon"],
+        },
+    }
+    payload = {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "target_label": "Instagram",
+        "logo_role": "wordmark",
+        "source_provider": "logos1000",
+        "query_values": ["instagram-logo", "instagram-icon"],
+    }
+
+    with patch("api.routers.admin_brands._save_logo_source_query", return_value=expected) as mocked:
+        response = client.post(
+            "/api/v1/admin/brands/logos/options/source-query",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.args[0].source_provider == "logos1000"
+    assert mocked.call_args.args[0].query_values == ["instagram-logo", "instagram-icon"]
 
 
 def test_post_brand_logo_option_select_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -516,18 +573,23 @@ def test_brand_family_endpoints_success(client: TestClient, monkeypatch: pytest.
     assert response.status_code == 200
     assert response.json()["id"] == "f1"
 
-    with patch(
-        "trr_backend.repositories.brand_families.get_family_by_entity",
-        return_value={"id": "f1", "display_name": "NBCU Family"},
-    ), patch(
-        "trr_backend.repositories.brand_families.list_family_suggestions",
-        return_value={"rows": []},
-    ), patch(
-        "trr_backend.repositories.brand_families.list_family_links",
-        return_value={"rows": []},
-    ), patch(
-        "trr_backend.repositories.brand_families.list_family_wikipedia_show_links",
-        return_value={"rows": []},
+    with (
+        patch(
+            "trr_backend.repositories.brand_families.get_family_by_entity",
+            return_value={"id": "f1", "display_name": "NBCU Family"},
+        ),
+        patch(
+            "trr_backend.repositories.brand_families.list_family_suggestions",
+            return_value={"rows": []},
+        ),
+        patch(
+            "trr_backend.repositories.brand_families.list_family_links",
+            return_value={"rows": []},
+        ),
+        patch(
+            "trr_backend.repositories.brand_families.list_family_wikipedia_show_links",
+            return_value={"rows": []},
+        ),
     ):
         response = client.get(
             "/api/v1/admin/brands/families/by-entity?entity_type=network&entity_key=bravo",

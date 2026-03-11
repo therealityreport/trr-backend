@@ -98,28 +98,20 @@ def _fetch_batch(
     mentions_col_enabled: bool,
 ) -> list[dict[str, Any]]:
     cfg = PLATFORM_CONFIG[platform]
-    hashtags_expr = (
-        f"coalesce(p.{cfg['hashtags_col']}, '[]'::jsonb)"
-        if hashtags_col_enabled
-        else "'[]'::jsonb"
-    )
-    mentions_expr = (
-        f"coalesce(p.{cfg['mentions_col']}, '[]'::jsonb)"
-        if mentions_col_enabled
-        else "'[]'::jsonb"
-    )
+    hashtags_expr = f"coalesce(p.{cfg['hashtags_col']}, '[]'::jsonb)" if hashtags_col_enabled else "'[]'::jsonb"
+    mentions_expr = f"coalesce(p.{cfg['mentions_col']}, '[]'::jsonb)" if mentions_col_enabled else "'[]'::jsonb"
     where_clause = "where (%s = '' or p.season_id::text = %s)"
     params: list[Any] = [season_id, season_id, max(1, int(batch_size)), max(0, int(offset))]
     return pg.fetch_all(
         f"""
         select
-          p.{cfg['id_col']}::text as row_id,
-          {cfg['text_expr']} as text,
+          p.{cfg["id_col"]}::text as row_id,
+          {cfg["text_expr"]} as text,
           {hashtags_expr} as hashtags,
           {mentions_expr} as mentions
-        from social.{cfg['table']} p
+        from social.{cfg["table"]} p
         {where_clause}
-        order by {cfg['order_col']} desc nulls last, p.{cfg['id_col']} desc
+        order by {cfg["order_col"]} desc nulls last, p.{cfg["id_col"]} desc
         limit %s
         offset %s
         """,
@@ -149,9 +141,9 @@ def _update_tokens(
     with pg.db_cursor() as cur:
         cur.execute(
             f"""
-            update social.{cfg['table']}
-            set {', '.join(assignments)}
-            where {cfg['id_col']} = %s::uuid
+            update social.{cfg["table"]}
+            set {", ".join(assignments)}
+            where {cfg["id_col"]} = %s::uuid
             """,
             params,
         )

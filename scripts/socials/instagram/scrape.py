@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from trr_backend.socials.instagram import (
     ScrapeConfig,
     load_cookies_from_file,
 )
+from trr_backend.utils.env import load_env
 
 logging.basicConfig(
     level=logging.INFO,
@@ -267,20 +269,31 @@ Examples:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    env_path = load_env()
+    if env_path:
+        logger.debug("Loaded environment from %s", env_path)
+
     # Load cookies
     cookies = {}
     if not args.no_auth:
         try:
-            cookies_path = Path(args.cookies)
-            if not cookies_path.exists():
-                # Try relative to script directory
-                cookies_path = Path(__file__).parent / args.cookies
-            if cookies_path.exists():
-                cookies = load_cookies_from_file(str(cookies_path))
-                logger.info(f"Loaded cookies from {cookies_path}")
+            from trr_backend.repositories.social_season_analytics import _load_instagram_cookies
+
+            if args.cookies and args.cookies != "instagram_cookies.json":
+                os.environ["SOCIAL_INSTAGRAM_COOKIES_FILE"] = str(Path(args.cookies).expanduser())
+            cookies = _load_instagram_cookies()
+            if cookies:
+                logger.info("Loaded Instagram cookies via canonical repo auth loader")
             else:
-                logger.warning(f"Cookies file not found: {args.cookies}")
-                logger.warning("Running in unauthenticated mode")
+                cookies_path = Path(args.cookies)
+                if not cookies_path.exists():
+                    cookies_path = Path(__file__).parent / args.cookies
+                if cookies_path.exists():
+                    cookies = load_cookies_from_file(str(cookies_path))
+                    logger.info(f"Loaded cookies from {cookies_path}")
+                else:
+                    logger.warning(f"Cookies file not found: {args.cookies}")
+                    logger.warning("Running in unauthenticated mode")
         except Exception as e:
             logger.error(f"Failed to load cookies: {e}")
             logger.warning("Running in unauthenticated mode")

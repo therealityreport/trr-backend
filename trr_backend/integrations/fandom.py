@@ -537,10 +537,7 @@ def _search_fandom_allpages_candidates(
             "aplimit": limit,
             "format": "json",
         }
-        api_query_url = (
-            f"https://{domain}/api.php?"
-            f"{urlencode(params)}"
-        )
+        api_query_url = f"https://{domain}/api.php?{urlencode(params)}"
         status, body, _ = fetch_html(api_query_url, timeout=timeout_seconds, headers=headers)
         if status != 200 or not body:
             continue

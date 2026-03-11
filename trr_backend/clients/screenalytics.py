@@ -9,8 +9,6 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Literal
 
-import requests
-
 DetectorMode = Literal["faces_then_yolo", "faces", "yolo"]
 
 logger = logging.getLogger(__name__)
@@ -304,8 +302,125 @@ def _batch_endpoint_candidates() -> list[str]:
     return ["/vision/people-count/batch", "/api/v1/vision/people-count/batch"]
 
 
+def _runtime_markers() -> set[str]:
+    raw_values = (
+        os.getenv("APP_ENV"),
+        os.getenv("ENV"),
+        os.getenv("ENVIRONMENT"),
+        os.getenv("TRR_ENV"),
+        os.getenv("TRR_ENVIRONMENT"),
+        os.getenv("WORKSPACE_ENV"),
+    )
+    return {str(value or "").strip().lower() for value in raw_values if str(value or "").strip()}
+
+
+def _is_local_or_dev_runtime() -> bool:
+    normalized = _runtime_markers()
+    if normalized & {"local", "dev", "development", "test"}:
+        return True
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    raw_local = str(os.getenv("TRR_LOCAL_DEV") or "").strip().lower()
+    return raw_local in {"1", "true", "yes", "on"}
+
+
+def _admin_image_execution_backend() -> Literal["local", "modal"]:
+    raw = str(os.getenv("TRR_ADMIN_IMAGE_EXECUTION_BACKEND") or "").strip().lower()
+    if raw == "modal":
+        return "modal"
+    if raw == "local":
+        return "local"
+
+    from trr_backend.job_plane import execution_backend_canonical
+
+    backend = execution_backend_canonical()
+    if backend == "modal":
+        return "modal"
+    return "local" if _is_local_or_dev_runtime() else "modal"
+
+
+def _modal_app_name() -> str:
+    return str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() or "trr-backend-jobs"
+
+
+def _modal_vision_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_VISION_FUNCTION") or "run_admin_vision").strip() or "run_admin_vision"
+
+
+def _vision_config_error() -> str | None:
+    backend = _admin_image_execution_backend()
+    if backend == "local":
+        return None
+    modal_enabled = str(os.getenv("TRR_MODAL_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not modal_enabled:
+        return "TRR_MODAL_ENABLED is not enabled for Modal vision execution"
+    if not _modal_app_name():
+        return "TRR_MODAL_APP_NAME is not configured"
+    if not _modal_vision_function_name():
+        return "TRR_MODAL_VISION_FUNCTION is not configured"
+    return None
+
+
 def is_screenalytics_configured() -> bool:
-    return bool(os.getenv("SCREENALYTICS_API_URL", "").strip())
+    return _vision_config_error() is None
+
+
+def _invoke_people_count_local(payload: dict[str, object]) -> dict[str, object]:
+    from trr_backend.vision.people_count_engine import (
+        VisionEngineError,
+        VisionEngineUnavailableError,
+        compute_people_count,
+    )
+
+    try:
+        return compute_people_count(payload)
+    except VisionEngineUnavailableError as exc:
+        raise ScreenalyticsUnavailableError(str(exc), retry_after_s=exc.retry_after_s) from exc
+    except VisionEngineError as exc:
+        raise ScreenalyticsClientError(str(exc)) from exc
+
+
+def _invoke_people_count_batch_local(payload: dict[str, object]) -> dict[str, object]:
+    from trr_backend.vision.people_count_engine import (
+        VisionEngineError,
+        VisionEngineUnavailableError,
+        compute_people_count_batch,
+    )
+
+    try:
+        return compute_people_count_batch(payload)
+    except VisionEngineUnavailableError as exc:
+        raise ScreenalyticsUnavailableError(str(exc), retry_after_s=exc.retry_after_s) from exc
+    except VisionEngineError as exc:
+        raise ScreenalyticsClientError(str(exc)) from exc
+
+
+def _invoke_people_count_modal(payload: dict[str, object], *, batch: bool = False) -> dict[str, object]:
+    try:
+        import modal
+    except Exception as exc:  # noqa: BLE001
+        raise ScreenalyticsUnavailableError(
+            "Modal client is not available for vision execution",
+            retry_after_s=_unavailable_cooldown_seconds(),
+        ) from exc
+
+    try:
+        fn = modal.Function.from_name(_modal_app_name(), _modal_vision_function_name())
+        response = fn.remote(payload, batch=batch)
+    except Exception as exc:  # noqa: BLE001
+        raise ScreenalyticsUnavailableError(
+            f"Modal vision execution failed: {exc}",
+            retry_after_s=_unavailable_cooldown_seconds(),
+        ) from exc
+
+    if not isinstance(response, dict):
+        raise ScreenalyticsClientError("Vision response was not an object")
+    error = response.get("error")
+    if isinstance(error, str) and error.strip():
+        retry_after = response.get("retry_after_s")
+        retry_after_seconds = int(retry_after) if isinstance(retry_after, int) else _unavailable_cooldown_seconds()
+        raise ScreenalyticsUnavailableError(error.strip(), retry_after_s=retry_after_seconds)
+    return response
 
 
 def _is_http_url(value: object) -> bool:
@@ -645,15 +760,14 @@ def count_people(
 ) -> PeopleCountResult:
     if not image_url:
         raise ScreenalyticsClientError("image_url is required")
-
-    base = _base_url()
-    if not base:
-        raise ScreenalyticsClientError("SCREENALYTICS_API_URL is not configured")
+    config_error = _vision_config_error()
+    if config_error:
+        raise ScreenalyticsClientError(config_error)
     unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
     if unavailable:
         reason_suffix = f": {unavailable_reason}" if unavailable_reason else ""
         raise ScreenalyticsUnavailableError(
-            f"Screenalytics temporarily unavailable{reason_suffix}",
+            f"Vision temporarily unavailable{reason_suffix}",
             retry_after_s=retry_after_s,
         )
     payload = _build_people_count_payload(
@@ -665,65 +779,20 @@ def count_people(
         person_reference_images=person_reference_images,
         prefer_fast_pass=prefer_fast_pass,
     )
-    last_error: str | None = None
-
-    response: requests.Response | None = None
-    tried_urls: list[str] = []
-    for path in _endpoint_candidates():
-        url = f"{base}{path}"
-        tried_urls.append(url)
-        try:
-            response = requests.post(url, json=payload, timeout=(3.05, 20))
-        except requests.RequestException as exc:
-            last_error = f"Screenalytics request failed: {exc}"
-            continue
-
-        if response.status_code == 404:
-            last_error = f"Screenalytics error {response.status_code}: {response.text.strip()[:200] or 'unknown error'}"
-            continue
-
-        if response.status_code >= 400:
-            detail = response.text.strip()[:200]
-            if response.status_code >= 500:
-                reason = f"Screenalytics error {response.status_code}: {detail or 'unknown error'}"
-                _mark_screenalytics_unavailable(reason)
-                unavailable, retry_after_s, _ = get_screenalytics_unavailable_state()
-                raise ScreenalyticsUnavailableError(
-                    reason,
-                    retry_after_s=retry_after_s if unavailable else _unavailable_cooldown_seconds(),
-                )
-            raise ScreenalyticsClientError(f"Screenalytics error {response.status_code}: {detail or 'unknown error'}")
-        break
-    else:
-        _mark_screenalytics_unavailable(last_error or "Screenalytics request failed")
-        unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
-        logger.error(
-            "Screenalytics people-count endpoint not found. Tried: %s",
-            ", ".join(tried_urls),
-        )
-        raise ScreenalyticsUnavailableError(
-            unavailable_reason or last_error or "Screenalytics request failed",
-            retry_after_s=retry_after_s if unavailable else _unavailable_cooldown_seconds(),
-        )
-
-    if response is None:
-        _mark_screenalytics_unavailable(last_error or "Screenalytics request failed")
-        unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
-        raise ScreenalyticsUnavailableError(
-            unavailable_reason or last_error or "Screenalytics request failed",
-            retry_after_s=retry_after_s if unavailable else _unavailable_cooldown_seconds(),
-        )
-
-    _clear_screenalytics_unavailable()
-    logger.info("Screenalytics people-count endpoint used: %s", response.url)
-
     try:
-        data = response.json()
-    except ValueError as exc:
-        raise ScreenalyticsClientError("Screenalytics returned invalid JSON") from exc
+        if _admin_image_execution_backend() == "modal":
+            data = _invoke_people_count_modal(payload)
+        else:
+            data = _invoke_people_count_local(payload)
+    except ScreenalyticsUnavailableError as exc:
+        _mark_screenalytics_unavailable(str(exc))
+        raise
+    except ScreenalyticsClientError:
+        raise
 
     if not isinstance(data, dict):
-        raise ScreenalyticsClientError("Screenalytics response was not an object")
+        raise ScreenalyticsClientError("Vision response was not an object")
+    _clear_screenalytics_unavailable()
     return _parse_people_count_data(data)
 
 
@@ -735,14 +804,14 @@ def count_people_batch(
 ) -> list[PeopleCountResult | None]:
     if not isinstance(image_requests, list) or not image_requests:
         return []
-    base = _base_url()
-    if not base:
-        raise ScreenalyticsClientError("SCREENALYTICS_API_URL is not configured")
+    config_error = _vision_config_error()
+    if config_error:
+        raise ScreenalyticsClientError(config_error)
     unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
     if unavailable:
         reason_suffix = f": {unavailable_reason}" if unavailable_reason else ""
         raise ScreenalyticsUnavailableError(
-            f"Screenalytics temporarily unavailable{reason_suffix}",
+            f"Vision temporarily unavailable{reason_suffix}",
             retry_after_s=retry_after_s,
         )
 
@@ -780,93 +849,23 @@ def count_people_batch(
         "images": normalized_images,
         **({"prefer_fast_pass": prefer_fast_pass} if isinstance(prefer_fast_pass, bool) else {}),
     }
-    response: requests.Response | None = None
-    tried_urls: list[str] = []
-
-    for path in _batch_endpoint_candidates():
-        url = f"{base}{path}"
-        tried_urls.append(url)
-        try:
-            response = requests.post(url, json=payload, timeout=(3.05, 45))
-        except requests.RequestException as exc:
-            logger.debug("Screenalytics batch request failed at %s: %s", url, exc)
-            continue
-        if response.status_code == 404:
-            response = None
-            continue
-        if response.status_code >= 400:
-            detail = response.text.strip()[:200]
-            if response.status_code >= 500:
-                reason = f"Screenalytics batch error {response.status_code}: {detail or 'unknown error'}"
-                _mark_screenalytics_unavailable(reason)
-                unavailable, retry_after_s, _ = get_screenalytics_unavailable_state()
-                raise ScreenalyticsUnavailableError(
-                    reason,
-                    retry_after_s=retry_after_s if unavailable else _unavailable_cooldown_seconds(),
-                )
-            raise ScreenalyticsClientError(
-                f"Screenalytics batch error {response.status_code}: {detail or 'unknown error'}"
-            )
-        break
-
-    if response is None:
-        # Batch endpoint unavailable: fallback to single endpoint for compatibility.
-        results: list[PeopleCountResult | None] = []
-        for entry in image_requests:
-            if not isinstance(entry, dict):
-                results.append(None)
-                continue
-            image_url = str(entry.get("image_url") or "").strip()
-            if not image_url:
-                results.append(None)
-                continue
-            try:
-                item_prefer_fast_pass = (
-                    entry.get("prefer_fast_pass")
-                    if isinstance(entry.get("prefer_fast_pass"), bool)
-                    else prefer_fast_pass
-                )
-                results.append(
-                    count_people(
-                        image_url,
-                        mode=str(entry.get("mode") or mode),  # type: ignore[arg-type]
-                        candidate_person_ids=(
-                            entry.get("candidate_person_ids")
-                            if isinstance(entry.get("candidate_person_ids"), list)
-                            else None
-                        ),
-                        owner_person_id=(
-                            entry.get("owner_person_id") if isinstance(entry.get("owner_person_id"), str) else None
-                        ),
-                        owner_reference_images=(
-                            entry.get("owner_reference_images")
-                            if isinstance(entry.get("owner_reference_images"), list)
-                            else None
-                        ),
-                        person_reference_images=(
-                            entry.get("person_reference_images")
-                            if isinstance(entry.get("person_reference_images"), list)
-                            else None
-                        ),
-                        prefer_fast_pass=item_prefer_fast_pass,
-                    )
-                )
-            except ScreenalyticsClientError:
-                results.append(None)
-        return results
-
-    _clear_screenalytics_unavailable()
-    logger.info("Screenalytics people-count batch endpoint used: %s", response.url)
     try:
-        data = response.json()
-    except ValueError as exc:
-        raise ScreenalyticsClientError("Screenalytics returned invalid JSON for batch response") from exc
+        if _admin_image_execution_backend() == "modal":
+            data = _invoke_people_count_modal(payload, batch=True)
+        else:
+            data = _invoke_people_count_batch_local(payload)
+    except ScreenalyticsUnavailableError as exc:
+        _mark_screenalytics_unavailable(str(exc))
+        raise
+    except ScreenalyticsClientError:
+        raise
     if not isinstance(data, dict):
-        raise ScreenalyticsClientError("Screenalytics batch response was not an object")
+        raise ScreenalyticsClientError("Vision batch response was not an object")
     raw_results = data.get("results")
     if not isinstance(raw_results, list):
-        raise ScreenalyticsClientError("Screenalytics batch response missing results")
+        raise ScreenalyticsClientError("Vision batch response missing results")
 
+    _clear_screenalytics_unavailable()
     parsed_results: list[PeopleCountResult | None] = []
     for item in raw_results:
         if not isinstance(item, dict):

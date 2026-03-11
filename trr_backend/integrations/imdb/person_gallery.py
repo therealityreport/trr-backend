@@ -238,9 +238,7 @@ def _parse_person_all_images_edges(
         if not isinstance(image_type_raw, str) or not image_type_raw.strip():
             image_type_raw = node.get("type")
         image_type = (
-            image_type_raw.strip().lower()
-            if isinstance(image_type_raw, str) and image_type_raw.strip()
-            else None
+            image_type_raw.strip().lower() if isinstance(image_type_raw, str) and image_type_raw.strip() else None
         )
 
         parsed = urlparse(normalized_url)
@@ -836,9 +834,7 @@ def _extract_section_links(
     if isinstance(labels, str):
         labels = [labels]
     normalized_labels = {
-        re.sub(r"\s+", " ", str(label or "").strip()).casefold()
-        for label in labels
-        if str(label or "").strip()
+        re.sub(r"\s+", " ", str(label or "").strip()).casefold() for label in labels if str(label or "").strip()
     }
     if not normalized_labels:
         return [], []
@@ -849,8 +845,7 @@ def _extract_section_links(
             return True
         # Accept common variants like "Title (1)" or "People:".
         return any(
-            normalized.startswith(f"{label} ") or normalized.startswith(f"{label}:")
-            for label in normalized_labels
+            normalized.startswith(f"{label} ") or normalized.startswith(f"{label}:") for label in normalized_labels
         )
 
     label_nodes = [

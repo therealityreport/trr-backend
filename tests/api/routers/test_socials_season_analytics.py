@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import jwt
@@ -111,6 +112,127 @@ def test_put_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     assert body["targets"][0]["platform"] == "instagram"
 
 
+def test_get_shared_account_sources(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "source_scope": "bravo",
+        "using_defaults": False,
+        "sources": [
+            {
+                "id": "shared-source-1",
+                "platform": "instagram",
+                "source_scope": "bravo",
+                "account_handle": "bravotv",
+                "is_active": True,
+                "scrape_priority": 100,
+            }
+        ],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_shared_account_sources", return_value=expected):
+        response = client.get(
+            "/api/v1/admin/socials/shared/sources?source_scope=bravo&include_inactive=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source_scope"] == "bravo"
+    assert body["sources"][0]["account_handle"] == "bravotv"
+
+
+def test_post_shared_ingest_returns_run_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "run_id": "shared-run-123",
+        "status": "queued",
+        "source_scope": "bravo",
+        "ingest_mode": "shared_account_async",
+        "shared_scrape_status": {"status": "queued", "job_count": 4},
+        "classification_status": None,
+        "materialization_status": None,
+        "review_queue_count": 0,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.ingest_shared_accounts", return_value=expected
+        ) as ingest_mock:
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                response = client.post(
+                    "/api/v1/admin/socials/shared/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"source_scope": "bravo", "platforms": ["instagram", "twitter"]},
+                )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "shared-run-123"
+    assert body["ingest_mode"] == "shared_account_async"
+    assert ingest_mock.call_args.kwargs["platforms"] == ["instagram", "twitter"]
+
+
+def test_get_shared_review_queue(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "source_scope": "bravo",
+        "review_status": "open",
+        "count": 1,
+        "items": [
+            {
+                "id": "review-1",
+                "platform": "instagram",
+                "source_id": "abc123",
+                "review_reason": "ambiguous_match",
+                "review_status": "open",
+            }
+        ],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.list_shared_review_queue", return_value=expected):
+        response = client.get(
+            "/api/v1/admin/socials/shared/review-queue?source_scope=bravo&review_status=open&limit=10",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 1
+    assert body["items"][0]["review_reason"] == "ambiguous_match"
+
+
+def test_get_season_shared_status_route(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "ingest_mode": "shared_account_async",
+        "matched_posts": 8,
+        "review_queue_count": 2,
+        "shared_scrape_status": {"status": "running", "job_count": 2, "active_jobs": 1},
+        "classification_status": {"status": "complete", "job_count": 2, "active_jobs": 0},
+        "materialization_status": {"status": "queued", "job_count": 1, "active_jobs": 0},
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_season_shared_status", return_value=expected):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/shared-status?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["season_id"] == season_id
+    assert body["shared_scrape_status"]["status"] == "running"
+
+
 def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -131,12 +253,13 @@ def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pyte
         "fetch_replies": False,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as mocked:
-        response = client.post(
-            f"/api/v1/admin/socials/seasons/{season_id}/ingest",
-            headers={"Authorization": f"Bearer {token}"},
-            json=payload,
-        )
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as mocked:
+            response = client.post(
+                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
 
     assert response.status_code == 200
     assert response.json()["season_id"] == season_id
@@ -362,6 +485,68 @@ def test_ingest_accepts_scheduler_fields(client: TestClient, monkeypatch: pytest
     assert ingest_mock.call_args.kwargs["priority_mode"] == "episode_peak_weighted"
 
 
+def test_ingest_resolves_week_index_to_canonical_window(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-week-2",
+        "status": "queued",
+        "stages": ["posts", "comments"],
+        "queued_or_started_jobs": 4,
+        "summary": {"total_jobs": 4},
+    }
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram"],
+        "week_index": 2,
+        "timezone": "America/New_York",
+        "date_start": "2026-01-01T00:00:00Z",
+        "date_end": "2026-01-02T00:00:00Z",
+    }
+    resolved_week = {
+        "week_index": 2,
+        "label": "Week 2",
+        "start": "2026-01-07T00:00:00Z",
+        "end": "2026-01-13T23:59:59Z",
+        "week_type": "episode",
+        "episode_number": 2,
+        "timezone": "America/New_York",
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.resolve_week_window",
+        return_value=resolved_week,
+    ) as resolve_mock:
+        with patch(
+            "trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected
+        ) as ingest_mock:
+            with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+                with patch(
+                    "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                    return_value={"healthy": True, "healthy_workers": 1},
+                ):
+                    response = client.post(
+                        f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"]["type"] == "week"
+    assert body["scope"]["week"]["week_index"] == 2
+    assert any("canonical season week window" in warning for warning in (body.get("warnings") or []))
+    assert resolve_mock.called
+    assert ingest_mock.call_args.kwargs["week_index"] == 2
+    assert ingest_mock.call_args.kwargs["window_timezone"] == "America/New_York"
+    assert ingest_mock.call_args.kwargs["run_scope_label"] == "Week 2"
+    assert ingest_mock.call_args.kwargs["date_start"] == datetime(2026, 1, 7, 0, 0, tzinfo=UTC)
+    assert ingest_mock.call_args.kwargs["date_end"] == datetime(2026, 1, 13, 23, 59, 59, tzinfo=UTC)
+
+
 @pytest.mark.parametrize(
     ("code", "message"),
     [
@@ -529,6 +714,115 @@ def test_instagram_scrape_async_creates_trackable_ingest_run(
     assert ingest_mock.call_args.kwargs["accounts_override"] == ["BravoTV"]
     assert ingest_mock.call_args.kwargs["hashtags_override"] == ["rhoslc"]
 
+
+def test_instagram_scrape_async_starts_inline_when_queue_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    payload = {
+        "username": "BravoTV",
+        "hashtags": ["rhoslc"],
+        "date_start": "2026-01-01T00:00:00Z",
+        "date_end": "2026-01-02T00:00:00Z",
+        "show_id": show_id,
+        "season_number": 6,
+    }
+
+    with patch("trr_backend.db.pg.fetch_one", return_value={"season_id": season_id}):
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.ingest_season",
+                return_value={"run_id": str(uuid4())},
+            ):
+                with patch("trr_backend.repositories.social_season_analytics.execute_run") as execute_mock:
+                    response = client.post(
+                        "/api/v1/admin/socials/instagram/scrape/async",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body["run_id"], str)
+    assert body["execution_mode_canonical"] == "inline"
+    assert body["execution_owner"] == "local_api"
+    assert execute_mock.called is True
+
+
+def test_instagram_scrape_async_allows_explicit_local_dev_fallback(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_LOCAL_DEV", "1")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    payload = {
+        "username": "BravoTV",
+        "hashtags": ["rhoslc"],
+        "date_start": "2026-01-01T00:00:00Z",
+        "date_end": "2026-01-02T00:00:00Z",
+        "show_id": show_id,
+        "season_number": 6,
+        "allow_inline_dev_fallback": True,
+    }
+
+    with patch("trr_backend.db.pg.fetch_one", return_value={"season_id": season_id}):
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.ingest_season",
+                return_value={"run_id": str(uuid4())},
+            ):
+                with patch("trr_backend.repositories.social_season_analytics.execute_run"):
+                    response = client.post(
+                        "/api/v1/admin/socials/instagram/scrape/async",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body["run_id"], str)
+    assert body["execution_mode_canonical"] == "inline_fallback"
+    assert body["execution_owner"] == "local_api"
+
+
+def test_post_shared_ingest_starts_inline_when_queue_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "run_id": "shared-run-123",
+        "status": "pending",
+        "source_scope": "bravo",
+        "ingest_mode": "shared_account_async",
+        "shared_scrape_status": {"status": "pending", "job_count": 4},
+        "classification_status": None,
+        "materialization_status": None,
+        "review_queue_count": 0,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.repositories.social_season_analytics.ingest_shared_accounts", return_value=expected):
+            with patch("trr_backend.repositories.social_season_analytics.execute_run") as execute_mock:
+                response = client.post(
+                    "/api/v1/admin/socials/shared/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"source_scope": "bravo", "platforms": ["instagram", "twitter"]},
+                )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "started"
+    assert body["execution_mode_canonical"] == "inline"
+    assert body["execution_owner"] == "local_api"
+    assert execute_mock.called is True
+
+
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -565,6 +859,9 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     run_id = str(uuid4())
+    workflow_id = "social-orch-demo"
+    date_start = "2025-08-14T04:00:00+00:00"
+    date_end = "2025-09-16T23:59:59.999999+00:00"
 
     runs_payload = [
         {
@@ -574,10 +871,23 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
             "source_scope": "bravo",
         }
     ]
+    query = urlencode(
+        {
+            "status": "completed",
+            "source_scope": "bravo",
+            "run_id": run_id,
+            "limit": 25,
+            "client_workflow_id": workflow_id,
+            "platforms": "twitter",
+            "week_index": 2,
+            "date_start": date_start,
+            "date_end": date_end,
+        }
+    )
 
     with patch("trr_backend.repositories.social_season_analytics.list_runs", return_value=runs_payload) as mocked:
         response = client.get(
-            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs?status=completed&source_scope=bravo&run_id={run_id}&limit=25",
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs?{query}",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -587,11 +897,109 @@ def test_get_ingest_runs_supports_filters(client: TestClient, monkeypatch: pytes
     assert body["filters"]["status"] == "completed"
     assert body["filters"]["source_scope"] == "bravo"
     assert body["filters"]["run_id"] == run_id
+    assert body["filters"]["client_workflow_id"] == workflow_id
+    assert body["filters"]["platforms"] == ["twitter"]
+    assert body["filters"]["week_index"] == 2
+    assert body["filters"]["date_start"] == date_start
+    assert body["filters"]["date_end"] == date_end
     assert body["runs"] == runs_payload
     assert mocked.call_args.kwargs["status"] == "completed"
     assert mocked.call_args.kwargs["source_scope"] == "bravo"
     assert mocked.call_args.kwargs["run_id"] == run_id
+    assert mocked.call_args.kwargs["client_workflow_id"] == workflow_id
+    assert mocked.call_args.kwargs["platforms"] == ["twitter"]
+    assert mocked.call_args.kwargs["week_index"] == 2
+    assert mocked.call_args.kwargs["date_start"].isoformat() == date_start
+    assert mocked.call_args.kwargs["date_end"].isoformat() == date_end
     assert mocked.call_args.kwargs["limit"] == 25
+
+
+def test_orchestrate_ingest_endpoint_queues_grouped_runs(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value={"healthy": True, "healthy_workers": 2},
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.orchestrate_season_ingest",
+                return_value={
+                    "season_id": season_id,
+                    "orchestration_id": "social-orch-demo",
+                    "scope": "single_week_single_platform",
+                    "requested_runs": [{"slot_key": "week:2|platform:instagram"}],
+                    "created_runs": [{"run_id": "run-1", "slot_key": "week:2|platform:instagram"}],
+                    "reused_runs": [],
+                    "total_requested_runs": 1,
+                    "created_count": 1,
+                    "reused_count": 0,
+                    "execution_owner": "remote_worker",
+                    "execution_mode_canonical": "remote",
+                    "remote_job_plane_enforced": True,
+                    "weeks": [{"week_index": 2, "label": "Week 2"}],
+                    "platforms": ["instagram"],
+                },
+            ) as mocked:
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest/orchestrations",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"week_index": 2, "platforms": ["instagram"], "resume_existing": True},
+                )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["orchestration_id"] == "social-orch-demo"
+    assert body["scope"] == "single_week_single_platform"
+    assert body["execution_owner"] == "remote_worker"
+    assert mocked.call_args.kwargs["week_index"] == 2
+    assert mocked.call_args.kwargs["platforms"] == ["instagram"]
+    assert mocked.call_args.kwargs["resume_existing"] is True
+
+
+def test_orchestrate_ingest_endpoint_starts_inline_when_queue_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.orchestrate_season_ingest",
+            return_value={
+                "season_id": season_id,
+                "orchestration_id": "social-orch-demo",
+                "scope": "single_week_single_platform",
+                "requested_runs": [{"slot_key": "week:2|platform:instagram"}],
+                "created_runs": [{"run_id": "run-1", "slot_key": "week:2|platform:instagram"}],
+                "reused_runs": [],
+                "total_requested_runs": 1,
+                "created_count": 1,
+                "reused_count": 0,
+                "execution_owner": "local_api",
+                "execution_mode_canonical": "local",
+                "remote_job_plane_enforced": False,
+                "weeks": [{"week_index": 2, "label": "Week 2"}],
+                "platforms": ["instagram"],
+            },
+        ) as mocked:
+            with patch("trr_backend.repositories.social_season_analytics.execute_run") as execute_mock:
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest/orchestrations",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"week_index": 2, "platforms": ["instagram"], "resume_existing": True},
+                )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "started"
+    assert body["message"] == "Season social orchestration started inline."
+    assert mocked.call_args.kwargs["week_index"] == 2
+    assert execute_mock.called is True
 
 
 def test_get_ingest_runs_rejects_invalid_season_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -855,13 +1263,21 @@ def test_get_week_detail_endpoint_defaults_to_25_comments_and_paginated_page(
     assert mocked.call_args.kwargs["post_offset"] == 0
 
 
-def test_get_week_summary_endpoint_forwards_defaults_and_shape(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_week_summary_endpoint_forwards_defaults_and_shape(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload: dict[str, Any] = {
         "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
-        "season": {"season_id": season_id, "show_id": str(uuid4()), "show_name": "Test", "show_slug": "test", "season_number": 6},
+        "season": {
+            "season_id": season_id,
+            "show_id": str(uuid4()),
+            "show_name": "Test",
+            "show_slug": "test",
+            "season_number": 6,
+        },
         "source_scope": "bravo",
         "platforms": {"instagram": {"total_posts": 12, "totals": {"posts": 12}}},
         "totals": {"posts": 12},
@@ -871,7 +1287,9 @@ def test_get_week_summary_endpoint_forwards_defaults_and_shape(client: TestClien
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_summary_cache()
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail_summary_fast", return_value=payload) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_week_detail_summary_fast", return_value=payload
+    ) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3/summary?source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -883,13 +1301,21 @@ def test_get_week_summary_endpoint_forwards_defaults_and_shape(client: TestClien
     assert mocked.call_args.kwargs["source_scope"] == "bravo"
 
 
-def test_get_week_summary_endpoint_include_full_uses_legacy_path(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_week_summary_endpoint_include_full_uses_legacy_path(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload: dict[str, Any] = {
         "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
-        "season": {"season_id": season_id, "show_id": str(uuid4()), "show_name": "Test", "show_slug": "test", "season_number": 6},
+        "season": {
+            "season_id": season_id,
+            "show_id": str(uuid4()),
+            "show_name": "Test",
+            "show_slug": "test",
+            "season_number": 6,
+        },
         "source_scope": "bravo",
         "platforms": {"instagram": {"total_posts": 12, "totals": {"posts": 12}}},
         "totals": {"posts": 12},
@@ -899,7 +1325,9 @@ def test_get_week_summary_endpoint_include_full_uses_legacy_path(client: TestCli
     from api.routers import socials as socials_router
 
     socials_router.invalidate_week_summary_cache()
-    with patch("trr_backend.repositories.social_season_analytics.get_week_detail_summary", return_value=payload) as full_mock:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_week_detail_summary", return_value=payload
+    ) as full_mock:
         with patch("trr_backend.repositories.social_season_analytics.get_week_detail_summary_fast") as fast_mock:
             response = client.get(
                 f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3/summary?source_scope=bravo&include=full",
@@ -929,7 +1357,9 @@ def test_get_schedule_preview_endpoint_returns_payload(client: TestClient, monke
         "lanes": {"A": [{"shard_index": 0}], "B": [{"shard_index": 1}]},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.preview_ingest_schedule", return_value=preview_payload) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.preview_ingest_schedule", return_value=preview_payload
+    ) as mocked:
         response = client.get(
             (
                 f"/api/v1/admin/socials/seasons/{season_id}/ingest/schedule-preview"
@@ -944,6 +1374,51 @@ def test_get_schedule_preview_endpoint_returns_payload(client: TestClient, monke
     assert body["scheduler"]["strategy"] == "adaptive_dual_runner"
     assert body["scheduler"]["runner_b_start_offset_hours"] == 48
     assert mocked.call_args.kwargs["runner_count"] == 2
+
+
+def test_get_schedule_preview_endpoint_resolves_week_scope(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    resolved_week = {
+        "week_index": 3,
+        "label": "Week 3",
+        "start": "2026-01-14T00:00:00Z",
+        "end": "2026-01-20T23:59:59Z",
+        "week_type": "episode",
+        "episode_number": 3,
+        "timezone": "America/New_York",
+    }
+    preview_payload = {
+        "season_id": season_id,
+        "scope": {"type": "week", "label": "Week 3", "week_index": 3, "timezone": "America/New_York"},
+        "scheduler": {"strategy": "single_runner"},
+        "lanes": {"A": [{"shard_index": 0}], "B": []},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.resolve_week_window",
+        return_value=resolved_week,
+    ) as resolve_mock:
+        with patch(
+            "trr_backend.repositories.social_season_analytics.preview_ingest_schedule", return_value=preview_payload
+        ) as mocked:
+            response = client.get(
+                (
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest/schedule-preview"
+                    "?source_scope=bravo&platforms=instagram&week_index=3&timezone=America/New_York"
+                ),
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["scope"]["type"] == "week"
+    assert resolve_mock.called
+    assert mocked.call_args.kwargs["week_index"] == 3
+    assert mocked.call_args.kwargs["window_timezone"] == "America/New_York"
+    assert mocked.call_args.kwargs["run_scope_label"] == "Week 3"
+    assert mocked.call_args.kwargs["date_start"] == datetime(2026, 1, 14, 0, 0, tzinfo=UTC)
+    assert mocked.call_args.kwargs["date_end"] == datetime(2026, 1, 20, 23, 59, 59, tzinfo=UTC)
 
 
 def test_get_week_detail_endpoint_supports_page_offset_and_de_duplicated_newest_first_order(
@@ -1010,14 +1485,18 @@ def test_get_week_detail_endpoint_supports_page_offset_and_de_duplicated_newest_
     assert page1["pagination"]["returned"] == 20
     assert page1["pagination"]["offset"] == 0
     assert page1["pagination"]["has_more"] is True
-    assert [post["source_id"] for post in page1["platforms"]["instagram"]["posts"]] == [f"p{i}" for i in range(39, 19, -1)]
+    assert [post["source_id"] for post in page1["platforms"]["instagram"]["posts"]] == [
+        f"p{i}" for i in range(39, 19, -1)
+    ]
     assert page1["pagination"]["total"] == 40
 
     assert page2["pagination"]["returned"] == 20
     assert page2["pagination"]["offset"] == 20
     assert page2["pagination"]["has_more"] is False
     assert page2["pagination"]["total"] == 40
-    assert [post["source_id"] for post in page2["platforms"]["instagram"]["posts"]] == [f"p{i}" for i in range(19, -1, -1)]
+    assert [post["source_id"] for post in page2["platforms"]["instagram"]["posts"]] == [
+        f"p{i}" for i in range(19, -1, -1)
+    ]
     assert len({post["source_id"] for post in page1["platforms"]["instagram"]["posts"]}) == 20
     assert len({post["source_id"] for post in page2["platforms"]["instagram"]["posts"]}) == 20
     assert mocked.call_count == 1
@@ -1034,7 +1513,13 @@ def test_get_week_detail_endpoint_forwards_sort_params_to_repository(
     payload: dict[str, Any] = {
         "season_id": season_id,
         "week": {"week_index": 3, "label": "Week 3", "start": "2025-09-30T00:00:00Z", "end": "2025-10-07T00:00:00Z"},
-        "platforms": {"instagram": {"posts": [], "total_posts": 0, "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0}}},
+        "platforms": {
+            "instagram": {
+                "posts": [],
+                "total_posts": 0,
+                "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
+            }
+        },
         "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
     }
 
@@ -1542,15 +2027,16 @@ def test_ingest_returns_400_when_queue_schema_missing(client: TestClient, monkey
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
 
-    with patch(
-        "trr_backend.repositories.social_season_analytics.ingest_season",
-        side_effect=ValueError("Social ingest queue schema is not migrated"),
-    ):
-        response = client.post(
-            f"/api/v1/admin/socials/seasons/{season_id}/ingest",
-            headers={"Authorization": f"Bearer {token}"},
-            json=payload,
-        )
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.ingest_season",
+            side_effect=ValueError("Social ingest queue schema is not migrated"),
+        ):
+            response = client.post(
+                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
 
     assert response.status_code == 400
     assert "not migrated" in response.json()["detail"]
@@ -2114,7 +2600,9 @@ def test_purge_inactive_workers_endpoint_returns_counts(
         "reason": None,
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.purge_inactive_workers", return_value=expected) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.purge_inactive_workers", return_value=expected
+    ) as mocked:
         response = client.post(
             "/api/v1/admin/socials/ingest/workers/purge-inactive",
             headers={"Authorization": f"Bearer {token}"},
@@ -2209,7 +2697,9 @@ def test_get_queue_status_endpoint_forwards_fresh_flag(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    with patch("trr_backend.repositories.social_season_analytics.get_queue_status", return_value={"ok": True}) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_queue_status", return_value={"ok": True}
+    ) as mocked:
         response = client.get(
             "/api/v1/admin/socials/ingest/queue-status?fresh=true",
             headers={"Authorization": f"Bearer {token}"},
@@ -2257,7 +2747,9 @@ def test_get_run_progress_endpoint_returns_payload(
         "worker_runtime": {"active_workers_now": 1},
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_run_progress_snapshot", return_value=expected) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_run_progress_snapshot", return_value=expected
+    ) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/progress?recent_log_limit=15",
             headers={"Authorization": f"Bearer {token}"},
@@ -2285,7 +2777,9 @@ def test_get_week_live_health_endpoint_returns_payload(
         ],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_week_live_health_snapshot", return_value=expected) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_week_live_health_snapshot", return_value=expected
+    ) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/11/live-health?platforms=instagram,tiktok&timezone=America/New_York&source_scope=bravo",
             headers={"Authorization": f"Bearer {token}"},
@@ -2652,7 +3146,12 @@ def test_debug_job_endpoint_returns_apply_success_payload(
         "run_id": str(uuid4()),
         "model_used": "gpt-5.3-codex",
         "fallback_used": False,
-        "analysis": {"root_cause": "x", "confidence": 0.8, "files_touched": ["api/routers/socials.py"], "tests_to_run": []},
+        "analysis": {
+            "root_cause": "x",
+            "confidence": 0.8,
+            "files_touched": ["api/routers/socials.py"],
+            "tests_to_run": [],
+        },
         "patch_unified_diff": "--- a/api/routers/socials.py\n+++ b/api/routers/socials.py\n",
         "apply": {
             "enabled": True,
@@ -3018,7 +3517,9 @@ def test_get_tiktok_sound_posts_endpoint(client: TestClient, monkeypatch: pytest
         "sound_id": "7540327234013301517",
         "posts": [{"platform_post_id": "123"}],
     }
-    with patch("trr_backend.repositories.social_season_analytics.get_tiktok_sound_posts", return_value=expected) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_tiktok_sound_posts", return_value=expected
+    ) as mocked:
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/tiktok/sounds/7540327234013301517/posts?limit=25",
             headers={"Authorization": f"Bearer {token}"},

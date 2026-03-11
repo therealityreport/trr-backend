@@ -210,8 +210,12 @@ def test_repair_candidate_regenerates_base_variants_for_repaired_rows(
 
     monkeypatch.setattr(mod, "_download_source_bytes", fake_download)
     monkeypatch.setattr(mod, "_update_row", lambda _db, *, table, row_id, patch: updated_rows.append((table, row_id)))
-    monkeypatch.setattr(mod, "mirror_cast_photo_row", lambda *_args, **_kwargs: {"hosted_url": "https://cdn.example.com/cast.jpg"})
-    monkeypatch.setattr(mod, "mirror_media_asset_row", lambda *_args, **_kwargs: {"hosted_url": "https://cdn.example.com/media.jpg"})
+    monkeypatch.setattr(
+        mod, "mirror_cast_photo_row", lambda *_args, **_kwargs: {"hosted_url": "https://cdn.example.com/cast.jpg"}
+    )
+    monkeypatch.setattr(
+        mod, "mirror_media_asset_row", lambda *_args, **_kwargs: {"hosted_url": "https://cdn.example.com/media.jpg"}
+    )
     monkeypatch.setattr(
         mod,
         "generate_cast_photo_variants",

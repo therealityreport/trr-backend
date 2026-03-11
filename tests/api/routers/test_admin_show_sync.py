@@ -31,6 +31,13 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _default_local_job_plane(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "local")
+    monkeypatch.delenv("TRR_LONG_JOB_ENFORCE_REMOTE", raising=False)
+    monkeypatch.delenv("TRR_MODAL_ENABLED", raising=False)
+
+
 class TestSyncFromLists:
     def test_returns_401_without_auth(self, client):
         mock_db = MagicMock()

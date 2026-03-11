@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,7 +22,13 @@ from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
 from api.routers import admin_show_bravo
 from trr_backend.db import pg
-from trr_backend.job_plane import canonical_execution_mode, execution_owner_label, is_remote_job_plane_enabled
+from trr_backend.job_plane import (
+    canonical_execution_mode,
+    execution_metadata,
+    execution_owner_label,
+    is_remote_job_plane_enabled,
+)
+from trr_backend.modal_dispatch import dispatch_google_news_sync, modal_execution_metadata
 from trr_backend.scraping.google_news_parser import fetch_google_news, normalize_article_url
 
 logger = logging.getLogger(__name__)
@@ -827,7 +833,7 @@ def _build_news_facets(items: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "seasons": sorted(
             [{"season_number": season_number, "count": count} for season_number, count in season_counts.items()],
-            key=lambda row: (-int(row["season_number"])),
+            key=lambda row: -int(row["season_number"]),
         ),
     }
 
@@ -1084,7 +1090,6 @@ def _sync_google_news_featured_images(
                         kind="promo",
                         context_section="google_news",
                         context_type="featured_image",
-                        source_logo="google_news",
                         asset_name=_GOOGLE_NEWS_IMAGE_CAPTION,
                     )
                 ],
@@ -1413,6 +1418,66 @@ def execute_claimed_google_news_sync_job(*, job_row: dict[str, Any], worker_id: 
     )
 
 
+def claim_google_news_sync_job(
+    *,
+    job_id: str,
+    worker_id: str,
+    lease_seconds: int = 300,
+) -> dict[str, Any] | None:
+    safe_lease = max(30, int(lease_seconds))
+    claim_token = str(uuid4())
+    row = pg.fetch_one(
+        """
+        UPDATE core.google_news_sync_jobs j
+        SET status = %s,
+            started_at = COALESCE(j.started_at, NOW()),
+            claim_token = %s::text,
+            claimed_by_worker_id = %s,
+            lease_expires_at = NOW() + (%s::int * INTERVAL '1 second'),
+            heartbeat_at = NOW(),
+            attempt_count = COALESCE(j.attempt_count, 0) + 1,
+            next_retry_at = NULL,
+            updated_at = NOW()
+        WHERE j.id = %s::uuid
+          AND j.status IN (%s, %s)
+          AND (
+            j.status = %s
+            OR j.lease_expires_at IS NULL
+            OR j.lease_expires_at < NOW()
+            OR COALESCE(j.heartbeat_at, j.updated_at, j.created_at) < NOW() - INTERVAL '5 minutes'
+          )
+        RETURNING
+          j.id::text AS id,
+          j.show_id::text AS show_id,
+          j.force,
+          j.requested_by,
+          j.status,
+          j.claim_token,
+          j.claimed_by_worker_id,
+          j.attempt_count
+        """,
+        [
+            _GOOGLE_SYNC_JOB_STATUS_RUNNING,
+            claim_token,
+            worker_id,
+            safe_lease,
+            job_id,
+            _GOOGLE_SYNC_JOB_STATUS_QUEUED,
+            _GOOGLE_SYNC_JOB_STATUS_RUNNING,
+            _GOOGLE_SYNC_JOB_STATUS_QUEUED,
+        ],
+    )
+    return dict(row) if row else None
+
+
+def claim_and_execute_google_news_sync_job(*, job_id: str, worker_id: str, lease_seconds: int = 300) -> bool:
+    claimed = claim_google_news_sync_job(job_id=job_id, worker_id=worker_id, lease_seconds=lease_seconds)
+    if not claimed:
+        return False
+    execute_claimed_google_news_sync_job(job_row=claimed, worker_id=worker_id)
+    return True
+
+
 def run_google_news_worker_loop(
     *,
     worker_id: str | None = None,
@@ -1649,9 +1714,17 @@ def sync_google_news(
         remote_mode = is_remote_job_plane_enabled()
         execution_mode = canonical_execution_mode()
         execution_owner = execution_owner_label()
+        execution_backend = str(execution_metadata().get("execution_backend_canonical") or "local")
         requested_by = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "").strip() or None
         job_id = _create_google_news_sync_job(show_id=show_id_str, force=payload.force, requested_by=requested_by)
-        if remote_mode:
+        modal_dispatched = dispatch_google_news_sync(job_id=job_id)
+        if modal_dispatched:
+            logger.info("Queued google-news sync job for Modal ownership: show_id=%s job_id=%s", show_id_str, job_id)
+            modal_metadata = modal_execution_metadata()
+            execution_mode = modal_metadata["execution_mode_canonical"]
+            execution_owner = modal_metadata["execution_owner"]
+            execution_backend = modal_metadata["execution_backend_canonical"]
+        elif remote_mode:
             logger.info(
                 "Queued google-news sync job for remote worker ownership: show_id=%s job_id=%s execution_mode=%s",
                 show_id_str,
@@ -1665,6 +1738,12 @@ def sync_google_news(
                 show_id_str=show_id_str,
                 force=payload.force,
                 admin_user_payload=dict(admin_user or {}),
+                worker_id="api-background:google-news",
+            )
+            logger.info(
+                "Queued google-news sync job for API background execution: show_id=%s job_id=%s",
+                show_id_str,
+                job_id,
             )
         return {
             "show_id": show_id_str,
@@ -1674,6 +1753,7 @@ def sync_google_news(
             "status": _GOOGLE_SYNC_JOB_STATUS_QUEUED,
             "execution_owner": execution_owner,
             "execution_mode_canonical": execution_mode,
+            "execution_backend_canonical": execution_backend,
         }
 
     return _run_google_news_sync_impl(show_id_str=show_id_str, force=payload.force, db=db, admin_user=admin_user)

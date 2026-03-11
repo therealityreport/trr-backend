@@ -378,17 +378,21 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
             "has_audio": str(payload.get("acodec") or "").lower() not in {"none", ""},
         }
 
-    thumbnail_meta = {
-        "url": thumbnail,
-        "type": "thumbnail",
-        "width": int(payload.get("thumbnail_width") or 0) or None,
-        "height": int(payload.get("thumbnail_height") or 0) or None,
-        "resolution": (
-            f"{int(payload.get('thumbnail_width') or 0)}x{int(payload.get('thumbnail_height') or 0)}"
-            if int(payload.get("thumbnail_width") or 0) > 0 and int(payload.get("thumbnail_height") or 0) > 0
-            else None
-        ),
-    } if thumbnail else None
+    thumbnail_meta = (
+        {
+            "url": thumbnail,
+            "type": "thumbnail",
+            "width": int(payload.get("thumbnail_width") or 0) or None,
+            "height": int(payload.get("thumbnail_height") or 0) or None,
+            "resolution": (
+                f"{int(payload.get('thumbnail_width') or 0)}x{int(payload.get('thumbnail_height') or 0)}"
+                if int(payload.get("thumbnail_width") or 0) > 0 and int(payload.get("thumbnail_height") or 0) > 0
+                else None
+            ),
+        }
+        if thumbnail
+        else None
+    )
 
     return (
         media_urls,
@@ -431,7 +435,9 @@ def resolve_youtube_media(
         )
 
     watch_url = f"https://www.youtube.com/watch?v={cleaned_video_id}"
-    resolution = YouTubeMediaResolution(source=None, media_urls=[], thumbnail_url=None, media_asset_meta={}, attempts=[])
+    resolution = YouTubeMediaResolution(
+        source=None, media_urls=[], thumbnail_url=None, media_asset_meta={}, attempts=[]
+    )
 
     ytdlp_urls, ytdlp_thumbnail, ytdlp_attempt, ytdlp_meta = _resolve_with_ytdlp(watch_url)
     resolution.attempts.append(ytdlp_attempt)
