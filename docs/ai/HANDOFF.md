@@ -1,6 +1,227 @@
 # Session Handoff (TRR-Backend)
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
+## Latest Update (2026-03-12 16:24 EDT) — Modal admin-operation runtime fixed; Render details refresh now succeeds end-to-end
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/test_modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+- behavior_summary:
+  - Root-caused the live Render `admin_show_refresh` failure to a Modal dependency-graph mismatch:
+    - local deploy path attached named secrets
+    - remote container import re-resolved to `Secret.from_dotenv(...)`
+    - Modal refused to start the function because the local and remote object graphs differed
+  - Made `trr_backend.modal_jobs` deterministic for non-local runtimes:
+    - explicit secret names still win when both are set
+    - local/dev keeps dotenv fallback
+    - production/staging now default to named secrets `trr-backend-runtime` and `trr-social-auth`
+  - Redeployed the live Modal app `trr-backend-jobs` after the fix.
+  - Verified that a previously stuck pending operation was claimed and completed successfully by `run_admin_operation_v2`.
+  - Verified the public Render route `POST /api/v1/admin/shows/{show_id}/refresh/stream` now completes with `details.status=success` and Modal-backed execution metadata.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/test_modal_jobs.py tests/utils/test_env.py tests/scripts/test_sync_render_service_from_aws.py`
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check trr_backend/modal_jobs.py tests/test_modal_jobs.py scripts/render/sync_render_service_from_aws.py`
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && TRR_MODAL_RUNTIME_SECRET_NAME=trr-backend-runtime TRR_MODAL_SOCIAL_SECRET_NAME=trr-social-auth TRR_MODAL_ADMIN_KEEP_WARM=0 ./.venv/bin/modal deploy -m trr_backend.modal_jobs`
+  - `GET https://trr-backend.onrender.com/health` -> `200 {"status":"healthy"}`
+  - `GET https://trr-backend.onrender.com/api/v1/shows/7782652f-783a-488b-8860-41b97de32e75` -> `200`
+  - `POST https://trr-backend.onrender.com/api/v1/admin/shows/7782652f-783a-488b-8860-41b97de32e75/google-news/sync` -> `200`, `execution_backend_canonical=modal`
+  - `POST https://trr-backend.onrender.com/api/v1/admin/shows/7782652f-783a-488b-8860-41b97de32e75/refresh/stream` -> terminal SSE `event: complete` with:
+    - `details.status=success`
+    - `details_sync_shows.status=success`
+    - `details_tmdb_show_entities.status=success`
+    - `details_tmdb_watch_providers.status=success`
+- blocked_checks:
+  - The remaining AWS API teardown is still gated by the observation-window/runbook sequence already documented elsewhere in Task 11 and should not be re-run early in this session.
+## Latest Update (2026-03-12 16:13 EDT) — Better Stack follow-up deferred and surfaced in Dev Dashboard task docs
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+- mcp_tools_used:
+  - `functions.exec_command`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Confirmed the Dev Dashboard outstanding-task feed is sourced from `docs/cross-collab/TASK*/PLAN.md` status snapshots rather than a separate TODO store.
+  - Added an explicit `Status Snapshot` to backend Task 11 so the dashboard now surfaces the remaining Better Stack follow-up as an in-progress item.
+  - Documented the operational decision to wait on Better Stack until the Render rollback observation window ends on `2026-03-13T16:09:13-04:00`.
+  - Captured the dependent order clearly in task docs:
+    - Better Stack first
+    - CloudWatch reduction second
+    - ALB/NAT retirement after the window and after logging is in place
+- validation_evidence:
+  - `TRR-APP/apps/web/src/lib/server/admin/dev-dashboard-service.ts` reads `Status Snapshot` from task `PLAN.md` and excludes only snapshots that begin with `complete` or `completed`
+  - backend Task 11 `PLAN.md` now contains an in-progress Better Stack follow-up snapshot, so it remains eligible for the Dev Dashboard outstanding-task list
+- blocked_checks:
+  - No live Better Stack configuration was performed in this session.
+  - The 24-hour observation window still blocks AWS teardown until `2026-03-13T16:09:13-04:00`.
+## Latest Update (2026-03-12 16:12 EDT) — Render-backed app cutover verified, 24-hour observation window started
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.mcp__chrome-devtools__new_page`
+  - `functions.mcp__chrome-devtools__take_snapshot`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/render/sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Confirmed `RENDER_API_KEY` is present in the local backend `.env` and used that file as the operator environment for live Render commands.
+  - Hardened the Render sync script again so local operator secret-source env is eligible for secret-file upload resolution:
+    - Google service-account file env
+    - Twitter/Twikit cookie env
+    - TikTok/Facebook/Threads cookie env
+  - Created the live Render service:
+    - service id `srv-d6phk5vkijhs73fcsk7g`
+    - slug `trr-backend-api`
+    - URL `https://trr-backend-api.onrender.com`
+    - first deploy id `dep-d6phk6fkijhs73fcsl10`
+  - To satisfy Render secret-file sync, materialized local `data/twitter_cookies.json` from the already-present backend `.env` Twitter cookie JSON because the expected file path did not exist locally.
+  - Render is now healthy:
+    - deploy `dep-d6phk6fkijhs73fcsl10` reached `live`
+    - public `/health` returns `200 {"status":"healthy"}`
+    - public `/openapi.json` returns `200`
+  - Updated Vercel Preview `TRR_API_URL` to `https://trr-backend-api.onrender.com`.
+  - Preview redeploy from the prior ready preview deployment `dpl_7mCRQqEiWPmuruGriqTTjfLxNgSZ` finished `Ready` as `dpl_EfubMpRSx2PaVYhYt5xkQA9tUg7p`.
+  - Managed Chrome still hits Vercel SSO for the preview URL, so Preview verification in this session is limited to Vercel deployment readiness plus direct Render backend health/openapi checks.
+  - Updated Vercel Production `TRR_API_URL` to `https://trr-backend-api.onrender.com`.
+  - Production redeploy from the prior ready production deployment `dpl_C6JooMoQh4gD1jQpNRRS5qF41Lt6` finished `Ready` as `dpl_AZvVEoif7qPX7TB3U6PabKS7iXvr`.
+  - Verified public production routes after cutover:
+    - `/` -> `200`
+    - `/login` -> `200`
+    - `/admin` -> `403`
+    - `/docs` -> `403`
+  - Managed Chrome verification on `https://trr-app.vercel.app/` shows the production app rendering on deployment `dpl_AZvVEoif7qPX7TB3U6PabKS7iXvr`.
+  - Started the observation window at `2026-03-12T16:09:13-04:00`; earliest safe AWS ALB/NAT teardown time is `2026-03-13T16:09:13-04:00`.
+  - AWS teardown was intentionally not started in this session because the observation window has not elapsed.
+- validation_evidence:
+  - Render service detail:
+    - `GET /v1/services/srv-d6phk5vkijhs73fcsk7g` -> URL `https://trr-backend-api.onrender.com`
+  - Render deploy detail:
+    - `GET /v1/services/srv-d6phk5vkijhs73fcsk7g/deploys?limit=1` -> deploy `dep-d6phk6fkijhs73fcsl10`, status `live`
+  - Public URL checks:
+    - `curl -i https://trr-backend-api.onrender.com/health` -> `200`
+    - `curl -i https://trr-backend-api.onrender.com/openapi.json` -> `200`
+  - Vercel:
+    - `vercel env rm TRR_API_URL preview`
+    - `vercel env add TRR_API_URL preview` with `https://trr-backend-api.onrender.com`
+    - `vercel redeploy https://trr-bfmzez5z5-the-reality-reports-projects.vercel.app --target preview`
+    - `vercel inspect https://trr-97fpv2ors-the-reality-reports-projects.vercel.app` -> deployment `dpl_EfubMpRSx2PaVYhYt5xkQA9tUg7p`, status `Ready`
+    - `vercel env rm TRR_API_URL production`
+    - `vercel env add TRR_API_URL production` with `https://trr-backend-api.onrender.com`
+    - `vercel redeploy https://trr-mea2e0kmv-the-reality-reports-projects.vercel.app --target production`
+    - `vercel inspect https://trr-qqf6nca81-the-reality-reports-projects.vercel.app` -> deployment `dpl_AZvVEoif7qPX7TB3U6PabKS7iXvr`, status `Ready`
+    - Python HTTP verification on `https://trr-app.vercel.app/`, `/login`, `/admin`, `/docs` -> `200`, `200`, `403`, `403`
+  - Managed Chrome:
+    - production app root renders at `https://trr-app.vercel.app/` on deployment `dpl_AZvVEoif7qPX7TB3U6PabKS7iXvr`
+- blocked_checks:
+  - Do not start AWS destructive cleanup until after `2026-03-13T16:09:13-04:00` and only if no rollback signals appear during the observation window.
+  - Better Stack env remains absent from the local backend `.env`, so live Better Stack verification is still pending even after the Render host becomes healthy.
+## Latest Update (2026-03-12 16:45 EDT) — Render readiness hardened, Better Stack wiring added, live cutover still blocked by Render account prerequisites
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/main.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/observability.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/clients/screenalytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/render/sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/test_observability.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/api/run.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/cloud_run.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Normalized the Render service contract so the repo blueprint and sync script both target `trr-backend-api`; this closes the duplicate-service-name risk before the live Render create.
+  - Added shared runtime observability bootstrap in `trr_backend/observability.py`:
+    - keeps normal stdout logging
+    - optionally ships structured Python logs to Better Stack over HTTP when `BETTER_STACK_SOURCE_TOKEN` is set
+    - includes trace ID, logger name, service name, environment, and exception text in the shipped event payload
+  - Wired that observability bootstrap into both:
+    - `api/main.py` for the public FastAPI host
+    - `trr_backend/modal_jobs.py` for Modal-executed background work
+  - Extended `scripts/render/sync_render_service_from_aws.py` so operator-shell env can override/pass through:
+    - `BETTER_STACK_SOURCE_TOKEN`
+    - `LOGTAIL_SOURCE_TOKEN`
+    - `BETTER_STACK_INGESTING_HOST`
+    - `LOGTAIL_INGESTING_HOST`
+    - `BETTER_STACK_LOG_TIMEOUT_SECONDS`
+    - `BETTER_STACK_FAILURE_COOLDOWN_SECONDS`
+    - `CORS_ALLOW_ORIGINS`
+    before syncing the Render service env.
+  - Removed dead legacy compatibility helpers from `trr_backend/clients/screenalytics.py` that implied outbound HTTP admin vision execution via `SCREENALYTICS_API_URL`; admin vision remains backend-owned (`local` or `modal`).
+  - Added a new Render deployment runbook at `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md` and aligned the API/runbook docs with the final `Render API + Modal jobs` steady state.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/scripts/test_sync_render_service_from_aws.py tests/test_observability.py`
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check api/main.py trr_backend/observability.py trr_backend/modal_jobs.py trr_backend/clients/screenalytics.py scripts/render/sync_render_service_from_aws.py tests/scripts/test_sync_render_service_from_aws.py tests/test_observability.py`
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python3.11 -m py_compile api/main.py trr_backend/observability.py trr_backend/modal_jobs.py trr_backend/clients/screenalytics.py scripts/render/sync_render_service_from_aws.py`
+- blocked_checks:
+  - Live Render create/update is still blocked until Render billing is enabled and a usable `RENDER_API_KEY` is available in the operator environment.
+  - Vercel `TRR_API_URL` cutover, Better Stack live verification, and AWS ALB/NAT retirement were intentionally not executed in this session because the Render host does not yet exist.
+## Latest Update (2026-03-12 15:00 EDT) — Render API cutover artifacts added, live create blocked by missing Render billing
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.mcp__awslabs-core__prompt_understanding`
+  - `functions.mcp__awslabs-aws-api__call_aws`
+  - `functions.exec_command`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/render.yaml`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/render/sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+- behavior_summary:
+  - Added a Render Blueprint file, `render.yaml`, for a single Docker-based `trr-backend-api` web service on the `standard` plan in `virginia` with `/health` as the health check.
+  - Added `scripts/render/sync_render_service_from_aws.py` to pull the live AWS API host contract from `/etc/trr-api.env` over SSM, then create or update the Render service and sync env vars via the Render API.
+  - The sync script defaults to the public backend repo (`https://github.com/therealityreport/trr-backend.git` on `main`) and preserves the current Modal-backed runtime contract unchanged.
+  - Attempted the live Render service create against workspace owner `tea-d6pglsu3jp1c73cctvf0`, but Render returned `402 Payment information is required`, so no Render service was created in this session.
+  - No AWS API infrastructure was deleted in this session because cutover preconditions were not met; `trr-api-asg`, ALB, NAT, and the API EC2 host remain the rollback-safe live stack.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/scripts/test_sync_render_service_from_aws.py` (pass; `3 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check scripts/render/sync_render_service_from_aws.py tests/scripts/test_sync_render_service_from_aws.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python3.11 -m py_compile scripts/render/sync_render_service_from_aws.py` (pass)
+  - Render owner discovery:
+    - `GET https://api.render.com/v1/owners` -> workspace `The Reality's workspace` (`tea-d6pglsu3jp1c73cctvf0`)
+  - Render service create attempt:
+    - `POST https://api.render.com/v1/services` -> `402 Payment information is required`
+- blocked_checks:
+  - Render workspace billing must be enabled before the scripted service create/update can succeed.
+  - Render API key rotation was not automatable in this session because Render requires API key revoke/create in the dashboard rather than the public API.
 ## Latest Update (2026-03-07 19:50 EST) — Admin vision Modal function deployed live on staging API host
 
 - primary_skill: `senior-devops`
@@ -15224,3 +15445,42 @@ Latest Update (2026-03-07 20:30 EST) — Modal-backend retirement slice validati
   - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend` (pass)
 - notes:
   - The remaining work for full EC2 retirement is no longer code/test debt inside `TRR-Backend`; it is environment-level traffic/base-URL cutover and eventual legacy AWS runtime retirement.
+
+Latest Update (2026-03-12 15:00 EST) — Vercel traffic is on Modal and the legacy AWS API ASG has been scaled down
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/api/run.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/cloud_run.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/runbooks/social_worker_queue_ops.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+- behavior_summary:
+  - Moved the deployed app runtime target to the Modal-hosted backend URL by updating Vercel Preview and Production `TRR_API_URL` values and redeploying both environments.
+  - Fixed the env rollout bug where `TRR_API_URL` was initially written with a trailing newline, then re-ran clean Preview and Production deployments after recreating the env vars.
+  - Re-verified the live Modal backend contract directly after cutover: `/health` is healthy and social worker-health/queue-status still report `execution_mode_canonical=remote`, `execution_owner=remote_worker`, and `execution_backend_canonical=modal`.
+  - Retired the remaining AWS API runtime from active capacity in the current account by scaling `trr-api-asg` to `0/0/0`; the final instance is terminating and draining out of `trr-api-tg`.
+- deployment_evidence:
+  - Modal API URL: [https://admin-56995--trr-backend-api.modal.run](https://admin-56995--trr-backend-api.modal.run)
+  - Vercel Preview deployment: `dpl_7mCRQqEiWPmuruGriqTTjfLxNgSZ`
+  - Vercel Production deployment: `dpl_C6JooMoQh4gD1jQpNRRS5qF41Lt6`
+  - `trr-api-asg` update request: `e22e64c2-5ab4-46cc-af70-be7e4d69ddb4`
+- validation_evidence:
+  - `python3.11 /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/verify_modal_readiness.py --json` (pass; `ok=true`, API URL present, all eight functions resolved)
+  - direct Modal API checks with bearer auth:
+    - `/health` (pass)
+    - `/api/v1/admin/socials/ingest/worker-health` (pass; fresh Modal dispatcher rows)
+    - `/api/v1/admin/socials/ingest/queue-status?fresh=true` (pass; canonical remote/modal metadata)
+  - AWS runtime checks:
+    - `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names trr-api-asg --region us-east-1`
+    - `aws autoscaling describe-policies --auto-scaling-group-name trr-api-asg --region us-east-1`
+    - `aws autoscaling describe-scheduled-actions --auto-scaling-group-name trr-api-asg --region us-east-1`
+    - `aws elbv2 describe-target-health --target-group-arn arn:aws:elasticloadbalancing:us-east-1:522814694101:targetgroup/trr-api-tg/997e02c9501a78fc --region us-east-1`
+- notes:
+  - Preview browser smoke remained limited by Vercel SSO protection in this session.
+  - At handoff time, the legacy API instance is still draining from the target group, but the ASG is already fixed at `0/0/0` with no scaling or scheduled actions left to restore capacity automatically.

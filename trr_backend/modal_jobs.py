@@ -21,6 +21,8 @@ _API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "1"))
 _SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "64")))
 _SOCIAL_RECOVERY_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT", "4")))
 _ADMIN_KEEP_WARM = max(0, int(os.getenv("TRR_MODAL_ADMIN_KEEP_WARM", "1")))
+_DEFAULT_RUNTIME_SECRET_NAME = "trr-backend-runtime"
+_DEFAULT_SOCIAL_SECRET_NAME = "trr-social-auth"
 _LOCAL_RUNTIME_MARKERS: Final[frozenset[str]] = frozenset({"local", "dev", "development", "test"})
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_JOB_PLANE_MODE": "remote",
@@ -30,7 +32,7 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_APP_NAME": _APP_NAME,
     "TRR_MODAL_API_FUNCTION": _API_FUNCTION_NAME,
     "TRR_MODAL_API_LABEL": _API_LABEL,
-    "TRR_MODAL_ADMIN_OPERATION_FUNCTION": "run_admin_operation",
+    "TRR_MODAL_ADMIN_OPERATION_FUNCTION": "run_admin_operation_v2",
     "TRR_MODAL_GOOGLE_NEWS_FUNCTION": "run_google_news_sync",
     "TRR_MODAL_REDDIT_REFRESH_FUNCTION": "run_reddit_refresh",
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
@@ -146,32 +148,34 @@ def _api_custom_domains() -> list[str] | None:
 
 
 def _resolve_modal_secrets() -> list[modal.Secret]:
-    runtime_secret_name = _runtime_secret_name()
-    social_secret_name = _social_secret_name()
+    explicit_runtime_secret_name = _runtime_secret_name()
+    explicit_social_secret_name = _social_secret_name()
 
-    if runtime_secret_name and social_secret_name:
+    if explicit_runtime_secret_name and explicit_social_secret_name:
         return [
-            modal.Secret.from_name(runtime_secret_name),
-            modal.Secret.from_name(social_secret_name),
+            modal.Secret.from_name(explicit_runtime_secret_name),
+            modal.Secret.from_name(explicit_social_secret_name),
         ]
 
-    if runtime_secret_name or social_secret_name:
+    if explicit_runtime_secret_name or explicit_social_secret_name:
         missing = []
-        if not runtime_secret_name:
+        if not explicit_runtime_secret_name:
             missing.append("TRR_MODAL_RUNTIME_SECRET_NAME")
-        if not social_secret_name:
+        if not explicit_social_secret_name:
             missing.append("TRR_MODAL_SOCIAL_SECRET_NAME")
         raise RuntimeError(
             f"Modal secret configuration is partial. Set both named secrets or neither. Missing: {', '.join(missing)}"
         )
 
-    if _require_named_secrets():
-        raise RuntimeError(
-            "Modal deploys outside local/dev require named secrets. "
-            "Set TRR_MODAL_RUNTIME_SECRET_NAME and TRR_MODAL_SOCIAL_SECRET_NAME."
-        )
+    if _is_local_or_dev_runtime():
+        return [modal.Secret.from_dotenv(_BACKEND_ROOT)]
 
-    return [modal.Secret.from_dotenv(_BACKEND_ROOT)]
+    # Keep production/staging deploys deterministic even when the secret name env vars
+    # are not present inside the remote import environment.
+    return [
+        modal.Secret.from_name(_DEFAULT_RUNTIME_SECRET_NAME),
+        modal.Secret.from_name(_DEFAULT_SOCIAL_SECRET_NAME),
+    ]
 
 
 def _inject_modal_runtime_defaults() -> None:
@@ -202,13 +206,7 @@ def serve_backend_api():
     return fastapi_app
 
 
-@app.function(
-    secrets=_secrets,
-    retries=0,
-    timeout=60 * 60,
-    min_containers=_ADMIN_KEEP_WARM,
-)
-def run_admin_operation(operation_id: str, operation_type: str) -> dict[str, object]:
+def _execute_admin_operation(operation_id: str, operation_type: str) -> dict[str, object]:
     from trr_backend.pipeline.admin_operations import claim_and_execute_operation
 
     worker_id = f"modal:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -223,6 +221,28 @@ def run_admin_operation(operation_id: str, operation_type: str) -> dict[str, obj
         "claimed": claimed,
         "worker_id": worker_id,
     }
+
+
+@app.function(
+    name="run_admin_operation",
+    secrets=_secrets,
+    retries=0,
+    timeout=60 * 60,
+    min_containers=_ADMIN_KEEP_WARM,
+)
+def run_admin_operation(operation_id: str, operation_type: str) -> dict[str, object]:
+    return _execute_admin_operation(operation_id, operation_type)
+
+
+@app.function(
+    name="run_admin_operation_v2",
+    secrets=_secrets,
+    retries=0,
+    timeout=60 * 60,
+    min_containers=_ADMIN_KEEP_WARM,
+)
+def run_admin_operation_v2(operation_id: str, operation_type: str) -> dict[str, object]:
+    return _execute_admin_operation(operation_id, operation_type)
 
 
 @app.function(

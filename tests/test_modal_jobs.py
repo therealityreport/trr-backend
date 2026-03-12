@@ -55,14 +55,24 @@ def test_resolve_modal_secrets_rejects_partial_named_secret_configuration(
 def test_resolve_modal_secrets_requires_named_secrets_outside_local_dev(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
-    monkeypatch.setenv("APP_ENV", "production")
+    named: list[str] = []
+
     monkeypatch.delenv("TRR_MODAL_RUNTIME_SECRET_NAME", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_SECRET_NAME", raising=False)
     monkeypatch.setattr(modal_jobs, "_is_local_or_dev_runtime", lambda: False)
+    monkeypatch.setattr(
+        modal_jobs.modal.Secret,
+        "from_name",
+        lambda name: named.append(name) or {"named": name},
+    )
 
-    with pytest.raises(RuntimeError, match="require named secrets"):
-        modal_jobs._resolve_modal_secrets()
+    secrets = modal_jobs._resolve_modal_secrets()
+
+    assert secrets == [
+        {"named": "trr-backend-runtime"},
+        {"named": "trr-social-auth"},
+    ]
+    assert named == ["trr-backend-runtime", "trr-social-auth"]
 
 
 def test_resolve_modal_secrets_keeps_dotenv_fallback_for_local_dev(

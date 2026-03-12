@@ -1,7 +1,168 @@
 # Status — Task 11 (Tab-Isolated Admin Operations + Resumable Streams)
 
 Repo: TRR-Backend
-Last updated: March 5, 2026
+Last updated: March 12, 2026
+
+## March 12, 2026 — Render `details` refresh path is now clean through Modal
+
+- Root cause of the last blocking Render admin-operation failure was inside the live Modal app definition:
+  - local deploy used named secrets
+  - remote container import re-evaluated to dotenv secrets
+  - Modal rejected the function start because the dependency graph did not match
+- `trr_backend.modal_jobs` now resolves secrets deterministically for non-local runtimes:
+  - explicit `TRR_MODAL_RUNTIME_SECRET_NAME` + `TRR_MODAL_SOCIAL_SECRET_NAME` still win when both are set
+  - local/dev retains dotenv fallback
+  - production/staging default to named secrets:
+    - `trr-backend-runtime`
+    - `trr-social-auth`
+- The live Modal app `trr-backend-jobs` was redeployed after that fix.
+- Render validation now passes for the previously failing show-details route:
+  - `GET https://trr-backend.onrender.com/health` -> `200`
+  - `GET https://trr-backend.onrender.com/api/v1/shows/7782652f-783a-488b-8860-41b97de32e75` -> `200`
+  - `POST https://trr-backend.onrender.com/api/v1/admin/shows/7782652f-783a-488b-8860-41b97de32e75/google-news/sync` -> `200`, Modal-backed
+  - `POST https://trr-backend.onrender.com/api/v1/admin/shows/7782652f-783a-488b-8860-41b97de32e75/refresh/stream` now reaches SSE `event: complete` with:
+    - `details.status=success`
+    - `details_sync_shows.status=success`
+    - `details_tmdb_show_entities.status=success`
+    - `details_tmdb_watch_providers.status=success`
+- This closes the last known `TRR_MODAL` production-path failure for the covered admin/show refresh slice.
+
+## March 12, 2026 — Better Stack follow-up explicitly deferred until after the observation window
+
+- Render cutover verification is complete enough to wait on Better Stack configuration.
+- Better Stack remains required before CloudWatch reduction/removal, but it is not on the critical path for the current 24-hour rollback window.
+- Operational next step after `2026-03-13T16:09:13-04:00`, assuming the cutover stays clean:
+  - set `BETTER_STACK_*` env on the live Render service and Modal job runtime
+  - verify ingestion from both the public API process and Modal jobs
+  - only then begin CloudWatch reduction alongside ALB/NAT retirement
+
+## March 12, 2026 — Render readiness hardened for the final `Render API + Modal jobs` cutover
+
+- Normalized the Render service contract so repo artifacts and the sync script now agree on:
+  - `name=trr-backend-api`
+  - `runtime=docker`
+  - `plan=standard`
+  - `region=virginia`
+  - `healthCheckPath=/health`
+- `scripts/render/sync_render_service_from_aws.py` now overlays operator-shell values for:
+  - `BETTER_STACK_SOURCE_TOKEN`
+  - `LOGTAIL_SOURCE_TOKEN`
+  - `BETTER_STACK_INGESTING_HOST`
+  - `LOGTAIL_INGESTING_HOST`
+  - `BETTER_STACK_LOG_TIMEOUT_SECONDS`
+  - `BETTER_STACK_FAILURE_COOLDOWN_SECONDS`
+  - `CORS_ALLOW_ORIGINS`
+  before syncing the Render service env.
+- Backend/runtime observability now supports Better Stack HTTP ingestion from:
+  - the FastAPI API process
+  - the Modal job app process
+- Startup/runtime copy was corrected to reflect the current screenalytics boundary:
+  - `SCREENALYTICS_API_URL` is now documented and logged as a non-admin legacy outbound dependency only
+  - covered admin image-analysis remains on the backend-owned vision runtime and Modal
+- Validation:
+  - `pytest -q tests/scripts/test_sync_render_service_from_aws.py tests/test_observability.py`
+  - `ruff check api/main.py trr_backend/observability.py trr_backend/modal_jobs.py trr_backend/clients/screenalytics.py scripts/render/sync_render_service_from_aws.py tests/scripts/test_sync_render_service_from_aws.py tests/test_observability.py`
+  - `python3.11 -m py_compile api/main.py trr_backend/observability.py trr_backend/modal_jobs.py trr_backend/clients/screenalytics.py scripts/render/sync_render_service_from_aws.py`
+- Live status remains unchanged:
+  - Render service create/update is still blocked by account-side billing enablement and API access
+  - AWS ALB/NAT cleanup is still deferred until the Render cutover exists and survives the observation window
+
+## March 12, 2026 — Render healthy, Preview and Production now serving through Render, observation window started
+
+- Live Render create is now past the original billing/key blocker:
+  - service id: `srv-d6phk5vkijhs73fcsk7g`
+  - service slug: `trr-backend-api`
+  - service URL: `https://trr-backend-api.onrender.com`
+  - first deploy id: `dep-d6phk6fkijhs73fcsl10`
+- Operator follow-up during creation:
+  - the sync script initially failed before contacting Render because the local secret-file source for `twikit-cookies.json` was unresolved
+  - the sync path was hardened to allow local operator secret-source env passthrough
+  - local `data/twitter_cookies.json` was materialized from the existing backend `.env` secret to satisfy the Render secret-file sync
+- Current validation state:
+  - Render deploy `dep-d6phk6fkijhs73fcsl10` is now `live`
+  - `GET https://trr-backend-api.onrender.com/health` -> `200`, `{"status":"healthy"}`
+  - `GET https://trr-backend-api.onrender.com/openapi.json` -> `200`
+- Cutover status:
+  - Vercel Preview `TRR_API_URL` has been updated to `https://trr-backend-api.onrender.com`
+  - Preview redeploy from prior ready deployment `dpl_7mCRQqEiWPmuruGriqTTjfLxNgSZ` finished `Ready` as `dpl_EfubMpRSx2PaVYhYt5xkQA9tUg7p`
+  - Preview browser validation remains limited by Vercel SSO; the gate used here is Render backend health plus Vercel deployment readiness
+  - Vercel Production `TRR_API_URL` has also been updated to `https://trr-backend-api.onrender.com`
+  - Production redeploy from prior ready deployment `dpl_C6JooMoQh4gD1jQpNRRS5qF41Lt6` finished `Ready` as `dpl_AZvVEoif7qPX7TB3U6PabKS7iXvr`
+  - Post-cutover verification:
+    - `https://trr-app.vercel.app/` -> `200`
+    - `https://trr-app.vercel.app/login` -> `200`
+    - `https://trr-app.vercel.app/admin` -> `403`
+    - `https://trr-app.vercel.app/docs` -> `403`
+    - managed Chrome on `https://trr-app.vercel.app/` shows deployment `dpl_AZvVEoif7qPX7TB3U6PabKS7iXvr`
+  - Observation window started: `2026-03-12T16:09:13-04:00`
+  - Earliest safe AWS destructive cleanup time: `2026-03-13T16:09:13-04:00`
+  - AWS ALB/NAT retirement remains blocked until that observation window passes cleanly
+
+## March 12, 2026 — Vercel app traffic moved to `modal.run` and the legacy AWS API ASG was scaled down
+
+- Deployed app runtime cutover is complete:
+  - Vercel Preview `TRR_API_URL` now points at `https://admin-56995--trr-backend-api.modal.run`
+  - Vercel Production `TRR_API_URL` now points at `https://admin-56995--trr-backend-api.modal.run`
+  - fixed a rollout bug where the initial Vercel env add path stored `TRR_API_URL` with a trailing newline; both Preview and Production vars were recreated cleanly before the final redeploy
+- Deploy evidence:
+  - Preview deployment: `dpl_7mCRQqEiWPmuruGriqTTjfLxNgSZ`
+    - URL: `https://trr-bfmzez5z5-the-reality-reports-projects.vercel.app`
+  - Production deployment: `dpl_C6JooMoQh4gD1jQpNRRS5qF41Lt6`
+    - URL: `https://trr-mea2e0kmv-the-reality-reports-projects.vercel.app`
+    - alias: `https://trr-app.vercel.app`
+- Modal backend verification after the cutover:
+  - `GET /health` on `https://admin-56995--trr-backend-api.modal.run` returns `{"status":"healthy"}`
+  - worker-health reports fresh Modal dispatcher rows for:
+    - `modal:social-dispatcher`
+    - `modal:reddit-dispatcher`
+    - `modal:google-news-dispatcher`
+    - `modal:admin-dispatcher`
+  - queue-status reports the canonical remote contract:
+    - `execution_mode_canonical=remote`
+    - `execution_owner=remote_worker`
+    - `execution_backend_canonical=modal`
+- Public production app verification:
+  - `https://trr-app.vercel.app/` returns `200`
+  - `https://trr-app.vercel.app/login` returns `200`
+  - `https://trr-app.vercel.app/admin` returns `403` as expected for the admin auth guard
+  - `https://trr-app.vercel.app/docs` returns `403` as expected for the admin auth guard
+- Legacy AWS API retirement:
+  - `trr-api-asg` updated to `MinSize=0`, `DesiredCapacity=0`, `MaxSize=0`
+  - no autoscaling policies are attached to `trr-api-asg`
+  - no scheduled actions are attached to `trr-api-asg`
+  - the remaining instance `i-01a7b672f5946d19a` entered `Terminating`
+  - `trr-api-tg` now shows that target as `draining`
+- Preview validation note:
+  - the Preview deployment is ready, but the preview URL remains Vercel-SSO protected, so this session relied on deployment readiness, clean env verification, and direct Modal backend checks rather than an authenticated preview browser session
+
+## March 12 follow-up — Render cutover artifacts are ready, live cutover blocked by Render billing
+
+- Added repo-side Render deployment artifacts:
+  - `render.yaml` for a single Docker web service:
+    - `name=trr-backend-api`
+    - `runtime=docker`
+    - `plan=standard`
+    - `region=virginia`
+    - `healthCheckPath=/health`
+  - `scripts/render/sync_render_service_from_aws.py`:
+    - reads the live AWS API host contract from `/etc/trr-api.env` over SSM
+    - creates or updates the Render service
+    - replaces all Render env vars with the live AWS API host env set
+    - preserves the current Modal-backed runtime contract unchanged
+  - `tests/scripts/test_sync_render_service_from_aws.py`
+- Validation:
+  - `pytest -q tests/scripts/test_sync_render_service_from_aws.py` -> `3 passed`
+  - `ruff check scripts/render/sync_render_service_from_aws.py tests/scripts/test_sync_render_service_from_aws.py` -> pass
+  - `python3.11 -m py_compile scripts/render/sync_render_service_from_aws.py` -> pass
+- Live external status:
+  - Render owner discovery succeeded:
+    - workspace: `The Reality's workspace`
+    - owner id: `tea-d6pglsu3jp1c73cctvf0`
+  - Render service creation failed before any service was created:
+    - `POST /v1/services` -> `402 Payment information is required`
+- Result:
+  - API cutover to Render is prepared but not executed
+  - AWS API stack retirement remains blocked until Render billing is enabled and the Render service exists
 
 ## March 7 live rollout follow-up — admin image analysis is now on Modal in staging
 
@@ -124,7 +285,7 @@ Last updated: March 5, 2026
   - `scripts/modal/prepare_named_secrets.py --apply` now deletes rendered secret env files by default after publishing, unless `--keep-rendered-files` is passed
 - Clarified the cutover boundary in runbooks:
   - social worker cutover readiness is not the same thing as full EC2 retirement
-  - EC2 retirement remains incomplete while documented admin image-analysis jobs still depend on `SCREENALYTICS_API_URL`
+  - EC2 retirement remains incomplete until the public API host moves to Render and the AWS ALB/NAT path is removed
 - Validation:
   - targeted pytest for the new readiness script
 
