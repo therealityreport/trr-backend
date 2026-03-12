@@ -3,9 +3,11 @@ from __future__ import annotations
 import io
 import sys
 import types
+from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ProfileNotFound
 
 from trr_backend.media import s3_mirror
 
@@ -141,6 +143,58 @@ def test_mirror_url_to_s3_fails_for_oversized_assets(monkeypatch: pytest.MonkeyP
     )
     assert result.status == "failed"
     assert result.error == "asset_too_large"
+
+
+@dataclass
+class _FakeBotoSession:
+    kwargs: dict[str, object]
+
+    def client(self, service_name: str, **kwargs):  # noqa: ANN001
+        return {"service_name": service_name, **kwargs}
+
+
+def test_load_s3_config_ignores_profile_when_explicit_creds_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("AWS_PROFILE", "trr")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+
+    config = s3_mirror.get_s3_config()
+
+    assert config.profile_name is None
+
+
+def test_get_s3_client_falls_back_to_env_creds_when_profile_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("AWS_PROFILE", "trr")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "token")
+
+    session_calls: list[dict[str, object]] = []
+
+    def _fake_session(**kwargs):  # noqa: ANN001
+        if kwargs.get("profile_name") == "trr":
+            raise ProfileNotFound(profile="trr")
+        session_calls.append(dict(kwargs))
+        return _FakeBotoSession(dict(kwargs))
+
+    monkeypatch.setattr(s3_mirror.boto3, "Session", _fake_session)
+
+    client = s3_mirror.get_s3_client()
+
+    assert session_calls == [{"region_name": "us-east-1"}]
+    assert client == {
+        "service_name": "s3",
+        "region_name": "us-east-1",
+        "aws_access_key_id": "key",
+        "aws_secret_access_key": "secret",
+        "aws_session_token": "token",
+    }
 
 
 def test_mirror_urls_to_s3_isolates_failures_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,7 +13,7 @@ from urllib.parse import quote, unquote, urlparse
 
 import boto3
 import requests
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ProfileNotFound
 
 _DEFAULT_HEADERS = {
     "accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -201,7 +201,11 @@ def _load_s3_config() -> S3Config:
     region = _require_region()
     cdn_base_url = _validate_cdn_base_url(_require_env("AWS_CDN_BASE_URL"))
     prefix = (os.getenv("AWS_S3_PREFIX") or "").strip().strip("/")
-    profile_name = (os.getenv("AWS_PROFILE") or os.getenv("AWS_DEFAULT_PROFILE") or "").strip() or None
+    access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
+    secret_key = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+    profile_name = None
+    if not (access_key and secret_key):
+        profile_name = (os.getenv("AWS_PROFILE") or os.getenv("AWS_DEFAULT_PROFILE") or "").strip() or None
     return S3Config(
         bucket=bucket,
         region=region,
@@ -217,7 +221,14 @@ def get_s3_config() -> S3Config:
 
 def _build_boto3_session(config: S3Config) -> boto3.Session:
     if config.profile_name:
-        return boto3.Session(profile_name=config.profile_name, region_name=config.region)
+        try:
+            return boto3.Session(profile_name=config.profile_name, region_name=config.region)
+        except ProfileNotFound:
+            access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
+            secret_key = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+            if access_key and secret_key:
+                return boto3.Session(region_name=config.region)
+            raise
     return boto3.Session(region_name=config.region)
 
 
@@ -225,17 +236,20 @@ def get_s3_client():
     config = get_s3_config()
     access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
     secret_key = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+    session_token = (os.getenv("AWS_SESSION_TOKEN") or "").strip()
 
     session = _build_boto3_session(config)
     if config.profile_name:
         return session.client("s3", region_name=config.region)
     if access_key and secret_key:
-        return session.client(
-            "s3",
-            region_name=config.region,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-        )
+        client_kwargs: dict[str, Any] = {
+            "region_name": config.region,
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
+        }
+        if session_token:
+            client_kwargs["aws_session_token"] = session_token
+        return session.client("s3", **client_kwargs)
     return session.client("s3", region_name=config.region)
 
 
