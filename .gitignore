@@ -120,3 +120,6 @@ data/tiktok_cookies_netscape.txt
 scripts/socials/**/output/
 scripts/socials/**/*.csv
 !scripts/socials/**/instagram_cookies.example.json
+
+# Playwright profiles
+.playwright-profiles/
