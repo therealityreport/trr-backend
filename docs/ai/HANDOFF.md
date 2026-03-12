@@ -1,6 +1,72 @@
 # Session Handoff (TRR-Backend)
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
+## Latest Update (2026-03-12 16:40 EDT) — AWS teardown operator script added; live deletion still gated until March 13
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+  - `functions.mcp__awslabs-aws-api__call_aws`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_teardown_pass.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/aws_teardown.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Queried the live AWS account and confirmed the remaining teardown set is limited to the drained legacy API/network shell plus the manual RDS snapshot.
+  - Confirmed no EC2 instances and no EBS volumes remain.
+  - Added `scripts/ops/aws_teardown_pass.py` as the canonical gated teardown operator:
+    - validates Render, one show read, one Modal-backed admin route, and Vercel production root
+    - blocks destructive execution until the observation window expires
+    - deletes the legacy AWS shell in the exact planned order when run with `--execute`
+  - Added `docs/deploy/aws_teardown.md` as the operator runbook and linked it from the Render deployment doc.
+  - Did not execute destructive teardown in this session because the current date is still March 12, 2026.
+- validation_evidence:
+  - live AWS inventory queries confirmed:
+    - `trr-api-asg` still exists and is already `0/0/0`
+    - `trr-api-alb` and `trr-api-tg` still exist
+    - NAT gateway `nat-004581b7931e685e7` and EIP `eipalloc-0c6c7ef0913e7a3d8` still exist
+    - two ALB-managed public IPv4 addresses still exist
+    - snapshot `trr-metadata-db-final-2026-03-07` still exists
+    - no EC2 instances exist
+    - no EBS volumes exist
+- blocked_checks:
+  - Do not run `scripts/ops/aws_teardown_pass.py --execute` until after `2026-03-13T16:09:13-04:00`.
+  - Better Stack is still not the primary logging sink, so only ALB-only alarms and clearly obsolete EC2/bootstrap log groups are part of this pass.
+## Latest Update (2026-03-12 16:18 EDT) — Better Stack free-first decision recorded; no credentials present yet
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/api/run.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Recorded the operator decision to start with Better Stack free rather than assuming a paid Better Stack plan.
+  - Updated the backend env example and deploy/run docs so the Better Stack step is framed as free-tier-first and still clearly required before CloudWatch reduction.
+  - Updated Task 11 cross-collab docs so the Dev Dashboard outstanding-task entry now reflects the free-first Better Stack decision.
+  - Checked the local backend `.env` for Better Stack credentials and found no configured source token or ingest host, so no live Better Stack activation was possible in this session.
+- validation_evidence:
+  - local env check:
+    - `BETTER_STACK_SOURCE_TOKEN=missing`
+    - `BETTER_STACK_INGESTING_HOST=missing`
+    - `LOGTAIL_SOURCE_TOKEN=missing`
+    - `LOGTAIL_INGESTING_HOST=missing`
+- blocked_checks:
+  - A Better Stack free source still needs to be created manually in Better Stack and its token/host added to the operator env before Render/Modal can ship logs.
+  - AWS teardown remains blocked by the observation window until `2026-03-13T16:09:13-04:00`.
 ## Latest Update (2026-03-12 16:24 EDT) — Modal admin-operation runtime fixed; Render details refresh now succeeds end-to-end
 
 - primary_skill: `senior-devops`

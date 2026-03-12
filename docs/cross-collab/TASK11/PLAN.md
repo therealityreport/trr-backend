@@ -1,13 +1,25 @@
 # Plan — Task 11 (Plan A: Workspace + TRR-Backend Contract Completion)
 
 Repo: TRR-Backend
-Last updated: March 4, 2026
+Last updated: March 12, 2026
+
+## Status Snapshot (As of March 12, 2026)
+
+- In progress.
+- Public traffic is now on the Render-hosted backend and the rollback observation window is open until March 13, 2026 at 16:09 EDT.
+- Better Stack can wait until after that observation window. It is required before CloudWatch is reduced or removed, but it does not block the current Render cutover validation window.
+- Logging decision: use Better Stack free first rather than paying up front. Upgrade only if real log volume or retention needs exceed the free tier.
+- Next TODO after the observation window closes cleanly:
+  - create or use a Better Stack free HTTP source and configure `BETTER_STACK_*` env on the live Render service and Modal job runtime
+  - verify backend API and Modal job logs arrive in Better Stack
+  - then run `scripts/ops/aws_teardown_pass.py --execute`
+  - then reduce CloudWatch usage and proceed with any follow-up cleanup outside the scripted pass
 
 ## Scope
 
 Finalize and harden additive backend/workspace contracts so admin SSE jobs are resumable across disconnect/reconnect and workspace startup no longer reloads all matching browser tabs by default.
 
-## Agent A Remote Job Plane Addendum (EC2 worker ownership)
+## Agent A Remote Job Plane Addendum (Render API + Modal job plane)
 
 1. Additive worker-claim lifecycle fields are required on:
    - `core.admin_operations`
@@ -17,15 +29,28 @@ Finalize and harden additive backend/workspace contracts so admin SSE jobs are r
    - `TRR_JOB_PLANE_MODE=local|remote`
    - `TRR_LONG_JOB_ENFORCE_REMOTE=0|1`
 3. In remote mode:
-   - API routes enqueue and return quickly.
-   - dedicated worker services claim and execute jobs.
+   - the public FastAPI host is Render once cutover completes
+   - `serve_backend_api` remains the Modal rollback host and parity target during migration
+   - TRR-APP targets the public backend host via `TRR_API_URL`
+   - Modal functions own async execution for admin, social, reddit, google-news, and vision work
 4. Additive kickoff contract fields (frozen for TRR-APP):
    - `execution_owner` (`local_api|remote_worker`)
    - `execution_mode_canonical` (`local|remote`)
-5. Worker entrypoints shipped in backend:
+5. Legacy worker entrypoints remain rollback/local-dev only:
    - `python -m scripts.workers.admin_operations_worker`
    - `python -m scripts.workers.reddit_refresh_worker`
    - `python -m scripts.workers.google_news_worker`
+
+## March 12, 2026 runtime closeout note
+
+Task 11 is no longer about proving EC2 worker ownership. The final architecture
+for this workstream is:
+
+- `TRR-APP` on Vercel Preview/Production
+- `TRR_API_URL` pointing at the Render-hosted backend API
+- `serve_backend_api` retained as the Modal rollback host and executor-adjacent parity surface
+- Modal functions as the live async execution plane
+- legacy AWS API/runtime retained only until the rollback window closes
 
 ## Frozen Contract Surface
 

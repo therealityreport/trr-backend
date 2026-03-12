@@ -3,6 +3,31 @@
 Repo: TRR-Backend
 Last updated: March 12, 2026
 
+## March 12, 2026 — AWS teardown pass is codified but still gated by the observation window
+
+- Added a dedicated teardown operator script:
+  - `scripts/ops/aws_teardown_pass.py`
+- Added a dedicated teardown runbook:
+  - `docs/deploy/aws_teardown.md`
+- The script covers the exact remaining AWS inventory:
+  - `trr-api-asg`
+  - `trr-api-lt`
+  - `trr-api-alb`
+  - `trr-api-tg`
+  - `nat-004581b7931e685e7`
+  - `eipalloc-0c6c7ef0913e7a3d8`
+  - `sg-054ae25e1699a3845`
+  - `sg-09ad087d9a6b689dd`
+  - `trr-metadata-db-final-2026-03-07`
+  - ALB-only alarms and old EC2/bootstrap log groups
+- Default script mode is non-destructive `check-only`.
+- `--execute` remains blocked until after `2026-03-13T16:09:13-04:00`.
+- This pass still intentionally excludes:
+  - S3
+  - ACM
+  - Better Stack wiring
+  - Render/Vercel/Modal config changes
+
 ## March 12, 2026 — Render `details` refresh path is now clean through Modal
 
 - Root cause of the last blocking Render admin-operation failure was inside the live Modal app definition:
@@ -31,7 +56,9 @@ Last updated: March 12, 2026
 
 - Render cutover verification is complete enough to wait on Better Stack configuration.
 - Better Stack remains required before CloudWatch reduction/removal, but it is not on the critical path for the current 24-hour rollback window.
+- Operator choice for the next step is now fixed: start with a Better Stack free source instead of a paid plan.
 - Operational next step after `2026-03-13T16:09:13-04:00`, assuming the cutover stays clean:
+  - create or use a Better Stack free HTTP source
   - set `BETTER_STACK_*` env on the live Render service and Modal job runtime
   - verify ingestion from both the public API process and Modal jobs
   - only then begin CloudWatch reduction alongside ALB/NAT retirement

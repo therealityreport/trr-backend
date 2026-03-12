@@ -1,7 +1,49 @@
 # Other Projects — Task 11 (Plan A Contract Freeze)
 
 Repo: TRR-Backend
-Last updated: March 4, 2026
+Last updated: March 12, 2026
+
+## March 12, 2026 Better Stack deferral note
+
+- `TRR-Backend` can defer Better Stack setup until the Render cutover observation window ends on March 13, 2026 at 16:09 EDT.
+- When that follow-up starts, the default is to use Better Stack free first instead of a paid plan.
+- The backend repo now also contains a dedicated AWS teardown operator script and runbook for the post-window cleanup:
+  - `scripts/ops/aws_teardown_pass.py`
+  - `docs/deploy/aws_teardown.md`
+- `TRR-APP` does not need any consumer or dashboard code change for this follow-up; the Dev Dashboard now picks it up from the backend task plan status snapshot.
+- screenalytics remains unaffected by this logging follow-up.
+
+## March 12, 2026 Render readiness hardening
+
+- `TRR-Backend` hardened the final public-hosting artifacts for the `Render API + Modal jobs` steady state:
+  - Render service naming is now normalized everywhere to `trr-backend-api`
+  - the Render sync path can pass through Better Stack logging env and explicit `CORS_ALLOW_ORIGINS`
+  - backend and Modal jobs now support Better Stack HTTP log ingestion when those env vars are present
+- `TRR-APP` does not need consumer contract changes for this step.
+- The deployed app path is still on the Modal API URL until Render billing is enabled and a live Render service exists.
+
+## March 12, 2026 Vercel + AWS retirement checkpoint
+
+- `TRR-APP` has now executed the deployed runtime cutover:
+  - Vercel Preview `TRR_API_URL` -> `https://admin-56995--trr-backend-api.modal.run`
+  - Vercel Production `TRR_API_URL` -> `https://admin-56995--trr-backend-api.modal.run`
+  - final ready deployments:
+    - Preview `dpl_7mCRQqEiWPmuruGriqTTjfLxNgSZ`
+    - Production `dpl_C6JooMoQh4gD1jQpNRRS5qF41Lt6`
+- `TRR-Backend` is now the live Modal-hosted backend API and async plane for the deployed app path.
+- The legacy AWS API runtime has been retired from active capacity in the current account:
+  - `trr-api-asg` scaled to `0/0/0`
+  - no worker ASG is present
+  - remaining target is terminating/draining only
+
+## March 12, 2026 Render API-hosting checkpoint
+
+- TRR-Backend now has repo-side Render deployment artifacts:
+  - `render.yaml`
+  - `scripts/render/sync_render_service_from_aws.py`
+- No consumer contract changes have landed in TRR-APP yet because the live Render service was blocked by missing billing in the Render workspace.
+- TRR-APP should continue targeting the current Modal-backed API host until a Render service exists and a frontend base-URL cutover is executed.
+- screenalytics remains unchanged in this checkpoint; only the future public API host is being re-homed.
 
 ## March 7, 2026 admin-vision rollout follow-up
 
