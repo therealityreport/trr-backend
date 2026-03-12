@@ -169,8 +169,8 @@ def append_operation_event(
     event_seq: int | None = None,
 ) -> dict[str, Any]:
     event_name = str(event_type or "").strip() or "progress"
-    row = pg.fetch_one(
-        """
+    params = [operation_id, operation_id, event_seq, event_name, _to_json(event_payload)]
+    query = """
         with locked_operation as (
           select id
           from core.admin_operations
@@ -201,12 +201,17 @@ def append_operation_event(
           event_type,
           event_payload,
           created_at
-        """,
-        [operation_id, operation_id, event_seq, event_name, _to_json(event_payload)],
-    )
-    if not row:
-        raise RuntimeError("Failed to append admin operation event")
-    return dict(row)
+        """
+    for attempt in range(3):
+        try:
+            row = pg.fetch_one(query, params)
+        except Exception as exc:
+            if event_seq is None and "admin_operation_events_op_seq_unique" in str(exc) and attempt < 2:
+                continue
+            raise
+        if row:
+            return dict(row)
+    raise RuntimeError("Failed to append admin operation event")
 
 
 def stream_events_after_seq(

@@ -141,6 +141,36 @@ def test_append_operation_event_preserves_explicit_event_seq() -> None:
     assert int(row["event_seq"]) == 42
 
 
+def test_append_operation_event_retries_on_unique_sequence_conflict() -> None:
+    operation_id = str(uuid4())
+    calls = 0
+
+    def _fake_fetch_one(_query: str, _params: list[object]):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError(
+                'duplicate key value violates unique constraint "admin_operation_events_op_seq_unique"'
+            )
+        return {
+            "operation_id": operation_id,
+            "event_seq": 2,
+            "event_type": "progress",
+            "event_payload": {"stage": "retry"},
+            "created_at": "2026-03-03T00:00:00Z",
+        }
+
+    with patch.object(admin_operations.pg, "fetch_one", side_effect=_fake_fetch_one):
+        row = admin_operations.append_operation_event(
+            operation_id,
+            event_type="progress",
+            event_payload={"stage": "retry"},
+        )
+
+    assert calls == 2
+    assert int(row["event_seq"]) == 2
+
+
 def test_stream_events_after_seq_orders_and_clamps_cursor() -> None:
     operation_id = str(uuid4())
 
