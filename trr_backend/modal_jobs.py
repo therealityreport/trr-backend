@@ -10,6 +10,8 @@ from typing import Final
 
 import modal
 
+from trr_backend.observability import configure_runtime_observability
+
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _APP_NAME = str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() or "trr-backend-jobs"
 _TIMEZONE = str(os.getenv("TRR_MODAL_TIMEZONE") or "America/New_York").strip() or "America/New_York"
@@ -175,10 +177,14 @@ def _resolve_modal_secrets() -> list[modal.Secret]:
 def _inject_modal_runtime_defaults() -> None:
     for key, value in _CANONICAL_MODAL_RUNTIME_DEFAULTS.items():
         os.environ[key] = value
+    if (os.getenv("AWS_ACCESS_KEY_ID") or "").strip() and (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip():
+        os.environ.pop("AWS_PROFILE", None)
+        os.environ.pop("AWS_DEFAULT_PROFILE", None)
 
 
 _secrets = _resolve_modal_secrets()
 _inject_modal_runtime_defaults()
+configure_runtime_observability(service_name="trr-backend-modal-jobs")
 
 app = modal.App(_APP_NAME, image=_image)
 

@@ -125,3 +125,17 @@ def test_inject_modal_runtime_defaults_overrides_explicit_env(
     modal_jobs._inject_modal_runtime_defaults()
 
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
+
+
+def test_inject_modal_runtime_defaults_clears_aws_profile_when_static_creds_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_PROFILE", "trr")
+    monkeypatch.setenv("AWS_DEFAULT_PROFILE", "trr")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+
+    modal_jobs._inject_modal_runtime_defaults()
+
+    assert "AWS_PROFILE" not in os.environ
+    assert "AWS_DEFAULT_PROFILE" not in os.environ
