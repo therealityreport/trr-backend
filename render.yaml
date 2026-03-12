@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: trr-backend-api
+    runtime: docker
+    repo: https://github.com/therealityreport/trr-backend.git
+    branch: main
+    plan: standard
+    region: virginia
+    healthCheckPath: /health
+    autoDeploy: false

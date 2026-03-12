@@ -4,6 +4,7 @@ Core browse endpoints for shows, seasons, episodes, and cast.
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -176,11 +177,31 @@ def _fetch_entities_by_ids(
     table: str,
     ids: list[int],
     fields: str,
+    id_column: str = "id",
 ) -> list[dict]:
     if not ids:
         return []
-    response = db.schema("core").table(table).select(fields).in_("id", ids).execute()
+    response = db.schema("core").table(table).select(fields).in_(id_column, ids).execute()
     return get_list_result(response, f"listing {table}")
+
+
+def _stringify_temporal(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _normalize_temporal_fields(row: dict[str, Any], *fields: str) -> dict[str, Any]:
+    for field in fields:
+        if field in row:
+            row[field] = _stringify_temporal(row.get(field))
+    return row
 
 
 def _group_watch_providers(rows: list[dict]) -> list[dict]:
@@ -267,6 +288,7 @@ def list_shows(
     response = db.schema("core").table("shows").select("*").order("name").range(offset, offset + limit - 1).execute()
     rows = get_list_result(response, "listing shows")
     for row in rows:
+        _normalize_temporal_fields(row, "premiere_date")
         row["external_ids"] = _build_show_external_ids(row)
     return rows
 
@@ -276,6 +298,7 @@ def get_show(db: SupabaseClient, show_id: UUID) -> dict:
     """Get a specific show by ID."""
     response = db.schema("core").table("shows").select("*").eq("id", str(show_id)).single().execute()
     show = require_single_result(response, "Show")
+    _normalize_temporal_fields(show, "premiere_date")
     show["external_ids"] = _build_show_external_ids(show)
 
     network_ids = show.get("tmdb_network_ids") or []
@@ -289,6 +312,8 @@ def get_show(db: SupabaseClient, show_id: UUID) -> dict:
                 "hosted_logo_content_type,hosted_logo_bytes,hosted_logo_etag,hosted_logo_at"
             ),
         )
+        for row in networks:
+            _normalize_temporal_fields(row, "hosted_logo_at")
         network_map = {row.get("id"): row for row in networks if row.get("id") is not None}
         show["tmdb_networks"] = [network_map.get(nid) for nid in network_ids if nid in network_map]
     else:
@@ -305,6 +330,8 @@ def get_show(db: SupabaseClient, show_id: UUID) -> dict:
                 "hosted_logo_content_type,hosted_logo_bytes,hosted_logo_etag,hosted_logo_at"
             ),
         )
+        for row in companies:
+            _normalize_temporal_fields(row, "hosted_logo_at")
         company_map = {row.get("id"): row for row in companies if row.get("id") is not None}
         show["tmdb_production_companies"] = [company_map.get(cid) for cid in company_ids if cid in company_map]
     else:
@@ -313,16 +340,32 @@ def get_show(db: SupabaseClient, show_id: UUID) -> dict:
     providers_response = (
         db.schema("core")
         .table("show_watch_providers")
-        .select(
-            "region,offer_type,display_priority,link,"
-            "provider:watch_providers(provider_id,provider_name,display_priority,tmdb_logo_path,logo_path,"
-            "hosted_logo_key,hosted_logo_url,hosted_logo_sha256,hosted_logo_content_type,"
-            "hosted_logo_bytes,hosted_logo_etag,hosted_logo_at)"
-        )
+        .select("region,offer_type,display_priority,link,provider_id")
         .eq("show_id", str(show_id))
         .execute()
     )
     provider_rows = get_list_result(providers_response, "listing watch providers")
+    provider_ids = sorted({int(row["provider_id"]) for row in provider_rows if isinstance(row.get("provider_id"), int)})
+    providers_by_id: dict[int, dict[str, Any]] = {}
+    if provider_ids:
+        providers = _fetch_entities_by_ids(
+            db,
+            table="watch_providers",
+            ids=provider_ids,
+            id_column="provider_id",
+            fields=(
+                "provider_id,provider_name,display_priority,tmdb_logo_path,logo_path,hosted_logo_key,hosted_logo_url,"
+                "hosted_logo_sha256,hosted_logo_content_type,hosted_logo_bytes,hosted_logo_etag,hosted_logo_at"
+            ),
+        )
+        for provider in providers:
+            _normalize_temporal_fields(provider, "hosted_logo_at")
+            provider_id = provider.get("provider_id")
+            if isinstance(provider_id, int):
+                providers_by_id[provider_id] = provider
+    for row in provider_rows:
+        provider_id = row.get("provider_id")
+        row["provider"] = providers_by_id.get(provider_id, {})
     show["watch_providers"] = _group_watch_providers(provider_rows)
 
     return show
@@ -358,7 +401,10 @@ def list_seasons(
         .range(offset, offset + limit - 1)
         .execute()
     )
-    return get_list_result(response, "listing seasons")
+    rows = get_list_result(response, "listing seasons")
+    for row in rows:
+        _normalize_temporal_fields(row, "premiere_date")
+    return rows
 
 
 @router.get("/{show_id}/seasons/{season_number}", response_model=Season)
@@ -377,7 +423,9 @@ def get_season(
         .single()
         .execute()
     )
-    return require_single_result(response, "Season")
+    row = require_single_result(response, "Season")
+    _normalize_temporal_fields(row, "premiere_date")
+    return row
 
 
 @router.get("/{show_id}/seasons/{season_number}/episodes", response_model=list[Episode])
@@ -412,7 +460,10 @@ def list_episodes(
         .range(offset, offset + limit - 1)
         .execute()
     )
-    return get_list_result(response, "listing episodes")
+    rows = get_list_result(response, "listing episodes")
+    for row in rows:
+        _normalize_temporal_fields(row, "air_date")
+    return rows
 
 
 @router.get("/{show_id}/cast", response_model=CastList)
