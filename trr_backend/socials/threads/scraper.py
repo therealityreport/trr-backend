@@ -218,8 +218,7 @@ class ThreadsScraper:
             "sec-ch-ua-platform": '"macOS"',
             "sec-ch-ua-platform-version": '"26.4.0"',
             "sec-ch-ua-full-version-list": (
-                '"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.117", '
-                '"Chromium";v="145.0.7632.117"'
+                '"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.117", "Chromium";v="145.0.7632.117"'
             ),
             "sec-ch-ua-model": '""',
             "sec-ch-prefers-color-scheme": "light",
@@ -250,9 +249,7 @@ class ThreadsScraper:
                 "x-ig-app-id": _THREADS_IG_APP_ID,
                 "x-fb-lsd": tokens.lsd,
                 "x-csrftoken": (
-                    tokens.fb_dtsg.split(":")[0]
-                    if ":" in tokens.fb_dtsg
-                    else self.cookies.get("csrftoken", "")
+                    tokens.fb_dtsg.split(":")[0] if ":" in tokens.fb_dtsg else self.cookies.get("csrftoken", "")
                 ),
                 "x-fb-friendly-name": "BarcelonaProfileThreadsTabDirectQuery",
             }
@@ -274,6 +271,25 @@ class ThreadsScraper:
         normalized = int(max_pages)
         return None if normalized <= 0 else normalized
 
+    def _fetch_html_with_cookies(
+        self,
+        url: str,
+        *,
+        delay_seconds: float,
+        referer: str | None = None,
+        document: bool = False,
+        cookies_override: dict[str, str] | None = None,
+    ) -> str:
+        self._rate_limit(delay_seconds)
+        response = self.session.get(
+            url,
+            timeout=(10, 45),
+            headers=self._headers(referer=referer, document=document),
+            cookies=self.cookies if cookies_override is None else cookies_override,
+        )
+        response.raise_for_status()
+        return response.text or ""
+
     def _fetch_html(
         self,
         url: str,
@@ -282,15 +298,12 @@ class ThreadsScraper:
         referer: str | None = None,
         document: bool = False,
     ) -> str:
-        self._rate_limit(delay_seconds)
-        response = self.session.get(
+        return self._fetch_html_with_cookies(
             url,
-            timeout=(10, 45),
-            headers=self._headers(referer=referer, document=document),
-            cookies=self.cookies,
+            delay_seconds=delay_seconds,
+            referer=referer,
+            document=document,
         )
-        response.raise_for_status()
-        return response.text or ""
 
     # ------------------------------------------------------------------
     # GraphQL API helpers
@@ -743,7 +756,7 @@ class ThreadsScraper:
             if normalized.startswith("/"):
                 normalized = f"{self.BASE_URL}{normalized}"
             elif normalized.startswith("http://"):
-                normalized = f"https://{normalized[len('http://'):]}"
+                normalized = f"https://{normalized[len('http://') :]}"
             if not normalized.startswith("https://www.threads.com/"):
                 continue
             normalized = normalized.split("?", 1)[0]
@@ -1023,9 +1036,7 @@ class ThreadsScraper:
                 delay_seconds=config.delay_seconds,
             )
             candidate_urls = [
-                str(item.get("url") or "").strip()
-                for item in discovered
-                if str(item.get("url") or "").strip()
+                str(item.get("url") or "").strip() for item in discovered if str(item.get("url") or "").strip()
             ]
             preview_by_url = {
                 str(item.get("url") or "").strip(): str(item.get("preview") or "").strip()
@@ -1091,7 +1102,24 @@ class ThreadsScraper:
         # Fetch profile page HTML (needed for both paths).
         # document=True adds sec-ch-ua / sec-fetch-* headers that trigger Meta's
         # full SSR payload (with preloader data containing userID + tokens).
-        page_html = self._fetch_html(profile_url, delay_seconds=config.delay_seconds, document=True)
+        profile_fetch_mode = "authenticated" if self.cookies else "anonymous"
+        try:
+            page_html = self._fetch_html(profile_url, delay_seconds=config.delay_seconds, document=True)
+        except requests.HTTPError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code != 404 or not self.cookies:
+                raise
+            logger.warning(
+                "[threads] authenticated profile fetch returned 404 for @%s; retrying without cookies",
+                username,
+            )
+            page_html = self._fetch_html_with_cookies(
+                profile_url,
+                delay_seconds=config.delay_seconds,
+                document=True,
+                cookies_override={},
+            )
+            profile_fetch_mode = "anonymous_fallback"
 
         # Try GraphQL API first (requires auth cookies)
         if self.cookies:
@@ -1102,6 +1130,7 @@ class ThreadsScraper:
                 progress_cb=progress_cb,
             )
             if graphql_posts is not None:
+                self.last_retrieval_meta["profile_fetch_mode"] = profile_fetch_mode
                 logger.info(
                     "[threads] GraphQL scrape for @%s: %d posts found",
                     username,
@@ -1111,17 +1140,18 @@ class ThreadsScraper:
 
         # Fall back to OG-tag / Playwright extraction
         logger.info("[threads] using OG-tag fallback scrape for @%s", username)
-        return self._scrape_via_fallback(
+        fallback_posts = self._scrape_via_fallback(
             config,
             page_html=page_html,
             profile_url=profile_url,
             progress_cb=progress_cb,
         )
+        self.last_retrieval_meta["profile_fetch_mode"] = profile_fetch_mode
+        return fallback_posts
 
     # Instagram mobile UA needed for the text_feed REST API
     _MOBILE_USER_AGENT = (
-        "Instagram 517.0.0.0.57 Android (33/13; 420dpi; 1080x2400; "
-        "samsung; SM-S918B; e3q; qcom; en_US; 595849780)"
+        "Instagram 517.0.0.0.57 Android (33/13; 420dpi; 1080x2400; samsung; SM-S918B; e3q; qcom; en_US; 595849780)"
     )
 
     def fetch_comments(
@@ -1167,13 +1197,13 @@ class ThreadsScraper:
             page += 1
             self._rate_limit(delay_seconds)
             try:
-                batch, paging_token, has_more = self._fetch_replies_page(
-                    post_pk, paging_token=paging_token
-                )
+                batch, paging_token, has_more = self._fetch_replies_page(post_pk, paging_token=paging_token)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[threads] replies page %d failed for pk=%s: %s",
-                    page, post_pk, exc,
+                    page,
+                    post_pk,
+                    exc,
                 )
                 self.last_comment_fetch_reason = "threads_replies_page_error"
                 break
@@ -1183,7 +1213,10 @@ class ThreadsScraper:
             comments.extend(batch)
             logger.debug(
                 "[threads] replies page %d: %d new (%d total) for pk=%s",
-                page, len(batch), len(comments), post_pk,
+                page,
+                len(batch),
+                len(comments),
+                post_pk,
             )
 
             if not has_more or not paging_token:
@@ -1258,7 +1291,7 @@ class ThreadsScraper:
             if not normalized:
                 return
             if normalized.startswith("http://"):
-                normalized = f"https://{normalized[len('http://'):]}"
+                normalized = f"https://{normalized[len('http://') :]}"
             if normalized.startswith("/"):
                 normalized = f"{self.BASE_URL}{normalized}"
             if normalized in seen_urls:
@@ -1426,7 +1459,7 @@ class ThreadsScraper:
         candidates = image_versions.get("candidates") or []
         if candidates:
             # Pick the highest resolution
-            best = max(candidates, key=lambda c: (c.get("width", 0) * c.get("height", 0)))
+            best = max(candidates, key=lambda c: c.get("width", 0) * c.get("height", 0))
             if best.get("url"):
                 media_urls.append(best["url"])
         for vid in post.get("video_versions") or []:

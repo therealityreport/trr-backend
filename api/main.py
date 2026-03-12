@@ -136,6 +136,7 @@ from api.routers import (  # noqa: E402
     admin_fandom_sync,
     admin_image_counts,
     admin_media_assets,
+    admin_nbcumv,
     admin_operations,
     admin_person_images,
     admin_scrape,
@@ -176,6 +177,7 @@ app.include_router(admin_show_links.router, prefix="/api/v1")
 app.include_router(admin_show_links.fandom_router, prefix="/api/v1")
 app.include_router(admin_show_roles.router, prefix="/api/v1")
 app.include_router(admin_person_images.router, prefix="/api/v1")
+app.include_router(admin_nbcumv.router, prefix="/api/v1")
 app.include_router(admin_show_bravo.router, prefix="/api/v1")
 app.include_router(admin_show_news.router, prefix="/api/v1")
 app.include_router(admin_scrape.router, prefix="/api/v1")

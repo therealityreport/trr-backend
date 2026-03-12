@@ -77,6 +77,8 @@ WIKIDATA_RETRY_BACKOFF_MS = 300
 
 class FatalSyncError(RuntimeError):
     """Raised when sync should fail immediately instead of marking entity unresolved."""
+
+
 STREAMING_SUFFIX_PATTERNS = (
     r"\s+amazon channel$",
     r"\s+apple tv channel$",
@@ -437,12 +439,7 @@ def _load_sync_run_row(db, *, run_id: str) -> dict[str, Any] | None:
     if not hasattr(db, "schema"):
         return None
     response = (
-        db.schema("admin")
-        .table("network_streaming_sync_runs")
-        .select("*")
-        .eq("run_id", run_id)
-        .limit(1)
-        .execute()
+        db.schema("admin").table("network_streaming_sync_runs").select("*").eq("run_id", run_id).limit(1).execute()
     )
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error loading sync run row: {response.error}")
@@ -509,12 +506,7 @@ def _upsert_sync_run_state(
         "failures": int(summary.failures),
         "error_message": _normalize_text(error_message) or None,
     }
-    response = (
-        db.schema("admin")
-        .table("network_streaming_sync_runs")
-        .upsert(payload, on_conflict="run_id")
-        .execute()
-    )
+    response = db.schema("admin").table("network_streaming_sync_runs").upsert(payload, on_conflict="run_id").execute()
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error upserting sync run state: {response.error}")
 
@@ -1298,9 +1290,7 @@ def _load_production_imdb_hints_by_key(
 
         if target_entity_keys:
             target_names_by_key = {
-                key: values
-                for key, values in target_names_by_key.items()
-                if key in target_entity_keys
+                key: values for key, values in target_names_by_key.items() if key in target_entity_keys
             }
 
         if not target_names_by_key:
@@ -1313,9 +1303,7 @@ def _load_production_imdb_hints_by_key(
             continue
 
         companies = [
-            company
-            for company in imdb_result.companies
-            if _is_imdb_production_category(company.category)
+            company for company in imdb_result.companies if _is_imdb_production_category(company.category)
         ] or imdb_result.companies
         if not companies:
             continue
@@ -2658,9 +2646,7 @@ def _process_entity(
                 else "cached_discovery_reused"
             )
             imdb_skip_reason = (
-                "discovery_locked"
-                if imdb_locked and not args.refresh_external_sources
-                else "cached_discovery_reused"
+                "discovery_locked" if imdb_locked and not args.refresh_external_sources else "cached_discovery_reused"
             )
             attempts.append(
                 AttemptRecord(
@@ -3340,9 +3326,7 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
 
     requested_entity_type = _normalize_text(getattr(args, "entity_type", None)).lower()
     requested_inventory_types = (
-        {requested_entity_type}
-        if requested_entity_type in {"network", "streaming", "production"}
-        else None
+        {requested_entity_type} if requested_entity_type in {"network", "streaming", "production"} else None
     )
     inventory = _load_used_inventory(db, include_types=requested_inventory_types)
     network_lookup = (
@@ -3387,8 +3371,7 @@ def run_sync(args: argparse.Namespace) -> SyncSummary:
     selected_types = {row.entity_type for row in selected_entities}
     production_entity_keys = {row.entity_key for row in selected_entities if row.entity_type == "production"}
     include_production_hints = "production" in selected_types and (
-        bool(getattr(args, "refresh_external_sources", False))
-        or not bool(getattr(args, "unresolved_only", False))
+        bool(getattr(args, "refresh_external_sources", False)) or not bool(getattr(args, "unresolved_only", False))
     )
     context = _build_sync_context(
         db,

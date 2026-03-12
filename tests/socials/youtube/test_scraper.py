@@ -20,7 +20,9 @@ def _build_video(video_id: str, *, surface: str, published_at: int) -> YouTubeVi
         views=1,
         likes=1,
         comments=1,
-        url=(f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"),
+        url=(
+            f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"
+        ),
         thumbnail_url="https://img.test/thumb.jpg",
         tags=[],
         keywords_matched=[],
@@ -238,9 +240,7 @@ def test_fetch_comment_replies_parses_nested_comment_view_model(monkeypatch) -> 
             "onResponseReceivedActions": [
                 {
                     "appendContinuationItemsAction": {
-                        "continuationItems": [
-                            {"commentViewModel": {"commentViewModel": {"commentId": "reply-1"}}}
-                        ]
+                        "continuationItems": [{"commentViewModel": {"commentViewModel": {"commentId": "reply-1"}}}]
                     }
                 }
             ],

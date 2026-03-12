@@ -14,9 +14,9 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -300,6 +300,7 @@ class TwitterScraper:
         self.last_quote_fetch_meta: dict[str, Any] = {}
         self._quote_search_timeline_unavailable = False
         self._last_twikit_search_error: str | None = None
+        self._last_playwright_search_error: str | None = None
         self.comments_auth_failed = False
 
     @staticmethod
@@ -674,7 +675,7 @@ class TwitterScraper:
     @staticmethod
     def _normalize_text_url_token(value: str) -> str:
         token = str(value or "").strip()
-        return token.rstrip('.,!?:;)]}"\'')
+        return token.rstrip(".,!?:;)]}\"'")
 
     def _expanded_url_is_media(self, value: str) -> bool:
         normalized = self._normalize_text_url_token(value).lower()
@@ -806,7 +807,9 @@ class TwitterScraper:
             "username": username,
             "display_name": str(user.get("name") or "").strip() or None,
             "text": tweet_text or None,
-            "url": f"https://x.com/{username}/status/{normalized_id}" if username else f"https://x.com/i/status/{normalized_id}",
+            "url": f"https://x.com/{username}/status/{normalized_id}"
+            if username
+            else f"https://x.com/i/status/{normalized_id}",
             "created_at": str(payload.get("created_at") or "").strip() or None,
             "user_id": str(user.get("id_str") or user.get("id") or "").strip() or None,
             "user_profile_url": profile_url,
@@ -898,7 +901,11 @@ class TwitterScraper:
                     continue
                 rest_id = str(tweet_result.get("rest_id") or "").strip()
                 legacy_id = str(tweet_result.get("legacy", {}).get("id_str") or "").strip()
-                if entry.get("entryId") == f"tweet-{normalized_id}" or rest_id == normalized_id or legacy_id == normalized_id:
+                if (
+                    entry.get("entryId") == f"tweet-{normalized_id}"
+                    or rest_id == normalized_id
+                    or legacy_id == normalized_id
+                ):
                     root_result = tweet_result
                     break
             if root_result:
@@ -942,7 +949,9 @@ class TwitterScraper:
             "username": username,
             "display_name": str(user.get("name") or user_core.get("name") or "").strip() or None,
             "text": text or None,
-            "url": f"https://x.com/{username}/status/{normalized_id}" if username else f"https://x.com/i/status/{normalized_id}",
+            "url": f"https://x.com/{username}/status/{normalized_id}"
+            if username
+            else f"https://x.com/i/status/{normalized_id}",
             "created_at": str(legacy.get("created_at") or "").strip() or None,
             "user_id": str(user_result.get("rest_id") or user.get("id_str") or user_core.get("id_str") or "").strip()
             or None,
@@ -967,19 +976,12 @@ class TwitterScraper:
     def _resolve_quote_markers(self, *, result: dict[str, Any], tweet: dict[str, Any]) -> tuple[bool, str | None]:
         quoted_result = result.get("quoted_status_result")
         quoted_result_id = self._normalize_optional_tweet_id(
-            quoted_result.get("result", {}).get("legacy", {}).get("id_str")
-            if isinstance(quoted_result, dict)
-            else None
+            quoted_result.get("result", {}).get("legacy", {}).get("id_str") if isinstance(quoted_result, dict) else None
         )
         legacy_quoted_id = self._normalize_optional_tweet_id(
             tweet.get("quoted_status_id_str") or tweet.get("quoted_status_id")
         )
-        is_quote = bool(
-            quoted_result
-            or tweet.get("is_quote_status")
-            or quoted_result_id
-            or legacy_quoted_id
-        )
+        is_quote = bool(quoted_result or tweet.get("is_quote_status") or quoted_result_id or legacy_quoted_id)
         return is_quote, quoted_result_id or legacy_quoted_id
 
     def _parse_tweet_result(self, result: dict, config: TwitterScrapeConfig) -> Tweet | None:
@@ -1161,12 +1163,15 @@ class TwitterScraper:
             or legacy.get("text")
             or ""
         )
-        in_reply_to = str(
-            getattr(raw_tweet, "in_reply_to", "")
-            or legacy.get("in_reply_to_status_id_str")
-            or legacy.get("in_reply_to_status_id")
-            or ""
-        ).strip() or None
+        in_reply_to = (
+            str(
+                getattr(raw_tweet, "in_reply_to", "")
+                or legacy.get("in_reply_to_status_id_str")
+                or legacy.get("in_reply_to_status_id")
+                or ""
+            ).strip()
+            or None
+        )
         quoted_obj = getattr(raw_tweet, "quoted_tweet", None)
         quoted_tweet_id = (
             str(getattr(quoted_obj, "id", "") or "").strip()
@@ -1445,6 +1450,161 @@ class TwitterScraper:
             )
 
         logger.info(f"Syndication scrape: found {len(tweets)} tweets for @{username}")
+        return tweets
+
+    def _fetch_search_via_playwright(
+        self,
+        *,
+        query: str,
+        config: TwitterScrapeConfig,
+        max_pages: int = 5,
+        delay: float = 0.5,
+    ) -> list[Tweet]:
+        auth_token = str(self.cookies.get("auth_token") or "").strip()
+        csrf_token = str(self.cookies.get("ct0") or "").strip()
+        self._last_playwright_search_error = None
+        if not auth_token or not csrf_token:
+            self._last_playwright_search_error = "playwright_missing_auth_cookie"
+            return []
+
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            self._last_playwright_search_error = "playwright_unavailable"
+            return []
+
+        payloads: list[dict[str, Any]] = []
+
+        async def _capture_payloads() -> list[dict[str, Any]]:
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/145.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 2800},
+                )
+                await context.add_cookies(
+                    [
+                        {
+                            "name": "auth_token",
+                            "value": auth_token,
+                            "domain": ".x.com",
+                            "path": "/",
+                            "httpOnly": True,
+                            "secure": True,
+                            "sameSite": "Lax",
+                        },
+                        {
+                            "name": "ct0",
+                            "value": csrf_token,
+                            "domain": ".x.com",
+                            "path": "/",
+                            "httpOnly": False,
+                            "secure": True,
+                            "sameSite": "Lax",
+                        },
+                    ]
+                )
+                page = await context.new_page()
+
+                async def _on_response(response: Any) -> None:
+                    response_url = str(response.url or "")
+                    if "/SearchTimeline?" not in response_url:
+                        return
+                    if int(response.status) != 200:
+                        return
+                    try:
+                        response_payload = await response.json()
+                    except Exception:
+                        return
+                    if isinstance(response_payload, dict):
+                        payloads.append(response_payload)
+
+                page.on("response", _on_response)
+                await page.goto(
+                    f"https://x.com/search?q={quote(query, safe='')}&src=typed_query&f=live",
+                    wait_until="domcontentloaded",
+                    timeout=45000,
+                )
+                await page.wait_for_timeout(4000)
+
+                max_scrolls = max(8, min(max_pages * 6, 80))
+                wait_ms = max(int(delay * 1000), 1200)
+                stagnant_cycles = 0
+                payload_count = len(payloads)
+                for _ in range(max_scrolls):
+                    await page.keyboard.press("End")
+                    await page.mouse.wheel(0, 12000)
+                    await page.wait_for_timeout(wait_ms)
+                    if len(payloads) == payload_count:
+                        stagnant_cycles += 1
+                    else:
+                        stagnant_cycles = 0
+                        payload_count = len(payloads)
+                    if len(payloads) >= max_pages and stagnant_cycles >= 3:
+                        break
+                    if stagnant_cycles >= 10:
+                        break
+
+                await page.close()
+                await context.close()
+                await browser.close()
+            return payloads
+
+        try:
+            import asyncio
+
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import nest_asyncio
+
+                    nest_asyncio.apply()
+                captured_payloads = loop.run_until_complete(_capture_payloads())
+            except RuntimeError:
+                captured_payloads = asyncio.run(_capture_payloads())
+        except Exception:
+            logger.error("Playwright search fallback failed for query=%s", query, exc_info=True)
+            self._last_playwright_search_error = "playwright_error"
+            return []
+
+        if not captured_payloads:
+            self._last_playwright_search_error = "playwright_no_search_payload"
+            return []
+
+        tweets: list[Tweet] = []
+        seen_ids: set[str] = set()
+        for payload in captured_payloads:
+            instructions = (
+                payload.get("data", {})
+                .get("search_by_raw_query", {})
+                .get("search_timeline", {})
+                .get("timeline", {})
+                .get("instructions", [])
+            )
+            for instruction in instructions:
+                if instruction.get("type") != "TimelineAddEntries":
+                    continue
+                for entry in instruction.get("entries", []):
+                    entry_id = str(entry.get("entryId") or "")
+                    if not entry_id.startswith("tweet-"):
+                        continue
+                    tweet_result = (
+                        entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                    )
+                    if not tweet_result:
+                        continue
+                    tweet = self._parse_tweet_result(tweet_result, config)
+                    if not tweet or not str(tweet.tweet_id or "").strip() or tweet.tweet_id in seen_ids:
+                        continue
+                    seen_ids.add(tweet.tweet_id)
+                    tweets.append(tweet)
+
+        if not tweets:
+            self._last_playwright_search_error = "playwright_no_tweet_entries"
         return tweets
 
     def _scrape_via_twikit(self, config: TwitterScrapeConfig) -> list[Tweet]:
@@ -2025,9 +2185,7 @@ class TwitterScraper:
         tweet_id: str,
         seen_ids: set[str],
     ) -> tuple[list[Tweet], str | None]:
-        timeline = (
-            payload.get("data", {}).get("search_by_raw_query", {}).get("search_timeline", {}).get("timeline", {})
-        )
+        timeline = payload.get("data", {}).get("search_by_raw_query", {}).get("search_timeline", {}).get("timeline", {})
         instructions = timeline.get("instructions", [])
         next_cursor: str | None = None
         quotes: list[Tweet] = []
@@ -2042,7 +2200,9 @@ class TwitterScraper:
                 if entry_id.startswith("cursor-top-") or not entry_id.startswith("tweet-"):
                     continue
 
-                tweet_result = entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                tweet_result = (
+                    entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                )
                 if not tweet_result:
                     continue
                 config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
@@ -2072,7 +2232,9 @@ class TwitterScraper:
                 quotes.append(tweet)
         return quotes, next_cursor
 
-    def _fetch_tweet_quotes_via_playwright(self, *, tweet_id: str, max_pages: int = 5, delay: float = 0.5) -> list[Tweet]:
+    def _fetch_tweet_quotes_via_playwright(
+        self, *, tweet_id: str, max_pages: int = 5, delay: float = 0.5
+    ) -> list[Tweet]:
         auth_token = str(self.cookies.get("auth_token") or "").strip()
         csrf_token = str(self.cookies.get("ct0") or "").strip()
         if not auth_token or not csrf_token:
@@ -2410,7 +2572,7 @@ class TwitterScraper:
     @staticmethod
     def _window_bound_timestamp(value: datetime) -> int:
         if value.tzinfo is None:
-            return int(value.replace(tzinfo=timezone.utc).timestamp())
+            return int(value.replace(tzinfo=UTC).timestamp())
         return int(value.timestamp())
 
     def _tweet_within_window(self, *, tweet: Tweet, start_ts: int, end_ts: int) -> bool:
@@ -2600,6 +2762,22 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "syndication"
+            if not tweets:
+                fallback_attempts.append("playwright")
+                logger.info("Primary Twitter search paths empty; trying Playwright search fallback...")
+                playwright_tweets = self._fetch_search_via_playwright(
+                    query=search_query,
+                    config=config,
+                    max_pages=config.max_pages or 5,
+                    delay=max(config.delay_seconds, 0.2),
+                )
+                tweets = self._clamp_tweets_to_window(
+                    tweets=playwright_tweets,
+                    start_ts=window_start_ts,
+                    end_ts=window_end_ts,
+                )
+                if tweets:
+                    retrieval_mode = "playwright"
         elif graphql_failed and not tweets:
             fallback_triggered = True
             if self._twikit_credentials:
@@ -2616,6 +2794,22 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "twikit"
+            if not tweets:
+                fallback_attempts.append("playwright")
+                logger.info("GraphQL failed; trying Playwright search fallback...")
+                playwright_tweets = self._fetch_search_via_playwright(
+                    query=search_query,
+                    config=config,
+                    max_pages=config.max_pages or 5,
+                    delay=max(config.delay_seconds, 0.2),
+                )
+                tweets = self._clamp_tweets_to_window(
+                    tweets=playwright_tweets,
+                    start_ts=window_start_ts,
+                    end_ts=window_end_ts,
+                )
+                if tweets:
+                    retrieval_mode = "playwright"
             if not tweets and not self._twikit_credentials:
                 logger.warning(
                     "Twitter requires authentication for search. "
@@ -2641,6 +2835,7 @@ class TwitterScraper:
             "graphql_failed": graphql_failed,
             "fallback_triggered": fallback_triggered,
             "fallback_attempts": fallback_attempts,
+            "playwright_failure_reason": self._last_playwright_search_error,
             "pages_scanned": page_num,
             "posts_checked": posts_checked_total,
             "filtered_out_of_window": filtered_out_of_window,

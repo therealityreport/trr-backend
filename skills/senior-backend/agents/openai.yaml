@@ -1,0 +1,5 @@
+interface:
+  display_name: "Senior Backend (TRR-Backend)"
+  short_description: "Repo-local canonical owner for TRR-Backend FastAPI contracts, schema, persistence semantics, performance, and security-sensitive behavior."
+  default_prompt: "Use $senior-backend for this TRR-Backend contract, schema, or persistence change."
+

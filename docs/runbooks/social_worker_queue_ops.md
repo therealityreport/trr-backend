@@ -2,24 +2,53 @@
 
 ## Scope
 
-This runbook covers production operations for social ingest queue mode:
+This runbook covers social ingest queue operations, with Modal as the canonical
+production remote executor and the legacy worker scripts retained for local/dev
+and rollback only:
 
-- Worker heartbeat availability (`social.scrape_workers`)
+- Modal-hosted backend API readiness (`serve_backend_api`)
+- Modal dispatcher heartbeat availability (`social.scrape_workers`)
 - Queue backlog and stuck jobs (`social.scrape_jobs`, `social.scrape_runs`)
 - Comment persistence diagnostics (`comment_stats` metadata + ID guardrails)
 
 ## Required Runtime Configuration
 
-- `SOCIAL_QUEUE_ENABLED=true` only when at least one worker process is running.
+- Canonical production/staging target:
+  - `TRR_JOB_PLANE_MODE=remote`
+  - `TRR_LONG_JOB_ENFORCE_REMOTE=1`
+  - `TRR_REMOTE_EXECUTOR=modal`
+  - `TRR_MODAL_ENABLED=1`
+  - `TRR_MODAL_APP_NAME=trr-backend-jobs`
+  - `TRR_MODAL_API_FUNCTION=serve_backend_api`
+  - `TRR_MODAL_API_LABEL=trr-backend-api`
+  - `TRR_MODAL_ADMIN_OPERATION_FUNCTION=run_admin_operation`
+  - `TRR_MODAL_GOOGLE_NEWS_FUNCTION=run_google_news_sync`
+  - `TRR_MODAL_REDDIT_REFRESH_FUNCTION=run_reddit_refresh`
+  - `TRR_MODAL_SOCIAL_JOB_FUNCTION=run_social_job`
+  - `TRR_MODAL_SOCIAL_RECOVERY_FUNCTION=sweep_social_dispatch_queue`
+  - `TRR_MODAL_RUNTIME_SECRET_NAME=trr-backend-runtime`
+  - `TRR_MODAL_SOCIAL_SECRET_NAME=trr-social-auth`
+  - `SOCIAL_QUEUE_ENABLED=true`
+- Named Modal secrets are mandatory outside local/dev:
+  - `trr-backend-runtime`
+  - `trr-social-auth`
+- Legacy worker-family env flags remain rollback/local-only:
+  - `TRR_ADMIN_OPERATION_WORKER_ENABLED`
+  - `TRR_REDDIT_REFRESH_WORKER_ENABLED`
+  - `TRR_GOOGLE_NEWS_WORKER_ENABLED`
 - `SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS` (optional, default `180`)
 - `SOCIAL_WORKER_HEARTBEAT_INTERVAL_SEC` (optional, default `15`, minimum `5`)
 - `SOCIAL_COMMENTS_RUN_WORKERS` (optional, default `4`, min `1`, max `8`; API-assisted comments-only fanout)
 - `SOCIAL_WORKER_MIN_STAGE_RUNNERS` (optional, default `6`; floor for enabled stage worker pools)
 - `SOCIAL_WORKER_ALLOW_STAGE_DISABLE` (optional, default `0`; set `1` to allow explicit `0` workers per stage)
-- `SOCIAL_WORKER_POOL_POSTS` (optional, default `6`; persistent posts-stage workers)
-- `SOCIAL_WORKER_POOL_COMMENTS` (optional, default `6`; persistent comments-stage workers)
+- `SOCIAL_WORKER_POOL_POSTS` (optional, default `8`; legacy/local-only persistent posts-stage workers)
+- `SOCIAL_WORKER_POOL_COMMENTS` (optional, default `8`; legacy/local-only persistent comments-stage workers)
 - `SOCIAL_WORKER_POOL_MEDIA_MIRROR` (optional, default `6`; persistent post media mirror workers)
 - `SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR` (optional, default `6`; persistent comment media mirror workers)
+- `SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS` (optional, default `6`; legacy/local-only shared-account scrape workers)
+- `SOCIAL_WORKER_POOL_POST_CLASSIFY` (optional, default `10`; internal classification concurrency target)
+- `SOCIAL_WORKER_POOL_SEASON_MATERIALIZE` (optional, default `10`; internal materialization concurrency target)
+- `SOCIAL_WORKER_POOL_ANALYTICS_REFRESH` (optional, default `4`; internal analytics refresh concurrency target)
 - `SOCIAL_WORKER_POOL_INTERVAL_SEC` (optional, default `2`; worker idle sleep interval)
 - `SOCIAL_STALE_RECOVERY_INTERVAL_SEC` (optional, default `30`; stale job recovery cadence)
 - `SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SEC` (optional, default `60`; run-summary reconciliation cadence)
@@ -28,8 +57,8 @@ This runbook covers production operations for social ingest queue mode:
 - `SOCIAL_JOB_STALE_SECONDS` (optional, default `300`; global stale timeout fallback)
 - `SOCIAL_JOB_STALE_SECONDS_YOUTUBE_POSTS` (optional, default `900`)
 - `SOCIAL_JOB_STALE_SECONDS_YOUTUBE_COMMENTS` (optional, default `600`)
-- `SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS` (optional, default `200`; comment/reply bulk upsert chunk size)
-- `SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS` (optional, default `50`; post bulk upsert chunk size)
+- `SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS` (optional, default `300`; comment/reply bulk upsert chunk size)
+- `SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS` (optional, default `100`; post bulk upsert chunk size)
 - `SOCIAL_TWITTER_DELAY_SEC`, `SOCIAL_TIKTOK_DELAY_SEC`, `SOCIAL_YOUTUBE_DELAY_SEC` (optional, default `0.35`)
 - `SOCIAL_CRAWLEE_ENABLED` (optional, default `true` in non-local deployments)
 - `SOCIAL_CRAWLEE_PLATFORMS` (optional, default `instagram,tiktok,twitter,youtube`)
@@ -43,7 +72,52 @@ When Crawlee runtime is enabled for a platform, auth preflight checks run before
 - Twitter/X: requires one of cookie auth (`SOCIAL_TWITTER_COOKIES_*`), bearer auth (`SOCIAL_TWITTER_BEARER_TOKEN`), or `TWIKIT_*` credentials
 - YouTube: public mode supported (no auth required)
 
-## Worker Start Commands
+## Modal Secret Prep And Cutover Commands
+
+Render the named secret env files and exact `modal secret create` commands
+without mutating Modal:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/prepare_named_secrets.py
+```
+
+Render the non-mutating cutover command checklist for SSM parameters and host
+env reconciliation:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/render_cutover_commands.py --parameter-prefix /trr/staging
+```
+
+Verify the named secrets, deployed app, and all eight required Modal functions
+plus the API web URL before rollout:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/verify_modal_readiness.py
+```
+
+Deploy the Modal app after named secrets are provisioned:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+./.venv/bin/python -m modal deploy -m trr_backend.modal_jobs
+```
+
+After deploy, capture the public backend URL from the readiness output and point
+the app/runtime `TRR_API_URL` at that Modal endpoint before running admin smoke
+checks.
+
+Full backend EC2 retirement is not complete until:
+
+- the Modal backend API URL is the canonical `TRR_API_URL` for TRR-APP
+- covered admin image-analysis jobs no longer depend on EC2-hosted runtime
+- social and non-social background work run only through Modal
+
+## Legacy Worker Start Commands
+
+The commands below are rollback/local-dev only after Modal cutover.
 
 Start a dedicated queue worker:
 
@@ -84,6 +158,10 @@ SOCIAL_WORKER_POOL_POSTS=6 \
 SOCIAL_WORKER_POOL_COMMENTS=6 \
 SOCIAL_WORKER_POOL_MEDIA_MIRROR=6 \
 SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR=6 \
+SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS=6 \
+SOCIAL_WORKER_POOL_POST_CLASSIFY=6 \
+SOCIAL_WORKER_POOL_SEASON_MATERIALIZE=6 \
+SOCIAL_WORKER_POOL_ANALYTICS_REFRESH=2 \
 SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS=200 \
 SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS=50 \
 ./scripts/socials/start_worker_pool.sh

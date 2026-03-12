@@ -131,7 +131,7 @@ def _canonicalize_url(value: str) -> str:
     # Normalize encoded wiki paths so %28...%29 and (...) collapse to one URL key.
     try:
         decoded_path = unquote(path)
-        path = quote(decoded_path, safe="/()_-,.:+")
+        path = quote(decoded_path, safe="/()_-,.:+@")
     except Exception:  # noqa: BLE001
         pass
     if path != "/":
@@ -227,6 +227,7 @@ def _start_discovery_stage_budget(
     if stats is not None:
         stats["__stage_name"] = stage
         stats["__stage_started_perf"] = perf_counter()
+        stats["__stage_timeout_seconds"] = float(timeout_seconds)
         stats["__stage_deadline_perf"] = (perf_counter() + timeout_seconds) if timeout_seconds > 0 else 0.0
         stats["__stage_fandom_candidates_start"] = int(stats.get("fandom_candidates_tested") or 0)
         stats["__stage_max_fandom_candidates"] = int(max_candidates)
@@ -551,7 +552,79 @@ def _extract_fandom_page_title_from_url(url: str | None) -> str | None:
     return re.sub(r"\s+", " ", title)
 
 
-def _build_fandom_link_metadata(url: str, *, title: str | None = None) -> dict[str, Any]:
+def _normalize_fandom_title_token(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().casefold()).strip()
+
+
+def _derive_fandom_site_title_from_host(host: str | None, *, page_title: str | None = None) -> str | None:
+    normalized_host = str(host or "").strip().lower()
+    if not normalized_host:
+        return None
+    if normalized_host.endswith(".fandom.com"):
+        community_slug = normalized_host[: -len(".fandom.com")]
+    elif normalized_host.endswith(".wikia.com"):
+        community_slug = normalized_host[: -len(".wikia.com")]
+    else:
+        community_slug = normalized_host.split(".", 1)[0]
+    community_slug = community_slug.strip(".")
+    if not community_slug or community_slug == "www":
+        return None
+
+    title_base = re.sub(r"[_-]+", " ", community_slug).strip()
+    if not title_base:
+        return None
+    title_words = [word.capitalize() for word in re.split(r"\s+", title_base) if word]
+    if not title_words:
+        return None
+    derived_title = " ".join(title_words)
+
+    normalized_page = _normalize_fandom_title_token(page_title)
+    normalized_title = _normalize_fandom_title_token(derived_title)
+    if normalized_page and normalized_title and normalized_page.startswith(f"the {normalized_title}"):
+        derived_title = f"The {derived_title}"
+
+    return f"{derived_title} Wiki"
+
+
+def _extract_fandom_site_title_from_html(
+    html: str | None,
+    *,
+    resolved_url: str | None = None,
+    page_title: str | None = None,
+) -> str | None:
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    og_site_name = soup.select_one('meta[property="og:site_name"], meta[name="og:site_name"]')
+    if og_site_name is not None:
+        content = str(og_site_name.get("content") or "").strip()
+        if content:
+            return re.sub(r"\s+", " ", content)
+
+    page_title_norm = _normalize_fandom_title_token(page_title)
+    if soup.title is not None:
+        title_text = str(soup.title.get_text(" ", strip=True) or "").strip()
+        if title_text:
+            parts = [re.sub(r"\s+", " ", part).strip() for part in re.split(r"\s+\|\s+", title_text) if part.strip()]
+            filtered_parts = [
+                part for part in parts if _normalize_fandom_title_token(part) not in {"", "fandom", page_title_norm}
+            ]
+            for part in filtered_parts:
+                if "wiki" in part.casefold():
+                    return part
+            if filtered_parts:
+                return filtered_parts[0]
+
+    resolved_host = str(urlparse(str(resolved_url or "").strip()).hostname or "").strip().lower()
+    return _derive_fandom_site_title_from_host(resolved_host, page_title=page_title)
+
+
+def _build_fandom_link_metadata(
+    url: str,
+    *,
+    title: str | None = None,
+    site_title: str | None = None,
+    html: str | None = None,
+) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     parsed = urlparse(str(url or "").strip())
     host = str(parsed.hostname or "").strip().lower()
@@ -559,6 +632,13 @@ def _build_fandom_link_metadata(url: str, *, title: str | None = None) -> dict[s
     if page_title:
         metadata["fandom_title"] = page_title
         metadata["page_title"] = page_title
+    resolved_site_title = str(site_title or "").strip() or _extract_fandom_site_title_from_html(
+        html,
+        resolved_url=url,
+        page_title=page_title,
+    )
+    if resolved_site_title:
+        metadata["site_title"] = resolved_site_title
     if host:
         metadata["favicon_url"] = f"https://{host}/favicon.ico"
     return metadata
@@ -656,23 +736,86 @@ def _score_fandom_show_candidate_url(url: str, *, show_name: str | None) -> int:
     title = _extract_fandom_page_title_from_url(url)
     if not title or not show_name:
         return 0
+    if _extract_season_number_from_text(title) is not None:
+        return 0
+    distinctive_show_tokens = _fandom_show_distinctive_tokens(show_name)
+    title_tokens = {token for token in _normalize_lookup_value(title).split() if token}
+    if distinctive_show_tokens:
+        if not distinctive_show_tokens.issubset(title_tokens):
+            return 0
+        score = len(distinctive_show_tokens) * 150
+    else:
+        show_tokens = {
+            token
+            for token in _normalize_lookup_value(show_name).split()
+            if token and token not in {"the", "tv", "show", "series", "season", "episode", "of"}
+        }
+        if not show_tokens or not title_tokens:
+            return 0
+        shared = show_tokens.intersection(title_tokens)
+        if not shared:
+            return 0
+        score = len(shared) * 100
+    if "season" in title_tokens or "episode" in title_tokens:
+        return 0
+    if distinctive_show_tokens and distinctive_show_tokens.issubset(title_tokens):
+        score += 100
+    elif not distinctive_show_tokens and show_tokens.issubset(title_tokens):
+        score += 200
+    return score
+
+
+def _fandom_show_distinctive_tokens(show_name: str | None) -> set[str]:
+    return {
+        token
+        for token in _normalize_lookup_value(show_name).split()
+        if token
+        and token
+        not in {
+            "the",
+            "of",
+            "tv",
+            "show",
+            "series",
+            "season",
+            "episode",
+            "real",
+            "housewives",
+            "housewife",
+            "wives",
+            "city",
+        }
+    }
+
+
+def _is_valid_fandom_show_page_title(title: str | None, *, show_name: str | None) -> bool:
+    cleaned_title = str(title or "").strip()
+    if not cleaned_title:
+        return False
+    if _extract_season_number_from_text(cleaned_title) is not None:
+        return False
+    title_tokens = {token for token in _normalize_lookup_value(cleaned_title).split() if token}
+    if not title_tokens:
+        return False
+    if "season" in title_tokens or "episode" in title_tokens:
+        return False
+    if not show_name:
+        return True
+    distinctive_show_tokens = _fandom_show_distinctive_tokens(show_name)
+    if distinctive_show_tokens:
+        return distinctive_show_tokens.issubset(title_tokens)
     show_tokens = {
         token
         for token in _normalize_lookup_value(show_name).split()
-        if token and token not in {"the", "tv", "show", "series", "season", "episode"}
+        if token and token not in {"the", "tv", "show", "series", "season", "episode", "of"}
     }
-    title_tokens = {token for token in _normalize_lookup_value(title).split() if token}
-    if not show_tokens or not title_tokens:
-        return 0
-    shared = show_tokens.intersection(title_tokens)
-    if not shared:
-        return 0
-    score = len(shared) * 100
-    if show_tokens.issubset(title_tokens):
-        score += 200
-    if "season" in title_tokens or "episode" in title_tokens:
-        score -= 100
-    return score
+    if not show_tokens:
+        return True
+    return bool(show_tokens.intersection(title_tokens))
+
+
+def _is_valid_fandom_show_page_url(url: str | None, *, show_name: str | None) -> bool:
+    return _is_valid_fandom_show_page_title(_extract_fandom_page_title_from_url(url), show_name=show_name)
 
 
 def _show_fandom_source_priority(source: str | None) -> int:
@@ -1629,6 +1772,12 @@ def _classify_submitted_link_input(
         label = "Google Knowledge Graph"
         canonical_url = canonical_input
 
+    elif "news.google.com" in host and path.lower().startswith("/topics/"):
+        link_group = "official"
+        link_kind = "google_news_url"
+        label = "Google News"
+        canonical_url = canonical_input
+
     elif "x.com" in host and path.lower().startswith("/i/topics/"):
         link_group = "knowledge"
         link_kind = "x_topic"
@@ -1640,11 +1789,35 @@ def _classify_submitted_link_input(
         link_kind = "fandom"
         wiki_title = _extract_wiki_slug_title(path)
         wiki_title_text = str(wiki_title or "").replace("_", " ").strip()
+        fandom_html: str | None = None
+        fandom_site_title: str | None = None
         if _is_fandom_seed_url(canonical_input):
             metadata["fandom_seed_domain"] = host
             metadata["fandom_seed_url"] = canonical_input
+            derived_site_title = _derive_fandom_site_title_from_host(host, page_title=wiki_title_text)
+            if derived_site_title:
+                metadata["site_title"] = derived_site_title
+        else:
+            status_code, html, resolved_url, fetch_error = _fetch_html_with_status(
+                canonical_input,
+                timeout=_source_timeout_seconds("fandom"),
+            )
+            if not fetch_error and html and (status_code is None or status_code < 400):
+                resolved = _canonicalize_url(resolved_url or canonical_input)
+                if resolved and not is_missing_fandom_page(html, resolved):
+                    canonical_url = resolved
+                    fandom_html = html
+                    if not wiki_title_text:
+                        wiki_title_text = _extract_fandom_page_title_from_url(canonical_url) or ""
+                    fandom_site_title = _extract_fandom_site_title_from_html(
+                        html,
+                        resolved_url=canonical_url,
+                        page_title=wiki_title_text,
+                    )
         metadata["fandom_title"] = wiki_title_text
         metadata["page_title"] = wiki_title_text
+        if fandom_site_title:
+            metadata["site_title"] = fandom_site_title
         if host:
             metadata["favicon_url"] = f"https://{host}/favicon.ico"
         label = wiki_title_text or "Fandom"
@@ -1666,6 +1839,24 @@ def _classify_submitted_link_input(
             curated_domains = _curated_show_fandom_domains(context.get("show_name"))
             if curated_domains and host not in curated_domains:
                 return [], "Fandom link is for a different community."
+        if fandom_html:
+            metadata = _build_fandom_link_metadata(
+                canonical_url,
+                title=wiki_title_text or None,
+                site_title=fandom_site_title,
+                html=fandom_html,
+            )
+            if metadata.get("fandom_title") is None and wiki_title_text:
+                metadata["fandom_title"] = wiki_title_text
+            if metadata.get("page_title") is None and wiki_title_text:
+                metadata["page_title"] = wiki_title_text
+            if metadata.get("favicon_url") is None and host:
+                metadata["favicon_url"] = f"https://{host}/favicon.ico"
+            metadata["submitted_input"] = submitted
+        elif metadata.get("site_title") is None:
+            derived_site_title = _derive_fandom_site_title_from_host(host, page_title=wiki_title_text)
+            if derived_site_title:
+                metadata["site_title"] = derived_site_title
 
     elif "bravotv.com" in host:
         if not bool(context.get("is_bravo_show")):
@@ -3069,6 +3260,53 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
             if bravo_wiki_candidate:
                 fandom_candidates.append((bravo_wiki_candidate, "bravo_default"))
         fandom_rows_by_url: dict[str, dict[str, Any]] = {}
+
+        def record_fandom_row(
+            *,
+            candidate_url: str,
+            html: str,
+            resolved_url: str,
+            source_value: str,
+            title_hint: str | None = None,
+        ) -> str | None:
+            normalized = _canonicalize_url(resolved_url or candidate_url)
+            if not normalized:
+                return None
+            title = str(title_hint or "").strip() or None
+            if not title:
+                soup = BeautifulSoup(html, "html.parser")
+                heading = soup.select_one("span.mw-page-title-main") or soup.select_one("h1")
+                if heading is not None:
+                    title = str(heading.get_text(" ", strip=True) or "").strip() or None
+            if not title:
+                title = _extract_fandom_page_title_from_url(normalized)
+            if not _is_valid_fandom_show_page_title(title, show_name=show_name):
+                return None
+            priority = _show_fandom_source_priority(source_value)
+            existing = fandom_rows_by_url.get(normalized)
+            existing_priority = existing.get("priority") if isinstance(existing, dict) else None
+            if existing is None or not isinstance(existing_priority, int) or priority < existing_priority:
+                fandom_rows_by_url[normalized] = {
+                    "url": normalized,
+                    "source": source_value,
+                    "title": title,
+                    "site_title": _extract_fandom_site_title_from_html(
+                        html,
+                        resolved_url=normalized,
+                        page_title=title,
+                    ),
+                    "priority": priority,
+                }
+            elif existing is not None and not str(existing.get("title") or "").strip() and title:
+                existing["title"] = title
+            elif existing is not None and not str(existing.get("site_title") or "").strip():
+                existing["site_title"] = _extract_fandom_site_title_from_html(
+                    html,
+                    resolved_url=normalized,
+                    page_title=title,
+                )
+            return normalized
+
         for raw_url, fandom_source in fandom_candidates:
             if _stage_budget_exhausted(stats):
                 break
@@ -3114,6 +3352,11 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                 candidate_urls.extend(ranked)
 
             found_derived_show_page = False
+            ranked_page_candidates = [
+                candidate_url
+                for candidate_url in candidate_urls
+                if candidate_url and not _is_fandom_seed_url(candidate_url)
+            ]
             for idx, candidate_url in enumerate(candidate_urls):
                 if idx > 0 and found_derived_show_page:
                     break
@@ -3132,35 +3375,64 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                 resolved = str(resolved_url or candidate_url)
                 if is_missing_fandom_page(html, resolved):
                     continue
-                normalized = _canonicalize_url(resolved)
-                if not normalized:
-                    continue
-                title = None
-                soup = BeautifulSoup(html, "html.parser")
-                heading = soup.select_one("span.mw-page-title-main") or soup.select_one("h1")
-                if heading is not None:
-                    title = str(heading.get_text(" ", strip=True) or "").strip() or None
-                if not title:
-                    title = _extract_fandom_page_title_from_url(normalized)
                 source_value = fandom_source if idx == 0 else f"{fandom_source}:derived_show_page"
-                priority = _show_fandom_source_priority(source_value)
-                existing = fandom_rows_by_url.get(normalized)
-                existing_priority = existing.get("priority") if isinstance(existing, dict) else None
-                if existing is None or not isinstance(existing_priority, int) or priority < existing_priority:
-                    fandom_rows_by_url[normalized] = {
-                        "url": normalized,
-                        "source": source_value,
-                        "title": title,
-                        "priority": priority,
-                    }
-                elif existing is not None and not str(existing.get("title") or "").strip() and title:
-                    existing["title"] = title
-                if idx > 0:
+                normalized = record_fandom_row(
+                    candidate_url=candidate_url,
+                    html=html,
+                    resolved_url=resolved,
+                    source_value=source_value,
+                )
+                if idx > 0 and normalized and not _is_fandom_seed_url(normalized):
                     found_derived_show_page = True
+            if (
+                not found_derived_show_page
+                and _is_fandom_seed_url(canonical_raw_url)
+                and show_name
+                and not _stage_budget_exhausted(stats)
+            ):
+                discovery_candidates = discover_fandom_candidate_pages(
+                    query_name=show_name,
+                    entity_kind="show",
+                    manual_page_urls=ranked_page_candidates or None,
+                    community_domains=[candidate_host],
+                    include_allpages_scan=True,
+                    allpages_max_pages=5,
+                    max_candidates=25,
+                )
+                for candidate in discovery_candidates:
+                    candidate_url = _canonicalize_url(candidate.url)
+                    if not candidate_url or _is_fandom_seed_url(candidate_url):
+                        continue
+                    if _score_fandom_show_candidate_url(candidate_url, show_name=show_name) <= 0:
+                        continue
+                    if not _can_attempt_fandom_candidate(stats):
+                        break
+                    status_code, html, resolved_url, fetch_error = _fetch_html_with_status(
+                        candidate_url,
+                        timeout=_source_timeout_seconds("fandom"),
+                    )
+                    if fetch_error or not html:
+                        continue
+                    if status_code is not None and status_code >= 400:
+                        continue
+                    resolved = str(resolved_url or candidate_url)
+                    if is_missing_fandom_page(html, resolved):
+                        continue
+                    normalized = record_fandom_row(
+                        candidate_url=candidate_url,
+                        html=html,
+                        resolved_url=resolved,
+                        source_value=f"{fandom_source}:{candidate.source}:derived_show_page",
+                        title_hint=candidate.title,
+                    )
+                    if normalized and not _is_fandom_seed_url(normalized):
+                        found_derived_show_page = True
+                        break
         for fandom_row in fandom_rows_by_url.values():
             fandom_url = str(fandom_row.get("url") or "").strip()
             fandom_source = str(fandom_row.get("source") or "").strip()
             fandom_title = str(fandom_row.get("title") or "").strip() or None
+            fandom_site_title = str(fandom_row.get("site_title") or "").strip() or None
             if not fandom_url:
                 continue
             discovered.append(
@@ -3173,7 +3445,11 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                     "label": fandom_title or "Fandom",
                     "url": fandom_url,
                     "source": fandom_source,
-                    "metadata": _build_fandom_link_metadata(fandom_url, title=fandom_title),
+                    "metadata": _build_fandom_link_metadata(
+                        fandom_url,
+                        title=fandom_title,
+                        site_title=fandom_site_title,
+                    ),
                 }
             )
 
@@ -4369,6 +4645,13 @@ def _discover_people_links(
         fandom_allowlist=fandom_allowlist,
         stats=stats,
     )
+    if stats is not None:
+        stats["people_total_targets"] = len(rows)
+        stats["people_processed"] = 0
+        stats["people_links_discovered"] = 0
+        stats["people_with_links"] = 0
+        stats["current_person_name"] = ""
+        stats["current_person_id"] = ""
     found: list[dict[str, Any]] = []
     seen_person_links: set[tuple[str, str, str]] = set()
     matched_show_cast_wikidata_candidates: set[str] = set()
@@ -4387,14 +4670,20 @@ def _discover_people_links(
         row["url"] = canonical_url
         row["link_kind"] = link_kind
         found.append(row)
+        if stats is not None:
+            stats["people_links_discovered"] = int(stats.get("people_links_discovered") or 0) + 1
 
-    for row in rows:
+    for index, row in enumerate(rows, start=1):
         if _stage_budget_exhausted(stats):
             break
         person_id = str(row.get("id"))
         name = str(row.get("full_name") or "").strip()
+        if stats is not None:
+            stats["current_person_id"] = person_id
+            stats["current_person_name"] = name
         fandom_url = str(row.get("fandom_url") or "").strip()
         external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
+        person_link_count_before = len(found)
         imdb_id, imdb_source = _resolve_person_external_identifier(
             external_ids,
             keys=("imdb", "imdb_id"),
@@ -4726,6 +5015,13 @@ def _discover_people_links(
                             source="cast_matrix_sync",
                         )
                     )
+        if stats is not None:
+            stats["people_processed"] = index
+            if len(found) > person_link_count_before:
+                stats["people_with_links"] = int(stats.get("people_with_links") or 0) + 1
+    if stats is not None:
+        stats["current_person_name"] = ""
+        stats["current_person_id"] = ""
     return found
 
 
@@ -5080,6 +5376,17 @@ def _scan_invalid_show_knowledge_links(show_id: str) -> dict[str, Any]:
             if is_missing_fandom_page(html, resolved):
                 invalid_rows.append({**row, "reason": "fandom_missing_or_invalid"})
                 continue
+            if entity_type == "show":
+                if not _is_valid_fandom_show_page_url(resolved, show_name=show_name):
+                    invalid_rows.append({**row, "reason": "fandom_not_show_level"})
+                    continue
+                title_candidates = _extract_page_title_candidates(html, resolved)
+                if not any(
+                    _is_valid_fandom_show_page_title(candidate_title, show_name=show_name)
+                    for candidate_title in title_candidates
+                ):
+                    invalid_rows.append({**row, "reason": "fandom_not_show_level"})
+                    continue
             continue
 
         resolved_wikipedia_url, _, wikipedia_error = _resolve_wikipedia_url(url)
@@ -5140,6 +5447,64 @@ def _cleanup_invalid_show_knowledge_links(show_id: str) -> dict[str, Any]:
         "manual_skipped": 0,
         "deleted_by_reason": _reason_counts(invalid_rows),
         "validation_failures": int(scan.get("validation_failures") or 0),
+    }
+
+
+def _normalize_existing_social_handle_urls(show_id: str, *, include_people: bool) -> dict[str, int]:
+    entity_types = ["show"]
+    if include_people:
+        entity_types.append("person")
+    rows = pg.fetch_all(
+        """
+        SELECT id::text AS id, url
+        FROM core.entity_links
+        WHERE show_id = %s::uuid
+          AND entity_type = ANY(%s::text[])
+          AND lower(link_kind) = ANY(%s::text[])
+          AND lower(status) <> 'rejected'
+        """,
+        [show_id, entity_types, sorted(_SOCIAL_LINK_KINDS)],
+    )
+    if not rows:
+        return {"scanned": 0, "normalized": 0, "deleted_duplicates": 0}
+
+    normalized = 0
+    deleted_duplicates = 0
+    with pg.db_connection() as conn:
+        for row in rows:
+            link_id = str(row.get("id") or "").strip()
+            raw_url = str(row.get("url") or "").strip()
+            if not link_id or not raw_url:
+                continue
+            canonical_url = _canonicalize_url(raw_url)
+            if not canonical_url or canonical_url == raw_url:
+                continue
+            try:
+                with pg.db_cursor(conn=conn) as cur:
+                    cur.execute(
+                        """
+                        UPDATE core.entity_links
+                        SET url = %s,
+                            url_key = %s,
+                            updated_at = NOW()
+                        WHERE id = %s::uuid
+                        RETURNING id
+                        """,
+                        [canonical_url, _url_key(canonical_url), link_id],
+                    )
+                    updated_rows = [dict(updated_row) for updated_row in cur.fetchall()]
+            except Exception as exc:  # noqa: BLE001
+                if _is_duplicate_violation(exc, constraint="entity_links_unique_active"):
+                    if hasattr(conn, "rollback"):
+                        conn.rollback()
+                    deleted_duplicates += _delete_entity_links_by_id([link_id], conn=conn)
+                    continue
+                raise
+            normalized += len(updated_rows)
+    return {
+        "scanned": len(rows),
+        "normalized": normalized,
+        "deleted_duplicates": deleted_duplicates,
     }
 
 
@@ -5352,6 +5717,62 @@ def _run_show_link_discovery(
     started_at = _iso_utc_now()
     started_perf = perf_counter()
     run_timeout_seconds = _link_discovery_run_timeout_seconds()
+    discovery_stats: dict[str, Any] = {"fandom_candidates_tested": 0, "skipped_fetch_budget": 0}
+    stage_timings_ms: dict[str, int] = {
+        "show_stage_ms": 0,
+        "season_stage_ms": 0,
+        "people_stage_ms": 0,
+        "validation_ms": 0,
+    }
+    scan_targets = _count_discovery_scan_targets(show_id_str)
+    discovered: list[dict[str, Any]] = []
+
+    def build_progress_snapshot(stage_name: str) -> dict[str, Any]:
+        current_stage = (
+            str(stage_name or "").strip().lower() or str(discovery_stats.get("__stage_name") or "").strip().lower()
+        )
+        budget_stage = str(discovery_stats.get("__stage_name") or stage_name).strip().lower() or stage_name
+        stage_started_perf = float(discovery_stats.get("__stage_started_perf") or 0.0)
+        stage_started_elapsed_ms = 0
+        stage_elapsed_ms = 0
+        if stage_started_perf > 0:
+            stage_started_elapsed_ms = max(0, int((stage_started_perf - started_perf) * 1000))
+            stage_elapsed_ms = max(0, int((perf_counter() - stage_started_perf) * 1000))
+        total_tested = int(discovery_stats.get("fandom_candidates_tested") or 0)
+        stage_start_tested = int(discovery_stats.get("__stage_fandom_candidates_start") or 0)
+        stage_tested = max(0, total_tested - stage_start_tested)
+        stage_progress: dict[str, Any] | None = None
+        if budget_stage == "people":
+            current_person_name = str(discovery_stats.get("current_person_name") or "").strip() or None
+            stage_progress = {
+                "processed_targets": int(discovery_stats.get("people_processed") or 0),
+                "total_targets": int(discovery_stats.get("people_total_targets") or 0),
+                "current_target_label": current_person_name,
+                "links_discovered": int(discovery_stats.get("people_links_discovered") or 0),
+                "targets_with_links": int(discovery_stats.get("people_with_links") or 0),
+            }
+        return {
+            "current_stage": current_stage,
+            "stage_started_elapsed_ms": stage_started_elapsed_ms,
+            "stage_elapsed_ms": stage_elapsed_ms,
+            "discovered_rows": len(discovered),
+            "fandom_candidates_tested": total_tested,
+            "stage_fandom_candidates_tested": stage_tested,
+            "scan_targets": {
+                "show_scanned": int(scan_targets.get("show_scanned") or 0),
+                "season_scanned": int(scan_targets.get("season_scanned") or 0) if payload.include_seasons else 0,
+                "people_scanned": int(scan_targets.get("people_scanned") or 0) if payload.include_people else 0,
+            },
+            "stage_budget": {
+                "stage": budget_stage,
+                "timeout_seconds": float(discovery_stats.get("__stage_timeout_seconds") or 0.0),
+                "max_fandom_candidates": int(discovery_stats.get("__stage_max_fandom_candidates") or 0),
+                "stage_fandom_candidates_tested": stage_tested,
+                "budget_exhausted": bool(discovery_stats.get("__stage_budget_exhausted") is True),
+                "budget_reason": str(discovery_stats.get("__stage_budget_exhausted_reason") or "") or None,
+            },
+            "stage_progress": stage_progress,
+        }
 
     def emit(stage: str, payload_in: dict[str, Any]) -> None:
         elapsed_ms = int((perf_counter() - started_perf) * 1000)
@@ -5360,6 +5781,7 @@ def _run_show_link_discovery(
             "run_id": run_id,
             "timestamp": _iso_utc_now(),
             "elapsed_ms": elapsed_ms,
+            **build_progress_snapshot(stage),
             **payload_in,
         }
         stage_callback(stage, payload_with_meta)
@@ -5374,18 +5796,8 @@ def _run_show_link_discovery(
             "detail": f"Discovery exceeded timeout budget at stage {stage}.",
         }
 
-    scan_targets = _count_discovery_scan_targets(show_id_str)
-    discovery_stats: dict[str, Any] = {"fandom_candidates_tested": 0, "skipped_fetch_budget": 0}
-    stage_timings_ms: dict[str, int] = {
-        "show_stage_ms": 0,
-        "season_stage_ms": 0,
-        "people_stage_ms": 0,
-        "validation_ms": 0,
-    }
-
     timed_out = False
     timeout_context: dict[str, Any] | None = None
-    discovered: list[dict[str, Any]] = []
 
     show_budget = _start_discovery_stage_budget(discovery_stats, stage="show")
     emit("show_discovery_started", {"budget": show_budget})
@@ -5408,12 +5820,20 @@ def _run_show_link_discovery(
         timeout_context = run_timeout_payload("show_discovery")
         emit("run_timeout", timeout_context)
 
-    show_fandom_seed_urls = [
+    show_fandom_seed_urls_raw = [
         str(row.get("url") or "").strip()
         for row in discovered
         if str(row.get("entity_type") or "").strip().lower() == "show"
         and _normalize_link_kind(str(row.get("link_kind") or "").strip().lower()) == "fandom"
     ]
+    show_fandom_seed_urls: list[str] = []
+    seen_show_fandom_seed_keys: set[str] = set()
+    for url in show_fandom_seed_urls_raw:
+        key = _url_key(url)
+        if not key or key in seen_show_fandom_seed_keys:
+            continue
+        seen_show_fandom_seed_keys.add(key)
+        show_fandom_seed_urls.append(url)
 
     if payload.include_seasons and not timed_out:
         season_budget = _start_discovery_stage_budget(discovery_stats, stage="season")
@@ -5532,6 +5952,12 @@ def _run_show_link_discovery(
             tmdb_social_links_added += 1
     emit("upsert_completed", {"upserted": upserted, "approved_added": approved_added})
 
+    social_url_normalization = _normalize_existing_social_handle_urls(
+        show_id_str,
+        include_people=payload.include_people,
+    )
+    emit("social_url_repair_completed", social_url_normalization)
+
     validation_started_perf = perf_counter()
     legacy_rows_normalized = _normalize_legacy_knowledge_link_kinds(show_id_str)
 
@@ -5635,6 +6061,8 @@ def _run_show_link_discovery(
             "deleted_invalid": deleted_invalid,
             "skipped_fetch_error": skipped_fetch_error,
             "skipped_fetch_budget": skipped_fetch_budget,
+            "social_urls_normalized": int(social_url_normalization.get("normalized") or 0),
+            "social_url_duplicates_deleted": int(social_url_normalization.get("deleted_duplicates") or 0),
         },
         "validation_reasons": validation_reasons,
         "counts_by_group": by_group,
@@ -5659,6 +6087,8 @@ def _run_show_link_discovery(
         "invalid_show_links_manual_skipped": int(invalid_show_cleanup.get("manual_skipped") or 0),
         "invalid_show_links_validation_failures": int(invalid_show_cleanup.get("validation_failures") or 0),
         "pending_links_promoted": pending_promoted,
+        "social_urls_normalized": int(social_url_normalization.get("normalized") or 0),
+        "social_url_duplicates_deleted": int(social_url_normalization.get("deleted_duplicates") or 0),
         "stage_counts": stage_counts,
         "stage_timings_ms": stage_timings_ms,
         "show_stage_ms": int(stage_timings_ms["show_stage_ms"]),
@@ -5714,11 +6144,16 @@ def discover_show_links_stream(
         done = threading.Event()
         result_box: dict[str, Any] = {}
         error_box: dict[str, Any] = {}
+        last_progress_payload: dict[str, Any] = {}
         heartbeat_interval_seconds = 5.0
         stream_started_perf = perf_counter()
 
         def on_stage(stage: str, stage_payload: dict[str, Any]) -> None:
-            event_queue.put(("progress", {"stage": stage, **stage_payload}))
+            current_stage = str(stage_payload.get("current_stage") or "").strip() or stage
+            payload_with_stage = {"stage": stage, "current_stage": current_stage, **stage_payload}
+            last_progress_payload.clear()
+            last_progress_payload.update(payload_with_stage)
+            event_queue.put(("progress", payload_with_stage))
 
         def worker() -> None:
             try:
@@ -5753,16 +6188,26 @@ def discover_show_links_stream(
                 event_name, event_payload = event_queue.get(timeout=heartbeat_interval_seconds)
             except Empty:
                 elapsed_ms = int((perf_counter() - stream_started_perf) * 1000)
+                stage_started_elapsed_ms = int(last_progress_payload.get("stage_started_elapsed_ms") or 0)
+                heartbeat_payload = {
+                    **last_progress_payload,
+                    "show_id": show_id_str,
+                    "stage": "heartbeat",
+                    "heartbeat": True,
+                    "elapsed_ms": elapsed_ms,
+                    "timestamp": _iso_utc_now(),
+                    "message": "Discovery still running...",
+                }
+                current_stage = str(
+                    last_progress_payload.get("current_stage") or last_progress_payload.get("stage") or ""
+                ).strip()
+                if current_stage:
+                    heartbeat_payload["current_stage"] = current_stage
+                if stage_started_elapsed_ms > 0:
+                    heartbeat_payload["stage_elapsed_ms"] = max(0, elapsed_ms - stage_started_elapsed_ms)
                 yield _sse_event(
                     "progress",
-                    {
-                        "show_id": show_id_str,
-                        "stage": "heartbeat",
-                        "heartbeat": True,
-                        "elapsed_ms": elapsed_ms,
-                        "timestamp": _iso_utc_now(),
-                        "message": "Discovery still running...",
-                    },
+                    heartbeat_payload,
                 )
                 continue
             yield _sse_event(event_name, {"show_id": show_id_str, **event_payload})
@@ -5834,11 +6279,16 @@ def build_show_links_discovery_operation_producer(
         done = threading.Event()
         result_box: dict[str, Any] = {}
         error_box: dict[str, Any] = {}
+        last_progress_payload: dict[str, Any] = {}
         heartbeat_interval_seconds = 5.0
         stream_started_perf = perf_counter()
 
         def on_stage(stage: str, stage_payload: dict[str, Any]) -> None:
-            event_queue.put(("progress", {"stage": stage, **stage_payload}))
+            current_stage = str(stage_payload.get("current_stage") or "").strip() or stage
+            payload_with_stage = {"stage": stage, "current_stage": current_stage, **stage_payload}
+            last_progress_payload.clear()
+            last_progress_payload.update(payload_with_stage)
+            event_queue.put(("progress", payload_with_stage))
 
         def worker() -> None:
             try:
@@ -5873,16 +6323,26 @@ def build_show_links_discovery_operation_producer(
                 event_name, event_payload = event_queue.get(timeout=heartbeat_interval_seconds)
             except Empty:
                 elapsed_ms = int((perf_counter() - stream_started_perf) * 1000)
+                stage_started_elapsed_ms = int(last_progress_payload.get("stage_started_elapsed_ms") or 0)
+                heartbeat_payload = {
+                    **last_progress_payload,
+                    "show_id": show_id_str,
+                    "stage": "heartbeat",
+                    "heartbeat": True,
+                    "elapsed_ms": elapsed_ms,
+                    "timestamp": _iso_utc_now(),
+                    "message": "Discovery still running...",
+                }
+                current_stage = str(
+                    last_progress_payload.get("current_stage") or last_progress_payload.get("stage") or ""
+                ).strip()
+                if current_stage:
+                    heartbeat_payload["current_stage"] = current_stage
+                if stage_started_elapsed_ms > 0:
+                    heartbeat_payload["stage_elapsed_ms"] = max(0, elapsed_ms - stage_started_elapsed_ms)
                 yield _sse_event(
                     "progress",
-                    {
-                        "show_id": show_id_str,
-                        "stage": "heartbeat",
-                        "heartbeat": True,
-                        "elapsed_ms": elapsed_ms,
-                        "timestamp": _iso_utc_now(),
-                        "message": "Discovery still running...",
-                    },
+                    heartbeat_payload,
                 )
                 continue
             yield _sse_event(event_name, {"show_id": show_id_str, **event_payload})

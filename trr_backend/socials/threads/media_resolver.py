@@ -218,9 +218,7 @@ def resolve_threads_media(
                 _add(item_video)
                 if item_video_meta:
                     source_assets.append(item_video_meta)
-            item_image = _pick_best_image(
-                (carousel_item.get("image_versions2") or {}).get("candidates") or []
-            )
+            item_image = _pick_best_image((carousel_item.get("image_versions2") or {}).get("candidates") or [])
             item_image_meta = _pick_best_image_meta(
                 (carousel_item.get("image_versions2") or {}).get("candidates") or []
             )

@@ -31,22 +31,14 @@ def test_search_wikimedia_commons_logo_candidates_builds_special_filepath_urls()
                 "https://commons.wikimedia.org/w/index.php?search=Bravo+logo"
                 "&title=Special%3AMediaSearch&type=image&filemime=svg"
             ),
-            text=(
-                "<html><body>"
-                '<a href="/wiki/File:Bravo_logo.svg">Bravo logo</a>'
-                "</body></html>"
-            ),
+            text=('<html><body><a href="/wiki/File:Bravo_logo.svg">Bravo logo</a></body></html>'),
         ),
         _FakeResponse(
             url=(
                 "https://commons.wikimedia.org/w/index.php?search=Bravo+icon"
                 "&title=Special%3AMediaSearch&type=image&filemime=svg"
             ),
-            text=(
-                "<html><body>"
-                '<a href="/wiki/File:Bravo_symbol.png">Bravo symbol</a>'
-                "</body></html>"
-            ),
+            text=('<html><body><a href="/wiki/File:Bravo_symbol.png">Bravo symbol</a></body></html>'),
         ),
         _FakeResponse(
             url=(
@@ -117,11 +109,7 @@ def test_extract_official_logo_candidates_includes_brand_guidelines_page_assets(
         if "brand-guidelines" in url:
             return _FakeResponse(
                 url=guidelines_url,
-                text=(
-                    "<html><body>"
-                    '<img alt="Official wordmark" src="/assets/wordmark.svg" />'
-                    "</body></html>"
-                ),
+                text=('<html><body><img alt="Official wordmark" src="/assets/wordmark.svg" /></body></html>'),
             )
         return _FakeResponse(status_code=404, url=url)
 
@@ -135,6 +123,35 @@ def test_extract_official_logo_candidates_includes_brand_guidelines_page_assets(
     assert "favicon_appicons" in providers
     assert "brand_guidelines" in providers
     assert any("wordmark.svg" in row.url for row in rows)
+
+
+def test_extract_official_logo_candidates_filters_official_site_to_png_or_svg() -> None:
+    homepage_url = "https://example.com"
+
+    def _fake_get(url: str, **_: object) -> _FakeResponse:
+        if url.rstrip("/") == homepage_url:
+            return _FakeResponse(
+                url=homepage_url,
+                text=(
+                    "<html><head>"
+                    '<meta property="og:image" content="/images/site-logo.webp" />'
+                    "</head><body>"
+                    '<img alt="Official png" src="/images/site-logo.png" />'
+                    '<img alt="Official jpg" src="/images/site-logo.jpg" />'
+                    "</body></html>"
+                ),
+            )
+        return _FakeResponse(status_code=404, url=url)
+
+    session = MagicMock()
+    session.get.side_effect = _fake_get
+
+    rows = mod.extract_official_logo_candidates([homepage_url], session=session)
+
+    official_rows = [row for row in rows if row.source_provider == "official_site"]
+    assert official_rows
+    assert all((".png" in row.url.lower()) or (".svg" in row.url.lower()) for row in official_rows)
+    assert all(".webp" not in row.url.lower() and ".jpg" not in row.url.lower() for row in official_rows)
 
 
 def test_collect_free_logo_candidates_merges_logopedia_results() -> None:
@@ -266,36 +283,47 @@ def test_collect_free_logo_candidates_filters_noisy_1000logos_assets() -> None:
 
 
 def test_collect_free_logo_candidates_scopes_official_sources_to_target_host() -> None:
-    with patch(
-        "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
-        return_value=[],
-    ) as official_mock, patch(
-        "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
-        return_value=[],
+    with (
+        patch(
+            "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
+            return_value=[],
+        ) as official_mock,
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
+            return_value=[],
+        ),
     ):
         mod.collect_free_logo_candidates(
             target_label="IMDb",
@@ -313,36 +341,47 @@ def test_collect_free_logo_candidates_scopes_official_sources_to_target_host() -
 
 
 def test_collect_free_logo_candidates_uses_brand_name_query_term_only() -> None:
-    with patch(
-        "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
-        return_value=[],
-    ) as wikimedia_mock, patch(
-        "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
-        return_value=[],
-    ), patch(
-        "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
-        return_value=[],
+    with (
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
+            return_value=[],
+        ) as wikimedia_mock,
+        patch(
+            "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
+            return_value=[],
+        ),
     ):
         mod.collect_free_logo_candidates(
             target_label="en.wikipedia.org",
@@ -352,3 +391,255 @@ def test_collect_free_logo_candidates_uses_brand_name_query_term_only() -> None:
 
     query_terms = wikimedia_mock.call_args.args[0]
     assert query_terms == ["wikipedia"]
+
+
+def test_build_source_query_profile_uses_slug_and_search_links() -> None:
+    slug_profile = mod.build_source_query_profile(
+        source_provider="logos1000",
+        target_label="peacocktv.com",
+        target_key="peacocktv.com",
+        query_override="/peacock-logo/",
+    )
+    search_profile = mod.build_source_query_profile(
+        source_provider="wikimedia_commons",
+        target_label="peacocktv.com",
+        target_key="peacocktv.com",
+        query_override="peacock tv",
+    )
+
+    assert slug_profile["query_kind"] == "slug"
+    assert slug_profile["effective_query_value"] == "peacock-logo"
+    assert slug_profile["query_values"] == ["peacock-logo"]
+    assert slug_profile["query_links"] == ["https://1000logos.net/peacock-logo/"]
+    assert search_profile["query_kind"] == "search_term"
+    assert any("peacock+tv+logo" in link for link in search_profile["query_links"])
+
+
+def test_build_source_query_profile_supports_multiple_queries() -> None:
+    profile = mod.build_source_query_profile(
+        source_provider="wikimedia_commons",
+        target_label="peacocktv.com",
+        target_key="peacocktv.com",
+        query_override=["peacock tv", "peacock streaming"],
+    )
+
+    assert profile["effective_query_value"] == "peacock tv"
+    assert profile["query_values"] == ["peacock tv", "peacock streaming"]
+    assert any("peacock+tv+logo" in link for link in profile["query_links"])
+    assert any("peacock+streaming+logo" in link for link in profile["query_links"])
+
+
+def test_build_source_query_profile_adds_logos_fandom_image_only_link() -> None:
+    profile = mod.build_source_query_profile(
+        source_provider="logos_fandom",
+        target_label="Bravo",
+        target_key="bravo.com",
+        query_override="bravo",
+    )
+
+    assert any("Special:Search?query=bravo" in link for link in profile["query_links"])
+    assert any("filter=imageOnly" in link for link in profile["query_links"])
+
+
+def test_build_source_query_profile_uses_direct_logos_fandom_page_links_for_wiki_paths() -> None:
+    profile = mod.build_source_query_profile(
+        source_provider="logos_fandom",
+        target_label="Bravo TV",
+        target_key="bravotv.com",
+        query_override=[
+            "https://logos.fandom.com/wiki/Bravo_(United_States)",
+            "https://logos.fandom.com/wiki/Bravo_(United_States)/Other",
+        ],
+    )
+
+    assert profile["query_values"] == ["Bravo_(United_States)", "Bravo_(United_States)/Other"]
+    assert profile["query_links"] == [
+        "https://logos.fandom.com/wiki/Bravo_(United_States)",
+        "https://logos.fandom.com/wiki/Bravo_(United_States)/Other",
+    ]
+
+
+def test_normalize_source_query_value_extracts_logos_fandom_page_slug_from_url() -> None:
+    normalized = mod._normalize_source_query_value(  # noqa: SLF001
+        "logos_fandom",
+        "https://logos.fandom.com/wiki/Bravo_(United_States)/Other",
+    )
+
+    assert normalized == "Bravo_(United_States)/Other"
+
+
+def test_collect_free_logo_candidates_passes_query_override_to_provider_terms() -> None:
+    with (
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
+            return_value=[],
+        ) as wikimedia_mock,
+        patch(
+            "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
+            return_value=[],
+        ),
+    ):
+        mod.collect_free_logo_candidates(
+            target_label="peacocktv.com",
+            target_key="peacocktv.com",
+            source_provider="wikimedia_commons",
+            query_override="peacock custom",
+        )
+
+    assert wikimedia_mock.call_args.args[0] == ["peacock custom"]
+
+
+def test_collect_free_logo_candidates_passes_exact_slug_override_to_1000logos() -> None:
+    with (
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
+            return_value=[],
+        ) as logos1000_mock,
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
+            return_value=[],
+        ),
+    ):
+        mod.collect_free_logo_candidates(
+            target_label="peacocktv.com",
+            target_key="peacocktv.com",
+            source_provider="logos1000",
+            query_override="/peacock-logo/",
+        )
+
+    assert logos1000_mock.call_args.kwargs["exact_slug"] == "peacock-logo"
+
+
+def test_collect_free_logo_candidates_aggregates_multiple_query_overrides() -> None:
+    with (
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
+            side_effect=[
+                [
+                    mod.FreeLogoCandidate(
+                        url="https://commons.wikimedia.org/wiki/Special:FilePath/Peacock_logo.svg",
+                        source_provider="wikimedia_commons",
+                        discovered_from="https://commons.wikimedia.org/wiki/File:Peacock_logo.svg",
+                        context="search",
+                    )
+                ],
+                [
+                    mod.FreeLogoCandidate(
+                        url="https://commons.wikimedia.org/wiki/Special:FilePath/Peacock_streaming_logo.svg",
+                        source_provider="wikimedia_commons",
+                        discovered_from="https://commons.wikimedia.org/wiki/File:Peacock_streaming_logo.svg",
+                        context="search",
+                    )
+                ],
+            ],
+        ) as wikimedia_mock,
+        patch(
+            "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
+            return_value=[],
+        ),
+    ):
+        rows = mod.collect_free_logo_candidates(
+            target_label="peacocktv.com",
+            target_key="peacocktv.com",
+            source_provider="wikimedia_commons",
+            query_override=["peacock tv", "peacock streaming"],
+        )
+
+    assert len(rows) == 2
+    assert wikimedia_mock.call_count == 2

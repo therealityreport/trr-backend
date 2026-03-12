@@ -107,7 +107,6 @@ def _fetch_rows(
     season_id: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    params: tuple[object, ...]
     if season_id:
         cur.execute(
             """

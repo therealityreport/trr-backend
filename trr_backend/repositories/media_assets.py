@@ -79,6 +79,11 @@ def _asset_id_for(source: str, source_asset_id: str | None, source_url: str | No
     return uuid5(_ASSET_ID_NAMESPACE, name)
 
 
+def asset_id_for(source: str, source_asset_id: str | None = None, source_url: str | None = None) -> UUID | None:
+    """Public wrapper for deterministic media_asset identity derivation."""
+    return _asset_id_for(source, source_asset_id, source_url)
+
+
 def _link_id_for(
     *,
     entity_type: str,

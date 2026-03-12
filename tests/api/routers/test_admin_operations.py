@@ -299,3 +299,118 @@ def test_start_operation_remote_mode_does_not_execute_in_api(monkeypatch: pytest
     assert response["execution_mode_canonical"] == "remote"
     assert appended_payloads
     assert appended_payloads[0]["execution_owner"] == "remote_worker"
+
+
+def test_start_operation_remote_mode_dispatches_supported_show_refresh_to_modal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    operation_id = str(uuid4())
+
+    with patch(
+        "trr_backend.repositories.admin_operations.create_or_attach_operation",
+        return_value=({"id": operation_id, "status": "pending", "operation_type": "admin_show_refresh"}, False),
+    ):
+        with patch(
+            "trr_backend.repositories.admin_operations.get_operation",
+            return_value={"id": operation_id, "status": "pending"},
+        ):
+            with patch(
+                "trr_backend.repositories.admin_operations.append_operation_event",
+                return_value={
+                    "operation_id": operation_id,
+                    "event_seq": 1,
+                    "event_type": "operation",
+                    "event_payload": {},
+                },
+            ):
+                with patch("trr_backend.pipeline.admin_operations.ensure_operation_execution") as ensure_mock:
+                    with patch(
+                        "trr_backend.pipeline.admin_operations.dispatch_admin_operation",
+                        return_value=True,
+                    ) as dispatch_mock:
+                        response = pipeline_admin_operations.start_operation_for_stream(
+                            operation_type="admin_show_refresh",
+                            producer=lambda: [],
+                            request_payload={"show_id": str(uuid4())},
+                            initiated_by="admin-modal",
+                            request=None,
+                        )
+
+    ensure_mock.assert_not_called()
+    dispatch_mock.assert_called_once_with(
+        operation_id=operation_id,
+        operation_type="admin_show_refresh",
+    )
+    assert response["execution_owner"] == "remote_worker"
+
+
+def test_start_operation_local_mode_dispatches_supported_show_refresh_to_modal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    operation_id = str(uuid4())
+
+    with patch(
+        "trr_backend.repositories.admin_operations.create_or_attach_operation",
+        return_value=({"id": operation_id, "status": "pending", "operation_type": "admin_show_refresh"}, False),
+    ):
+        with patch(
+            "trr_backend.repositories.admin_operations.get_operation",
+            return_value={"id": operation_id, "status": "pending"},
+        ):
+            with patch(
+                "trr_backend.repositories.admin_operations.append_operation_event",
+                return_value={
+                    "operation_id": operation_id,
+                    "event_seq": 1,
+                    "event_type": "operation",
+                    "event_payload": {},
+                },
+            ):
+                with patch("trr_backend.pipeline.admin_operations.ensure_operation_execution") as ensure_mock:
+                    with patch(
+                        "trr_backend.pipeline.admin_operations.dispatch_admin_operation",
+                        return_value=True,
+                    ) as dispatch_mock:
+                        response = pipeline_admin_operations.start_operation_for_stream(
+                            operation_type="admin_show_refresh",
+                            producer=lambda: [],
+                            request_payload={"show_id": str(uuid4())},
+                            initiated_by="admin-modal",
+                            request=None,
+                        )
+
+    ensure_mock.assert_not_called()
+    dispatch_mock.assert_called_once_with(
+        operation_id=operation_id,
+        operation_type="admin_show_refresh",
+    )
+    assert response["execution_owner"] == "remote_worker"
+    assert response["execution_mode_canonical"] == "remote"
+
+
+def test_claim_and_execute_operation_claims_specific_operation() -> None:
+    operation_id = str(uuid4())
+    claimed_row = {
+        "id": operation_id,
+        "operation_type": "admin_show_refresh",
+        "attempt_count": 1,
+    }
+
+    with patch(
+        "trr_backend.repositories.admin_operations.claim_operation",
+        return_value=claimed_row,
+    ) as claim_mock:
+        with patch("trr_backend.pipeline.admin_operations._run_remote_claimed_operation") as run_mock:
+            claimed = pipeline_admin_operations.claim_and_execute_operation(
+                operation_id=operation_id,
+                worker_id="modal:test",
+                operation_types=["admin_show_refresh"],
+            )
+
+    assert claimed is True
+    claim_mock.assert_called_once()
+    run_mock.assert_called_once_with(claimed_row)

@@ -17,7 +17,13 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
-from trr_backend.job_plane import canonical_execution_mode, execution_owner_label, is_remote_job_plane_enabled
+from trr_backend.job_plane import (
+    canonical_execution_mode,
+    execution_metadata,
+    execution_owner_label,
+    is_remote_job_plane_enabled,
+)
+from trr_backend.modal_dispatch import dispatch_admin_operation, modal_execution_metadata, supports_admin_operation
 from trr_backend.repositories import admin_operations
 
 logger = logging.getLogger(__name__)
@@ -464,11 +470,13 @@ def claim_and_execute_next_operation(
     *,
     worker_id: str,
     operation_types: Iterable[str] | None = None,
+    exclude_operation_types: Iterable[str] | None = None,
 ) -> bool:
     claimed = admin_operations.claim_next_operation(
         worker_id,
         lease_seconds=_OPERATION_CLAIM_LEASE_SECONDS,
         operation_types=operation_types,
+        exclude_operation_types=exclude_operation_types,
     )
     if not claimed:
         return False
@@ -484,10 +492,37 @@ def claim_and_execute_next_operation(
     return True
 
 
+def claim_and_execute_operation(
+    *,
+    operation_id: str,
+    worker_id: str,
+    operation_types: Iterable[str] | None = None,
+) -> bool:
+    claimed = admin_operations.claim_operation(
+        operation_id,
+        worker_id,
+        lease_seconds=_OPERATION_CLAIM_LEASE_SECONDS,
+        operation_types=operation_types,
+    )
+    if not claimed:
+        return False
+
+    logger.info(
+        "Admin operation claimed by id: worker_id=%s operation_id=%s operation_type=%s attempt=%s",
+        worker_id,
+        str(claimed.get("id") or ""),
+        str(claimed.get("operation_type") or ""),
+        int(claimed.get("attempt_count") or 0),
+    )
+    _run_remote_claimed_operation(claimed)
+    return True
+
+
 def run_remote_operation_worker_loop(
     *,
     worker_id: str | None = None,
     operation_types: Iterable[str] | None = None,
+    exclude_operation_types: Iterable[str] | None = None,
     poll_seconds: float = 2.0,
     once: bool = False,
 ) -> int:
@@ -495,7 +530,11 @@ def run_remote_operation_worker_loop(
     safe_poll = max(0.2, float(poll_seconds))
 
     while True:
-        claimed = claim_and_execute_next_operation(worker_id=normalized_worker_id, operation_types=operation_types)
+        claimed = claim_and_execute_next_operation(
+            worker_id=normalized_worker_id,
+            operation_types=operation_types,
+            exclude_operation_types=exclude_operation_types,
+        )
         if once:
             return 0 if claimed else 1
         if not claimed:
@@ -534,6 +573,8 @@ def start_operation_for_stream(
         raise RuntimeError("Failed to create admin operation")
 
     remote_mode = is_remote_job_plane_enabled()
+    modal_supported = supports_admin_operation(operation_type)
+    modal_dispatched = False
     logger.info(
         (
             "Admin operation create_or_attach: operation_type=%s "
@@ -551,7 +592,11 @@ def start_operation_for_stream(
     )
 
     if not attached:
-        if remote_mode:
+        if modal_supported:
+            modal_dispatched = dispatch_admin_operation(operation_id=operation_id, operation_type=operation_type)
+        if modal_dispatched:
+            logger.info("Queued admin operation for Modal ownership: operation_id=%s", operation_id)
+        elif remote_mode:
             logger.info("Queued admin operation for remote worker ownership: operation_id=%s", operation_id)
         else:
             if producer is None:
@@ -562,6 +607,8 @@ def start_operation_for_stream(
     if not refreshed:
         raise RuntimeError("Operation created but could not be loaded")
 
+    current_execution_metadata = modal_execution_metadata() if modal_dispatched else execution_metadata()
+
     # Emit immediate envelope so clients can persist operation_id/event_seq before progress arrives.
     admin_operations.append_operation_event(
         operation_id,
@@ -571,12 +618,22 @@ def start_operation_for_stream(
             "status": str(refreshed.get("status") or "pending"),
             "attached": bool(attached),
             "request_id": request_id,
-            "execution_owner": execution_owner_label(),
-            "execution_mode_canonical": canonical_execution_mode(),
+            **current_execution_metadata,
         },
     )
+    if modal_dispatched:
+        admin_operations.append_operation_event(
+            operation_id,
+            event_type="dispatched_to_modal",
+            event_payload={
+                "operation_id": operation_id,
+                "request_id": request_id,
+                **current_execution_metadata,
+            },
+        )
 
     refreshed["attached"] = attached
-    refreshed["execution_owner"] = execution_owner_label()
-    refreshed["execution_mode_canonical"] = canonical_execution_mode()
+    refreshed["execution_owner"] = current_execution_metadata["execution_owner"]
+    refreshed["execution_mode_canonical"] = current_execution_metadata["execution_mode_canonical"]
+    refreshed["execution_backend_canonical"] = current_execution_metadata["execution_backend_canonical"]
     return refreshed

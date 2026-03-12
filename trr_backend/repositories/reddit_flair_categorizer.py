@@ -150,7 +150,7 @@ def _get_communities_for_show(show_id: str) -> list[dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(sql, (show_id,))
             cols = [desc[0] for desc in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+            return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
 
 
 def auto_categorize_flairs_batch(*, show_id: str) -> dict[str, Any]:
@@ -179,13 +179,15 @@ def auto_categorize_flairs_batch(*, show_id: str) -> dict[str, Any]:
             if cat:
                 categories[canonical] = cat
 
-        results.append({
-            "community_id": community_id,
-            "subreddit": community.get("subreddit"),
-            "categories": categories,
-            "matched": len(categories),
-            "total": len(flairs),
-        })
+        results.append(
+            {
+                "community_id": community_id,
+                "subreddit": community.get("subreddit"),
+                "categories": categories,
+                "matched": len(categories),
+                "total": len(flairs),
+            }
+        )
         total_matched += len(categories)
         total_flairs += len(flairs)
 

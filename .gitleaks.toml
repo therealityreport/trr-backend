@@ -45,6 +45,10 @@ paths = [
   '''^README\.md$''',
   '''^docs/SECURITY\.md$''',
   '''^docs/HISTORY_PURGE\.md$''',
+  # AI handoff and cross-collab docs contain AWS resource IDs (instance IDs,
+  # SSM command IDs) that gitleaks flags as generic-api-key false positives
+  '''^docs/ai/HANDOFF\.md$''',
+  '''^docs/cross-collab/.*/STATUS\.md$''',
   # Test files and fixtures
   '''tests/.*''',
   '''.*test.*\.py$''',

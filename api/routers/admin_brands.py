@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import ipaddress
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -20,7 +21,11 @@ from pydantic import BaseModel, Field
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient, get_supabase_admin_client
 from trr_backend.db import pg
-from trr_backend.integrations.free_logo_sources import FREE_LOGO_SOURCE_PROVIDERS, collect_free_logo_candidates
+from trr_backend.integrations.free_logo_sources import (
+    FREE_LOGO_SOURCE_PROVIDERS,
+    build_source_query_profile,
+    collect_free_logo_candidates,
+)
 from trr_backend.media.s3_mirror import download_image
 from trr_backend.repositories import brand_families, brands_franchises
 
@@ -100,14 +105,17 @@ class PatchBrandFamilyLinkRuleRequest(BaseModel):
     link_kind: str | None = None
     label: str | None = None
     url: str | None = None
-    coverage_type: Literal[
-        "family_all_shows",
-        "family_network_shows",
-        "family_streaming_shows",
-        "franchise_rule",
-        "show_wikidata_exact",
-        "show_name_contains",
-    ] | None = None
+    coverage_type: (
+        Literal[
+            "family_all_shows",
+            "family_network_shows",
+            "family_streaming_shows",
+            "franchise_rule",
+            "show_wikidata_exact",
+            "show_name_contains",
+        ]
+        | None
+    ) = None
     coverage_value: str | None = None
     source: Literal["manual", "wikipedia_import", "system"] | None = None
     priority: int | None = Field(default=None, ge=0)
@@ -188,9 +196,21 @@ class BrandLogosOptionDiscoverRequest(BaseModel):
     target_label: str | None = None
     logo_role: BrandLogoRole
     source_provider: str | None = None
+    query_override: str | None = None
+    query_overrides: list[str] | None = None
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=_DEFAULT_DISCOVER_PAGE_SIZE, ge=1, le=100)
     include_related: bool = True
+
+
+class BrandLogosSourceQueryRequest(BaseModel):
+    target_type: BrandLogoTargetType
+    target_key: str
+    target_label: str | None = None
+    logo_role: BrandLogoRole
+    source_provider: str
+    query_value: str | None = None
+    query_values: list[str] | None = None
 
 
 class BrandLogosOptionSelectRequest(BaseModel):
@@ -408,12 +428,7 @@ def _is_valid_public_hostname(host: str) -> bool:
     except ValueError:
         return True
     return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
     )
 
 
@@ -707,6 +722,7 @@ def _find_related_network_streaming_assets_by_host(
         order by is_primary desc, updated_at desc nulls last, created_at desc nulls last
         limit %s
         """
+
     try:
         rows = _fetch_all_with_logo_variant_fallback(
             query_builder=query_builder,
@@ -842,6 +858,7 @@ def _list_brand_logos(
               )
             order by is_primary desc, updated_at desc nulls last, created_at desc nulls last
             """
+
         rows = _fetch_all_with_logo_variant_fallback(
             query_builder=query_builder,
             params=[target_type, needle, like, like, like],
@@ -887,6 +904,7 @@ def _list_brand_logos(
               )
             order by is_primary desc, updated_at desc nulls last, created_at desc nulls last
             """
+
         rows = _fetch_all_with_logo_variant_fallback(
             query_builder=query_builder,
             params=[target_type, needle, like, like, like, like],
@@ -1237,9 +1255,7 @@ def _load_sync_targets(
                 "target_label": _normalize_text(row.get("target_label")) or _normalize_text(row.get("target_key")),
                 "discovered_from": _normalize_text(row.get("discovered_from")) or None,
                 "discovered_from_urls": (
-                    row.get("discovered_from_urls")
-                    if isinstance(row.get("discovered_from_urls"), list)
-                    else []
+                    row.get("discovered_from_urls") if isinstance(row.get("discovered_from_urls"), list) else []
                 ),
             }
             if not normalized["target_key"]:
@@ -1253,15 +1269,9 @@ def _load_sync_targets(
             continue
         existing = deduped[key]
         existing_urls = (
-            existing.get("discovered_from_urls")
-            if isinstance(existing.get("discovered_from_urls"), list)
-            else []
+            existing.get("discovered_from_urls") if isinstance(existing.get("discovered_from_urls"), list) else []
         )
-        incoming_urls = (
-            row.get("discovered_from_urls")
-            if isinstance(row.get("discovered_from_urls"), list)
-            else []
-        )
+        incoming_urls = row.get("discovered_from_urls") if isinstance(row.get("discovered_from_urls"), list) else []
         for url in incoming_urls:
             normalized_url = _normalize_text(url)
             if normalized_url and normalized_url not in existing_urls and len(existing_urls) < 20:
@@ -1320,10 +1330,222 @@ def _source_provider_catalog(
     return providers
 
 
+def _is_missing_logo_source_query_table_error(error: Exception) -> bool:
+    message = _normalize_text(error).casefold()
+    return "brand_logo_source_queries" in message and "does not exist" in message
+
+
+def _is_missing_logo_source_query_values_column_error(error: Exception) -> bool:
+    message = _normalize_text(error).casefold()
+    return "query_values" in message and "does not exist" in message
+
+
+def _normalize_source_query_values(values: Any) -> list[str]:
+    raw_values = values if isinstance(values, list) else []
+    normalized_values: list[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        normalized = _normalize_text(value)
+        if not normalized:
+            continue
+        normalized_key = normalized.casefold()
+        if normalized_key in seen:
+            continue
+        seen.add(normalized_key)
+        normalized_values.append(normalized)
+    return normalized_values
+
+
+def _coerce_logo_source_query_values(row: dict[str, Any]) -> list[str]:
+    query_values = row.get("query_values")
+    if isinstance(query_values, str):
+        try:
+            parsed = json.loads(query_values)
+        except Exception:  # noqa: BLE001
+            parsed = None
+        if isinstance(parsed, list):
+            normalized = _normalize_source_query_values(parsed)
+            if normalized:
+                return normalized
+    elif isinstance(query_values, list):
+        normalized = _normalize_source_query_values(query_values)
+        if normalized:
+            return normalized
+    query_value = _normalize_text(row.get("query_value"))
+    return [query_value] if query_value else []
+
+
+def _load_logo_source_query_overrides(
+    *,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    logo_role: BrandLogoRole,
+) -> dict[str, list[str]]:
+    normalized_key = _normalize_text(target_key).casefold()
+    try:
+        rows = pg.fetch_all(
+            """
+            select source_provider, query_value, query_values
+            from admin.brand_logo_source_queries
+            where target_type = %s
+              and target_key = %s
+              and logo_role = %s
+            """,
+            [target_type, normalized_key, logo_role],
+        )
+    except Exception as error:  # noqa: BLE001
+        if _is_missing_logo_source_query_values_column_error(error):
+            rows = pg.fetch_all(
+                """
+                select source_provider, query_value
+                from admin.brand_logo_source_queries
+                where target_type = %s
+                  and target_key = %s
+                  and logo_role = %s
+                """,
+                [target_type, normalized_key, logo_role],
+            )
+        elif _is_missing_logo_source_query_table_error(error):
+            return {}
+        else:
+            raise
+    overrides: dict[str, list[str]] = {}
+    for row in rows:
+        provider = _normalize_text(row.get("source_provider")).casefold()
+        query_values = _coerce_logo_source_query_values(row)
+        if provider and query_values:
+            overrides[provider] = query_values
+    return overrides
+
+
+def _upsert_logo_source_query_override(
+    *,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    logo_role: BrandLogoRole,
+    source_provider: str,
+    query_values: list[str],
+) -> None:
+    normalized_values = _normalize_source_query_values(query_values)
+    if not normalized_values:
+        raise ValueError("At least one query value is required")
+    serialized_values = json.dumps(normalized_values)
+    try:
+        pg.fetch_one(
+            """
+            insert into admin.brand_logo_source_queries (
+              target_type,
+              target_key,
+              logo_role,
+              source_provider,
+              query_value,
+              query_values
+            )
+            values (%s, %s, %s, %s, %s, %s::jsonb)
+            on conflict (target_type, target_key, logo_role, source_provider)
+            do update set
+              query_value = excluded.query_value,
+              query_values = excluded.query_values,
+              updated_at = timezone('utc', now())
+            returning target_type
+            """,
+            [
+                target_type,
+                _normalize_text(target_key).casefold(),
+                logo_role,
+                _normalize_text(source_provider).casefold(),
+                normalized_values[0],
+                serialized_values,
+            ],
+        )
+    except Exception as error:  # noqa: BLE001
+        if _is_missing_logo_source_query_values_column_error(error) and len(normalized_values) == 1:
+            pg.fetch_one(
+                """
+                insert into admin.brand_logo_source_queries (
+                  target_type,
+                  target_key,
+                  logo_role,
+                  source_provider,
+                  query_value
+                )
+                values (%s, %s, %s, %s, %s)
+                on conflict (target_type, target_key, logo_role, source_provider)
+                do update set
+                  query_value = excluded.query_value,
+                  updated_at = timezone('utc', now())
+                returning target_type
+                """,
+                [
+                    target_type,
+                    _normalize_text(target_key).casefold(),
+                    logo_role,
+                    _normalize_text(source_provider).casefold(),
+                    normalized_values[0],
+                ],
+            )
+            return
+        if _is_missing_logo_source_query_table_error(error):
+            raise
+        raise
+
+
+def _delete_logo_source_query_override(
+    *,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    logo_role: BrandLogoRole,
+    source_provider: str,
+) -> None:
+    pg.fetch_one(
+        """
+        delete from admin.brand_logo_source_queries
+        where target_type = %s
+          and target_key = %s
+          and logo_role = %s
+          and source_provider = %s
+        returning target_type
+        """,
+        [target_type, _normalize_text(target_key).casefold(), logo_role, _normalize_text(source_provider).casefold()],
+    )
+
+
+def _build_logo_source_summary(
+    *,
+    provider: str,
+    total_count: int,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    target_label: str,
+    logo_role: BrandLogoRole,
+    query_override: str | list[str] | None,
+) -> dict[str, Any]:
+    profile = build_source_query_profile(
+        source_provider=provider,
+        target_label=target_label,
+        target_key=target_key,
+        query_override=query_override,
+    )
+    return {
+        "source_provider": provider,
+        "total_count": total_count,
+        "has_more": total_count > _DEFAULT_LOGO_OPTIONS_PAGE_SIZE or provider in _DISCOVERABLE_SOURCE_PROVIDERS,
+        "editable": bool(profile.get("editable")),
+        "refreshable": bool(profile.get("refreshable")),
+        "query_kind": _normalize_text(profile.get("query_kind")) or "search_term",
+        "default_query_value": _normalize_text(profile.get("default_query_value")) or None,
+        "effective_query_value": _normalize_text(profile.get("effective_query_value")) or None,
+        "query_values": _normalize_source_query_values(profile.get("query_values")),
+        "query_links": list(profile.get("query_links") or []),
+        "logo_role": logo_role,
+    }
+
+
 def _list_logo_option_sources(
     *,
     target_type: BrandLogoTargetType,
     target_key: str,
+    target_label: str | None = None,
     logo_role: BrandLogoRole,
     include_related: bool = True,
 ) -> dict[str, Any]:
@@ -1364,24 +1586,31 @@ def _list_logo_option_sources(
     for row in rows:
         provider = _normalize_text(row.get("source_provider")) or "unknown"
         counts[provider] = counts.get(provider, 0) + 1
+    overrides = _load_logo_source_query_overrides(
+        target_type=target_type,
+        target_key=target_key,
+        logo_role=logo_role,
+    )
     catalog = _source_provider_catalog(target_type=target_type, include_related=include_related)
     ordered_providers = list(catalog)
     for provider in sorted(counts.keys(), key=lambda item: item.casefold()):
         if provider not in ordered_providers:
             ordered_providers.append(provider)
+    resolved_label = _normalize_text(target_label) or _normalize_text(target_key)
     return {
         "target_type": target_type,
         "target_key": _normalize_text(target_key).casefold(),
         "logo_role": logo_role,
         "sources": [
-            {
-                "source_provider": provider,
-                "total_count": counts.get(provider, 0),
-                "has_more": (
-                    counts.get(provider, 0) > _DEFAULT_LOGO_OPTIONS_PAGE_SIZE
-                    or provider in _DISCOVERABLE_SOURCE_PROVIDERS
-                ),
-            }
+            _build_logo_source_summary(
+                provider=provider,
+                total_count=counts.get(provider, 0),
+                target_type=target_type,
+                target_key=target_key,
+                target_label=resolved_label,
+                logo_role=logo_role,
+                query_override=overrides.get(provider),
+            )
             for provider in ordered_providers
         ],
     }
@@ -1456,6 +1685,7 @@ def _discover_logo_candidates_by_source(payload: BrandLogosOptionDiscoverRequest
         discovered_from_urls=discovered_urls,
         aliases=aliases,
         source_provider=payload.source_provider,
+        query_override=payload.query_overrides if payload.query_overrides else payload.query_override,
         limit_per_source=limit_per_source,
         timeout_seconds=15.0,
     )
@@ -1511,8 +1741,65 @@ def _discover_logo_candidates_by_source(payload: BrandLogosOptionDiscoverRequest
         "target_label": target_label,
         "logo_role": payload.logo_role,
         "candidates": out[payload.offset : payload.offset + payload.limit],
+        "total_count": total,
         "next_offset": next_offset if next_offset < total else total,
         "has_more": next_offset < total,
+    }
+
+
+def _save_logo_source_query(payload: BrandLogosSourceQueryRequest) -> dict[str, Any]:
+    provider = _normalize_text(payload.source_provider).casefold()
+    allowed = set(_source_provider_catalog(target_type=payload.target_type, include_related=True))
+    if provider not in allowed or provider == "related_network_streaming":
+        raise ValueError("Source query editing is not supported for this provider")
+
+    target_key = _normalize_text(payload.target_key).casefold()
+    target_label = _normalize_text(payload.target_label) or target_key
+    requested_query_values = payload.query_values if payload.query_values is not None else [payload.query_value]
+    normalized_requested_values = _normalize_source_query_values(requested_query_values)
+    if normalized_requested_values:
+        profile = build_source_query_profile(
+            source_provider=provider,
+            target_label=target_label,
+            target_key=target_key,
+            query_override=normalized_requested_values,
+        )
+        effective_query_values = _normalize_source_query_values(profile.get("query_values"))
+        if not effective_query_values:
+            raise ValueError("Query value is invalid for this provider")
+        _upsert_logo_source_query_override(
+            target_type=payload.target_type,
+            target_key=target_key,
+            logo_role=payload.logo_role,
+            source_provider=provider,
+            query_values=effective_query_values,
+        )
+    else:
+        _delete_logo_source_query_override(
+            target_type=payload.target_type,
+            target_key=target_key,
+            logo_role=payload.logo_role,
+            source_provider=provider,
+        )
+
+    overrides = _load_logo_source_query_overrides(
+        target_type=payload.target_type,
+        target_key=target_key,
+        logo_role=payload.logo_role,
+    )
+    return {
+        "target_type": payload.target_type,
+        "target_key": target_key,
+        "logo_role": payload.logo_role,
+        "source": _build_logo_source_summary(
+            provider=provider,
+            total_count=0,
+            target_type=payload.target_type,
+            target_key=target_key,
+            target_label=target_label,
+            logo_role=payload.logo_role,
+            query_override=overrides.get(provider),
+        ),
     }
 
 
@@ -1555,6 +1842,7 @@ def _fetch_logo_option_row(
               and entity_key = %s
             limit 1
             """
+
         row = _fetch_one_with_logo_variant_fallback(
             query_builder=query_builder,
             params=[asset_id, target_type, normalized_target_key],
@@ -1595,6 +1883,7 @@ def _fetch_logo_option_row(
               and target_key = %s
             limit 1
             """
+
         row = _fetch_one_with_logo_variant_fallback(
             query_builder=query_builder,
             params=[asset_id, target_type, normalized_target_key],
@@ -1802,13 +2091,7 @@ def _set_brand_role_selection(
         else:
             patch["is_primary"] = False
 
-        update = (
-            db.schema("admin")
-            .table("brand_logo_assets")
-            .update(patch)
-            .eq("id", current_id)
-            .execute()
-        )
+        update = db.schema("admin").table("brand_logo_assets").update(patch).eq("id", current_id).execute()
         if hasattr(update, "error") and update.error:
             raise RuntimeError(f"Failed to update brand logo selection: {update.error}")
 
@@ -2155,6 +2438,79 @@ def _candidate_discovered_urls(row: dict[str, Any]) -> list[str]:
     return urls
 
 
+def _merge_sync_source_query_overrides(
+    *,
+    wordmark_overrides: dict[str, list[str]],
+    icon_overrides: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for overrides in (wordmark_overrides, icon_overrides):
+        for provider, query_values in overrides.items():
+            bucket = merged.setdefault(provider, [])
+            seen = {value.casefold() for value in bucket}
+            for query_value in query_values:
+                normalized = _normalize_text(query_value)
+                if not normalized:
+                    continue
+                key = normalized.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                bucket.append(normalized)
+
+    return merged
+
+
+def _collect_sync_logo_candidates(
+    *,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    target_label: str,
+    discovered_from_urls: list[str],
+    aliases: list[str],
+    source_query_overrides: dict[str, list[str]],
+    limit_per_source: int,
+    timeout_seconds: float,
+) -> list[Any]:
+    candidates: list[Any] = []
+    for provider, query_values in source_query_overrides.items():
+        candidates.extend(
+            collect_free_logo_candidates(
+                target_label=target_label,
+                target_key=target_key,
+                discovered_from_urls=discovered_from_urls,
+                aliases=aliases,
+                source_provider=provider,
+                query_override=query_values,
+                limit_per_source=limit_per_source,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+    candidates.extend(
+        collect_free_logo_candidates(
+            target_label=target_label,
+            target_key=target_key,
+            discovered_from_urls=discovered_from_urls,
+            aliases=aliases,
+            limit_per_source=limit_per_source,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+    deduped: list[Any] = []
+    seen_urls: set[str] = set()
+    for candidate in candidates:
+        source_url = _normalize_text(getattr(candidate, "url", None))
+        if not source_url:
+            continue
+        key = source_url.casefold()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
 def _sync_brand_logos(
     *,
     payload: BrandLogosSyncRequest,
@@ -2200,6 +2556,16 @@ def _sync_brand_logos(
         )
         existing_wordmark_count = int(existing.get("wordmark_count") or 0)
         existing_icon_count = int(existing.get("icon_count") or 0)
+        wordmark_source_overrides = _load_logo_source_query_overrides(
+            target_type=target_type,  # type: ignore[arg-type]
+            target_key=target_key,
+            logo_role="wordmark",
+        )
+        icon_source_overrides = _load_logo_source_query_overrides(
+            target_type=target_type,  # type: ignore[arg-type]
+            target_key=target_key,
+            logo_role="icon",
+        )
         desired_wordmark_count = (
             role_cap
             if (payload.force or not payload.only_missing or not existing["wordmark"])
@@ -2208,6 +2574,11 @@ def _sync_brand_logos(
         desired_icon_count = (
             role_cap if (payload.force or not payload.only_missing or not existing["icon"]) else existing_icon_count
         )
+        if payload.only_missing and not payload.force:
+            if wordmark_source_overrides:
+                desired_wordmark_count = min(role_cap, max(desired_wordmark_count, existing_wordmark_count + 1))
+            if icon_source_overrides:
+                desired_icon_count = min(role_cap, max(desired_icon_count, existing_icon_count + 1))
         need_wordmark = existing_wordmark_count < desired_wordmark_count
         need_icon = existing_icon_count < desired_icon_count
 
@@ -2268,11 +2639,17 @@ def _sync_brand_logos(
         if target_key and "." in target_key:
             aliases.append(target_key.split(".", 1)[0])
 
-        candidates = collect_free_logo_candidates(
+        source_query_overrides = _merge_sync_source_query_overrides(
+            wordmark_overrides=wordmark_source_overrides if need_wordmark else {},
+            icon_overrides=icon_source_overrides if need_icon else {},
+        )
+        candidates = _collect_sync_logo_candidates(
+            target_type=target_type,  # type: ignore[arg-type]
             target_label=target_label,
             target_key=target_key,
             discovered_from_urls=discovered_urls,
             aliases=aliases,
+            source_query_overrides=source_query_overrides,
             limit_per_source=max(10, role_cap + payload.limit // 10),
             timeout_seconds=15.0,
         )
@@ -2349,7 +2726,8 @@ def _is_service_unavailable_error(error: RuntimeError) -> bool:
     return (
         "table is unavailable" in message
         or "run backend migrations" in message
-        or "schema" in message and "missing" in message
+        or "schema" in message
+        and "missing" in message
         or "is not migrated" in message
         or "connection pool exhausted" in message
         or "database pool initialization failed" in message
@@ -2669,6 +3047,7 @@ def get_brand_logo_targets(
 def get_brand_logo_option_sources(
     target_type: BrandLogoTargetType = Query(...),
     target_key: str = Query(...),
+    target_label: str | None = Query(default=None),
     logo_role: BrandLogoRole = Query(...),
     include_related: bool = Query(default=True),
     _: AdminUser = None,
@@ -2677,6 +3056,7 @@ def get_brand_logo_option_sources(
         return _list_logo_option_sources(
             target_type=target_type,
             target_key=target_key,
+            target_label=target_label,
             logo_role=logo_role,
             include_related=include_related,
         )
@@ -2691,6 +3071,17 @@ def post_brand_logo_option_discover(
 ) -> dict[str, Any]:
     try:
         return _discover_logo_candidates_by_source(payload)
+    except Exception as error:  # noqa: BLE001
+        raise _to_http_exception(error) from error
+
+
+@router.post("/logos/options/source-query")
+def post_brand_logo_option_source_query(
+    payload: BrandLogosSourceQueryRequest,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    try:
+        return _save_logo_source_query(payload)
     except Exception as error:  # noqa: BLE001
         raise _to_http_exception(error) from error
 

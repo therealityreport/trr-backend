@@ -205,6 +205,11 @@ class TikTokScraper:
         if self._is_auth_related_failure(normalized):
             self.comments_auth_failed = True
 
+    @staticmethod
+    def _should_skip_api_pagination(reason: str | None) -> bool:
+        normalized = str(reason or "").strip().lower()
+        return normalized in {"non_json_response", "challenge_or_blocked"}
+
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
         session = requests.Session()
@@ -941,6 +946,24 @@ class TikTokScraper:
             person_id=config.person_id,
         )
 
+    def _extract_user_detail_avatar_url(self, user_data: dict | None) -> str | None:
+        if not isinstance(user_data, dict):
+            return None
+        user_info = user_data.get("userInfo") if isinstance(user_data.get("userInfo"), dict) else {}
+        user = user_info.get("user") if isinstance(user_info.get("user"), dict) else {}
+        return self._pick_best_avatar_url(
+            user.get("avatarLarger"),
+            user.get("avatar_larger"),
+            user.get("originalAvatarUrl"),
+            user.get("avatarMedium"),
+            user.get("avatar_medium"),
+            user.get("avatarThumb"),
+            user.get("avatar_thumb"),
+            user.get("avatar_thumb_url"),
+            user.get("avatarUrl"),
+            user.get("avatar"),
+        )
+
     def fetch_user_detail(self, username: str, delay: float = 2.0) -> dict | None:
         """Fetch user detail to get secUid needed for post list."""
         self._rate_limit(delay)
@@ -1045,9 +1068,13 @@ class TikTokScraper:
 
         # Get user detail first to get secUid
         user_data = self.fetch_user_detail(config.username, config.delay_seconds)
+        api_preflight_fail_reason = self._last_api_fail_reason
 
         sec_uid = None
         use_api = False
+        api_pagination_blocked_reason: str | None = None
+        api_posts_found = False
+        ytdlp_used = False
 
         if user_data and user_data.get("userInfo", {}).get("user", {}).get("secUid"):
             user_info = user_data.get("userInfo", {})
@@ -1068,9 +1095,19 @@ class TikTokScraper:
                     logger.info(f"Extracted {len(html_posts)} posts from HTML page")
                 if sec_uid:
                     logger.info(f"Got secUid from HTML: {sec_uid[:20]}...")
-                    use_api = True  # Can try API for pagination now
+                    if self._should_skip_api_pagination(api_preflight_fail_reason):
+                        api_pagination_blocked_reason = api_preflight_fail_reason
+                        logger.info(
+                            "Skipping TikTok API pagination for @%s after poisoned preflight (%s)",
+                            config.username,
+                            api_preflight_fail_reason,
+                        )
+                    else:
+                        use_api = True  # Can try API for pagination now
 
         # Process HTML-extracted posts first
+        profile_avatar_url = self._extract_user_detail_avatar_url(user_data)
+
         posts = []
         existing_ids: set[str] = set()
         posts_checked = 0
@@ -1093,6 +1130,8 @@ class TikTokScraper:
             description = str(item.get("desc") or item.get("text") or "")
             if config.matches_hashtags(description):
                 post = self._parse_post_item(item, config)
+                if not getattr(post, "user_avatar_url", None) and profile_avatar_url:
+                    post.user_avatar_url = profile_avatar_url
                 if post.video_id and post.video_id not in existing_ids:
                     posts.append(post)
                     existing_ids.add(post.video_id)
@@ -1144,10 +1183,13 @@ class TikTokScraper:
                     description = str(item.get("desc") or item.get("text") or "")
                     if config.matches_hashtags(description):
                         post = self._parse_post_item(item, config)
+                        if not getattr(post, "user_avatar_url", None) and profile_avatar_url:
+                            post.user_avatar_url = profile_avatar_url
                         # Avoid duplicates from HTML extraction / prior pages.
                         if post.video_id and post.video_id not in existing_ids:
                             posts.append(post)
                             existing_ids.add(post.video_id)
+                            api_posts_found = True
                             logger.info(
                                 f"Found #{len(posts)}: {post.video_id} ({post.date_time}) - {post.views:,} views"
                             )
@@ -1177,6 +1219,7 @@ class TikTokScraper:
                 "trying yt-dlp bulk fallback for deeper pagination..."
             )
             ytdlp_posts = self._scrape_via_ytdlp(config)
+            ytdlp_used = bool(ytdlp_posts)
             for p in ytdlp_posts:
                 if p.video_id and p.video_id not in existing_ids:
                     posts.append(p)
@@ -1206,11 +1249,11 @@ class TikTokScraper:
 
         self.last_retrieval_meta = {
             "retrieval_mode": (
-                "api"
-                if user_data and user_data.get("userInfo", {}).get("user", {}).get("secUid")
-                else ("html" if html_posts else "ytdlp_fallback" if posts else "none")
+                "ytdlp_fallback" if ytdlp_used else ("api" if api_posts_found else ("html" if html_posts else "none"))
             ),
             "api_fail_reason": self._last_api_fail_reason,
+            "api_preflight_fail_reason": api_preflight_fail_reason,
+            "api_pagination_blocked_reason": api_pagination_blocked_reason,
             "pages_scanned": pages_scanned,
             "videos_scanned": posts_checked,
             "first_page_count": len(posts[:30]),
@@ -1445,17 +1488,23 @@ class TikTokScraper:
         if parsed_replies and reply_count <= 0:
             reply_count = len(parsed_replies)
 
-        return TikTokComment(
-            comment_id=comment_id,
-            text=str(data.get("text") or ""),
-            username=str(
+        profile_username = (
+            str(
                 user.get("unique_id")
                 or user.get("uniqueId")
                 or data.get("uniqueId")
                 or data.get("ownerUsername")
                 or user.get("username")
                 or ""
-            ),
+            )
+            .strip()
+            .lstrip("@")
+        )
+
+        return TikTokComment(
+            comment_id=comment_id,
+            text=str(data.get("text") or ""),
+            username=profile_username,
             user_id=str(user.get("uid") or data.get("uid") or user.get("id") or ""),
             nickname=str(user.get("nickname") or user.get("nickName") or data.get("nickname") or ""),
             created_at=created_at,
@@ -1480,14 +1529,23 @@ class TikTokScraper:
             is_author_liked=is_author_liked,
             aweme_id=aweme_id,
             parent_source_comment_id=parent_source_comment_id,
-            user_url=(str(user.get("url") or user.get("profileUrl") or "").strip() or None),
+            user_url=(
+                str(user.get("url") or user.get("profileUrl") or "").strip()
+                or (f"https://www.tiktok.com/@{profile_username}" if profile_username else None)
+            ),
             user_bio=(str(user.get("bio") or user.get("signature") or "").strip() or None),
             user_avatar_url=self._pick_best_avatar_url(
                 user.get("avatarLarger"),
                 user.get("avatar_larger"),
                 user.get("originalAvatarUrl"),
+                user.get("avatarThumb"),
+                user.get("avatar_thumb"),
+                user.get("avatar_thumb_url"),
                 user.get("avatarUrl"),
                 user.get("avatar"),
+                data.get("avatarThumbnail"),
+                data.get("avatarUrl"),
+                data.get("avatar"),
             ),
             user_region=(str(user.get("region") or "").strip() or None),
             user_language=(str(user.get("language") or user.get("lang") or "").strip() or None),

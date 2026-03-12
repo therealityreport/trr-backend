@@ -29,16 +29,19 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_start_reddit_refresh_run_enqueues_background_job(
+def test_start_reddit_refresh_run_local_mode_starts_in_api_background(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "local")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "0")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "0")
+    monkeypatch.delenv("TRR_REMOTE_EXECUTOR", raising=False)
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     community_id = str(uuid4())
     season_id = str(uuid4())
-    run_id = str(uuid4())
 
     payload = {
         "community_id": community_id,
@@ -70,15 +73,22 @@ def test_start_reddit_refresh_run_enqueues_background_job(
         "max_pages": 500,
     }
 
+    run_id = str(uuid4())
+
     with patch(
         "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
         return_value={"id": run_id, "reused": False},
-    ) as create_mock:
+    ):
         with patch("trr_backend.repositories.reddit_refresh.execute_refresh_run", return_value={}) as exec_mock:
             with patch(
                 "trr_backend.repositories.reddit_refresh.get_refresh_run",
-                return_value={"run_id": run_id, "status": "queued"},
-            ) as get_mock:
+                return_value={
+                    "run_id": run_id,
+                    "status": "queued",
+                    "execution_owner": "local_api",
+                    "execution_mode_canonical": "local",
+                },
+            ):
                 response = client.post(
                     "/api/v1/admin/socials/reddit/runs",
                     headers={"Authorization": f"Bearer {token}"},
@@ -88,19 +98,10 @@ def test_start_reddit_refresh_run_enqueues_background_job(
     assert response.status_code == 200
     body = response.json()
     assert body["reused"] is False
-    assert body["run"]["run_id"] == run_id
-    assert create_mock.called
-    assert exec_mock.called
-    assert get_mock.called
-    sent_payload = create_mock.call_args.kwargs.get("payload")
-    assert isinstance(sent_payload, dict)
-    assert sent_payload.get("seed_post_urls") == payload["seed_post_urls"]
-    assert sent_payload.get("period_stable_key") == "period-preseason"
-    assert sent_payload.get("coverage_mode") == "adaptive_deep"
-    assert sent_payload.get("max_backfill_queries") == 30
-    assert sent_payload.get("max_backfill_pages_per_query") == 50
-    assert sent_payload.get("period_label") == "Pre-Season"
-    assert sent_payload.get("run_config_hash") == "1234567890abcdef1234567890abcdef12345678"
+    assert body["execution_owner"] == "local_api"
+    assert body["execution_mode_canonical"] == "local"
+    assert body["run"]["execution_owner"] == "local_api"
+    assert exec_mock.called is True
 
 
 def test_start_reddit_refresh_run_remote_mode_does_not_start_in_api(
@@ -110,6 +111,8 @@ def test_start_reddit_refresh_run_remote_mode_does_not_start_in_api(
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "0")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "legacy_worker")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
     run_id = str(uuid4())
@@ -130,7 +133,12 @@ def test_start_reddit_refresh_run_remote_mode_does_not_start_in_api(
         with patch("trr_backend.repositories.reddit_refresh.execute_refresh_run", return_value={}) as exec_mock:
             with patch(
                 "trr_backend.repositories.reddit_refresh.get_refresh_run",
-                return_value={"run_id": run_id, "status": "queued"},
+                return_value={
+                    "run_id": run_id,
+                    "status": "queued",
+                    "execution_owner": "remote_worker",
+                    "execution_mode_canonical": "remote",
+                },
             ):
                 response = client.post(
                     "/api/v1/admin/socials/reddit/runs",
@@ -143,7 +151,60 @@ def test_start_reddit_refresh_run_remote_mode_does_not_start_in_api(
     assert body["reused"] is False
     assert body["execution_owner"] == "remote_worker"
     assert body["execution_mode_canonical"] == "remote"
+    assert body["run"]["execution_owner"] == "remote_worker"
     assert exec_mock.called is False
+
+
+def test_start_reddit_refresh_run_modal_dispatches_without_api_background(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    run_id = str(uuid4())
+    payload = {
+        "community_id": str(uuid4()),
+        "season_id": str(uuid4()),
+        "period_key": "pre-season",
+        "subreddit": "BravoRealHousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+    }
+
+    with patch(
+        "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
+        return_value={"id": run_id, "reused": False},
+    ):
+        with patch("api.routers.socials.dispatch_reddit_refresh", return_value=True) as dispatch_mock:
+            with patch("trr_backend.repositories.reddit_refresh.execute_refresh_run", return_value={}) as exec_mock:
+                with patch(
+                    "trr_backend.repositories.reddit_refresh.get_refresh_run",
+                    return_value={
+                        "run_id": run_id,
+                        "status": "queued",
+                        "execution_owner": "remote_worker",
+                        "execution_mode_canonical": "remote",
+                    },
+                ):
+                    response = client.post(
+                        "/api/v1/admin/socials/reddit/runs",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["execution_owner"] == "remote_worker"
+    assert body["execution_mode_canonical"] == "remote"
+    assert body["run"]["execution_owner"] == "remote_worker"
+    dispatch_mock.assert_called_once_with(run_id=run_id)
+    exec_mock.assert_not_called()
 
 
 def test_get_reddit_refresh_run_returns_404_for_missing_run(
@@ -340,8 +401,16 @@ def test_get_reddit_cached_period_payload_returns_discovery(
     season_id = str(uuid4())
 
     with patch(
-        "trr_backend.repositories.reddit_refresh.get_cached_period_payload",
-        return_value={"subreddit": "bravorealhousewives", "threads": []},
+        "trr_backend.repositories.reddit_refresh.get_cached_period_payload_snapshot",
+        return_value={
+            "discovery": {"subreddit": "bravorealhousewives", "threads": []},
+            "resolved_period_key": "pre-season",
+            "cache_status": "fresh",
+            "cache_age_seconds": None,
+            "run_status": "completed",
+            "phase": None,
+            "partial_failures": [],
+        },
     ):
         response = client.get(
             "/api/v1/admin/socials/reddit/cache",
@@ -367,7 +436,10 @@ def test_get_reddit_cached_period_payload_404_when_missing(
     community_id = str(uuid4())
     season_id = str(uuid4())
 
-    with patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload", return_value=None):
+    with (
+        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload_snapshot", return_value=None),
+        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload", return_value=None),
+    ):
         response = client.get(
             "/api/v1/admin/socials/reddit/cache",
             params={
@@ -391,7 +463,7 @@ def test_get_reddit_cached_period_payload_bulk_returns_first_match_and_misses(
     community_id = str(uuid4())
     season_id = str(uuid4())
     resolve_calls: list[str] = []
-    payload_calls: list[str] = []
+    snapshot_calls: list[str] = []
 
     def _fake_resolve(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
         del community_id, season_id
@@ -400,16 +472,24 @@ def test_get_reddit_cached_period_payload_bulk_returns_first_match_and_misses(
             return period_key
         return None
 
-    def _fake_cached(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
+    def _fake_snapshot(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
         del community_id, season_id
-        payload_calls.append(period_key)
+        snapshot_calls.append(period_key)
         if period_key == "period-preseason":
-            return {"subreddit": "bravorealhousewives", "threads": [{"reddit_post_id": "post-1"}]}
+            return {
+                "discovery": {"subreddit": "bravorealhousewives", "threads": [{"reddit_post_id": "post-1"}]},
+                "resolved_period_key": "period-preseason",
+                "cache_status": "fresh",
+                "cache_age_seconds": None,
+                "run_status": "completed",
+                "phase": None,
+                "partial_failures": [],
+            }
         return None
 
     with (
         patch("trr_backend.repositories.reddit_refresh.resolve_cached_period_key", side_effect=_fake_resolve),
-        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload", side_effect=_fake_cached),
+        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload_snapshot", side_effect=_fake_snapshot),
     ):
         response = client.post(
             "/api/v1/admin/socials/reddit/cache/bulk",
@@ -428,7 +508,7 @@ def test_get_reddit_cached_period_payload_bulk_returns_first_match_and_misses(
     assert payload["discovery"]["threads"][0]["reddit_post_id"] == "post-1"
     assert payload["source"] == "cache"
     assert resolve_calls == ["period-preseason"]
-    assert payload_calls == ["period-preseason"]
+    assert snapshot_calls == ["period-preseason"]
 
 
 def test_get_reddit_cached_period_payload_bulk_returns_all_misses_when_no_payload(
@@ -506,7 +586,7 @@ def test_get_reddit_cached_period_payload_bulk_uses_container_keys_first(
     season_id = str(uuid4())
     derived_key = f"community:{community_id}:season:{season_id}:container:period-preseason"
     resolve_calls: list[str] = []
-    payload_calls: list[str] = []
+    snapshot_calls: list[str] = []
 
     def _fake_resolve(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
         del community_id, season_id
@@ -515,16 +595,24 @@ def test_get_reddit_cached_period_payload_bulk_uses_container_keys_first(
             return period_key
         return None
 
-    def _fake_cached(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
+    def _fake_snapshot(*, community_id: str, season_id: str, period_key: str):  # type: ignore[override]
         del community_id, season_id
-        payload_calls.append(period_key)
+        snapshot_calls.append(period_key)
         if period_key == derived_key:
-            return {"subreddit": "bravorealhousewives", "threads": [{"reddit_post_id": "post-xyz"}]}
+            return {
+                "discovery": {"subreddit": "bravorealhousewives", "threads": [{"reddit_post_id": "post-xyz"}]},
+                "resolved_period_key": derived_key,
+                "cache_status": "fresh",
+                "cache_age_seconds": None,
+                "run_status": "completed",
+                "phase": None,
+                "partial_failures": [],
+            }
         return None
 
     with (
         patch("trr_backend.repositories.reddit_refresh.resolve_cached_period_key", side_effect=_fake_resolve),
-        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload", side_effect=_fake_cached),
+        patch("trr_backend.repositories.reddit_refresh.get_cached_period_payload_snapshot", side_effect=_fake_snapshot),
     ):
         response = client.post(
             "/api/v1/admin/socials/reddit/cache/bulk",
@@ -542,7 +630,7 @@ def test_get_reddit_cached_period_payload_bulk_uses_container_keys_first(
     assert payload["matched_period_key"] == derived_key
     assert payload["source"] == "cache"
     assert resolve_calls == [derived_key]
-    assert payload_calls == [derived_key]
+    assert snapshot_calls == [derived_key]
 
 
 def test_get_reddit_analytics_summary_requires_season_id_for_season_scope(

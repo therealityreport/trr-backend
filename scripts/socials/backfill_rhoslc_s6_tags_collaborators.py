@@ -3,6 +3,7 @@
 profile_tags, collaborators, tagged_users_detail, and collaborators_detail
 using the fixed permalink metadata extraction pipeline.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,9 +19,7 @@ from trr_backend.utils.env import load_env
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Backfill RHOSLC S6 Instagram post tags & collaborators."
-    )
+    parser = argparse.ArgumentParser(description="Backfill RHOSLC S6 Instagram post tags & collaborators.")
     parser.add_argument("--limit", type=int, default=None, help="Max posts to process.")
     parser.add_argument("--dry-run", action="store_true", help="Preview without persisting.")
     parser.add_argument(

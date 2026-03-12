@@ -475,9 +475,7 @@ def fetch_imdb_cast_photos(
         if not (isinstance(image_type_raw, str) and image_type_raw.strip()):
             image_type_raw = details.get("image_type")
         image_type = (
-            str(image_type_raw).strip().lower()
-            if isinstance(image_type_raw, str) and image_type_raw.strip()
-            else None
+            str(image_type_raw).strip().lower() if isinstance(image_type_raw, str) and image_type_raw.strip() else None
         )
 
         tags: dict[str, Any] = {}
@@ -832,8 +830,10 @@ def fetch_fandom_person_cast_photos(
             metadata.setdefault("content_type", section_tag)
 
         season_value = photo.get("season")
-        season_number = season_value if isinstance(season_value, int) else _extract_season_number(
-            section_label, caption_text, alt_text
+        season_number = (
+            season_value
+            if isinstance(season_value, int)
+            else _extract_season_number(section_label, caption_text, alt_text)
         )
         if isinstance(season_number, int):
             metadata.setdefault("season_number", season_number)

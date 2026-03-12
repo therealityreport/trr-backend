@@ -586,7 +586,7 @@ def test_unified_news_skips_cast_lookup_when_tags_already_present(
     assert cast_index_mock.called is False
 
 
-def test_google_news_sync_async_returns_job_id(
+def test_google_news_sync_async_local_mode_starts_in_api_background(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -605,7 +605,7 @@ def test_google_news_sync_async_returns_job_id(
                 },
             ):
                 with patch("api.routers.admin_show_news._create_google_news_sync_job", return_value=str(uuid4())):
-                    with patch("api.routers.admin_show_news._run_google_news_sync_job"):
+                    with patch("api.routers.admin_show_news._run_google_news_sync_job") as runner_mock:
                         response = client.post(
                             f"/api/v1/admin/shows/{show_id}/google-news/sync",
                             headers={"Authorization": f"Bearer {token}"},
@@ -615,8 +615,9 @@ def test_google_news_sync_async_returns_job_id(
     assert response.status_code == 200
     payload = response.json()
     assert payload["queued"] is True
-    assert isinstance(payload["job_id"], str)
-    assert payload["status"] == "queued"
+    assert payload["execution_owner"] == "local_api"
+    assert payload["execution_mode_canonical"] == "local"
+    assert runner_mock.called is True
 
 
 def test_google_news_sync_async_remote_mode_does_not_start_in_api(
@@ -653,6 +654,46 @@ def test_google_news_sync_async_remote_mode_does_not_start_in_api(
     assert payload["execution_owner"] == "remote_worker"
     assert payload["execution_mode_canonical"] == "remote"
     assert runner_mock.called is False
+
+
+def test_google_news_sync_async_modal_dispatches_without_api_background(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    show_id = str(uuid4())
+    mock_db = MagicMock()
+    job_id = str(uuid4())
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_show_news._show_exists", return_value=True):
+            with patch(
+                "api.routers.admin_show_news._resolve_google_news_link",
+                return_value={
+                    "url": "https://news.google.com/topics/topic-1?ceid=US:en&oc=3",
+                    "status": "approved",
+                },
+            ):
+                with patch("api.routers.admin_show_news._create_google_news_sync_job", return_value=job_id):
+                    with patch(
+                        "api.routers.admin_show_news.dispatch_google_news_sync", return_value=True
+                    ) as dispatch_mock:
+                        with patch("api.routers.admin_show_news._run_google_news_sync_job") as runner_mock:
+                            response = client.post(
+                                f"/api/v1/admin/shows/{show_id}/google-news/sync",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"async": True},
+                            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queued"] is True
+    assert payload["execution_owner"] == "remote_worker"
+    assert payload["execution_mode_canonical"] == "remote"
+    dispatch_mock.assert_called_once_with(job_id=job_id)
+    runner_mock.assert_not_called()
 
 
 def test_google_news_sync_featured_image_marks_terminal_when_source_missing() -> None:

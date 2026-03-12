@@ -22,7 +22,20 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Optional operation_type filter (repeatable)",
     )
+    parser.add_argument(
+        "--exclude-operation-type",
+        action="append",
+        default=[],
+        help="Optional operation_type exclusion filter (repeatable)",
+    )
     return parser.parse_args()
+
+
+def _env_operation_types(name: str) -> list[str]:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def main() -> int:
@@ -34,7 +47,11 @@ def main() -> int:
     )
     return run_remote_operation_worker_loop(
         worker_id=args.worker_id,
-        operation_types=args.operation_type or None,
+        operation_types=(args.operation_type or _env_operation_types("TRR_ADMIN_OPERATION_WORKER_TYPES")) or None,
+        exclude_operation_types=(
+            args.exclude_operation_type or _env_operation_types("TRR_ADMIN_OPERATION_WORKER_EXCLUDE_TYPES")
+        )
+        or None,
         poll_seconds=args.poll_seconds,
         once=bool(args.once),
     )

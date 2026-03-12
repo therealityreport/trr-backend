@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,12 +13,16 @@ from bs4 import BeautifulSoup
 from trr_backend.integrations.logopedia import LogopediaError, fetch_logopedia_logo_candidates
 
 WIKIMEDIA_MEDIASEARCH_URL = (
-    "https://commons.wikimedia.org/w/index.php"
-    "?search={query}&title=Special%3AMediaSearch&type=image&filemime=svg"
+    "https://commons.wikimedia.org/w/index.php?search={query}&title=Special%3AMediaSearch&type=image&filemime=svg"
 )
 LOGOS_1000_SEARCH_URL = "https://1000logos.net/?s={query}"
 LOGOS_1000_ARTICLE_SLUG_URL = "https://1000logos.net/{slug}-logo/"
 LOGOS_1000_WP_SEARCH_URL = "https://1000logos.net/wp-json/wp/v2/posts?search={query}&per_page=6&_fields=link,slug,title"
+LOGOS_FANDOM_SEARCH_URL = "https://logos.fandom.com/wiki/Special:Search?query={query}"
+LOGOS_FANDOM_IMAGE_ONLY_SEARCH_URL = (
+    "https://logos.fandom.com/wiki/Special:Search?scope=internal&query={query}&ns%5B0%5D=6&filter=imageOnly"
+)
+LOGOS_FANDOM_PAGE_URL = "https://logos.fandom.com/wiki/{slug}"
 WORLDVECTORLOGO_SEARCH_URL = "https://worldvectorlogo.com/search?q={query}"
 SEEKLOGO_SEARCH_URL = "https://seeklogo.com/search?q={query}"
 LOGOWIK_SEARCH_URL = "https://logowik.com/search?q={query}"
@@ -45,6 +49,18 @@ FREE_LOGO_SOURCE_PROVIDERS: tuple[str, ...] = (
     "logosearch",
     "simple_icons",
 )
+_SEARCH_TERM_SOURCE_PROVIDERS = {
+    "wikimedia_commons",
+    "logos_fandom",
+    "worldvectorlogo",
+    "seeklogo",
+    "logowik",
+    "logo_wine",
+    "logosearch",
+    "simple_icons",
+}
+_HOST_OR_URL_SOURCE_PROVIDERS = {"official_site", "brand_guidelines", "favicon_appicons"}
+_SLUG_SOURCE_PROVIDERS = {"logos1000"}
 
 _GUIDELINE_PATH_HINTS = (
     "brand-guidelines",
@@ -249,11 +265,7 @@ def _derive_brand_query_term(target_label: str, target_key: str, aliases: list[s
                 text = parts[0]
         text = re.sub(r"[_-]+", " ", text)
         text = re.sub(r"[^a-zA-Z0-9 ]+", " ", text)
-        terms = [
-            token
-            for token in text.split()
-            if token and token.casefold() not in _GENERIC_QUERY_TOKENS
-        ]
+        terms = [token for token in text.split() if token and token.casefold() not in _GENERIC_QUERY_TOKENS]
         if terms:
             return " ".join(terms[:3])
     fallback = _normalize_text(target_label) or _normalize_text(target_key)
@@ -269,6 +281,285 @@ def _normalize_hostname_from_url(value: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def _1000logos_article_url(slug: str) -> str:
+    normalized_slug = _normalize_source_query_value("logos1000", slug)
+    if not normalized_slug:
+        return ""
+    final_slug = normalized_slug if normalized_slug.endswith("-logo") else f"{normalized_slug}-logo"
+    return f"https://1000logos.net/{final_slug}/"
+
+
+def _humanize_query_fragment(value: str) -> str:
+    text = unquote(_normalize_text(value))
+    if not text:
+        return ""
+    text = re.sub(r"[_/]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" -")
+
+
+def _extract_search_term_from_url(source_provider: str, value: str) -> str:
+    parsed = urlparse(value if "://" in value else f"https://placeholder.local/{value.lstrip('/')}")
+    if not (_normalize_text(parsed.netloc) or _normalize_text(parsed.path)):
+        return ""
+
+    query_params = parse_qs(parsed.query)
+    for key in ("query", "q", "search", "s"):
+        values = query_params.get(key) or []
+        if not values:
+            continue
+        normalized = _humanize_query_fragment(values[0])
+        if normalized:
+            return normalized
+
+    path = _normalize_text(parsed.path).strip("/")
+    if not path:
+        return ""
+    if _normalize_text(source_provider).casefold() == "logos_fandom" and path.casefold().startswith("wiki/"):
+        path = path[5:]
+    if path.casefold().startswith("special:search"):
+        return ""
+    return _humanize_query_fragment(path)
+
+
+def _normalize_logos_fandom_page_slug(value: str) -> str:
+    text = _normalize_text(unquote(value))
+    if not text:
+        return ""
+
+    is_absolute_url = "://" in text
+    parsed = urlparse(text if is_absolute_url else f"https://placeholder.local/{text.lstrip('/')}")
+    host = _normalize_text(parsed.netloc).casefold()
+    path = _normalize_text(unquote(parsed.path)).strip("/") if parsed.path else ""
+
+    if is_absolute_url and host and "logos.fandom.com" not in host:
+        return ""
+    if path.casefold().startswith("wiki/"):
+        path = path[5:]
+
+    raw_candidate = path or text.strip("/")
+    if not raw_candidate or raw_candidate.casefold().startswith("special:search"):
+        return ""
+    if not any(token in raw_candidate for token in ("/", "_", "(", ")")):
+        return ""
+
+    segments = [
+        re.sub(r"\s+", "_", _normalize_text(segment))
+        for segment in raw_candidate.split("/")
+        if _normalize_text(segment)
+    ]
+    return "/".join(segments)
+
+
+def _logos_fandom_query_search_term(value: str) -> str:
+    page_slug = _normalize_logos_fandom_page_slug(value)
+    if page_slug:
+        return _humanize_query_fragment(page_slug)
+    return re.sub(r"\s+", " ", _extract_search_term_from_url("logos_fandom", value) or _normalize_text(value)).strip()
+
+
+def _logos_fandom_query_links(value: str) -> list[str]:
+    page_slug = _normalize_logos_fandom_page_slug(value)
+    if page_slug:
+        return [LOGOS_FANDOM_PAGE_URL.format(slug=page_slug)]
+    search_term = _logos_fandom_query_search_term(value)
+    if not search_term:
+        return []
+    return [
+        LOGOS_FANDOM_SEARCH_URL.format(query=quote_plus(search_term)),
+        LOGOS_FANDOM_IMAGE_ONLY_SEARCH_URL.format(query=quote_plus(search_term)),
+    ]
+
+
+def _is_png_or_svg_logo_url(url: str) -> bool:
+    lowered_url = _normalize_text(url).casefold()
+    if not lowered_url:
+        return False
+    return lowered_url.startswith("data:image/svg+xml") or ".svg" in lowered_url or ".png" in lowered_url
+
+
+def _normalize_source_query_value(source_provider: str, value: str) -> str:
+    provider = _normalize_text(source_provider).casefold()
+    text = _normalize_text(value)
+    if not text:
+        return ""
+
+    if provider == "logos_fandom":
+        page_slug = _normalize_logos_fandom_page_slug(text)
+        if page_slug:
+            return page_slug
+        extracted = _logos_fandom_query_search_term(text)
+        return re.sub(r"\s+", " ", extracted or text).strip()
+
+    if provider in _SEARCH_TERM_SOURCE_PROVIDERS:
+        extracted = _extract_search_term_from_url(provider, text)
+        return re.sub(r"\s+", " ", extracted or text).strip()
+
+    if provider in _SLUG_SOURCE_PROVIDERS:
+        parsed = urlparse(text if "://" in text else f"https://placeholder.local/{text.lstrip('/')}")
+        slug = _normalize_text(parsed.path).strip("/") or _normalize_text(text).strip("/")
+        if slug.endswith(".html"):
+            slug = slug[:-5]
+        return _slugify(slug)
+
+    if provider in _HOST_OR_URL_SOURCE_PROVIDERS:
+        parsed = urlparse(text if "://" in text else f"https://{text}")
+        host = _normalize_text(parsed.netloc or parsed.path).lower()
+        path = _normalize_text(parsed.path if parsed.netloc else "")
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            return ""
+        normalized = f"https://{host}"
+        if path and path != "/":
+            normalized = f"{normalized}{path.rstrip('/')}"
+        return normalized
+
+    return text
+
+
+def _normalize_source_query_values(source_provider: str, values: list[str] | tuple[str, ...] | str | None) -> list[str]:
+    if values is None:
+        return []
+    raw_values = values if isinstance(values, (list, tuple)) else [values]
+    normalized_values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        normalized = _normalize_source_query_value(source_provider, _normalize_text(raw_value))
+        if not normalized:
+            continue
+        normalized_key = normalized.casefold()
+        if normalized_key in seen:
+            continue
+        seen.add(normalized_key)
+        normalized_values.append(normalized)
+    return normalized_values
+
+
+def _dedupe_query_links(query_links: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query_link in query_links:
+        normalized = _normalize_text(query_link)
+        if not normalized:
+            continue
+        normalized_key = normalized.casefold()
+        if normalized_key in seen:
+            continue
+        seen.add(normalized_key)
+        deduped.append(normalized)
+    return deduped
+
+
+def get_source_query_kind(source_provider: str) -> str:
+    provider = _normalize_text(source_provider).casefold()
+    if provider == "related_network_streaming":
+        return "readonly"
+    if provider in _SLUG_SOURCE_PROVIDERS:
+        return "slug"
+    if provider in _HOST_OR_URL_SOURCE_PROVIDERS:
+        return "host_or_url"
+    return "search_term"
+
+
+def build_source_query_profile(
+    *,
+    source_provider: str,
+    target_label: str,
+    target_key: str,
+    query_override: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    provider = _normalize_text(source_provider).casefold()
+    query_kind = get_source_query_kind(provider)
+    brand_query_term = _derive_brand_query_term(target_label, target_key)
+    target_host = _normalize_hostname_from_url(target_key or target_label)
+
+    if provider == "related_network_streaming":
+        host_text = target_host or _normalize_text(target_key) or _normalize_text(target_label)
+        return {
+            "source_provider": provider,
+            "editable": False,
+            "refreshable": False,
+            "query_kind": query_kind,
+            "default_query_value": host_text,
+            "effective_query_value": host_text,
+            "query_values": [host_text] if host_text else [],
+            "query_links": [f"host match: {host_text}" if host_text else "host match"],
+        }
+
+    if provider in _SLUG_SOURCE_PROVIDERS:
+        default_query_value = _slugify(f"{brand_query_term}-logo") or _slugify(brand_query_term)
+        query_values = _normalize_source_query_values(provider, query_override) or [default_query_value]
+        effective_query_value = query_values[0]
+        return {
+            "source_provider": provider,
+            "editable": True,
+            "refreshable": True,
+            "query_kind": query_kind,
+            "default_query_value": default_query_value,
+            "effective_query_value": effective_query_value,
+            "query_values": query_values,
+            "query_links": [_1000logos_article_url(query_value) for query_value in query_values],
+        }
+
+    if provider in _HOST_OR_URL_SOURCE_PROVIDERS:
+        default_query_value = f"https://{target_host}" if target_host else ""
+        query_values = _normalize_source_query_values(provider, query_override) or (
+            [default_query_value] if default_query_value else []
+        )
+        effective_query_value = query_values[0] if query_values else default_query_value
+        return {
+            "source_provider": provider,
+            "editable": True,
+            "refreshable": True,
+            "query_kind": query_kind,
+            "default_query_value": default_query_value,
+            "effective_query_value": effective_query_value,
+            "query_values": query_values,
+            "query_links": query_values if query_values else ["https://"],
+        }
+
+    default_query_value = brand_query_term
+    query_values = _normalize_source_query_values(provider, query_override) or [default_query_value]
+    effective_query_value = query_values[0]
+    query_links: list[str] = []
+    for query_value in query_values:
+        if provider == "wikimedia_commons":
+            query_links.extend(
+                [
+                    WIKIMEDIA_MEDIASEARCH_URL.format(query=quote_plus(f"{query_value} logo")),
+                    WIKIMEDIA_MEDIASEARCH_URL.format(query=quote_plus(f"{query_value} icon")),
+                ]
+            )
+        elif provider == "logos_fandom":
+            query_links.extend(_logos_fandom_query_links(query_value))
+        elif provider == "worldvectorlogo":
+            query_links.append(WORLDVECTORLOGO_SEARCH_URL.format(query=quote_plus(query_value)))
+        elif provider == "seeklogo":
+            query_links.append(SEEKLOGO_SEARCH_URL.format(query=quote_plus(query_value)))
+        elif provider == "logowik":
+            query_links.append(LOGOWIK_SEARCH_URL.format(query=quote_plus(query_value)))
+        elif provider == "logo_wine":
+            query_links.append(LOGOWINE_SEARCH_URL.format(query=quote_plus(query_value)))
+        elif provider == "logosearch":
+            query_links.append(LOGOSEARCH_SEARCH_URL.format(query=quote_plus(query_value)))
+        elif provider == "simple_icons":
+            query_links.append(SIMPLE_ICONS_SEARCH_URL.format(query=quote_plus(query_value)))
+        else:
+            query_links.append(query_value)
+
+    return {
+        "source_provider": provider,
+        "editable": provider in FREE_LOGO_SOURCE_PROVIDERS,
+        "refreshable": provider in FREE_LOGO_SOURCE_PROVIDERS,
+        "query_kind": query_kind,
+        "default_query_value": default_query_value,
+        "effective_query_value": effective_query_value,
+        "query_values": query_values,
+        "query_links": _dedupe_query_links(query_links),
+    }
 
 
 def _target_host_tokens(target_key: str, terms: list[str]) -> set[str]:
@@ -612,24 +903,33 @@ def extract_official_logo_candidates(
             continue
         parsed = urlparse(normalized_url if "://" in normalized_url else f"https://{normalized_url}")
         host = _normalize_text(parsed.netloc or parsed.path).lower()
+        path = _normalize_text(parsed.path if parsed.netloc else "")
         if host.startswith("www."):
             host = host[4:]
         if not host:
             continue
-        homepage = f"https://{host}"
-        if homepage in checked:
+        entry_url = f"https://{host}"
+        if path and path != "/":
+            entry_url = f"{entry_url}{path.rstrip('/')}"
+        if entry_url in checked:
             continue
-        checked.add(homepage)
+        checked.add(entry_url)
 
-        response = _safe_get(session, homepage, timeout_seconds=timeout_seconds)
+        response = _safe_get(session, entry_url, timeout_seconds=timeout_seconds)
         if response is None or response.status_code >= 400 or not response.text:
             continue
+        discovered_from = str(response.url or entry_url)
+        page_provider = (
+            "brand_guidelines"
+            if any(hint in discovered_from.casefold() for hint in _GUIDELINE_PATH_HINTS)
+            else "official_site"
+        )
 
         candidates.extend(
             _extract_inline_svg_data_urls(
                 html=response.text,
-                source_provider="official_site",
-                discovered_from=str(response.url or homepage),
+                source_provider=page_provider,
+                discovered_from=discovered_from,
                 limit=limit,
             )
         )
@@ -639,17 +939,17 @@ def extract_official_logo_candidates(
         candidates.extend(
             _extract_images_from_html(
                 response.text,
-                base_url=str(response.url or homepage),
-                source_provider="official_site",
-                discovered_from=str(response.url or homepage),
+                base_url=discovered_from,
+                source_provider=page_provider,
+                discovered_from=discovered_from,
                 limit=limit,
-                context_hint="homepage",
+                context_hint="homepage" if page_provider == "official_site" else "brand_guidelines",
             )
         )
         if len(candidates) >= limit:
             break
 
-        guideline_links = _extract_brand_guideline_links(response.text, base_url=str(response.url or homepage), limit=3)
+        guideline_links = _extract_brand_guideline_links(response.text, base_url=discovered_from, limit=3)
         for guideline_url in guideline_links:
             guideline_host = _normalize_hostname_from_url(guideline_url)
             if guideline_host and not _host_matches_target(guideline_host, host):
@@ -672,12 +972,15 @@ def extract_official_logo_candidates(
         if len(candidates) >= limit:
             break
 
-    return _dedupe_candidates(candidates)[:limit]
+    deduped = _dedupe_candidates(candidates)
+    filtered = [row for row in deduped if row.source_provider != "official_site" or _is_png_or_svg_logo_url(row.url)]
+    return filtered[:limit]
 
 
 def search_1000logos_logo_candidates(
     query_terms: list[str],
     *,
+    exact_slug: str | None = None,
     limit: int = 8,
     timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS,
     session: requests.Session | None = None,
@@ -687,6 +990,13 @@ def search_1000logos_logo_candidates(
     article_urls: list[str] = []
     seen_articles: set[str] = set()
     match_tokens = _target_host_tokens("", query_terms)
+
+    normalized_exact_slug = _normalize_source_query_value("logos1000", exact_slug or "")
+    if normalized_exact_slug:
+        fallback_article = _1000logos_article_url(normalized_exact_slug)
+        if fallback_article not in seen_articles:
+            seen_articles.add(fallback_article)
+            article_urls.append(fallback_article)
 
     for term in query_terms[:2]:
         wp_search_url = LOGOS_1000_WP_SEARCH_URL.format(query=quote_plus(term))
@@ -740,7 +1050,7 @@ def search_1000logos_logo_candidates(
 
         slug = re.sub(r"[^a-z0-9]+", "-", term.casefold()).strip("-")
         if slug:
-            fallback_article = LOGOS_1000_ARTICLE_SLUG_URL.format(slug=slug)
+            fallback_article = _1000logos_article_url(slug)
             if fallback_article not in seen_articles:
                 seen_articles.add(fallback_article)
                 article_urls.append(fallback_article)
@@ -752,9 +1062,7 @@ def search_1000logos_logo_candidates(
         page_soup = BeautifulSoup(response.text, "html.parser")
         parsed_candidates: list[FreeLogoCandidate] = []
         content_root = page_soup.select_one(".entry-content") or page_soup
-        for image in content_root.select(
-            "img[data-src], img[src], a[href] img[data-src], a[href] img[src]"
-        ):
+        for image in content_root.select("img[data-src], img[src], a[href] img[data-src], a[href] img[src]"):
             source_url = _normalize_candidate_url(
                 _normalize_text(image.get("data-src") or image.get("src")),
                 base_url=str(response.url or article_url),
@@ -1234,19 +1542,57 @@ def collect_free_logo_candidates(
     discovered_from_urls: list[str] | None = None,
     aliases: list[str] | None = None,
     source_provider: str | None = None,
+    query_override: str | list[str] | tuple[str, ...] | None = None,
     limit_per_source: int = 8,
     timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS,
     session: requests.Session | None = None,
 ) -> list[FreeLogoCandidate]:
     session = session or requests.Session()
-    brand_query_term = _derive_brand_query_term(target_label, target_key, aliases=aliases)
+    normalized_provider = _normalize_text(source_provider).casefold()
+    normalized_query_values = (
+        _normalize_source_query_values(normalized_provider, query_override) if normalized_provider else []
+    )
+    if normalized_provider and len(normalized_query_values) > 1:
+        candidates: list[FreeLogoCandidate] = []
+        for query_value in normalized_query_values:
+            candidates.extend(
+                collect_free_logo_candidates(
+                    target_label=target_label,
+                    target_key=target_key,
+                    discovered_from_urls=discovered_from_urls,
+                    aliases=aliases,
+                    source_provider=normalized_provider,
+                    query_override=query_value,
+                    limit_per_source=limit_per_source,
+                    timeout_seconds=timeout_seconds,
+                    session=session,
+                )
+            )
+        return _dedupe_candidates(candidates)
+    query_profile = (
+        build_source_query_profile(
+            source_provider=normalized_provider,
+            target_label=target_label,
+            target_key=target_key,
+            query_override=query_override,
+        )
+        if normalized_provider
+        else None
+    )
+    brand_query_term = (
+        _normalize_text((query_profile or {}).get("effective_query_value"))
+        if query_profile and query_profile.get("query_kind") == "search_term"
+        else _derive_brand_query_term(target_label, target_key, aliases=aliases)
+    )
+    if normalized_provider == "logos_fandom":
+        brand_query_term = (
+            _logos_fandom_query_search_term(_normalize_text((query_profile or {}).get("effective_query_value")))
+            or brand_query_term
+        )
     terms = [brand_query_term]
     match_tokens = _target_host_tokens(target_key, terms)
     target_host = _normalize_hostname_from_url(target_key)
-    discovered_from_urls = [
-        _normalize_text(url) for url in (discovered_from_urls or []) if _normalize_text(url)
-    ]
-    normalized_provider = _normalize_text(source_provider).casefold()
+    discovered_from_urls = [_normalize_text(url) for url in (discovered_from_urls or []) if _normalize_text(url)]
 
     def _provider_enabled(provider_name: str) -> bool:
         return not normalized_provider or normalized_provider == provider_name
@@ -1279,9 +1625,13 @@ def collect_free_logo_candidates(
                 continue
             if not _logos_fandom_url_matches_target(url=url, tokens=match_tokens):
                 continue
+            discovered_from_links = _logos_fandom_query_links(
+                _normalize_text((query_profile or {}).get("effective_query_value"))
+            )
             discovered_from = (
-                "https://logos.fandom.com/wiki/Special:Search?query="
-                f"{quote_plus(brand_query_term)}"
+                discovered_from_links[0]
+                if discovered_from_links
+                else (f"https://logos.fandom.com/wiki/Special:Search?query={quote_plus(brand_query_term)}")
             )
             candidates.append(
                 FreeLogoCandidate(
@@ -1299,6 +1649,9 @@ def collect_free_logo_candidates(
         candidates.extend(
             search_1000logos_logo_candidates(
                 terms,
+                exact_slug=_normalize_text((query_profile or {}).get("effective_query_value"))
+                if normalized_provider == "logos1000"
+                else None,
                 limit=limit_per_source,
                 timeout_seconds=timeout_seconds,
                 session=session,
@@ -1366,6 +1719,10 @@ def collect_free_logo_candidates(
         )
 
     official_sources: list[str] = []
+    if normalized_provider in _HOST_OR_URL_SOURCE_PROVIDERS:
+        source_seed = _normalize_text((query_profile or {}).get("effective_query_value"))
+        if source_seed:
+            official_sources.append(source_seed)
     for url in discovered_from_urls:
         host = _normalize_hostname_from_url(url)
         if not host:
@@ -1374,7 +1731,7 @@ def collect_free_logo_candidates(
             continue
         if url not in official_sources:
             official_sources.append(url)
-    if target_host:
+    if target_host and not official_sources:
         for url in (f"https://{target_host}", f"https://www.{target_host}"):
             if url not in official_sources:
                 official_sources.append(url)

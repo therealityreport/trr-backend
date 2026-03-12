@@ -786,6 +786,37 @@ class InstagramScraper:
                 best = value
         return best
 
+    def _extract_profile_avatar_from_profile_payload(self, data: dict[str, Any] | None) -> str | None:
+        if not isinstance(data, dict):
+            return None
+        user = data.get("data", {}).get("user", {}) if isinstance(data.get("data"), dict) else {}
+        if not isinstance(user, dict):
+            return None
+        return self._pick_best_profile_pic_url(
+            user.get("profile_pic_url_hd") or user.get("profilePicUrlHd"),
+            user.get("profile_pic_url") or user.get("profilePicUrl"),
+        )
+
+    def _backfill_post_owner_profile_pic(
+        self,
+        posts: list["InstagramPost"],
+        *,
+        profile_pic_url: str | None,
+    ) -> int:
+        resolved_profile_pic = str(profile_pic_url or "").strip() or None
+        if not resolved_profile_pic:
+            return 0
+
+        updated = 0
+        for post in posts:
+            if not getattr(post, "owner_profile_pic_url", None):
+                post.owner_profile_pic_url = resolved_profile_pic
+                updated += 1
+            owner_detail = getattr(post, "owner_detail", None)
+            if owner_detail and not getattr(owner_detail, "profile_pic_url", None):
+                owner_detail.profile_pic_url = resolved_profile_pic
+        return updated
+
     def _extract_tagged_users_detail(self, node: dict) -> list[InstagramUserDetail]:
         """Extract full tagged user objects from post."""
         details: list[InstagramUserDetail] = []
@@ -1992,12 +2023,17 @@ class InstagramScraper:
                 matched_posts=len(posts),
             )
 
+        profile_avatar_backfilled_posts = self._backfill_post_owner_profile_pic(
+            posts,
+            profile_pic_url=self._extract_profile_avatar_from_profile_payload(data),
+        )
         logger.info(f"Scrape complete: {len(posts)} posts found")
         self.last_retrieval_meta = {
             "retrieval_mode": "profile_info",
             "first_page_count": len(posts),
             "fallback_reason": None,
             "initial_page_failed": False,
+            "profile_avatar_backfilled_posts": profile_avatar_backfilled_posts,
         }
         return posts
 
@@ -2116,6 +2152,13 @@ class InstagramScraper:
             logger.info(f"Page {page_num}: checked {posts_on_page} posts, {len(posts)} matches total")
 
         logger.info(f"Scrape complete: checked {posts_checked} posts, found {len(posts)} matches")
+        profile_avatar_backfilled_posts = 0
+        if posts and any(not getattr(post, "owner_profile_pic_url", None) for post in posts):
+            profile_data = self.fetch_profile_info(config.username, config.delay_seconds)
+            profile_avatar_backfilled_posts = self._backfill_post_owner_profile_pic(
+                posts,
+                profile_pic_url=self._extract_profile_avatar_from_profile_payload(profile_data),
+            )
         self.last_retrieval_meta = {
             "retrieval_mode": "graphql",
             "first_page_count": len(posts) if page_num <= 1 else min(len(posts), 12),
@@ -2126,6 +2169,7 @@ class InstagramScraper:
             "stop_reason": stop_reason,
             "no_match_pages": no_match_pages,
             "no_match_page_limit": no_match_page_limit,
+            "profile_avatar_backfilled_posts": profile_avatar_backfilled_posts,
         }
         return posts
 

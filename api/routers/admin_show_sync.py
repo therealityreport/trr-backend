@@ -3900,7 +3900,7 @@ def refresh_show_photos_stream(
             if unavailable:
                 yield progress(
                     stage="auto_count",
-                    message="Skipping auto-count (Screenalytics unavailable).",
+                    message="Skipping auto-count (vision unavailable).",
                     extra={
                         "skip_reason": "service_unavailable",
                         "service_unavailable": True,
@@ -3963,11 +3963,11 @@ def refresh_show_photos_stream(
                         auto_counts_succeeded += 1
                     except ScreenalyticsUnavailableError as exc:
                         auto_counts_failed += 1
-                        detail = str(exc) or "Screenalytics unavailable"
+                        detail = str(exc) or "Vision unavailable"
                         errors.append(f"Auto-count service unavailable: {detail}")
                         yield progress(
                             stage="auto_count",
-                            message="Auto-count paused (Screenalytics unavailable).",
+                            message="Auto-count paused (vision unavailable).",
                             stage_current=idx,
                             stage_total=len(to_process),
                             extra={

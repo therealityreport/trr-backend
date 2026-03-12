@@ -424,9 +424,7 @@ def restore_changed_originals(
     }
 
     details = [
-        asdict(result)
-        for result in results
-        if result.status != "match" or result.repair_applied or result.repair_error
+        asdict(result) for result in results if result.status != "match" or result.repair_applied or result.repair_error
     ]
 
     report = {

@@ -30,8 +30,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="repair_twitter_quotes_metrics_and_comment_media",
         description=(
-            "Repair twitter root metrics, refresh quote/reply ingestion, and enqueue missing "
-            "comment media mirror jobs."
+            "Repair twitter root metrics, refresh quote/reply ingestion, and enqueue missing comment media mirror jobs."
         ),
     )
     parser.add_argument("--season-id", default="", help="Season UUID scope. Required when --apply is set.")
@@ -63,9 +62,7 @@ def _load_root_rows(
         where_clauses.append("t.season_id = %s::uuid")
         params.append(season_id)
     if source_account:
-        where_clauses.append(
-            "lower(coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '')) = lower(%s)"
-        )
+        where_clauses.append("lower(coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '')) = lower(%s)")
         params.append(source_account)
     if tweet_id:
         where_clauses.append("t.tweet_id = %s")
@@ -79,7 +76,7 @@ def _load_root_rows(
           t.season_id::text as season_id,
           coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '') as source_account
         from social.twitter_tweets t
-        where {' and '.join(where_clauses)}
+        where {" and ".join(where_clauses)}
         order by t.created_at desc
         limit %s
         """,

@@ -27,9 +27,7 @@ def test_fetch_fandom_person_cast_photos_applies_gallery_show_season_and_content
     assert len(rows) == 3
 
     rhoc_row = next(
-        row
-        for row in rows
-        if row.get("context_section") == "The Real Housewives of Orange County Season 18 Reunion"
+        row for row in rows if row.get("context_section") == "The Real Housewives of Orange County Season 18 Reunion"
     )
     rhoc_metadata = rhoc_row.get("metadata") or {}
     assert rhoc_row["season"] == 18

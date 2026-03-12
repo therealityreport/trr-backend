@@ -15,9 +15,11 @@ import time
 from datetime import UTC, datetime
 
 from trr_backend.repositories.social_season_analytics import (
+    cancel_claimed_job_before_processing,
     claim_next_queued_jobs,
     ensure_media_mirror_s3_ready,
     execute_run,
+    get_worker_auth_capabilities,
     mark_worker_stopped,
     process_claimed_job,
     reconcile_run_summaries,
@@ -32,7 +34,14 @@ _UNSET = object()
 
 
 class WorkerHeartbeat:
-    def __init__(self, *, worker_id: str, stage: str | None, run_id: str | None, supported_platforms: list[str] | None = None):
+    def __init__(
+        self,
+        *,
+        worker_id: str,
+        stage: str | None,
+        run_id: str | None,
+        supported_platforms: list[str] | None = None,
+    ):
         self._worker_id = worker_id
         self._supported_platforms = supported_platforms
         self._lock = threading.Lock()
@@ -45,6 +54,7 @@ class WorkerHeartbeat:
             "run_id": run_id,
             "current_job_id": None,
             "metadata": {
+                "auth_capabilities": get_worker_auth_capabilities(),
                 "hostname": socket.gethostname(),
                 "pid": os.getpid(),
                 "worker_script": "scripts.socials.worker",
@@ -92,8 +102,7 @@ class WorkerHeartbeat:
 
         now = time.monotonic()
         # Skip write if status unchanged and interval not elapsed
-        if (self._last_written_status == current_status
-                and (now - self._last_written_at) < self._interval_seconds):
+        if self._last_written_status == current_status and (now - self._last_written_at) < self._interval_seconds:
             return
 
         try:
@@ -157,7 +166,42 @@ def _resolve_int_env(name: str, default: int, *, minimum: int, maximum: int) -> 
 
 
 def _default_claim_batch_size_for_stage(stage: str | None) -> int:
-    return 4 if (stage or "").strip().lower() == "posts" else 2
+    # Queue claims mark jobs running up front; batching post claims creates false
+    # stale-heartbeat jobs for the later entries while one worker processes the first.
+    return 1 if (stage or "").strip().lower() in {"posts", "shared_account_posts"} else 2
+
+
+def _claim_stage_candidates(stage: str | None) -> tuple[str | None, ...]:
+    normalized_stage = (stage or "").strip().lower() or None
+    if normalized_stage == "comments":
+        # Keep comments draining first, but let otherwise-idle comments workers
+        # borrow post shards once the comment queue is empty.
+        return ("comments", "posts")
+    return (stage,)
+
+
+def _claim_jobs_for_stage_candidates(
+    *,
+    worker_id: str,
+    stage: str | None,
+    platform: str | None,
+    limit: int,
+) -> list[dict[str, object]]:
+    attempted: set[str | None] = set()
+    for candidate_stage in _claim_stage_candidates(stage):
+        if candidate_stage in attempted:
+            continue
+        attempted.add(candidate_stage)
+        candidate_limit = min(limit, _default_claim_batch_size_for_stage(candidate_stage))
+        claimed_jobs = claim_next_queued_jobs(
+            worker_id=worker_id,
+            stage=candidate_stage,
+            platform=platform,
+            limit=candidate_limit,
+        )
+        if claimed_jobs:
+            return claimed_jobs
+    return []
 
 
 def parse_args() -> argparse.Namespace:
@@ -174,7 +218,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage",
-        choices=["any", "posts", "comments", "media_mirror", "comment_media_mirror"],
+        choices=[
+            "any",
+            "posts",
+            "comments",
+            "media_mirror",
+            "comment_media_mirror",
+            "shared_account_posts",
+            "post_classify",
+            "season_materialize",
+            "analytics_refresh",
+        ],
         default="any",
         help="Optional stage filter when claiming jobs",
     )
@@ -218,6 +272,106 @@ def _requires_media_mirror_s3_preflight(*, stage: str | None, platform: str | No
     }
 
 
+def _spawn_child_worker(
+    *,
+    worker_id: str,
+    interval: float,
+    stage: str | None = None,
+    platform: str | None = None,
+    run_id: str | None = None,
+    once: bool = False,
+) -> subprocess.Popen:
+    cmd = [
+        sys.executable,
+        "-m",
+        "scripts.socials.worker",
+        "--worker-id",
+        worker_id,
+        "--parallel",
+        "1",
+    ]
+    if run_id:
+        cmd.extend(["--run-id", run_id])
+    else:
+        cmd.extend(["--interval", str(interval)])
+        if once:
+            cmd.append("--once")
+    if stage:
+        cmd.extend(["--stage", stage])
+    if platform:
+        cmd.extend(["--platform", platform])
+    return subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy())
+
+
+def _wait_process(proc: subprocess.Popen, timeout: float | None = None) -> int | None:
+    try:
+        if timeout is None:
+            return proc.wait()
+        return proc.wait(timeout=timeout)
+    except TypeError:
+        return proc.wait()
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _poll_process(proc: subprocess.Popen) -> int | None:
+    poll = getattr(proc, "poll", None)
+    if callable(poll):
+        try:
+            return poll()
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _stop_process(proc: subprocess.Popen, *, force: bool) -> None:
+    action = getattr(proc, "kill" if force else "terminate", None)
+    if callable(action):
+        try:
+            action()
+        except Exception:  # noqa: BLE001
+            return
+
+
+def _wait_for_children(
+    children: list[subprocess.Popen],
+    *,
+    context_label: str,
+    terminate_grace_seconds: float = 5.0,
+) -> int:
+    exit_code = 0
+    try:
+        for proc in children:
+            rc = _wait_process(proc)
+            if rc is None:
+                continue
+            if rc != 0 and exit_code == 0:
+                exit_code = rc
+                logger.error("%s child exited non-zero: returncode=%s", context_label, rc)
+                for sibling in children:
+                    if sibling is proc:
+                        continue
+                    if _poll_process(sibling) is None:
+                        _stop_process(sibling, force=False)
+    except KeyboardInterrupt:
+        exit_code = 130
+        logger.warning("%s interrupted; terminating child workers", context_label)
+        for proc in children:
+            if _poll_process(proc) is None:
+                _stop_process(proc, force=False)
+    finally:
+        deadline = time.monotonic() + max(0.0, terminate_grace_seconds)
+        for proc in children:
+            if _poll_process(proc) is not None:
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            rc = _wait_process(proc, timeout=remaining)
+            if rc is None and _poll_process(proc) is None:
+                _stop_process(proc, force=True)
+                _wait_process(proc, timeout=1.0)
+    return exit_code
+
+
 def main() -> int:
     load_env()
     args = parse_args()
@@ -247,30 +401,16 @@ def main() -> int:
         children: list[subprocess.Popen] = []
         for index in range(max(1, int(args.parallel))):
             child_worker_id = f"{worker_id}:p{index + 1}"
-            cmd = [
-                sys.executable,
-                "-m",
-                "scripts.socials.worker",
-                "--worker-id",
-                child_worker_id,
-                "--parallel",
-                "1",
-                "--interval",
-                str(args.interval),
-            ]
-            if stage_filter:
-                cmd.extend(["--stage", stage_filter])
-            if platform_filter:
-                cmd.extend(["--platform", platform_filter])
-            if args.once:
-                cmd.append("--once")
-            children.append(subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy()))
-        exit_code = 0
-        for proc in children:
-            rc = proc.wait()
-            if rc != 0:
-                exit_code = rc
-        return exit_code
+            children.append(
+                _spawn_child_worker(
+                    worker_id=child_worker_id,
+                    interval=args.interval,
+                    stage=stage_filter,
+                    platform=platform_filter,
+                    once=bool(args.once),
+                )
+            )
+        return _wait_for_children(children, context_label="queue fanout")
 
     if platform_filter:
         worker_supported_platforms = [platform_filter]
@@ -313,32 +453,19 @@ def main() -> int:
                 def _spawn_group(stage: str, count: int) -> None:
                     for index in range(count):
                         child_worker_id = f"{worker_id}:{stage}:p{index + 1}"
-                        cmd = [
-                            sys.executable,
-                            "-m",
-                            "scripts.socials.worker",
-                            "--run-id",
-                            args.run_id,
-                            "--worker-id",
-                            child_worker_id,
-                            "--stage",
-                            stage,
-                            "--parallel",
-                            "1",
-                        ]
-                        if platform_filter:
-                            cmd.extend(["--platform", platform_filter])
-                        children.append(subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy()))
+                        children.append(
+                            _spawn_child_worker(
+                                worker_id=child_worker_id,
+                                interval=args.interval,
+                                stage=stage,
+                                platform=platform_filter,
+                                run_id=args.run_id,
+                            )
+                        )
 
                 _spawn_group("posts", posts_workers)
                 _spawn_group("comments", comments_workers)
-
-                exit_code = 0
-                for proc in children:
-                    rc = proc.wait()
-                    if rc != 0:
-                        exit_code = rc
-                return exit_code
+                return _wait_for_children(children, context_label="tandem run")
             if args.parallel > 1:
                 logger.info(
                     "Executing run_id=%s with %d parallel workers",
@@ -348,28 +475,16 @@ def main() -> int:
                 children: list[subprocess.Popen] = []
                 for index in range(args.parallel):
                     child_worker_id = f"{worker_id}:p{index + 1}"
-                    cmd = [
-                        sys.executable,
-                        "-m",
-                        "scripts.socials.worker",
-                        "--run-id",
-                        args.run_id,
-                        "--worker-id",
-                        child_worker_id,
-                        "--parallel",
-                        "1",
-                    ]
-                    if stage_filter:
-                        cmd.extend(["--stage", stage_filter])
-                    if platform_filter:
-                        cmd.extend(["--platform", platform_filter])
-                    children.append(subprocess.Popen(cmd, cwd=os.getcwd(), env=os.environ.copy()))
-                exit_code = 0
-                for proc in children:
-                    rc = proc.wait()
-                    if rc != 0:
-                        exit_code = rc
-                return exit_code
+                    children.append(
+                        _spawn_child_worker(
+                            worker_id=child_worker_id,
+                            interval=args.interval,
+                            stage=stage_filter,
+                            platform=platform_filter,
+                            run_id=args.run_id,
+                        )
+                    )
+                return _wait_for_children(children, context_label="parallel run")
             logger.info(
                 "Executing specific run_id=%s stage=%s platform=%s",
                 args.run_id,
@@ -378,7 +493,11 @@ def main() -> int:
             )
             heartbeat.set_state(status="working", run_id=args.run_id, stage=stage_filter or "any")
             execute_run(args.run_id, worker_id=worker_id, stage=stage_filter, platform=platform_filter)
-            heartbeat.set_state(status="idle", current_job_id=None, metadata_updates={"processed_jobs": "run_complete"})
+            heartbeat.set_state(
+                status="idle",
+                current_job_id=None,
+                metadata_updates={"run_complete": True, "last_completed_run_id": args.run_id},
+            )
             return 0
 
         processed = 0
@@ -429,14 +548,51 @@ def main() -> int:
                 last_summary_reconcile_at = now_mono
 
             if not claimed_jobs:
-                claimed_jobs = claim_next_queued_jobs(
-                    worker_id=worker_id,
-                    stage=stage_filter,
-                    platform=platform_filter,
-                    limit=claim_batch_size,
-                )
+                try:
+                    claimed_jobs = _claim_jobs_for_stage_candidates(
+                        worker_id=worker_id,
+                        stage=stage_filter,
+                        platform=platform_filter,
+                        limit=claim_batch_size,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Job claim failed: worker_id=%s error=%s", worker_id, exc)
+                    heartbeat.set_state(
+                        status="idle",
+                        current_job_id=None,
+                        run_id=None,
+                        metadata_updates={"last_claim_error": type(exc).__name__},
+                    )
+                    if args.once:
+                        return 1
+                    idle_sleep_seconds = max(0.25, args.interval) + random.uniform(0.0, 0.2)
+                    time.sleep(idle_sleep_seconds)
+                    continue
             claimed = claimed_jobs.pop(0) if claimed_jobs else None
             if claimed:
+                try:
+                    cancelled_job = cancel_claimed_job_before_processing(claimed)
+                except Exception as exc:  # noqa: BLE001
+                    cancelled_job = None
+                    logger.warning(
+                        "Pre-process cancel check failed: worker_id=%s job_id=%s error=%s",
+                        worker_id,
+                        claimed.get("id"),
+                        exc,
+                    )
+                    heartbeat.set_state(
+                        metadata_updates={"last_cancel_probe_error": type(exc).__name__},
+                    )
+                if cancelled_job is not None:
+                    heartbeat.set_state(status="idle", current_job_id=None, run_id=None)
+                    logger.info(
+                        "Discarded claimed job=%s run_id=%s because the job or run was already cancelled",
+                        cancelled_job.get("id"),
+                        cancelled_job.get("run_id"),
+                    )
+                    if args.once:
+                        break
+                    continue
                 heartbeat.set_state(status="working", stage=stage_filter or "any")
                 claimed_config = dict(claimed.get("config") or {})
                 heartbeat.set_state(
@@ -445,7 +601,22 @@ def main() -> int:
                     run_id=str(claimed.get("run_id") or "") or None,
                     current_job_id=str(claimed.get("id") or "") or None,
                 )
-                job = process_claimed_job(claimed, worker_id=worker_id)
+                try:
+                    job = process_claimed_job(claimed, worker_id=worker_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "Processing claimed job crashed unexpectedly: worker_id=%s job_id=%s",
+                        worker_id,
+                        claimed.get("id"),
+                    )
+                    heartbeat.set_state(
+                        status="idle",
+                        current_job_id=None,
+                        metadata_updates={"last_processing_error": type(exc).__name__},
+                    )
+                    if args.once:
+                        return 1
+                    continue
                 processed += 1
                 heartbeat.set_state(
                     status="working",

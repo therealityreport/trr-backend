@@ -253,8 +253,6 @@ def test_normalize_article_url_strips_tracking_params() -> None:
 
 
 def test_normalize_article_url_sorts_query_params_for_stable_dedupe() -> None:
-    normalized = google_news_parser.normalize_article_url(
-        "https://people.com/story-1?b=2&a=1&utm_source=google"
-    )
+    normalized = google_news_parser.normalize_article_url("https://people.com/story-1?b=2&a=1&utm_source=google")
 
     assert normalized == "https://people.com/story-1?a=1&b=2"

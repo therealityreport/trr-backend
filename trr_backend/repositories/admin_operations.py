@@ -171,13 +171,30 @@ def append_operation_event(
     event_name = str(event_type or "").strip() or "progress"
     row = pg.fetch_one(
         """
+        with locked_operation as (
+          select id
+          from core.admin_operations
+          where id = %s::uuid
+          for update
+        ),
+        next_event as (
+          select coalesce(max(e.event_seq), 0) + 1 as event_seq
+          from core.admin_operation_events e
+          where e.operation_id = %s::uuid
+        )
         insert into core.admin_operation_events (
           operation_id,
           event_seq,
           event_type,
           event_payload
         )
-        values (%s::uuid, %s, %s, %s::jsonb)
+        select
+          locked_operation.id,
+          coalesce(%s, next_event.event_seq),
+          %s,
+          %s::jsonb
+        from locked_operation
+        cross join next_event
         returning
           operation_id::text as operation_id,
           event_seq,
@@ -185,7 +202,7 @@ def append_operation_event(
           event_payload,
           created_at
         """,
-        [operation_id, event_seq, event_name, _to_json(event_payload)],
+        [operation_id, operation_id, event_seq, event_name, _to_json(event_payload)],
     )
     if not row:
         raise RuntimeError("Failed to append admin operation event")
@@ -339,6 +356,7 @@ def claim_next_operation(
     *,
     lease_seconds: int = 180,
     operation_types: Iterable[str] | None = None,
+    exclude_operation_types: Iterable[str] | None = None,
 ) -> dict[str, Any] | None:
     """Claim the next pending/stale operation for remote execution."""
     normalized_worker = _clean_text(worker_id)
@@ -347,12 +365,16 @@ def claim_next_operation(
 
     safe_lease_seconds = max(15, int(lease_seconds))
     normalized_types = [str(item).strip() for item in (operation_types or []) if str(item).strip()]
+    excluded_types = [str(item).strip() for item in (exclude_operation_types or []) if str(item).strip()]
 
     where_type = ""
     params: list[Any] = []
     if normalized_types:
         where_type = "and operation_type = any(%s::text[])"
         params.append(normalized_types)
+    if excluded_types:
+        where_type += " and not (operation_type = any(%s::text[]))"
+        params.append(excluded_types)
     params.extend([normalized_worker, safe_lease_seconds])
 
     row = pg.fetch_one(
@@ -373,6 +395,86 @@ def claim_next_operation(
             case when status = 'pending' then 0 else 1 end,
             created_at asc
           limit 1
+          for update skip locked
+        )
+        update core.admin_operations as op
+        set
+          status = case when op.status = 'pending' then 'running' else op.status end,
+          started_at = case when op.status = 'pending' then coalesce(op.started_at, now()) else op.started_at end,
+          claimed_by_worker_id = %s,
+          claim_token = gen_random_uuid()::text,
+          lease_expires_at = now() + (%s::int * interval '1 second'),
+          heartbeat_at = now(),
+          attempt_count = coalesce(op.attempt_count, 0) + 1,
+          next_retry_at = null
+        from candidate
+        where op.id = candidate.id
+        returning
+          op.id::text as id,
+          op.operation_type,
+          op.status,
+          op.initiated_by,
+          op.request_id,
+          op.client_session_id,
+          op.client_workflow_id,
+          op.request_payload,
+          op.progress_payload,
+          op.result_payload,
+          op.error_payload,
+          op.cancel_requested_at,
+          op.claimed_by_worker_id,
+          op.claim_token,
+          op.lease_expires_at,
+          op.heartbeat_at,
+          op.attempt_count,
+          op.next_retry_at,
+          op.started_at,
+          op.completed_at,
+          op.created_at,
+          op.updated_at
+        """,
+        params,
+    )
+    return _normalize_operation(row)
+
+
+def claim_operation(
+    operation_id: str,
+    worker_id: str,
+    *,
+    lease_seconds: int = 180,
+    operation_types: Iterable[str] | None = None,
+) -> dict[str, Any] | None:
+    """Claim a specific operation for remote execution if it is still available."""
+    normalized_worker = _clean_text(worker_id)
+    if not normalized_worker:
+        raise ValueError("worker_id is required")
+
+    safe_lease_seconds = max(15, int(lease_seconds))
+    normalized_types = [str(item).strip() for item in (operation_types or []) if str(item).strip()]
+
+    where_type = ""
+    params: list[Any] = [operation_id]
+    if normalized_types:
+        where_type = "and operation_type = any(%s::text[])"
+        params.append(normalized_types)
+    params.extend([normalized_worker, safe_lease_seconds])
+
+    row = pg.fetch_one(
+        f"""
+        with candidate as (
+          select id
+          from core.admin_operations
+          where id = %s::uuid
+            and status in ('pending', 'running', 'cancelling')
+            and coalesce(next_retry_at, now()) <= now()
+            and (
+              status = 'pending'
+              or lease_expires_at is null
+              or lease_expires_at < now()
+              or coalesce(heartbeat_at, updated_at, created_at) < now() - interval '5 minutes'
+            )
+            {where_type}
           for update skip locked
         )
         update core.admin_operations as op

@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/scrape", tags=["admin-scrape"])
 
 
+def _clean_optional_import_text(value: str | None) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
 def _brand_logo_routing_v2_enabled() -> bool:
     return str(os.getenv("BRAND_LOGO_ROUTING_V2", "true")).strip().lower() not in {"0", "false", "off", "no"}
 
@@ -120,6 +125,46 @@ class ImportImageItem(BaseModel):
     logo_target_label: str | None = None
     logo_set_primary: bool = False
     asset_name: str | None = None
+
+    @model_validator(mode="after")
+    def validate_import_image_item(self):
+        self.caption = _clean_optional_import_text(self.caption)
+        self.context_section = _clean_optional_import_text(self.context_section)
+        self.context_type = _clean_optional_import_text(self.context_type)
+        self.source_logo = _clean_optional_import_text(self.source_logo)
+        self.logo_target_key = _clean_optional_import_text(self.logo_target_key)
+        self.logo_target_label = _clean_optional_import_text(self.logo_target_label)
+        self.asset_name = _clean_optional_import_text(self.asset_name)
+
+        if self.person_ids:
+            deduped_ids: list[UUID] = []
+            seen_ids: set[UUID] = set()
+            for person_id in self.person_ids:
+                if person_id in seen_ids:
+                    continue
+                seen_ids.add(person_id)
+                deduped_ids.append(person_id)
+            self.person_ids = deduped_ids or None
+
+        has_logo_metadata = any(
+            [
+                self.source_logo,
+                self.logo_target_type,
+                self.logo_target_key,
+                self.logo_target_label,
+                self.logo_set_primary,
+            ]
+        )
+        if self.kind == "logo":
+            if self.person_ids:
+                raise ValueError("person_ids are not supported for logo images")
+            if (self.logo_target_type or _legacy_logo_target_type(self.source_logo)) is None:
+                raise ValueError("logo_target_type is required for logo images")
+            return self
+
+        if has_logo_metadata:
+            raise ValueError("logo target fields are only supported for logo images")
+        return self
 
 
 EntityType = Literal["season", "show", "person"]

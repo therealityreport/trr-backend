@@ -190,7 +190,7 @@ def _url_key(value: str) -> str:
 
 def _string_list(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
-        return tuple()
+        return ()
     cleaned: list[str] = []
     seen: set[str] = set()
     for item in value:
@@ -203,7 +203,9 @@ def _string_list(value: Any) -> tuple[str, ...]:
 
 
 def _ordered_active_rules(rules_by_key: dict[str, FranchiseRule]) -> list[FranchiseRule]:
-    return sorted((rule for rule in rules_by_key.values() if rule.is_active), key=lambda rule: (rule.source_rank, rule.key))
+    return sorted(
+        (rule for rule in rules_by_key.values() if rule.is_active), key=lambda rule: (rule.source_rank, rule.key)
+    )
 
 
 def _ensure_schema(*, required: bool) -> None:
@@ -232,7 +234,10 @@ def _ensure_schema(*, required: bool) -> None:
           created_at timestamptz not null default now()
         )
         """,
-        "create index if not exists brands_franchise_rules_active_rank_idx on admin.brands_franchise_rules (is_active, source_rank, franchise_key)",
+        (
+            "create index if not exists brands_franchise_rules_active_rank_idx "
+            "on admin.brands_franchise_rules (is_active, source_rank, franchise_key)"
+        ),
         "grant usage on schema admin to service_role",
         "grant all privileges on table admin.brands_franchise_rules to service_role",
     ]
@@ -319,7 +324,8 @@ def _load_rule_rows() -> list[dict[str, Any]]:
 def _rule_from_row(row: dict[str, Any]) -> FranchiseRule:
     return FranchiseRule(
         key=_normalize_key(row.get("franchise_key") or ""),
-        name=str(row.get("name") or "").strip() or _normalize_key(row.get("franchise_key") or "").replace("-", " ").title(),
+        name=str(row.get("name") or "").strip()
+        or _normalize_key(row.get("franchise_key") or "").replace("-", " ").title(),
         primary_url=str(row.get("primary_url") or "").strip(),
         review_allpages_url=str(row.get("review_allpages_url") or "").strip() or None,
         match_terms=_string_list(row.get("match_terms")),
@@ -353,11 +359,11 @@ def _rule_matches_show(rule: FranchiseRule, *, show_name: str, networks: tuple[s
     name_match = any(term in normalized_name for term in terms) if terms else False
 
     network_terms = tuple(term for term in rule.network_terms if term)
-    network_match = any(
-        network_term in network_name
-        for network_term in network_terms
-        for network_name in normalized_networks
-    ) if network_terms else False
+    network_match = (
+        any(network_term in network_name for network_term in network_terms for network_name in normalized_networks)
+        if network_terms
+        else False
+    )
 
     if terms and network_terms:
         return name_match and network_match
@@ -368,7 +374,9 @@ def _rule_matches_show(rule: FranchiseRule, *, show_name: str, networks: tuple[s
     return False
 
 
-def _resolve_show_rule(show_name: str, networks: tuple[str, ...], rules_by_key: dict[str, FranchiseRule]) -> FranchiseRule | None:
+def _resolve_show_rule(
+    show_name: str, networks: tuple[str, ...], rules_by_key: dict[str, FranchiseRule]
+) -> FranchiseRule | None:
     for rule in _ordered_active_rules(rules_by_key):
         if _rule_matches_show(rule, show_name=show_name, networks=networks):
             return rule
@@ -577,7 +585,13 @@ def list_shows_franchises(*, q: str = "", limit: int = 300) -> dict[str, Any]:
             effective_source = "none"
 
         candidates = rule.candidate_urls() if rule else (fallback_rule.candidate_urls() if fallback_rule else [])
-        include_allpages_scan = bool(rule.include_allpages_scan) if rule else bool(fallback_rule.include_allpages_scan) if fallback_rule else False
+        include_allpages_scan = (
+            bool(rule.include_allpages_scan)
+            if rule
+            else bool(fallback_rule.include_allpages_scan)
+            if fallback_rule
+            else False
+        )
 
         row = {
             "show_id": show.show_id,
@@ -681,12 +695,16 @@ def update_franchise_rule(*, franchise_key: str, payload: dict[str, Any], actor:
         raise ValueError("primary_url is required")
 
     review_allpages_url = str(payload.get("review_allpages_url") or "").strip() or None
-    match_terms = _string_list(payload.get("match_terms") if "match_terms" in payload else list(current_rule.match_terms))
+    match_terms = _string_list(
+        payload.get("match_terms") if "match_terms" in payload else list(current_rule.match_terms)
+    )
     aliases = _string_list(payload.get("aliases") if "aliases" in payload else list(current_rule.aliases))
     community_domains = _string_list(
         payload.get("community_domains") if "community_domains" in payload else list(current_rule.community_domains)
     )
-    network_terms = _string_list(payload.get("network_terms") if "network_terms" in payload else list(current_rule.network_terms))
+    network_terms = _string_list(
+        payload.get("network_terms") if "network_terms" in payload else list(current_rule.network_terms)
+    )
     include_allpages_scan = bool(payload.get("include_allpages_scan", current_rule.include_allpages_scan))
     source_rank = max(0, int(payload.get("source_rank", current_rule.source_rank)))
     is_active = bool(payload.get("is_active", current_rule.is_active))
@@ -869,7 +887,9 @@ def apply_franchise_rule(*, franchise_key: str, missing_only: bool, dry_run: boo
             skipped_explicit += 1
             continue
 
-        has_same_fallback = bool(state.fallback_url) and _url_key(state.fallback_url or "") == _url_key(rule.primary_url)
+        has_same_fallback = bool(state.fallback_url) and _url_key(state.fallback_url or "") == _url_key(
+            rule.primary_url
+        )
         if has_same_fallback:
             skipped_already_fallback += 1
             continue
@@ -904,7 +924,10 @@ def apply_franchise_rule(*, franchise_key: str, missing_only: bool, dry_run: boo
     }
 
     logger.info(
-        "brands_franchise_rule_apply key=%s matched=%s applied=%s dry_run=%s links_upserted=%s skipped_explicit=%s skipped_existing=%s",
+        (
+            "brands_franchise_rule_apply key=%s matched=%s applied=%s dry_run=%s "
+            "links_upserted=%s skipped_explicit=%s skipped_existing=%s"
+        ),
         rule.key,
         len(matched),
         len(applied_entries),

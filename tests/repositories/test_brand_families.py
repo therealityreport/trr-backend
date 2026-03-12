@@ -44,18 +44,25 @@ def test_apply_family_links_skips_manual_and_updates_derived() -> None:
         "metadata": {},
     }
 
-    with patch.object(mod, "_fetch_family_row", return_value={"id": "fam-1"}), patch.object(
-        mod.pg,
-        "fetch_all",
-        return_value=[rule_row],
-    ), patch.object(mod, "_resolve_rule_show_ids", return_value={"show-1", "show-2"}), patch.object(
-        mod,
-        "_show_has_non_family_link_kind",
-        side_effect=[True, False],
-    ), patch.object(mod, "_update_existing_family_rule_link", return_value=1), patch.object(
-        mod,
-        "_upsert_family_rule_link",
-        return_value=0,
+    with (
+        patch.object(mod, "_fetch_family_row", return_value={"id": "fam-1"}),
+        patch.object(
+            mod.pg,
+            "fetch_all",
+            return_value=[rule_row],
+        ),
+        patch.object(mod, "_resolve_rule_show_ids", return_value={"show-1", "show-2"}),
+        patch.object(
+            mod,
+            "_show_has_non_family_link_kind",
+            side_effect=[True, False],
+        ),
+        patch.object(mod, "_update_existing_family_rule_link", return_value=1),
+        patch.object(
+            mod,
+            "_upsert_family_rule_link",
+            return_value=0,
+        ),
     ):
         result = mod.apply_family_links(
             family_id="fam-1",

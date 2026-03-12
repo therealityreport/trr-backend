@@ -182,12 +182,16 @@ def download_videos(videos: list[YouTubeVideo], output_dir: Path):
 
         cmd = [
             "yt-dlp",
-            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
-            "--merge-output-format", "mp4",
-            "--output", output_template,
+            "--format",
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+            "--merge-output-format",
+            "mp4",
+            "--output",
+            output_template,
             "--no-playlist",
             "--write-thumbnail",
-            "--convert-thumbnails", "jpg",
+            "--convert-thumbnails",
+            "jpg",
             "--no-overwrites",
             url,
         ]
@@ -382,8 +386,10 @@ Examples:
     # Report coverage metadata
     meta = scraper.last_retrieval_meta
     if meta:
-        print(f"\nCoverage: {meta.get('continuation_pages', 0)} pages scanned, "
-              f"{meta.get('in_range_hits', 0)} in-range hits")
+        print(
+            f"\nCoverage: {meta.get('continuation_pages', 0)} pages scanned, "
+            f"{meta.get('in_range_hits', 0)} in-range hits"
+        )
         if meta.get("scan_capped_reason"):
             print(f"WARNING: Scan was capped — reason: {meta['scan_capped_reason']}")
 

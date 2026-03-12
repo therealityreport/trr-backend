@@ -64,6 +64,56 @@ def test_import_image_item_rejects_unknown_logo_target_type() -> None:
         )
 
 
+def test_import_image_item_requires_logo_target_type_for_logo_images() -> None:
+    with pytest.raises(ValidationError):
+        ImportImageItem(
+            candidate_id="logo-3",
+            url="https://example.com/logo.png",
+            kind="logo",
+        )
+
+
+def test_import_image_item_rejects_logo_metadata_for_non_logo_images() -> None:
+    with pytest.raises(ValidationError):
+        ImportImageItem(
+            candidate_id="poster-1",
+            url="https://example.com/poster.jpg",
+            kind="poster",
+            logo_target_type="show",
+        )
+
+
+def test_import_image_item_rejects_person_ids_for_logo_images() -> None:
+    with pytest.raises(ValidationError):
+        ImportImageItem(
+            candidate_id="logo-4",
+            url="https://example.com/logo.png",
+            kind="logo",
+            logo_target_type="publication",
+            person_ids=[uuid4()],
+        )
+
+
+def test_import_image_item_dedupes_person_ids_and_trims_optional_text() -> None:
+    person_id = uuid4()
+    item = ImportImageItem(
+        candidate_id="cast-1",
+        url="https://example.com/cast.jpg",
+        kind="cast",
+        caption="  Caption  ",
+        context_section="  gallery  ",
+        context_type="  hero  ",
+        asset_name="  cast-shot  ",
+        person_ids=[person_id, person_id],
+    )
+
+    assert item.caption == "Caption"
+    assert item.context_section == "gallery"
+    assert item.context_type == "hero"
+    assert item.asset_name == "cast-shot"
+    assert item.person_ids == [person_id]
+
+
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     now = datetime.now(tz=UTC)
     payload = {

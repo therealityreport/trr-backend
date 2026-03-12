@@ -80,8 +80,8 @@ Before ending session:
 2. Run targeted tests for changed endpoints/contracts.
 3. Update `docs/ai/HANDOFF.md`.
 
-## Skill Routing (Codex-Only)
-Use Codex-installed skills only.
+## Skill Routing
+Use repo-local and workspace-local TRR skills first.
 Primary skills:
 - `orchestrate-plan-execution`
 - `senior-backend`
@@ -95,6 +95,42 @@ Secondary skills:
 - `tdd-guide`
 - `tech-stack-evaluator`
 - `aws-solution-architect`
+
+Canonical owners:
+- `senior-backend` -> `/Users/thomashulihan/Projects/TRR/TRR-Backend/skills/senior-backend/SKILL.md`
+- `database-designer` -> `/Users/thomashulihan/Projects/TRR/TRR-Backend/skills/database-designer/SKILL.md`
+- `senior-fullstack` -> `/Users/thomashulihan/Projects/TRR/skills/senior-fullstack/SKILL.md`
+- `senior-qa` -> `/Users/thomashulihan/Projects/TRR/skills/senior-qa/SKILL.md`
+- `code-reviewer` -> `/Users/thomashulihan/Projects/TRR/skills/code-reviewer/SKILL.md`
+- `senior-architect` -> `/Users/thomashulihan/Projects/TRR/skills/senior-architect/SKILL.md`
+- `senior-devops` -> `/Users/thomashulihan/Projects/TRR/skills/senior-devops/SKILL.md`
+
+Use global `~/.codex/skills` only for skills that remain globally canonical in the governance matrix.
+
+### Before Each Plan
+Before producing any plan:
+1. Review the skills available for this backend scope:
+   - `TRR-Backend/skills/` first
+   - `/Users/thomashulihan/Projects/TRR/skills/` second
+   - globally canonical `~/.codex/skills` third
+   - alias or specialist skills only if no canonical owner fits cleanly
+2. Choose the minimum skill set needed.
+3. State which skills will be used for:
+   - plan writing
+   - implementation
+4. Invoke and follow those selected skills during plan creation and implementation routing.
+5. If no repo-local skill fits, fall back to workspace-local, then globally canonical.
+
+### AWS Deploy Rule
+For deployable AWS/cloud-infra/backend implementation work:
+1. Trigger this rule only when backend implementation changes require rollout of running AWS-backed services, workers, infra config, or backend behavior.
+2. Do not trigger this rule for docs-only, tests-only, local-only, or non-deployed changes.
+3. The selected implementation skills must include:
+   - `senior-devops`
+   - `aws-solution-architect`
+4. Required checks must pass before deploy.
+5. Implementation is not complete until the AWS deployment is executed successfully to the primary production target when rollout is required.
+6. Handoff must record deploy evidence and post-deploy verification.
 
 ## MCP Invocation Matrix
 | MCP Server | Invoke When |
