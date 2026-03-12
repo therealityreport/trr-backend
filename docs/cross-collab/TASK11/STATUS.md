@@ -1,7 +1,63 @@
 # Status — Task 11 (Tab-Isolated Admin Operations + Resumable Streams)
 
 Repo: TRR-Backend
-Last updated: March 12, 2026
+Last updated: March 13, 2026
+
+## March 13, 2026 — Canary re-validation passed against Vercel → Modal live path; R2 connectivity confirmed; Better Stack token still invalid
+
+- Re-ran live-path canary validation against the deployed Vercel → Modal backend after the March 12 Modal secret graph mismatch fix.
+- Evidence:
+  - `GET /health` → `200 {"status":"healthy"}`
+  - `GET /api/v1/shows/7782652f-...` → `200` with valid show JSON
+  - `POST /api/v1/admin/shows/.../google-news/sync` → `200`, `execution_backend_canonical=modal`, job `6553229d-6b3a-4a3a-b5a3-bf2d082036b3`
+  - `POST /api/v1/admin/shows/.../refresh/stream` → SSE stream completed:
+    - `event: operation` (event_seq=1, execution_backend_canonical=modal)
+    - `event: dispatched_to_modal` (event_seq=2)
+    - `event: progress` (event_seq=3, stage=starting)
+    - `event: complete` (event_seq=4, details_sync_shows.status=success)
+    - operation_id: `ab3a5dab-c7b5-4d0f-9c07-bb401948a3b1`
+    - completed in 5 seconds (created 23:23:02 → completed 23:23:07)
+  - Replay continuity: `after_seq=2` correctly returns only events 3 and 4
+  - `GET /api/v1/admin/operations/{operation_id}` → `200`, `status=completed`, `latest_event_seq=4`
+- Added two regression tests covering the failure mode that caused the canary gate block:
+  - `test_modal_dispatch_emits_operation_and_dispatched_events`
+  - `test_replay_stream_returns_all_events_after_modal_execution`
+- R2 credential verification:
+  - `OBJECT_STORAGE_*` env vars are now populated with real Cloudflare R2 values
+  - Provider: `r2`, Bucket: `trr-media-prod`
+  - Connectivity confirmed: `list_objects_v2` returns objects (healthcheck + artifacts)
+- Better Stack credential verification:
+  - `BETTER_STACK_SOURCE_TOKEN` is populated but returns HTTP `401` — token is not valid
+  - Operator still needs to create a Better Stack free HTTP source and replace the token
+- Canary gate status: **GREEN** — replay continuity is confirmed working on the live Vercel → Modal path
+
+## March 12, 2026 — Better Stack and Cloudflare R2 code paths are ready; live cutover still needs external credentials
+
+- Added a provider-neutral object-storage layer so the backend now prefers:
+  - `OBJECT_STORAGE_PROVIDER`
+  - `OBJECT_STORAGE_BUCKET`
+  - `OBJECT_STORAGE_REGION`
+  - `OBJECT_STORAGE_ENDPOINT_URL`
+  - `OBJECT_STORAGE_ACCESS_KEY_ID`
+  - `OBJECT_STORAGE_SECRET_ACCESS_KEY`
+  - `OBJECT_STORAGE_PUBLIC_BASE_URL`
+  while still accepting the legacy `AWS_*` names during rollout.
+- Updated the backend media paths that matter for the AWS S3 exit:
+  - `trr_backend/media/s3_mirror.py`
+  - `trr_backend/pipeline/manifests.py`
+  - `scripts/media/mirror_media_assets_to_s3.py`
+- Added explicit bucket migration tooling:
+  - `scripts/storage/sync_bucket_to_r2.py`
+  - `scripts/storage/verify_bucket_sync.py`
+- Extended the Render sync script so operator-shell `OBJECT_STORAGE_*` env values can be pushed into the live Render service env once the Cloudflare R2 credentials exist.
+- Added operator docs:
+  - `docs/deploy/r2_migration.md`
+- Current blocker remains external:
+  - no local `BETTER_STACK_*` credentials
+  - no local `OBJECT_STORAGE_*` / R2 credentials
+- Result:
+  - repo/runtime support is in place
+  - live Better Stack wiring, live Render/Modal storage cutover, and AWS S3 retirement are still pending credentials
 
 ## March 12, 2026 — AWS teardown pass is codified but still gated by the observation window
 
