@@ -482,6 +482,132 @@ def test_save_logo_source_query_upserts_and_resets_override() -> None:
     assert reset["source"]["effective_query_value"] == "peacocktv-logo"
 
 
+def test_save_logo_source_query_raises_explicit_migration_error_for_multi_query_stale_schema() -> None:
+    with patch(
+        "api.routers.admin_brands._upsert_logo_source_query_override",
+        side_effect=RuntimeError(admin_brands._QUERY_VALUES_MIGRATION_ERROR),
+    ):
+        with pytest.raises(RuntimeError, match="query_values"):
+            admin_brands._save_logo_source_query(
+                admin_brands.BrandLogosSourceQueryRequest(
+                    target_type="publication",
+                    target_key="peacocktv.com",
+                    target_label="peacocktv.com",
+                    logo_role="wordmark",
+                    source_provider="logos1000",
+                    query_values=["peacock-logo", "peacock-symbol"],
+                )
+            )
+
+
+def test_upsert_logo_source_query_override_single_value_falls_back_without_query_values_column() -> None:
+    calls: list[tuple[str, list[object] | None]] = []
+
+    def _fake_fetch_one(query: str, params: list[object] | None = None) -> dict[str, object]:
+        calls.append((query, params))
+        if len(calls) == 1:
+            raise RuntimeError('column "query_values" of relation "brand_logo_source_queries" does not exist')
+        return {"target_type": "publication"}
+
+    with patch("api.routers.admin_brands.pg.fetch_one", side_effect=_fake_fetch_one):
+        admin_brands._upsert_logo_source_query_override(
+            target_type="publication",
+            target_key="peacocktv.com",
+            logo_role="wordmark",
+            source_provider="logos1000",
+            query_values=["peacock-logo"],
+        )
+
+    assert len(calls) == 2
+    assert "query_values" in calls[0][0]
+    assert "query_values" not in calls[1][0]
+
+
+def test_upsert_logo_source_query_override_multi_value_requires_query_values_column() -> None:
+    with patch(
+        "api.routers.admin_brands.pg.fetch_one",
+        side_effect=RuntimeError('column "query_values" of relation "brand_logo_source_queries" does not exist'),
+    ):
+        with pytest.raises(RuntimeError, match="0178_brand_logo_source_query_values.sql"):
+            admin_brands._upsert_logo_source_query_override(
+                target_type="publication",
+                target_key="peacocktv.com",
+                logo_role="wordmark",
+                source_provider="logos1000",
+                query_values=["peacock-logo", "peacock-symbol"],
+            )
+
+
+def test_select_logo_option_skips_feature_selection_when_set_featured_false() -> None:
+    selected_row = {
+        "id": "asset-1",
+        "source_url": "https://cdn.example.com/logo.svg",
+        "source_provider": "logos1000",
+    }
+
+    with (
+        patch("api.routers.admin_brands._fetch_logo_option_row", side_effect=[selected_row, selected_row, selected_row]),
+        patch("api.routers.admin_brands._set_brand_role_selection") as set_brand_mock,
+        patch("api.routers.admin_brands._set_network_role_selection") as set_network_mock,
+        patch(
+            "api.routers.admin_brands._selected_logo_role_summary",
+            return_value={"wordmark": {"selected_asset_id": "existing-asset"}},
+        ),
+    ):
+        result = admin_brands._select_logo_option(
+            payload=admin_brands.BrandLogosOptionSelectRequest(
+                target_type="publication",
+                target_key="imdb.com",
+                target_label="IMDb",
+                logo_role="wordmark",
+                asset_id="asset-1",
+                set_featured=False,
+            ),
+            db=object(),
+        )
+
+    assert result["selected"]["id"] == "asset-1"
+    set_brand_mock.assert_not_called()
+    set_network_mock.assert_not_called()
+
+
+def test_select_logo_option_features_candidate_when_set_featured_true() -> None:
+    imported_row = {
+        "id": "asset-1",
+        "source_url": "https://cdn.example.com/logo.svg",
+        "source_provider": "logos1000",
+    }
+
+    with (
+        patch("api.routers.admin_brands._import_logo_option_candidate", return_value=imported_row) as import_mock,
+        patch("api.routers.admin_brands._set_brand_role_selection") as set_brand_mock,
+        patch("api.routers.admin_brands._fetch_logo_option_row", return_value=imported_row),
+        patch(
+            "api.routers.admin_brands._selected_logo_role_summary",
+            return_value={"wordmark": {"selected_asset_id": "asset-1"}},
+        ),
+    ):
+        result = admin_brands._select_logo_option(
+            payload=admin_brands.BrandLogosOptionSelectRequest(
+                target_type="publication",
+                target_key="imdb.com",
+                target_label="IMDb",
+                logo_role="wordmark",
+                candidate=admin_brands.BrandLogoDiscoverCandidateRequest(
+                    source_url="https://cdn.example.com/logo.svg",
+                    source_provider="logos1000",
+                    discovered_from="https://1000logos.net/imdb-logo/",
+                ),
+                set_featured=True,
+            ),
+            db=object(),
+        )
+
+    assert result["selected"]["id"] == "asset-1"
+    assert import_mock.call_args.kwargs["set_featured"] is True
+    set_brand_mock.assert_called_once()
+
+
 def test_sync_brand_logos_reports_related_pair_metrics() -> None:
     db = SimpleNamespace()
     with (

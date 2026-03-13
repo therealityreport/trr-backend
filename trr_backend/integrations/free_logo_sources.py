@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -34,6 +34,7 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 DEFAULT_READ_TIMEOUT_SECONDS = 15.0
 DEFAULT_RETRY_ATTEMPTS = 2
 DEFAULT_RETRY_BACKOFF_MS = 250
+DEFAULT_LOGOS_FANDOM_SUGGESTION_LIMIT = 30
 
 FREE_LOGO_SOURCE_PROVIDERS: tuple[str, ...] = (
     "wikimedia_commons",
@@ -93,6 +94,21 @@ _GENERIC_QUERY_TOKENS = {
     "logo",
     "logos",
 }
+_LOGOS_FANDOM_DISALLOWED_PAGE_PREFIXES = (
+    "special:",
+    "file:",
+    "category:",
+    "template:",
+    "user:",
+    "help:",
+    "talk:",
+    "mediawiki:",
+    "forum:",
+    "message_wall:",
+    "thread:",
+    "blog:",
+    "module:",
+)
 
 
 @dataclass(frozen=True)
@@ -343,14 +359,43 @@ def _normalize_logos_fandom_page_slug(value: str) -> str:
     if not raw_candidate or raw_candidate.casefold().startswith("special:search"):
         return ""
     if not any(token in raw_candidate for token in ("/", "_", "(", ")")):
+        if not (is_absolute_url and host and "logos.fandom.com" in host):
+            return ""
+    if " " in raw_candidate:
         return ""
-
     segments = [
         re.sub(r"\s+", "_", _normalize_text(segment))
         for segment in raw_candidate.split("/")
         if _normalize_text(segment)
     ]
     return "/".join(segments)
+
+
+def _coerce_logos_fandom_page_slug(value: str, *, allow_simple: bool = False) -> str:
+    page_slug = _normalize_logos_fandom_page_slug(value)
+    if page_slug or not allow_simple:
+        return page_slug
+
+    text = _normalize_text(unquote(value)).strip("/")
+    if not text or " " in text or text.casefold().startswith("special:search"):
+        return ""
+    if "://" in text:
+        return ""
+    return re.sub(r"\s+", "_", text)
+
+
+def _normalize_explicit_logos_fandom_url(value: str) -> str:
+    text = _normalize_text(value)
+    if "://" not in text:
+        return ""
+    parsed = urlparse(text)
+    host = _normalize_text(parsed.netloc).casefold()
+    path = _normalize_text(unquote(parsed.path))
+    if "logos.fandom.com" not in host or not path:
+        return ""
+    normalized_path = "/" + path.lstrip("/")
+    normalized_query = _normalize_text(parsed.query)
+    return urlunparse(("https", "logos.fandom.com", normalized_path, "", normalized_query, ""))
 
 
 def _logos_fandom_query_search_term(value: str) -> str:
@@ -361,6 +406,9 @@ def _logos_fandom_query_search_term(value: str) -> str:
 
 
 def _logos_fandom_query_links(value: str) -> list[str]:
+    explicit_url = _normalize_explicit_logos_fandom_url(value)
+    if explicit_url:
+        return [explicit_url]
     page_slug = _normalize_logos_fandom_page_slug(value)
     if page_slug:
         return [LOGOS_FANDOM_PAGE_URL.format(slug=page_slug)]
@@ -371,6 +419,108 @@ def _logos_fandom_query_links(value: str) -> list[str]:
         LOGOS_FANDOM_SEARCH_URL.format(query=quote_plus(search_term)),
         LOGOS_FANDOM_IMAGE_ONLY_SEARCH_URL.format(query=quote_plus(search_term)),
     ]
+
+
+def _default_logos_fandom_query_values(target_label: str, target_key: str) -> list[str]:
+    target_host = _normalize_hostname_from_url(target_key or target_label)
+    normalized_label = _normalize_text(target_label).casefold()
+    if target_host == "imdb.com" or normalized_label in {"imdb", "imdb.com"}:
+        return ["IMDb", "IMDb/Special_Logos"]
+    if target_host == "bravotv.com" or normalized_label in {
+        "bravo",
+        "bravo tv",
+        "bravo (united states)",
+        "bravotv.com",
+    }:
+        return ["Bravo_(United_States)", "Bravo_(United_States)/Special_Logos"]
+    return []
+
+
+def _is_valid_logos_fandom_suggestion_slug(value: str) -> bool:
+    slug = _normalize_logos_fandom_page_slug(value)
+    if not slug:
+        return False
+    if any(segment.casefold().startswith(_LOGOS_FANDOM_DISALLOWED_PAGE_PREFIXES) for segment in slug.split("/")):
+        return False
+    if slug.casefold().endswith((".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif")):
+        return False
+    return True
+
+
+def suggest_logos_fandom_query_values(
+    *,
+    target_label: str,
+    target_key: str,
+    current_query_values: list[str] | tuple[str, ...] | None = None,
+    timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS,
+    limit: int = DEFAULT_LOGOS_FANDOM_SUGGESTION_LIMIT,
+    session: requests.Session | None = None,
+) -> list[dict[str, str]]:
+    active_session = session or requests.Session()
+    normalized_current_values = _normalize_source_query_values("logos_fandom", list(current_query_values or []))
+    if not normalized_current_values:
+        normalized_current_values = _default_logos_fandom_query_values(target_label, target_key)
+    if not normalized_current_values:
+        return []
+
+    current_set = {value.casefold() for value in normalized_current_values}
+    target_tokens = _target_host_tokens(target_key, [_derive_brand_query_term(target_label, target_key)])
+    seen: set[str] = set()
+    suggestions: list[dict[str, str]] = []
+
+    def add_suggestion(query_value: str, *, reason: str, discovered_from: str) -> None:
+        normalized_value = _normalize_source_query_value("logos_fandom", query_value)
+        if not _is_valid_logos_fandom_suggestion_slug(normalized_value):
+            return
+        normalized_key = normalized_value.casefold()
+        if normalized_key in current_set or normalized_key in seen:
+            return
+        seen.add(normalized_key)
+        suggestions.append(
+            {
+                "query_value": normalized_value,
+                "query_link": LOGOS_FANDOM_PAGE_URL.format(slug=normalized_value),
+                "reason": reason,
+                "discovered_from": discovered_from,
+            }
+        )
+
+    for current_value in normalized_current_values:
+        page_slug = _coerce_logos_fandom_page_slug(current_value, allow_simple=True)
+        if not page_slug:
+            continue
+        page_url = LOGOS_FANDOM_PAGE_URL.format(slug=page_slug)
+        if not page_slug.casefold().endswith("/special_logos"):
+            add_suggestion(f"{page_slug}/Special_Logos", reason="special_logos_page", discovered_from=page_url)
+
+        response = _safe_get(active_session, page_url, timeout_seconds=timeout_seconds)
+        if response is None or response.status_code >= 400:
+            continue
+        soup = BeautifulSoup(response.text, "html.parser")
+        container = soup.select_one(".mw-parser-output") or soup.body or soup
+        linked_slugs: list[str] = []
+        for anchor in container.find_all("a", href=True):
+            slug = _normalize_logos_fandom_page_slug(anchor.get("href") or "")
+            if not _is_valid_logos_fandom_suggestion_slug(slug):
+                continue
+            if slug.casefold() in current_set:
+                continue
+            linked_slugs.append(slug)
+
+        def _score(slug: str) -> tuple[int, int, str]:
+            slug_lower = slug.casefold()
+            humanized = _humanize_query_fragment(slug)
+            candidate_tokens = set(re.split(r"[^a-z0-9]+", humanized.casefold()))
+            overlap = len({token for token in candidate_tokens if len(token) >= 2} & target_tokens)
+            special_bonus = 0 if "/special_logos" in slug_lower else 1
+            return (special_bonus, -overlap, slug_lower)
+
+        for slug in sorted(set(linked_slugs), key=_score):
+            add_suggestion(slug, reason=f"linked_from:{page_slug}", discovered_from=page_url)
+            if len(suggestions) >= max(1, limit):
+                return suggestions[:limit]
+
+    return suggestions[:limit]
 
 
 def _is_png_or_svg_logo_url(url: str) -> bool:
@@ -436,6 +586,24 @@ def _normalize_source_query_values(source_provider: str, values: list[str] | tup
         seen.add(normalized_key)
         normalized_values.append(normalized)
     return normalized_values
+
+
+def _preserve_query_override_values(values: list[str] | tuple[str, ...] | str | None) -> list[str]:
+    if values is None:
+        return []
+    raw_values = values if isinstance(values, (list, tuple)) else [values]
+    preserved_values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        normalized = _normalize_text(raw_value)
+        if not normalized:
+            continue
+        normalized_key = normalized.casefold()
+        if normalized_key in seen:
+            continue
+        seen.add(normalized_key)
+        preserved_values.append(normalized)
+    return preserved_values
 
 
 def _dedupe_query_links(query_links: list[str]) -> list[str]:
@@ -522,7 +690,17 @@ def build_source_query_profile(
         }
 
     default_query_value = brand_query_term
-    query_values = _normalize_source_query_values(provider, query_override) or [default_query_value]
+    default_query_values = _default_logos_fandom_query_values(target_label, target_key) if provider == "logos_fandom" else []
+    if provider == "logos_fandom" and default_query_values:
+        default_query_value = default_query_values[0]
+    raw_query_values = _preserve_query_override_values(query_override) if provider == "logos_fandom" else []
+    query_values = (
+        raw_query_values
+        if provider == "logos_fandom" and raw_query_values
+        else _normalize_source_query_values(provider, query_override) or [default_query_value]
+    )
+    if provider == "logos_fandom" and default_query_values and query_override is None:
+        query_values = default_query_values
     effective_query_value = query_values[0]
     query_links: list[str] = []
     for query_value in query_values:
@@ -534,7 +712,10 @@ def build_source_query_profile(
                 ]
             )
         elif provider == "logos_fandom":
-            query_links.extend(_logos_fandom_query_links(query_value))
+            if default_query_values and query_override is None and query_value in default_query_values:
+                query_links.append(LOGOS_FANDOM_PAGE_URL.format(slug=query_value))
+            else:
+                query_links.extend(_logos_fandom_query_links(query_value))
         elif provider == "worldvectorlogo":
             query_links.append(WORLDVECTORLOGO_SEARCH_URL.format(query=quote_plus(query_value)))
         elif provider == "seeklogo":
@@ -1549,12 +1730,21 @@ def collect_free_logo_candidates(
 ) -> list[FreeLogoCandidate]:
     session = session or requests.Session()
     normalized_provider = _normalize_text(source_provider).casefold()
+    raw_query_values = (
+        [_normalize_text(value) for value in query_override]
+        if isinstance(query_override, (list, tuple))
+        else [_normalize_text(query_override)]
+        if query_override is not None
+        else []
+    )
     normalized_query_values = (
         _normalize_source_query_values(normalized_provider, query_override) if normalized_provider else []
     )
-    if normalized_provider and len(normalized_query_values) > 1:
+    if normalized_provider and len(raw_query_values) > 1:
         candidates: list[FreeLogoCandidate] = []
-        for query_value in normalized_query_values:
+        for query_value in raw_query_values:
+            if not query_value:
+                continue
             candidates.extend(
                 collect_free_logo_candidates(
                     target_label=target_label,
@@ -1585,10 +1775,12 @@ def collect_free_logo_candidates(
         else _derive_brand_query_term(target_label, target_key, aliases=aliases)
     )
     if normalized_provider == "logos_fandom":
-        brand_query_term = (
-            _logos_fandom_query_search_term(_normalize_text((query_profile or {}).get("effective_query_value")))
-            or brand_query_term
-        )
+        raw_effective_query = _normalize_text(query_override)
+        if not raw_effective_query:
+            raw_effective_query = _normalize_text((query_profile or {}).get("effective_query_value"))
+        fandom_page_slug = _coerce_logos_fandom_page_slug(raw_effective_query, allow_simple=True)
+        if fandom_page_slug:
+            brand_query_term = _humanize_query_fragment(fandom_page_slug) or brand_query_term
     terms = [brand_query_term]
     match_tokens = _target_host_tokens(target_key, terms)
     target_host = _normalize_hostname_from_url(target_key)
@@ -1609,10 +1801,26 @@ def collect_free_logo_candidates(
         )
 
     if _provider_enabled("logos_fandom"):
+        raw_effective_query = _normalize_text(query_override)
+        if not raw_effective_query:
+            raw_effective_query = _normalize_text((query_profile or {}).get("effective_query_value"))
+        fandom_lookup_name = _coerce_logos_fandom_page_slug(raw_effective_query, allow_simple=True) or brand_query_term
+        fandom_aliases: list[str] = []
+        for alias in (
+            brand_query_term,
+            _logos_fandom_query_search_term(raw_effective_query),
+            _normalize_text((query_profile or {}).get("effective_query_value")),
+        ):
+            normalized_alias = _normalize_text(alias)
+            if not normalized_alias or "://" in normalized_alias:
+                continue
+            if normalized_alias.casefold() in {value.casefold() for value in fandom_aliases}:
+                continue
+            fandom_aliases.append(normalized_alias)
         try:
             logopedia_urls = fetch_logopedia_logo_candidates(
-                brand_query_term,
-                aliases=terms,
+                fandom_lookup_name,
+                aliases=fandom_aliases or terms,
                 timeout_seconds=timeout_seconds,
                 session=session,
             )
@@ -1626,7 +1834,7 @@ def collect_free_logo_candidates(
             if not _logos_fandom_url_matches_target(url=url, tokens=match_tokens):
                 continue
             discovered_from_links = _logos_fandom_query_links(
-                _normalize_text((query_profile or {}).get("effective_query_value"))
+                raw_effective_query or _normalize_text((query_profile or {}).get("effective_query_value"))
             )
             discovered_from = (
                 discovered_from_links[0]

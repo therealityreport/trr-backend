@@ -629,6 +629,14 @@ def test_worker_passes_all_platforms_when_no_flag(monkeypatch) -> None:
     assert captured["supported_platforms"] == list(SOCIAL_SUPPORTED_PLATFORMS)
 
 
+def test_parse_args_accepts_reddit_platform(monkeypatch) -> None:
+    monkeypatch.setattr(worker.sys, "argv", ["worker", "--platform", "reddit"])
+
+    args = worker.parse_args()
+
+    assert args.platform == "reddit"
+
+
 def test_parse_args_accepts_shared_pipeline_stages(monkeypatch) -> None:
     monkeypatch.setattr("sys.argv", ["worker.py", "--stage", "post_classify", "--once"])
 

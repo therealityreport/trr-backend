@@ -1529,11 +1529,25 @@ class YouTubeScraper:
             )
 
         for video in unique_videos:
-            if not video.channel_id and canonical_channel_id:
+            try:
+                channel_id = str(video.channel_id or "").strip()
+            except AttributeError:
+                channel_id = ""
+            if not channel_id and canonical_channel_id:
                 video.channel_id = canonical_channel_id
-            if not video.channel_title and resolved_channel_title:
+
+            try:
+                channel_title = str(video.channel_title or "").strip()
+            except AttributeError:
+                channel_title = ""
+            if not channel_title and resolved_channel_title:
                 video.channel_title = resolved_channel_title
-            if not video.user_avatar_url and resolved_channel_avatar_url:
+
+            try:
+                user_avatar_url = str(video.user_avatar_url or "").strip()
+            except AttributeError:
+                user_avatar_url = ""
+            if not user_avatar_url and resolved_channel_avatar_url:
                 video.user_avatar_url = resolved_channel_avatar_url
 
         logger.info(f"Scrape complete: found {len(unique_videos)} videos")

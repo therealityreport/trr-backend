@@ -8,9 +8,73 @@ import socket
 import uuid
 from typing import Final
 
-import modal
+try:
+    import modal
+except ModuleNotFoundError:  # pragma: no cover - exercised by local/test imports without modal installed
+    class _ModalImage:
+        @classmethod
+        def debian_slim(cls, **_kwargs):
+            return cls()
+
+        def pip_install_from_requirements(self, *_args, **_kwargs):
+            return self
+
+        def add_local_python_source(self, *_args, **_kwargs):
+            return self
+
+        def add_local_file(self, *_args, **_kwargs):
+            return self
+
+        def add_local_dir(self, *_args, **_kwargs):
+            return self
+
+        def apt_install(self, *_args, **_kwargs):
+            return self
+
+        def pip_install(self, *_args, **_kwargs):
+            return self
+
+    class _ModalSecret:
+        @staticmethod
+        def from_name(name: str):
+            return {"named": name}
+
+        @staticmethod
+        def from_dotenv(path: pathlib.Path):
+            return {"dotenv": str(path)}
+
+    class _ModalCron:
+        def __init__(self, expression: str, *, timezone: str | None = None):
+            self.expression = expression
+            self.timezone = timezone
+
+    class _ModalApp:
+        def __init__(self, *_args, **_kwargs):
+            return
+
+        def function(self, *_args, **_kwargs):
+            def _decorator(func):
+                return func
+
+            return _decorator
+
+    class _ModalModule:
+        Image = _ModalImage
+        Secret = _ModalSecret
+        Cron = _ModalCron
+        App = _ModalApp
+
+        @staticmethod
+        def asgi_app(*_args, **_kwargs):
+            def _decorator(func):
+                return func
+
+            return _decorator
+
+    modal = _ModalModule()
 
 from trr_backend.observability import configure_runtime_observability
+from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _APP_NAME = str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() or "trr-backend-jobs"
@@ -346,7 +410,7 @@ def heartbeat_remote_executors() -> dict[str, object]:
             dispatcher_name="social",
             status="idle",
             metadata_updates=metadata,
-            supported_platforms=["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"],
+            supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
         )
     return {"ok": True}
 

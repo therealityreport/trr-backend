@@ -27,26 +27,34 @@ DEFAULT_ASG_NAME = "trr-api-asg"
 DEFAULT_LAUNCH_TEMPLATE_NAME = "trr-api-lt"
 DEFAULT_LOAD_BALANCER_NAME = "trr-api-alb"
 DEFAULT_TARGET_GROUP_NAME = "trr-api-tg"
+DEFAULT_PRIVATE_ROUTE_TABLE_ID = "rtb-04176689ad967a8ae"
 DEFAULT_NAT_GATEWAY_ID = "nat-004581b7931e685e7"
 DEFAULT_NAT_EIP_ALLOCATION_ID = "eipalloc-0c6c7ef0913e7a3d8"
 DEFAULT_ALB_SECURITY_GROUP_ID = "sg-054ae25e1699a3845"
 DEFAULT_API_SECURITY_GROUP_ID = "sg-09ad087d9a6b689dd"
 DEFAULT_RDS_SNAPSHOT_ID = "trr-metadata-db-final-2026-03-07"
+DEFAULT_METRICS_LAMBDA_NAME = "trr-jobplane-metrics-publisher"
+DEFAULT_METRICS_LAMBDA_ROLE_NAME = "trr-metrics-publisher-role"
 DEFAULT_OBSERVATION_WINDOW_END = "2026-03-13T16:09:13-04:00"
 DEFAULT_DELETE_ALARMS = (
     "trr-api-target-5xx",
     "trr-api-target-5xx-high",
-)
-DEFAULT_KEEP_ALARMS = (
     "trr-long-job-failures-high",
     "trr-queue-depth-high",
     "trr-stale-leases-high",
 )
 DEFAULT_DELETE_LOG_GROUPS = (
+    "/aws/lambda/trr-jobplane-metrics-publisher",
+    "/aws/ssm/AWS-RunShellScript",
     "/trr/api/bootstrap",
     "/trr/ec2/cloud-init",
     "/trr/ec2/cloud-init-output",
     "/trr/worker/bootstrap",
+)
+DEFAULT_DELETE_BUCKETS = (
+    "trr-backend",
+    "screenalytics",
+    "ltsr-data-bucket",
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -68,11 +76,14 @@ class ResourceConfig:
     launch_template_name: str
     load_balancer_name: str
     target_group_name: str
+    private_route_table_id: str
     nat_gateway_id: str
     nat_eip_allocation_id: str
     alb_security_group_id: str
     api_security_group_id: str
     rds_snapshot_id: str
+    metrics_lambda_name: str
+    metrics_lambda_role_name: str
     observation_window_end: str
 
 
@@ -86,11 +97,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--launch-template-name", default=DEFAULT_LAUNCH_TEMPLATE_NAME)
     parser.add_argument("--load-balancer-name", default=DEFAULT_LOAD_BALANCER_NAME)
     parser.add_argument("--target-group-name", default=DEFAULT_TARGET_GROUP_NAME)
+    parser.add_argument("--private-route-table-id", default=DEFAULT_PRIVATE_ROUTE_TABLE_ID)
     parser.add_argument("--nat-gateway-id", default=DEFAULT_NAT_GATEWAY_ID)
     parser.add_argument("--nat-eip-allocation-id", default=DEFAULT_NAT_EIP_ALLOCATION_ID)
     parser.add_argument("--alb-security-group-id", default=DEFAULT_ALB_SECURITY_GROUP_ID)
     parser.add_argument("--api-security-group-id", default=DEFAULT_API_SECURITY_GROUP_ID)
     parser.add_argument("--rds-snapshot-id", default=DEFAULT_RDS_SNAPSHOT_ID)
+    parser.add_argument("--metrics-lambda-name", default=DEFAULT_METRICS_LAMBDA_NAME)
+    parser.add_argument("--metrics-lambda-role-name", default=DEFAULT_METRICS_LAMBDA_ROLE_NAME)
     parser.add_argument("--observation-window-end", default=DEFAULT_OBSERVATION_WINDOW_END)
     parser.add_argument(
         "--execute",
@@ -160,6 +174,9 @@ def _boto3_clients(region: str) -> dict[str, Any]:
         "cloudwatch": session.client("cloudwatch"),
         "logs": session.client("logs"),
         "rds": session.client("rds"),
+        "lambda": session.client("lambda"),
+        "iam": session.client("iam"),
+        "s3": session.client("s3"),
     }
 
 
@@ -242,6 +259,37 @@ def _describe_snapshot(client: Any, snapshot_id: str) -> dict[str, Any] | None:
         raise
     snapshots = response.get("DBSnapshots") or []
     return snapshots[0] if snapshots else None
+
+
+def _describe_lambda_function(client: Any, function_name: str) -> dict[str, Any] | None:
+    try:
+        response = client.get_function(FunctionName=function_name)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code == "ResourceNotFoundException":
+            return None
+        raise
+    return response.get("Configuration") or None
+
+
+def _describe_role(client: Any, role_name: str) -> dict[str, Any] | None:
+    try:
+        response = client.get_role(RoleName=role_name)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code == "NoSuchEntity":
+            return None
+        raise
+    return response.get("Role") or None
+
+
+def _list_bucket_names(client: Any) -> set[str]:
+    response = client.list_buckets()
+    return {
+        str(bucket.get("Name") or "").strip()
+        for bucket in response.get("Buckets") or []
+        if str(bucket.get("Name") or "").strip()
+    }
 
 
 def _list_alarm_names(client: Any) -> set[str]:
@@ -333,6 +381,9 @@ def _inventory(clients: dict[str, Any], config: ResourceConfig) -> dict[str, Any
         "launch_template": _describe_launch_template(clients["ec2"], config.launch_template_name),
         "load_balancer": lb,
         "target_group": _describe_target_group(clients["elbv2"], config.target_group_name),
+        "private_route_table": clients["ec2"].describe_route_tables(RouteTableIds=[config.private_route_table_id]).get(
+            "RouteTables", []
+        ),
         "nat_gateway": _describe_nat_gateway(clients["ec2"], config.nat_gateway_id),
         "nat_eip_present": any(
             str(entry.get("AllocationId") or "") == config.nat_eip_allocation_id for entry in addresses
@@ -341,6 +392,9 @@ def _inventory(clients: dict[str, Any], config: ResourceConfig) -> dict[str, Any
         "alb_security_group": _describe_security_group(clients["ec2"], config.alb_security_group_id),
         "api_security_group": _describe_security_group(clients["ec2"], config.api_security_group_id),
         "snapshot": _describe_snapshot(clients["rds"], config.rds_snapshot_id),
+        "metrics_lambda": _describe_lambda_function(clients["lambda"], config.metrics_lambda_name),
+        "metrics_role": _describe_role(clients["iam"], config.metrics_lambda_role_name),
+        "buckets_present": sorted(name for name in DEFAULT_DELETE_BUCKETS if name in _list_bucket_names(clients["s3"])),
         "alarm_names": sorted(_list_alarm_names(clients["cloudwatch"])),
         "log_groups_present": {
             name: _log_group_exists(clients["logs"], name) for name in DEFAULT_DELETE_LOG_GROUPS
@@ -391,6 +445,31 @@ def _delete_target_group(client: Any, name: str) -> None:
         return
     client.delete_target_group(TargetGroupArn=tg["TargetGroupArn"])
     _wait_for(lambda: _describe_target_group(client, name) is None, description=f"target group {name} deletion")
+
+
+def _delete_nat_route(client: Any, route_table_id: str, nat_gateway_id: str) -> None:
+    route_tables = client.describe_route_tables(RouteTableIds=[route_table_id]).get("RouteTables") or []
+    if not route_tables:
+        return
+    routes = route_tables[0].get("Routes") or []
+    has_nat_route = any(
+        str(route.get("DestinationCidrBlock") or "") == "0.0.0.0/0"
+        and str(route.get("NatGatewayId") or "") == nat_gateway_id
+        for route in routes
+    )
+    if not has_nat_route:
+        return
+    client.delete_route(RouteTableId=route_table_id, DestinationCidrBlock="0.0.0.0/0")
+    _wait_for(
+        lambda: not any(
+            str(route.get("DestinationCidrBlock") or "") == "0.0.0.0/0"
+            and str(route.get("NatGatewayId") or "") == nat_gateway_id
+            for route in (
+                client.describe_route_tables(RouteTableIds=[route_table_id]).get("RouteTables") or [{}]
+            )[0].get("Routes", [])
+        ),
+        description=f"NAT route removal from {route_table_id}",
+    )
 
 
 def _delete_security_group(client: Any, group_id: str) -> None:
@@ -470,6 +549,94 @@ def _delete_snapshot(client: Any, snapshot_id: str) -> None:
     _wait_for(lambda: _describe_snapshot(client, snapshot_id) is None, description=f"snapshot {snapshot_id} deletion")
 
 
+def _delete_lambda_function(client: Any, function_name: str) -> None:
+    config = _describe_lambda_function(client, function_name)
+    if not config:
+        return
+    client.delete_function(FunctionName=function_name)
+    _wait_for(
+        lambda: _describe_lambda_function(client, function_name) is None,
+        description=f"Lambda function {function_name} deletion",
+    )
+
+
+def _delete_role(client: Any, role_name: str) -> None:
+    role = _describe_role(client, role_name)
+    if not role:
+        return
+    attached = client.list_attached_role_policies(RoleName=role_name).get("AttachedPolicies") or []
+    for policy in attached:
+        policy_arn = str(policy.get("PolicyArn") or "").strip()
+        if policy_arn:
+            client.detach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+    inline_names = client.list_role_policies(RoleName=role_name).get("PolicyNames") or []
+    for policy_name in inline_names:
+        client.delete_role_policy(RoleName=role_name, PolicyName=policy_name)
+    client.delete_role(RoleName=role_name)
+    _wait_for(
+        lambda: _describe_role(client, role_name) is None,
+        description=f"IAM role {role_name} deletion",
+    )
+
+
+def _empty_bucket(client: Any, bucket_name: str) -> None:
+    paginator = client.get_paginator("list_object_versions")
+    try:
+        pages = paginator.paginate(Bucket=bucket_name)
+        has_versioning_payload = True
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code not in {"NoSuchBucket"}:
+            raise
+        return
+
+    objects_to_delete: list[dict[str, str]] = []
+    if has_versioning_payload:
+        for page in pages:
+            for item in page.get("Versions") or []:
+                key = str(item.get("Key") or "")
+                version_id = str(item.get("VersionId") or "")
+                if key and version_id:
+                    objects_to_delete.append({"Key": key, "VersionId": version_id})
+            for item in page.get("DeleteMarkers") or []:
+                key = str(item.get("Key") or "")
+                version_id = str(item.get("VersionId") or "")
+                if key and version_id:
+                    objects_to_delete.append({"Key": key, "VersionId": version_id})
+
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket_name):
+        for item in page.get("Contents") or []:
+            key = str(item.get("Key") or "")
+            if key:
+                objects_to_delete.append({"Key": key})
+
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in objects_to_delete:
+        dedupe_key = (item["Key"], item.get("VersionId", ""))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        deduped.append(item)
+
+    for idx in range(0, len(deduped), 1000):
+        chunk = deduped[idx : idx + 1000]
+        client.delete_objects(Bucket=bucket_name, Delete={"Objects": chunk, "Quiet": True})
+
+
+def _delete_bucket(client: Any, bucket_name: str) -> None:
+    if bucket_name not in _list_bucket_names(client):
+        return
+    _empty_bucket(client, bucket_name)
+    client.delete_bucket(Bucket=bucket_name)
+    _wait_for(
+        lambda: bucket_name not in _list_bucket_names(client),
+        description=f"S3 bucket {bucket_name} deletion",
+        timeout=300,
+    )
+
+
 def _verify_post_teardown(
     clients: dict[str, Any],
     config: ResourceConfig,
@@ -484,6 +651,15 @@ def _verify_post_teardown(
         raise TeardownError(f"{config.load_balancer_name} still exists after teardown.")
     if inventory["target_group"] is not None:
         raise TeardownError(f"{config.target_group_name} still exists after teardown.")
+    route_tables = inventory["private_route_table"] or []
+    if route_tables:
+        routes = route_tables[0].get("Routes") or []
+        if any(
+            str(route.get("DestinationCidrBlock") or "") == "0.0.0.0/0"
+            and str(route.get("NatGatewayId") or "") == config.nat_gateway_id
+            for route in routes
+        ):
+            raise TeardownError(f"{config.private_route_table_id} still points 0.0.0.0/0 at {config.nat_gateway_id}.")
     nat_gateway = inventory["nat_gateway"]
     if nat_gateway is not None and str(nat_gateway.get("State") or "").lower() != "deleted":
         raise TeardownError(f"{config.nat_gateway_id} still exists after teardown.")
@@ -499,16 +675,19 @@ def _verify_post_teardown(
         raise TeardownError(f"{config.api_security_group_id} still exists after teardown.")
     if inventory["snapshot"] is not None:
         raise TeardownError(f"{config.rds_snapshot_id} still exists after teardown.")
+    if inventory["metrics_lambda"] is not None:
+        raise TeardownError(f"{config.metrics_lambda_name} still exists after teardown.")
+    if inventory["metrics_role"] is not None:
+        raise TeardownError(f"{config.metrics_lambda_role_name} still exists after teardown.")
     remaining_alarms = set(inventory["alarm_names"])
     for alarm_name in DEFAULT_DELETE_ALARMS:
         if alarm_name in remaining_alarms:
             raise TeardownError(f"Deleted alarm {alarm_name} is still present after teardown.")
-    for keep_alarm in DEFAULT_KEEP_ALARMS:
-        if keep_alarm not in remaining_alarms:
-            raise TeardownError(f"Expected custom alarm {keep_alarm} is missing after teardown.")
     for log_group_name, present in inventory["log_groups_present"].items():
         if present:
             raise TeardownError(f"Deleted log group {log_group_name} is still present after teardown.")
+    if inventory["buckets_present"]:
+        raise TeardownError(f"Deleted S3 buckets are still present after teardown: {inventory['buckets_present']}")
     if inventory["ec2_instances_running_or_stopped"]:
         raise TeardownError("Unexpected EC2 instances appeared during teardown.")
     if inventory["volumes_present"]:
@@ -532,11 +711,14 @@ def main() -> int:
         launch_template_name=args.launch_template_name,
         load_balancer_name=args.load_balancer_name,
         target_group_name=args.target_group_name,
+        private_route_table_id=args.private_route_table_id,
         nat_gateway_id=args.nat_gateway_id,
         nat_eip_allocation_id=args.nat_eip_allocation_id,
         alb_security_group_id=args.alb_security_group_id,
         api_security_group_id=args.api_security_group_id,
         rds_snapshot_id=args.rds_snapshot_id,
+        metrics_lambda_name=args.metrics_lambda_name,
+        metrics_lambda_role_name=args.metrics_lambda_role_name,
         observation_window_end=args.observation_window_end,
     )
     clients = _boto3_clients(config.region)
@@ -575,13 +757,18 @@ def main() -> int:
         _delete_launch_template(clients["ec2"], config.launch_template_name)
         _delete_load_balancer(clients["elbv2"], config.load_balancer_name)
         _delete_target_group(clients["elbv2"], config.target_group_name)
+        _delete_nat_route(clients["ec2"], config.private_route_table_id, config.nat_gateway_id)
         _delete_security_group(clients["ec2"], config.alb_security_group_id)
         _delete_security_group(clients["ec2"], config.api_security_group_id)
         _delete_nat_gateway(clients["ec2"], config.nat_gateway_id)
         _release_eip(clients["ec2"], config.nat_eip_allocation_id)
         _delete_alarms(clients["cloudwatch"], DEFAULT_DELETE_ALARMS)
         _delete_log_groups(clients["logs"], DEFAULT_DELETE_LOG_GROUPS)
+        _delete_lambda_function(clients["lambda"], config.metrics_lambda_name)
+        _delete_role(clients["iam"], config.metrics_lambda_role_name)
         _delete_snapshot(clients["rds"], config.rds_snapshot_id)
+        for bucket_name in DEFAULT_DELETE_BUCKETS:
+            _delete_bucket(clients["s3"], bucket_name)
         inventory_after = _verify_post_teardown(clients, config, prior_alb_public_ips)
         result["inventory_after"] = inventory_after
         output = (

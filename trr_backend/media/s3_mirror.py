@@ -13,7 +13,10 @@ from urllib.parse import quote, unquote, urlparse
 
 import boto3
 import requests
+from botocore.client import Config
 from botocore.exceptions import ClientError, ProfileNotFound
+
+from trr_backend.object_storage import load_object_storage_config
 
 _DEFAULT_HEADERS = {
     "accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -158,7 +161,15 @@ class S3Config:
     region: str
     cdn_base_url: str
     prefix: str
+    provider: str
+    endpoint_url: str | None
+    access_key_id: str | None
+    secret_access_key: str | None
+    session_token: str | None
     profile_name: str | None
+
+
+HostedMediaStorageConfig = S3Config
 
 
 def _require_env(name: str) -> str:
@@ -175,48 +186,60 @@ def _require_region() -> str:
     return region
 
 
-def _validate_cdn_base_url(value: str) -> str:
+def _validate_public_base_url(value: str) -> str:
     base = (value or "").strip()
     if not base:
-        raise RuntimeError("Missing required environment variable: AWS_CDN_BASE_URL")
+        raise RuntimeError(
+            "Missing required environment variable: OBJECT_STORAGE_PUBLIC_BASE_URL (or AWS_CDN_BASE_URL)"
+        )
     if not base.startswith("https://"):
-        raise RuntimeError("AWS_CDN_BASE_URL must start with https://")
+        raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL must start with https://")
     if "dxxxx" in base.lower():
-        raise RuntimeError("AWS_CDN_BASE_URL contains placeholder 'dxxxx'; set the real CDN domain")
+        raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL contains placeholder 'dxxxx'; set the real public host")
     parsed = urlparse(base)
     host = (parsed.netloc or "").strip().lower()
     if not host:
-        raise RuntimeError("AWS_CDN_BASE_URL must include a valid host")
+        raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL must include a valid host")
     if host == "s3.amazonaws.com" or host.endswith(".s3.amazonaws.com"):
-        raise RuntimeError("AWS_CDN_BASE_URL must not be a direct S3 endpoint")
+        raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL must not be a direct S3 endpoint")
     if re.match(r"^s3[.-][a-z0-9-]+\.amazonaws\.com$", host):
-        raise RuntimeError("AWS_CDN_BASE_URL must not be a direct S3 endpoint")
+        raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL must not be a direct S3 endpoint")
     if re.match(r"^[a-z0-9.-]+\.s3[.-][a-z0-9-]+\.amazonaws\.com$", host):
-        raise RuntimeError("AWS_CDN_BASE_URL must not be a direct S3 endpoint")
+        raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL must not be a direct S3 endpoint")
     return base.rstrip("/")
 
 
-def _load_s3_config() -> S3Config:
-    bucket = _require_env("AWS_S3_BUCKET")
-    region = _require_region()
-    cdn_base_url = _validate_cdn_base_url(_require_env("AWS_CDN_BASE_URL"))
-    prefix = (os.getenv("AWS_S3_PREFIX") or "").strip().strip("/")
-    access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
-    secret_key = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
-    profile_name = None
-    if not (access_key and secret_key):
-        profile_name = (os.getenv("AWS_PROFILE") or os.getenv("AWS_DEFAULT_PROFILE") or "").strip() or None
+def _validate_cdn_base_url(value: str) -> str:
+    return _validate_public_base_url(value)
+
+
+def _load_hosted_media_storage_config() -> HostedMediaStorageConfig:
+    storage = load_object_storage_config(require_bucket=True, require_public_base_url=True)
+    profile_name = storage.profile_name
     return S3Config(
-        bucket=bucket,
-        region=region,
-        cdn_base_url=cdn_base_url,
-        prefix=prefix,
+        bucket=storage.bucket,
+        region=storage.region,
+        cdn_base_url=_validate_public_base_url(storage.public_base_url or ""),
+        prefix=storage.prefix,
+        provider=storage.provider,
+        endpoint_url=storage.endpoint_url,
+        access_key_id=storage.access_key_id,
+        secret_access_key=storage.secret_access_key,
+        session_token=storage.session_token,
         profile_name=profile_name,
     )
 
 
+def _load_s3_config() -> S3Config:
+    return _load_hosted_media_storage_config()
+
+
+def get_hosted_media_storage_config() -> HostedMediaStorageConfig:
+    return _load_hosted_media_storage_config()
+
+
 def get_s3_config() -> S3Config:
-    return _load_s3_config()
+    return get_hosted_media_storage_config()
 
 
 def _build_boto3_session(config: S3Config) -> boto3.Session:
@@ -232,44 +255,54 @@ def _build_boto3_session(config: S3Config) -> boto3.Session:
     return boto3.Session(region_name=config.region)
 
 
-def get_s3_client():
-    config = get_s3_config()
-    access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
-    secret_key = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
-    session_token = (os.getenv("AWS_SESSION_TOKEN") or "").strip()
-
+def get_object_storage_client():
+    config = get_hosted_media_storage_config()
     session = _build_boto3_session(config)
-    if config.profile_name:
-        return session.client("s3", region_name=config.region)
-    if access_key and secret_key:
-        client_kwargs: dict[str, Any] = {
-            "region_name": config.region,
-            "aws_access_key_id": access_key,
-            "aws_secret_access_key": secret_key,
-        }
-        if session_token:
-            client_kwargs["aws_session_token"] = session_token
-        return session.client("s3", **client_kwargs)
-    return session.client("s3", region_name=config.region)
+    client_kwargs: dict[str, Any] = {"region_name": config.region}
+    if config.endpoint_url:
+        client_kwargs["endpoint_url"] = config.endpoint_url
+        client_kwargs["config"] = Config(signature_version="s3v4", s3={"addressing_style": "path"})
+    if config.access_key_id and config.secret_access_key:
+        client_kwargs["aws_access_key_id"] = config.access_key_id
+        client_kwargs["aws_secret_access_key"] = config.secret_access_key
+        if config.session_token:
+            client_kwargs["aws_session_token"] = config.session_token
+    return session.client("s3", **client_kwargs)
+
+
+def get_s3_client():
+    return get_object_storage_client()
+
+
+def get_object_storage_bucket() -> str:
+    return get_hosted_media_storage_config().bucket
 
 
 def get_s3_bucket() -> str:
-    return get_s3_config().bucket
+    return get_object_storage_bucket()
 
 
 def get_s3_prefix() -> str:
-    return get_s3_config().prefix
+    return get_hosted_media_storage_config().prefix
+
+
+def get_public_base_url() -> str:
+    return get_hosted_media_storage_config().cdn_base_url
 
 
 def get_cdn_base_url() -> str:
-    return get_s3_config().cdn_base_url
+    return get_public_base_url()
 
 
-def build_hosted_url(hosted_key: str) -> str:
+def build_public_object_url(hosted_key: str) -> str:
     key = str(hosted_key or "").strip()
     if not key:
         raise RuntimeError("hosted_key is required to build hosted_url")
-    return f"{get_cdn_base_url()}/{key.lstrip('/')}"
+    return f"{get_public_base_url()}/{key.lstrip('/')}"
+
+
+def build_hosted_url(hosted_key: str) -> str:
+    return build_public_object_url(hosted_key)
 
 
 def guess_ext_from_content_type(content_type: str | None) -> str:
@@ -301,7 +334,7 @@ def infer_media_extension(url: str, content_type: str | None) -> str:
 
 
 def _sanitize_path_segment(name: str) -> str:
-    """Sanitize a name for use in S3 paths (lowercase, hyphens, no special chars)."""
+    """Sanitize a name for use in object-storage paths (lowercase, hyphens, no special chars)."""
     if not name:
         return "unknown"
     # Lowercase and replace spaces/underscores with hyphens
@@ -317,7 +350,7 @@ def _sanitize_path_segment(name: str) -> str:
 
 
 def _sanitize_filename(filename: str) -> str:
-    """Sanitize uploaded filenames for stable S3 keys."""
+    """Sanitize uploaded filenames for stable hosted-object keys."""
     raw = (filename or "").strip()
     if not raw:
         return "icon.bin"
@@ -334,7 +367,7 @@ def _sanitize_filename(filename: str) -> str:
 
 def build_icon_s3_key(show_key: str, filename: str) -> str:
     """
-    Build S3 key for show icons.
+    Build the hosted-object key for show icons.
 
     Path: icons/{show_key}/{sanitized_filename}
     """
@@ -1132,7 +1165,7 @@ def mirror_reddit_media(
     bucket: str | None = None,
     max_bytes: int = 50 * 1024 * 1024,
 ) -> dict[str, Any]:
-    """Mirror a single Reddit media URL to S3 and return a row dict for reddit_media_mirrors.
+    """Mirror a single Reddit media URL into hosted object storage and return a row dict.
 
     Handles dedup: if the source_url already has a 'mirrored' row for the same
     post (and optionally comment), the existing record is returned unchanged.
@@ -1412,7 +1445,7 @@ def mirror_tmdb_logo_row(
     s3_client=None,
 ) -> dict[str, Any] | None:
     """
-    Mirror a TMDb logo image to S3 and return hosted_logo_* fields.
+    Mirror a TMDb logo image into hosted object storage and return hosted_logo_* fields.
     """
     hosted_url = row.get("hosted_logo_url")
     hosted_key = row.get("hosted_logo_key")
@@ -1498,7 +1531,7 @@ def mirror_external_logo_row(
     source: str = "wikimedia",
 ) -> dict[str, Any] | None:
     """
-    Mirror an external logo URL (for example Wikimedia) to S3.
+    Mirror an external logo URL (for example Wikimedia) into hosted object storage.
     """
     hosted_url = row.get("hosted_logo_url")
     hosted_key = row.get("hosted_logo_key")
@@ -1583,7 +1616,7 @@ def mirror_logo_monochrome_variants_row(
     source: str = "wikimedia",
 ) -> MonochromeLogoMirrorResult | None:
     """
-    Generate and mirror black/white transparent logo variants to S3.
+    Generate and mirror black/white transparent logo variants into hosted object storage.
     """
     entity_id = row.get(id_field)
     if entity_id is None:
@@ -1646,7 +1679,7 @@ def mirror_show_image_row(
     s3_client=None,
 ) -> dict[str, Any] | None:
     """
-    Mirror a show image to S3.
+    Mirror a show image into hosted object storage.
 
     For TMDb images with file_path, always uses original resolution.
     Returns patch dict with hosted_* fields, or None if already hosted.
@@ -1745,7 +1778,7 @@ def mirror_season_image_row(
     s3_client=None,
 ) -> dict[str, Any] | None:
     """
-    Mirror a season image to S3.
+    Mirror a season image into hosted object storage.
     """
     hosted_url = row.get("hosted_url")
     hosted_key = row.get("hosted_key")
@@ -2112,7 +2145,7 @@ def mirror_episode_image_row(
     s3_client=None,
 ) -> dict[str, Any] | None:
     """
-    Mirror an episode image to S3.
+    Mirror an episode image into hosted object storage.
 
     For TMDb images with file_path, always uses original resolution.
     Returns patch dict with hosted_* fields, or None if already hosted.

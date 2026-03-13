@@ -17,7 +17,7 @@ TARGET_ENV = {
     "TRR_MODAL_APP_NAME": "trr-backend-jobs",
     "TRR_MODAL_API_FUNCTION": "serve_backend_api",
     "TRR_MODAL_API_LABEL": "trr-backend-api",
-    "TRR_MODAL_ADMIN_OPERATION_FUNCTION": "run_admin_operation",
+    "TRR_MODAL_ADMIN_OPERATION_FUNCTION": "run_admin_operation_v2",
     "TRR_MODAL_GOOGLE_NEWS_FUNCTION": "run_google_news_sync",
     "TRR_MODAL_REDDIT_REFRESH_FUNCTION": "run_reddit_refresh",
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",

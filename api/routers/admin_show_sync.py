@@ -36,7 +36,6 @@ import scripts.sync.sync_show_cast as sync_show_cast
 import scripts.sync.sync_show_images as sync_show_images
 import scripts.sync.sync_show_logos as sync_show_logos
 import scripts.sync.sync_shows as sync_shows
-import scripts.sync.sync_shows_all as sync_shows_all
 import scripts.sync.sync_tmdb_show_entities as sync_tmdb_show_entities
 import scripts.sync.sync_tmdb_watch_providers as sync_tmdb_watch_providers
 from api.auth import AdminUser
@@ -72,6 +71,63 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-sync"])
 STREAM_HEARTBEAT_INTERVAL_SECONDS = 10
+
+
+def _maybe_reload_postgrest_schema_cache(enabled: bool) -> None:
+    if not enabled:
+        return
+    from trr_backend.db.postgrest_cache import PostgrestCacheError, reload_postgrest_schema
+
+    try:
+        reload_postgrest_schema()
+    except PostgrestCacheError as exc:
+        logger.warning("Failed to reload PostgREST schema cache before show refresh: %s", exc)
+
+
+def _run_details_refresh_steps(
+    *,
+    show_id_str: str,
+    payload: ShowRefreshRequest,
+) -> dict[str, RefreshStepResult]:
+    common = ["--show-id", show_id_str, "--force"]
+    if payload.verbose:
+        common.append("--verbose")
+
+    _maybe_reload_postgrest_schema_cache(payload.reload_schema_cache)
+
+    detail_results: dict[str, RefreshStepResult] = {}
+    detail_results["details_sync_shows"] = _run_script_step(
+        "details_sync_shows",
+        sync_shows.main,
+        list(common),
+    )
+
+    entity_args = list(common)
+    if payload.skip_s3:
+        entity_args.append("--skip-s3")
+    detail_results["details_tmdb_show_entities"] = _run_script_step(
+        "details_tmdb_show_entities",
+        sync_tmdb_show_entities.main,
+        entity_args,
+    )
+
+    watch_args = list(common)
+    if payload.skip_s3:
+        watch_args.append("--skip-s3")
+    detail_results["details_tmdb_watch_providers"] = _run_script_step(
+        "details_tmdb_watch_providers",
+        sync_tmdb_watch_providers.main,
+        watch_args,
+    )
+
+    detail_results["details"] = _combine_step_results(
+        [
+            ("sync_shows", detail_results["details_sync_shows"]),
+            ("tmdb_show_entities", detail_results["details_tmdb_show_entities"]),
+            ("tmdb_watch_providers", detail_results["details_tmdb_watch_providers"]),
+        ]
+    )
+    return detail_results
 
 
 def _split_env_list(var_name: str) -> list[str]:
@@ -2316,15 +2372,7 @@ def refresh_show(
 
     for target in ordered:
         if target == "details":
-            argv = ["--show-id", show_id_str, "--force"]
-            if payload.skip_s3:
-                argv.append("--skip-s3")
-            if payload.verbose:
-                argv.append("--verbose")
-            # Default to no schema cache reload unless explicitly requested.
-            argv.append("--reload-schema-cache" if payload.reload_schema_cache else "--no-reload-schema-cache")
-            step = _run_script_step("details", sync_shows_all.main, argv)
-            results["details"] = step
+            results.update(_run_details_refresh_steps(show_id_str=show_id_str, payload=payload))
             continue
 
         if target == "seasons_episodes":

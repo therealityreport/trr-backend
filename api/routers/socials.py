@@ -65,6 +65,16 @@ _COMMENTS_COVERAGE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _COMMENTS_COVERAGE_CACHE_LOCK = Lock()
 _MIRROR_COVERAGE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _MIRROR_COVERAGE_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_TTL_SECONDS", "20"))
+_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES", "256"))
+_ACCOUNT_PROFILE_SUMMARY_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_POSTS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_POSTS_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_HASHTAGS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_COLLABORATORS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK = Lock()
 _WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST = 0
 _WEEK_DETAIL_DEFAULT_POST_LIMIT = 20
 _WEEK_DETAIL_DEFAULT_POST_OFFSET = 0
@@ -593,6 +603,34 @@ def _value_error_to_bad_request(exc: ValueError) -> HTTPException:
             detail={"code": "INVALID_PLATFORM_FILTER", "message": message.split(":", 1)[-1].strip() or message},
         )
     return HTTPException(status_code=400, detail=message)
+
+
+def _lookup_error_to_not_found(exc: LookupError) -> HTTPException:
+    return HTTPException(status_code=404, detail=str(exc) or "Not found")
+
+
+def _account_profile_cache_key(
+    *,
+    surface: str,
+    platform: str,
+    account_handle: str,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> tuple[Any, ...]:
+    return (
+        surface,
+        str(platform or "").strip().lower(),
+        str(account_handle or "").strip().lower().lstrip("@"),
+        page,
+        page_size,
+    )
+
+
+def _clear_account_profile_caches() -> None:
+    _clear_ttl_cache(_ACCOUNT_PROFILE_SUMMARY_CACHE, _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK)
+    _clear_ttl_cache(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK)
+    _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
+    _clear_ttl_cache(_ACCOUNT_PROFILE_COLLABORATORS_CACHE, _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK)
 
 
 def _is_local_or_dev_runtime() -> bool:
@@ -2106,6 +2144,20 @@ class SharedReviewResolveRequest(BaseModel):
     resolved_season_id: UUID | None = None
 
 
+class SocialAccountProfileHashtagAssignmentInput(BaseModel):
+    show_id: UUID
+    season_id: UUID | None = None
+
+
+class SocialAccountProfileHashtagInput(BaseModel):
+    hashtag: str = Field(..., min_length=1, max_length=128)
+    assignments: list[SocialAccountProfileHashtagAssignmentInput] = Field(default_factory=list)
+
+
+class SocialAccountProfileHashtagsPutRequest(BaseModel):
+    hashtags: list[SocialAccountProfileHashtagInput] = Field(default_factory=list)
+
+
 class PostCommentRefreshRequest(BaseModel):
     max_comments_per_post: int = Field(default=100000, ge=0, le=1000000)
     fetch_replies: bool = Field(default=True)
@@ -2734,6 +2786,183 @@ def put_shared_account_sources_route(
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/summary")
+def get_social_account_profile_summary_route(
+    platform: str,
+    account_handle: str,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_profile_summary
+
+    cache_key = _account_profile_cache_key(
+        surface="summary",
+        platform=platform,
+        account_handle=account_handle,
+    )
+    cached_payload = _get_ttl_cached_payload(
+        _ACCOUNT_PROFILE_SUMMARY_CACHE,
+        _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_account_profile_summary(platform=platform, account_handle=account_handle)
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_SUMMARY_CACHE,
+            _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/posts")
+def get_social_account_profile_posts_route(
+    platform: str,
+    account_handle: str,
+    page: int = Query(default=1, ge=1, le=10_000),
+    page_size: int = Query(default=25, ge=1, le=100),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_profile_posts
+
+    cache_key = _account_profile_cache_key(
+        surface="posts",
+        platform=platform,
+        account_handle=account_handle,
+        page=page,
+        page_size=page_size,
+    )
+    cached_payload = _get_ttl_cached_payload(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK, cache_key)
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_account_profile_posts(
+            platform=platform,
+            account_handle=account_handle,
+            page=page,
+            page_size=page_size,
+        )
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_POSTS_CACHE,
+            _ACCOUNT_PROFILE_POSTS_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/hashtags")
+def get_social_account_profile_hashtags_route(
+    platform: str,
+    account_handle: str,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_profile_hashtags
+
+    cache_key = _account_profile_cache_key(
+        surface="hashtags",
+        platform=platform,
+        account_handle=account_handle,
+    )
+    cached_payload = _get_ttl_cached_payload(
+        _ACCOUNT_PROFILE_HASHTAGS_CACHE,
+        _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_account_profile_hashtags(platform=platform, account_handle=account_handle)
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_HASHTAGS_CACHE,
+            _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.put("/profiles/{platform}/{account_handle}/hashtags")
+def put_social_account_profile_hashtags_route(
+    platform: str,
+    account_handle: str,
+    payload: SocialAccountProfileHashtagsPutRequest,
+    user: AdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import put_social_account_profile_hashtags
+
+    try:
+        response = put_social_account_profile_hashtags(
+            platform=platform,
+            account_handle=account_handle,
+            hashtags=[item.model_dump() for item in payload.hashtags],
+            updated_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return response
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/collaborators-tags")
+def get_social_account_profile_collaborators_tags_route(
+    platform: str,
+    account_handle: str,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_profile_collaborators_tags
+
+    cache_key = _account_profile_cache_key(
+        surface="collaborators-tags",
+        platform=platform,
+        account_handle=account_handle,
+    )
+    cached_payload = _get_ttl_cached_payload(
+        _ACCOUNT_PROFILE_COLLABORATORS_CACHE,
+        _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_account_profile_collaborators_tags(platform=platform, account_handle=account_handle)
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_COLLABORATORS_CACHE,
+            _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
 
 
 @router.post("/shared/ingest")

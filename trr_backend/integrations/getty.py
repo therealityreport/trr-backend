@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 from requests import Session
@@ -62,12 +62,13 @@ def search_editorial_assets(
     progress_cb: GettyProgressCallback | None = None,
     detail_batch_size: int = DEFAULT_DETAIL_BATCH_SIZE,
     detail_max_workers: int = DEFAULT_DETAIL_MAX_WORKERS,
+    query_params: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     cleaned = str(phrase or "").strip()
     if not cleaned:
         return []
 
-    detail_urls = _search_detail_urls_for_phrase(cleaned, limit=limit, session=session)
+    detail_urls = _search_detail_urls_for_phrase(cleaned, limit=limit, session=session, query_params=query_params)
     total = min(len(detail_urls), max(0, int(limit)))
     if progress_cb:
         progress_cb(0, total, f"Getty search found {total} candidate asset pages.")
@@ -100,9 +101,31 @@ def search_editorial_assets(
     return results
 
 
+def _build_search_url(
+    phrase: str,
+    *,
+    page: int | None = None,
+    query_params: dict[str, str] | None = None,
+) -> str:
+    params = {
+        "groupbyevent": "false",
+        "family": "editorial",
+        "phrase": phrase,
+        "sort": "newest",
+    }
+    if isinstance(query_params, dict):
+        for key, value in query_params.items():
+            cleaned_key = str(key or "").strip()
+            cleaned_value = str(value or "").strip()
+            if cleaned_key and cleaned_value:
+                params[cleaned_key] = cleaned_value
+    if page and page > 1:
+        params["page"] = str(page)
+    return f"{BASE_URL}/search/2/image?{urlencode(params)}"
+
+
 def _search_detail_urls(object_name: str, *, session: Session | None = None) -> list[str]:
-    query = quote(object_name)
-    search_url = f"{BASE_URL}/search/2/image?family=editorial&phrase={query}&sort=newest"
+    search_url = _build_search_url(object_name)
     client = _session(session)
     try:
         response = client.get(search_url, headers=_DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT_SECONDS)
@@ -126,17 +149,19 @@ def _search_detail_urls(object_name: str, *, session: Session | None = None) -> 
     return deduped
 
 
-def _search_detail_urls_for_phrase(phrase: str, *, limit: int, session: Session | None = None) -> list[str]:
-    query = quote(phrase)
+def _search_detail_urls_for_phrase(
+    phrase: str,
+    *,
+    limit: int,
+    session: Session | None = None,
+    query_params: dict[str, str] | None = None,
+) -> list[str]:
     client = _session(session)
     deduped: list[str] = []
     seen: set[str] = set()
 
     for page in range(1, MAX_SEARCH_PAGES + 1):
-        page_suffix = "" if page == 1 else f"&page={page}"
-        search_url = (
-            f"{BASE_URL}/search/2/image?groupbyevent=false&family=editorial&phrase={query}&sort=newest{page_suffix}"
-        )
+        search_url = _build_search_url(phrase, page=page, query_params=query_params)
         try:
             response = client.get(search_url, headers=_DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT_SECONDS)
             response.raise_for_status()
@@ -189,6 +214,18 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
     result["license_type"] = _first_present(asset_json, "licenseType", "license_type")
     result["date_created"] = _first_present(asset_json, "dateCreated", "date_created")
     result["upload_date"] = _first_present(asset_json, "uploadDate", "upload_date")
+    result["thumb_url"] = _first_present(asset_json, "thumbUrl")
+    result["comp_url"] = _first_present(asset_json, "compUrl")
+    result["preview_image_url"] = _first_present(
+        asset_json,
+        "downloadableCompUrl",
+        "galleryHighResCompUrl",
+        "highResCompUrl",
+        "galleryComp1024Url",
+        "compUrl",
+        "mainImageUrl",
+        "thumbUrl",
+    )
     result["keywords"] = asset_json.get("keywords") if isinstance(asset_json.get("keywords"), list) else []
     return result
 

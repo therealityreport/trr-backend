@@ -28,6 +28,7 @@ import requests
 
 from scripts._sync_common import load_env_and_db
 from trr_backend.db.session import DbSession
+from trr_backend.object_storage import build_s3_client, load_object_storage_config
 from trr_backend.repositories.media_assets import (
     fetch_assets_for_mirroring,
     update_asset_with_mirror_result,
@@ -47,11 +48,6 @@ def _load_allowed_domains() -> set[str]:
 
 
 ALLOWED_DOMAINS = _load_allowed_domains()
-
-# S3 configuration from environment
-AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "")
-AWS_CDN_BASE_URL = os.getenv("AWS_CDN_BASE_URL", "")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Retry configuration
 DEFAULT_MAX_RETRIES = 5
@@ -79,13 +75,8 @@ def is_allowed_domain(url: str) -> bool:
 
 
 def _get_s3_client():
-    """Create boto3 S3 client."""
-    try:
-        import boto3
-    except ImportError as exc:
-        raise RuntimeError("boto3 is required for S3 mirroring. Install with: pip install boto3") from exc
-
-    return boto3.client("s3", region_name=AWS_REGION)
+    """Create an S3-compatible object storage client."""
+    return build_s3_client(load_object_storage_config(require_bucket=True, require_public_base_url=False))
 
 
 def _guess_extension(content_type: str | None) -> str:
@@ -488,11 +479,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Validate S3 configuration
     if not args.dry_run:
-        if not AWS_S3_BUCKET:
-            print("ERROR: AWS_S3_BUCKET environment variable is required", file=sys.stderr)
+        storage = load_object_storage_config(require_bucket=True, require_public_base_url=True)
+        if not storage.bucket:
+            print("ERROR: OBJECT_STORAGE_BUCKET (or AWS_S3_BUCKET) is required", file=sys.stderr)
             return 1
-        if not AWS_CDN_BASE_URL:
-            print("ERROR: AWS_CDN_BASE_URL environment variable is required", file=sys.stderr)
+        if not storage.public_base_url:
+            print("ERROR: OBJECT_STORAGE_PUBLIC_BASE_URL (or AWS_CDN_BASE_URL) is required", file=sys.stderr)
             return 1
 
     # Load database
@@ -547,8 +539,8 @@ def main(argv: list[str] | None = None) -> int:
             db,
             batch,
             s3_client=s3_client,
-            bucket=AWS_S3_BUCKET,
-            cdn_base_url=AWS_CDN_BASE_URL,
+            bucket=storage.bucket,
+            cdn_base_url=storage.public_base_url,
             max_retries=args.max_retries,
             backoff_hours=args.retry_backoff_hours,
             concurrency=args.concurrency,

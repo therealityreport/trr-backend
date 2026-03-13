@@ -25,8 +25,9 @@ from trr_backend.integrations.free_logo_sources import (
     FREE_LOGO_SOURCE_PROVIDERS,
     build_source_query_profile,
     collect_free_logo_candidates,
+    suggest_logos_fandom_query_values,
 )
-from trr_backend.media.s3_mirror import download_image
+from trr_backend.media.s3_mirror import delete_s3_objects, download_image, get_s3_bucket, get_s3_client
 from trr_backend.repositories import brand_families, brands_franchises
 
 router = APIRouter(prefix="/admin/brands", tags=["admin-brands"])
@@ -182,6 +183,10 @@ _DEFAULT_LOGO_OPTIONS_PAGE_SIZE = 24
 _DEFAULT_DISCOVER_PAGE_SIZE = 20
 _DISCOVERABLE_SOURCE_PROVIDERS = set(FREE_LOGO_SOURCE_PROVIDERS)
 _SCHEMA_FALLBACK_WARNED_KEYS: set[str] = set()
+_QUERY_VALUES_MIGRATION_ERROR = (
+    "Connected database is missing admin.brand_logo_source_queries.query_values; "
+    "apply migration 0178_brand_logo_source_query_values.sql."
+)
 
 
 class BrandLogoDiscoverCandidateRequest(BaseModel):
@@ -214,6 +219,16 @@ class BrandLogosSourceQueryRequest(BaseModel):
 
 
 class BrandLogosOptionSelectRequest(BaseModel):
+    target_type: BrandLogoTargetType
+    target_key: str
+    target_label: str | None = None
+    logo_role: BrandLogoRole
+    asset_id: str | None = None
+    candidate: BrandLogoDiscoverCandidateRequest | None = None
+    set_featured: bool = True
+
+
+class BrandLogosOptionAssignRequest(BaseModel):
     target_type: BrandLogoTargetType
     target_key: str
     target_label: str | None = None
@@ -465,7 +480,42 @@ def _normalize_logo_role_selection_state(row: dict[str, Any]) -> dict[str, Any]:
         discovered_from=row.get("discovered_from"),
         source_domain=row.get("source_domain"),
     )
+    file_type = _infer_logo_file_type(
+        source_url=_normalize_text(row.get("source_url")),
+        content_type=_normalize_text(row.get("content_type")),
+    )
+    width = row.get("width")
+    height = row.get("height")
+    row["file_type"] = file_type
+    row["content_type"] = _normalize_text(row.get("content_type")) or None
+    row["width"] = int(width) if isinstance(width, int) and width > 0 else None
+    row["height"] = int(height) if isinstance(height, int) and height > 0 else None
+    row["aspect_ratio"] = (
+        (float(row["width"]) / float(row["height"]))
+        if isinstance(row.get("width"), int) and isinstance(row.get("height"), int) and int(row["height"]) > 0
+        else None
+    )
     return row
+
+
+def _infer_logo_file_type(*, source_url: str, content_type: str | None) -> str | None:
+    normalized_content_type = _normalize_text(content_type).lower()
+    if normalized_content_type.startswith("image/"):
+        subtype = normalized_content_type.split("/", 1)[1].split(";", 1)[0].strip()
+        if subtype == "svg+xml":
+            return "svg"
+        if subtype == "jpeg":
+            return "jpg"
+        if subtype:
+            return subtype
+
+    lowered_url = _normalize_text(source_url).lower()
+    for extension in ("svg", "png", "webp", "jpg", "jpeg", "gif", "avif", "ico"):
+        if re.search(rf"\.{extension}(?:$|[?#])", lowered_url):
+            return "jpg" if extension == "jpeg" else extension
+    if lowered_url.startswith("data:image/svg+xml"):
+        return "svg"
+    return None
 
 
 def _apply_logo_selection_fallback(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -574,6 +624,49 @@ def _extract_image_dimensions(image_data: bytes) -> tuple[int | None, int | None
         from PIL import Image  # type: ignore
     except Exception:  # noqa: BLE001
         return None, None
+
+
+def _load_candidate_preview_metadata(
+    *,
+    source_url: str,
+    discovered_from: str | None,
+) -> tuple[str | None, int | None, int | None]:
+    normalized_url = _normalize_text(source_url)
+    if not normalized_url:
+        return None, None, None
+    if normalized_url.lower().startswith("data:image/svg+xml;base64,"):
+        return "image/svg+xml", None, None
+    try:
+        image_data, content_type = download_image(
+            normalized_url,
+            source="brand_logo_candidate_probe",
+            referer=_normalize_text(discovered_from) or None,
+        )
+    except Exception:  # noqa: BLE001
+        return None, None, None
+    width, height = _extract_image_dimensions(image_data)
+    return _normalize_text(content_type) or None, width, height
+
+
+def _discover_role_sort_priority(
+    *,
+    preferred_role: BrandLogoRole | None,
+    detected_role: str,
+    width: int | None,
+    height: int | None,
+) -> tuple[int, int]:
+    normalized_detected = _normalize_logo_role(detected_role)
+    role_bucket = 0 if not preferred_role or normalized_detected == preferred_role else 1
+    if not width or not height or height <= 0:
+        return role_bucket, 1
+    ratio = width / height
+    if preferred_role == "icon":
+        shape_bucket = 0 if 0.78 <= ratio <= 1.35 else 1
+    elif preferred_role == "wordmark":
+        shape_bucket = 0 if ratio >= 1.7 else 1
+    else:
+        shape_bucket = 0
+    return role_bucket, shape_bucket
     try:
         with Image.open(io.BytesIO(image_data)) as image:
             width = int(image.width) if image.width else None
@@ -713,6 +806,9 @@ def _find_related_network_streaming_assets_by_host(
           is_primary,
           mirror_status,
           failure_reason,
+          hosted_logo_content_type as content_type,
+          pixel_width as width,
+          pixel_height as height,
           created_at,
           updated_at
         from admin.network_streaming_logo_assets
@@ -761,6 +857,9 @@ def _find_related_network_streaming_assets_by_host(
                 "is_primary": role == "wordmark",
                 "mirror_status": _normalize_text(row.get("mirror_status")) or "mirrored",
                 "failure_reason": _normalize_text(row.get("failure_reason")) or None,
+                "content_type": _normalize_text(row.get("content_type")) or None,
+                "width": row.get("width"),
+                "height": row.get("height"),
                 "metadata": {
                     "logo_role": role,
                     "selection_origin": "related_pair",
@@ -840,6 +939,9 @@ def _list_brand_logos(
               is_primary,
               mirror_status,
               failure_reason,
+              hosted_logo_content_type as content_type,
+              pixel_width as width,
+              pixel_height as height,
               null::jsonb as metadata,
               case when is_primary then 'wordmark' else 'icon' end as logo_role,
               source as source_provider,
@@ -885,6 +987,9 @@ def _list_brand_logos(
               is_primary,
               mirror_status,
               failure_reason,
+              coalesce(hosted_logo_content_type, hosted_logo_black_content_type, hosted_logo_white_content_type) as content_type,
+              null::int as width,
+              null::int as height,
               metadata,
               coalesce(metadata->>'logo_role', case when is_primary then 'wordmark' else 'icon' end) as logo_role,
               coalesce(metadata->>'source_provider', source_domain, 'manual') as source_provider,
@@ -954,6 +1059,9 @@ def _list_brand_logos(
                             "is_primary": role == "wordmark",
                             "mirror_status": "missing",
                             "failure_reason": None,
+                            "content_type": None,
+                            "width": None,
+                            "height": None,
                             "metadata": {
                                 "logo_role": role,
                                 "discovered_from": discovered_from,
@@ -1485,6 +1593,8 @@ def _upsert_logo_source_query_override(
                 ],
             )
             return
+        if _is_missing_logo_source_query_values_column_error(error):
+            raise RuntimeError(_QUERY_VALUES_MIGRATION_ERROR) from error
         if _is_missing_logo_source_query_table_error(error):
             raise
         raise
@@ -1538,6 +1648,55 @@ def _build_logo_source_summary(
         "query_values": _normalize_source_query_values(profile.get("query_values")),
         "query_links": list(profile.get("query_links") or []),
         "logo_role": logo_role,
+    }
+
+
+def _list_logo_source_suggestions(
+    *,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    target_label: str | None,
+    logo_role: BrandLogoRole,
+    source_provider: str,
+) -> dict[str, Any]:
+    provider = _normalize_text(source_provider).casefold()
+    resolved_label = _normalize_text(target_label) or _normalize_text(target_key)
+    if provider != "logos_fandom":
+        return {
+            "target_type": target_type,
+            "target_key": _normalize_text(target_key).casefold(),
+            "target_label": resolved_label,
+            "logo_role": logo_role,
+            "source_provider": provider,
+            "current_query_values": [],
+            "suggestions": [],
+        }
+
+    overrides = _load_logo_source_query_overrides(
+        target_type=target_type,
+        target_key=target_key,
+        logo_role=logo_role,
+    )
+    profile = build_source_query_profile(
+        source_provider=provider,
+        target_label=resolved_label,
+        target_key=target_key,
+        query_override=overrides.get(provider),
+    )
+    current_query_values = _normalize_source_query_values(profile.get("query_values"))
+    suggestions = suggest_logos_fandom_query_values(
+        target_label=resolved_label,
+        target_key=target_key,
+        current_query_values=current_query_values,
+    )
+    return {
+        "target_type": target_type,
+        "target_key": _normalize_text(target_key).casefold(),
+        "target_label": resolved_label,
+        "logo_role": logo_role,
+        "source_provider": provider,
+        "current_query_values": current_query_values,
+        "suggestions": suggestions,
     }
 
 
@@ -1707,7 +1866,16 @@ def _discover_logo_candidates_by_source(payload: BrandLogosOptionDiscoverRequest
         provider = _normalize_text(candidate.source_provider) or "unknown"
         if normalized_provider_filter and provider.casefold() != normalized_provider_filter:
             continue
-        detected_role = _detect_logo_role(candidate_url=source_url, content_type=None, width=None, height=None)
+        content_type, width, height = _load_candidate_preview_metadata(
+            source_url=source_url,
+            discovered_from=_normalize_text(candidate.discovered_from) or None,
+        )
+        detected_role = _detect_logo_role(
+            candidate_url=source_url,
+            content_type=content_type,
+            width=width,
+            height=height,
+        )
         out.append(
             {
                 "id": f"candidate:{hashlib.sha256(f'{provider}:{source_url}'.encode()).hexdigest()[:24]}",
@@ -1721,15 +1889,23 @@ def _discover_logo_candidates_by_source(payload: BrandLogosOptionDiscoverRequest
                 "detected_logo_role": _normalize_logo_role(detected_role),
                 "option_kind": "candidate",
                 "origin_target_type": payload.target_type,
-                "width": None,
-                "height": None,
-                "aspect_ratio": None,
+                "file_type": _infer_logo_file_type(source_url=source_url, content_type=content_type),
+                "content_type": content_type,
+                "width": width,
+                "height": height,
+                "aspect_ratio": (float(width) / float(height)) if width and height and height > 0 else None,
             }
         )
 
     total = len(out)
     out.sort(
         key=lambda row: (
+            *_discover_role_sort_priority(
+                preferred_role=payload.logo_role,
+                detected_role=_normalize_text(row.get("detected_logo_role")) or "wordmark",
+                width=row.get("width") if isinstance(row.get("width"), int) else None,
+                height=row.get("height") if isinstance(row.get("height"), int) else None,
+            ),
             _discover_format_priority(_normalize_text(row.get("source_url"))),
             _normalize_text(row.get("source_url")).casefold(),
         )
@@ -1828,6 +2004,9 @@ def _fetch_logo_option_row(
               is_primary,
               mirror_status,
               failure_reason,
+              hosted_logo_content_type as content_type,
+              pixel_width as width,
+              pixel_height as height,
               null::jsonb as metadata,
               case when is_primary then 'wordmark' else 'icon' end as logo_role,
               source as source_provider,
@@ -1869,6 +2048,9 @@ def _fetch_logo_option_row(
               is_primary,
               mirror_status,
               failure_reason,
+              coalesce(hosted_logo_content_type, hosted_logo_black_content_type, hosted_logo_white_content_type) as content_type,
+              null::int as width,
+              null::int as height,
               metadata,
               coalesce(metadata->>'logo_role', case when is_primary then 'wordmark' else 'icon' end) as logo_role,
               coalesce(metadata->>'source_provider', source_domain, 'manual') as source_provider,
@@ -1908,6 +2090,7 @@ def _import_logo_option_candidate(
     source_provider: str | None,
     discovered_from: str | None,
     selection_origin: str,
+    set_featured: bool,
 ) -> dict[str, Any]:
     from api.routers.admin_scrape import _import_non_show_logo_target  # noqa: PLC0415
 
@@ -1930,7 +2113,7 @@ def _import_logo_option_candidate(
         "discovered_from": _normalize_text(discovered_from) or None,
         "discovery_timestamp": datetime.now(tz=UTC).isoformat(),
         "selection_origin": selection_origin,
-        "selected_for_role": True,
+        "selected_for_role": set_featured,
         "selection_updated_at": datetime.now(tz=UTC).isoformat(),
     }
     status, _, created_asset_id = _import_non_show_logo_target(
@@ -1938,7 +2121,7 @@ def _import_logo_option_candidate(
         target_type=target_type,
         target_key=target_key,
         target_label=target_label,
-        set_primary=(logo_role == "wordmark"),
+        set_primary=(logo_role == "wordmark" and set_featured),
         image_data=image_data,
         sha256=hashlib.sha256(image_data).hexdigest(),
         content_type=_normalize_text(content_type) or "application/octet-stream",
@@ -2067,26 +2250,42 @@ def _set_brand_role_selection(
     rows = rows_response.data or []
     now_iso = datetime.now(tz=UTC).isoformat()
 
+    selected_previous_role: BrandLogoRole | None = None
+    for row in rows:
+        if _normalize_text(row.get("id")) != asset_id:
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        role = _normalize_logo_role(metadata.get("logo_role") if isinstance(metadata, dict) else None)
+        if role == "wordmark" and not isinstance(metadata, dict):
+            role = "wordmark" if bool(row.get("is_primary")) else "icon"
+        selected_previous_role = role
+        break
+
     for row in rows:
         current_id = _normalize_text(row.get("id"))
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         role = _normalize_logo_role(metadata.get("logo_role") if isinstance(metadata, dict) else None)
         if role == "wordmark" and not isinstance(metadata, dict):
             role = "wordmark" if bool(row.get("is_primary")) else "icon"
-        if role != logo_role:
+        manages_new_role = role == logo_role
+        manages_previous_role = bool(selected_previous_role and selected_previous_role != logo_role and role == selected_previous_role)
+        if current_id == asset_id:
+            manages_new_role = True
+            manages_previous_role = False
+        if not manages_new_role and not manages_previous_role:
             continue
 
         new_metadata = dict(metadata or {})
-        new_metadata["logo_role"] = logo_role
+        new_metadata["logo_role"] = logo_role if current_id == asset_id else role
         new_metadata["selection_updated_at"] = now_iso
         new_metadata["selection_origin"] = selection_origin
-        new_metadata["selected_for_role"] = current_id == asset_id
+        new_metadata["selected_for_role"] = current_id == asset_id if manages_new_role else False
 
         patch: dict[str, Any] = {
             "metadata": new_metadata,
             "updated_at": now_iso,
         }
-        if logo_role == "wordmark":
+        if current_id == asset_id and logo_role == "wordmark":
             patch["is_primary"] = current_id == asset_id
         else:
             patch["is_primary"] = False
@@ -2094,6 +2293,14 @@ def _set_brand_role_selection(
         update = db.schema("admin").table("brand_logo_assets").update(patch).eq("id", current_id).execute()
         if hasattr(update, "error") and update.error:
             raise RuntimeError(f"Failed to update brand logo selection: {update.error}")
+
+    if selected_previous_role and selected_previous_role != logo_role:
+        _ensure_brand_role_selection(
+            db=db,
+            target_type=target_type,
+            target_key=normalized_key,
+            logo_role=selected_previous_role,
+        )
 
 
 def _selected_logo_role_summary(
@@ -2124,6 +2331,150 @@ def _selected_logo_role_summary(
     return summary
 
 
+def _featured_logo_role_rows(
+    *,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    include_related: bool,
+) -> dict[str, dict[str, Any] | None]:
+    featured: dict[str, dict[str, Any] | None] = {}
+    for role in ("wordmark", "icon"):
+        payload = _list_logo_options(
+            target_type=target_type,
+            target_key=target_key,
+            logo_role=role,  # type: ignore[arg-type]
+            include_related=include_related,
+            offset=0,
+            limit=500,
+        )
+        rows = payload.get("rows", []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            rows = []
+        featured[role] = next((row for row in rows if bool(row.get("is_selected_for_role"))), rows[0] if rows else None)
+    return featured
+
+
+def _ensure_brand_role_selection(
+    *,
+    db: SupabaseAdminClient,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    logo_role: BrandLogoRole,
+) -> None:
+    payload = _list_logo_options(
+        target_type=target_type,
+        target_key=target_key,
+        logo_role=logo_role,
+        include_related=False,
+        offset=0,
+        limit=500,
+    )
+    rows = payload.get("rows", []) if isinstance(payload, dict) else []
+    if not isinstance(rows, list) or not rows:
+        return
+    selected_row = next((row for row in rows if bool(row.get("is_selected_for_role"))), None)
+    if selected_row is not None:
+        return
+    _set_brand_role_selection(
+        db=db,
+        target_type=target_type,
+        target_key=target_key,
+        asset_id=_normalize_text(rows[0].get("id")),
+        logo_role=logo_role,
+        selection_origin="delete_autopromote",
+    )
+
+
+def _ensure_network_wordmark_selection(
+    *,
+    db: SupabaseAdminClient,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+) -> None:
+    payload = _list_logo_options(
+        target_type=target_type,
+        target_key=target_key,
+        logo_role="wordmark",
+        include_related=False,
+        offset=0,
+        limit=500,
+    )
+    rows = payload.get("rows", []) if isinstance(payload, dict) else []
+    if not isinstance(rows, list) or not rows:
+        return
+    selected_row = next((row for row in rows if bool(row.get("is_selected_for_role"))), None)
+    if selected_row is not None:
+        return
+    _set_network_role_selection(
+        db=db,
+        target_type=target_type,
+        target_key=target_key,
+        asset_id=_normalize_text(rows[0].get("id")),
+        logo_role="wordmark",
+    )
+
+
+def _list_combined_logo_modal_state(
+    *,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    target_label: str | None,
+    include_related: bool,
+) -> dict[str, Any]:
+    normalized_target_key = _normalize_text(target_key).casefold()
+    resolved_label = _normalize_text(target_label) or normalized_target_key
+    saved_payload = _list_brand_logos(
+        target_type=target_type,
+        q="",
+        limit=4000,
+        offset=0,
+        include_missing=False,
+        target_key=normalized_target_key,
+        logo_role=None,
+        source_provider=None,
+        include_related=False,
+    )
+    saved_assets = saved_payload.get("rows", []) if isinstance(saved_payload, dict) else []
+    if not isinstance(saved_assets, list):
+        saved_assets = []
+
+    featured = _featured_logo_role_rows(
+        target_type=target_type,
+        target_key=normalized_target_key,
+        include_related=include_related,
+    )
+    selected_roles_by_asset_id: dict[str, list[str]] = {}
+    for role, row in featured.items():
+        asset_id = _normalize_text((row or {}).get("id"))
+        if asset_id:
+            selected_roles_by_asset_id.setdefault(asset_id, []).append(role)
+
+    for row in saved_assets:
+        asset_id = _normalize_text(row.get("id"))
+        row["selected_roles"] = selected_roles_by_asset_id.get(asset_id, [])
+
+    source_payload = _list_logo_option_sources(
+        target_type=target_type,
+        target_key=normalized_target_key,
+        target_label=resolved_label,
+        logo_role="wordmark",
+        include_related=include_related,
+    )
+    return {
+        "target_type": target_type,
+        "target_key": normalized_target_key,
+        "target_label": resolved_label,
+        "saved_assets": saved_assets,
+        "featured_assets": featured,
+        "summary": _selected_logo_role_summary(
+            target_type=target_type,
+            target_key=normalized_target_key,
+            include_related=include_related,
+        ),
+        "sources": source_payload.get("sources", []) if isinstance(source_payload, dict) else [],
+    }
+
+
 def _select_logo_option(
     *,
     payload: BrandLogosOptionSelectRequest,
@@ -2150,6 +2501,7 @@ def _select_logo_option(
             source_provider=payload.candidate.source_provider,
             discovered_from=payload.candidate.discovered_from,
             selection_origin=selection_origin,
+            set_featured=payload.set_featured,
         )
         asset_id = _normalize_text(selected_row.get("id"))
     elif asset_id.startswith("related:"):
@@ -2174,6 +2526,7 @@ def _select_logo_option(
             source_provider=_normalize_text(selected_related.get("source_provider")) or "related_network_streaming",
             discovered_from=_normalize_text(selected_related.get("discovered_from")) or None,
             selection_origin="related_pair",
+            set_featured=payload.set_featured,
         )
         asset_id = _normalize_text(selected_row.get("id"))
         selection_origin = "related_pair"
@@ -2185,25 +2538,7 @@ def _select_logo_option(
         )
         if not selected_row:
             raise KeyError("Logo option not found")
-        row_source_url = _normalize_text(selected_row.get("source_url"))
-        if payload.target_type in {"network", "streaming", "production"}:
-            _set_network_role_selection(
-                db=db,
-                target_type=payload.target_type,
-                target_key=normalized_target_key,
-                asset_id=asset_id,
-                logo_role=payload.logo_role,
-            )
-        else:
-            _set_brand_role_selection(
-                db=db,
-                target_type=payload.target_type,
-                target_key=normalized_target_key,
-                asset_id=asset_id,
-                logo_role=payload.logo_role,
-                selection_origin=selection_origin,
-            )
-        if row_source_url:
+        if _normalize_text(selected_row.get("source_url")):
             selected_row = _fetch_logo_option_row(
                 target_type=payload.target_type,
                 target_key=normalized_target_key,
@@ -2213,23 +2548,24 @@ def _select_logo_option(
     if not selected_row:
         raise RuntimeError("Failed to select logo option")
     selected_asset_id = _normalize_text(selected_row.get("id"))
-    if payload.target_type in {"network", "streaming", "production"}:
-        _set_network_role_selection(
-            db=db,
-            target_type=payload.target_type,
-            target_key=normalized_target_key,
-            asset_id=selected_asset_id,
-            logo_role=payload.logo_role,
-        )
-    else:
-        _set_brand_role_selection(
-            db=db,
-            target_type=payload.target_type,
-            target_key=normalized_target_key,
-            asset_id=selected_asset_id,
-            logo_role=payload.logo_role,
-            selection_origin=selection_origin,
-        )
+    if payload.set_featured:
+        if payload.target_type in {"network", "streaming", "production"}:
+            _set_network_role_selection(
+                db=db,
+                target_type=payload.target_type,
+                target_key=normalized_target_key,
+                asset_id=selected_asset_id,
+                logo_role=payload.logo_role,
+            )
+        else:
+            _set_brand_role_selection(
+                db=db,
+                target_type=payload.target_type,
+                target_key=normalized_target_key,
+                asset_id=selected_asset_id,
+                logo_role=payload.logo_role,
+                selection_origin=selection_origin,
+            )
 
     refreshed_selected = _fetch_logo_option_row(
         target_type=payload.target_type,
@@ -2244,6 +2580,134 @@ def _select_logo_option(
             include_related=payload.target_type in {"publication", "social"},
         ),
     }
+
+
+def _fetch_logo_asset_delete_row(
+    *,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    asset_id: str,
+) -> dict[str, Any] | None:
+    normalized_target_key = _normalize_text(target_key).casefold()
+    if target_type in {"network", "streaming", "production"}:
+        return pg.fetch_one(
+            """
+            select
+              id::text as id,
+              entity_type as target_type,
+              entity_key as target_key,
+              source_url,
+              hosted_logo_key,
+              hosted_logo_black_key,
+              hosted_logo_white_key,
+              is_primary
+            from admin.network_streaming_logo_assets
+            where id::text = %s
+              and entity_type = %s
+              and entity_key = %s
+            limit 1
+            """,
+            [asset_id, target_type, normalized_target_key],
+        )
+    return pg.fetch_one(
+        """
+        select
+          id::text as id,
+          target_type,
+          target_key,
+          source_url,
+          hosted_logo_key,
+          hosted_logo_black_key,
+          hosted_logo_white_key,
+          is_primary,
+          metadata
+        from admin.brand_logo_assets
+        where id::text = %s
+          and target_type = %s
+          and target_key = %s
+        limit 1
+        """,
+        [asset_id, target_type, normalized_target_key],
+    )
+
+
+def _delete_logo_asset_objects(row: dict[str, Any]) -> None:
+    bucket = get_s3_bucket()
+    keys = [
+        _normalize_text(row.get("hosted_logo_key")),
+        _normalize_text(row.get("hosted_logo_black_key")),
+        _normalize_text(row.get("hosted_logo_white_key")),
+    ]
+    keys = [key for key in keys if key]
+    if not keys:
+        return
+    delete_s3_objects(get_s3_client(), bucket, keys)
+
+
+def _delete_saved_logo_option(
+    *,
+    db: SupabaseAdminClient,
+    target_type: BrandLogoTargetType,
+    target_key: str,
+    target_label: str | None = None,
+    asset_id: str,
+) -> dict[str, Any]:
+    normalized_target_key = _normalize_text(target_key).casefold()
+    row = _fetch_logo_asset_delete_row(
+        target_type=target_type,
+        target_key=normalized_target_key,
+        asset_id=asset_id,
+    )
+    if not row:
+        raise KeyError("Saved logo option not found")
+
+    normalized_row = _normalize_logo_role_selection_state(dict(row))
+    _delete_logo_asset_objects(row)
+
+    if target_type in {"network", "streaming", "production"}:
+        response = (
+            db.schema("admin")
+            .table("network_streaming_logo_assets")
+            .delete()
+            .eq("id", asset_id)
+            .eq("entity_type", target_type)
+            .eq("entity_key", normalized_target_key)
+            .execute()
+        )
+        if hasattr(response, "error") and response.error:
+            raise RuntimeError(f"Failed to delete saved network logo option: {response.error}")
+        if bool(normalized_row.get("is_selected_for_role")) and _normalize_logo_role(normalized_row.get("logo_role")) == "wordmark":
+            _ensure_network_wordmark_selection(
+                db=db,
+                target_type=target_type,
+                target_key=normalized_target_key,
+            )
+    else:
+        response = (
+            db.schema("admin")
+            .table("brand_logo_assets")
+            .delete()
+            .eq("id", asset_id)
+            .eq("target_type", target_type)
+            .eq("target_key", normalized_target_key)
+            .execute()
+        )
+        if hasattr(response, "error") and response.error:
+            raise RuntimeError(f"Failed to delete saved brand logo option: {response.error}")
+        if bool(normalized_row.get("is_selected_for_role")):
+            _ensure_brand_role_selection(
+                db=db,
+                target_type=target_type,
+                target_key=normalized_target_key,
+                logo_role=_normalize_logo_role(normalized_row.get("logo_role")),
+            )
+
+    return _list_combined_logo_modal_state(
+        target_type=target_type,
+        target_key=normalized_target_key,
+        target_label=target_label,
+        include_related=target_type in {"publication", "social"},
+    )
 
 
 def _load_related_pair_candidates_for_sync(
@@ -3064,6 +3528,46 @@ def get_brand_logo_option_sources(
         raise _to_http_exception(error) from error
 
 
+@router.get("/logos/options/modal")
+def get_brand_logo_option_modal(
+    target_type: BrandLogoTargetType = Query(...),
+    target_key: str = Query(...),
+    target_label: str | None = Query(default=None),
+    include_related: bool = Query(default=True),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    try:
+        return _list_combined_logo_modal_state(
+            target_type=target_type,
+            target_key=target_key,
+            target_label=target_label,
+            include_related=include_related,
+        )
+    except Exception as error:  # noqa: BLE001
+        raise _to_http_exception(error) from error
+
+
+@router.get("/logos/options/source-suggestions")
+def get_brand_logo_option_source_suggestions(
+    target_type: BrandLogoTargetType = Query(...),
+    target_key: str = Query(...),
+    target_label: str | None = Query(default=None),
+    logo_role: BrandLogoRole = Query(...),
+    source_provider: str = Query(...),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    try:
+        return _list_logo_source_suggestions(
+            target_type=target_type,
+            target_key=target_key,
+            target_label=target_label,
+            logo_role=logo_role,
+            source_provider=source_provider,
+        )
+    except Exception as error:  # noqa: BLE001
+        raise _to_http_exception(error) from error
+
+
 @router.post("/logos/options/discover")
 def post_brand_logo_option_discover(
     payload: BrandLogosOptionDiscoverRequest,
@@ -3093,6 +3597,47 @@ def post_brand_logo_option_select(
 ) -> dict[str, Any]:
     try:
         return _select_logo_option(payload=payload)
+    except Exception as error:  # noqa: BLE001
+        raise _to_http_exception(error) from error
+
+
+@router.post("/logos/options/assign")
+def post_brand_logo_option_assign(
+    payload: BrandLogosOptionAssignRequest,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    try:
+        return _select_logo_option(
+            payload=BrandLogosOptionSelectRequest(
+                target_type=payload.target_type,
+                target_key=payload.target_key,
+                target_label=payload.target_label,
+                logo_role=payload.logo_role,
+                asset_id=payload.asset_id,
+                candidate=payload.candidate,
+                set_featured=True,
+            )
+        )
+    except Exception as error:  # noqa: BLE001
+        raise _to_http_exception(error) from error
+
+
+@router.delete("/logos/options/saved/{asset_id}")
+def delete_brand_logo_saved_option(
+    asset_id: str,
+    target_type: BrandLogoTargetType = Query(...),
+    target_key: str = Query(...),
+    target_label: str | None = Query(default=None),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    try:
+        return _delete_saved_logo_option(
+            db=get_supabase_admin_client(),
+            target_type=target_type,
+            target_key=target_key,
+            target_label=target_label,
+            asset_id=asset_id,
+        )
     except Exception as error:  # noqa: BLE001
         raise _to_http_exception(error) from error
 

@@ -46,6 +46,11 @@ def _brand_logo_routing_v2_enabled() -> bool:
     return str(os.getenv("BRAND_LOGO_ROUTING_V2", "true")).strip().lower() not in {"0", "false", "off", "no"}
 
 
+def _is_non_blocking_logo_variant_failure(error: Exception) -> bool:
+    message = str(error or "").strip().lower()
+    return message in {"logo_decode_failed", "transparent_extraction_failed"}
+
+
 # Request/Response Models
 
 
@@ -523,15 +528,27 @@ def _import_non_show_logo_target(
             "hosted_logo_etag": etag,
             "hosted_logo_at": datetime.now(tz=UTC).isoformat(),
         }
-        variant_patch = mirror_logo_monochrome_variants_row(
-            {id_field: target_row.get(id_field), **patch},
-            kind=logo_kind,
-            id_field=id_field,
-            source_url=hosted_url,
-            force=True,
-            s3_client=s3_client,
-            source="override",
-        )
+        try:
+            variant_patch = mirror_logo_monochrome_variants_row(
+                {id_field: target_row.get(id_field), **patch},
+                kind=logo_kind,
+                id_field=id_field,
+                source_url=hosted_url,
+                force=True,
+                s3_client=s3_client,
+                source="override",
+            )
+        except Exception as error:  # noqa: BLE001
+            if not _is_non_blocking_logo_variant_failure(error):
+                raise
+            logger.warning(
+                "Non-blocking logo variant mirror failure for %s %s (%s): %s",
+                target_type,
+                target_key,
+                source_url,
+                error,
+            )
+            variant_patch = None
         if variant_patch and isinstance(variant_patch.patch, dict):
             patch.update(variant_patch.patch)
 
@@ -598,14 +615,26 @@ def _import_non_show_logo_target(
         "hosted_logo_etag": etag,
         "hosted_logo_at": datetime.now(tz=UTC).isoformat(),
     }
-    variant_patch = mirror_logo_monochrome_variants_row(
-        {"id": target_key.casefold(), **patch},
-        kind=logo_kind,
-        source_url=hosted_url,
-        force=True,
-        s3_client=s3_client,
-        source="override",
-    )
+    try:
+        variant_patch = mirror_logo_monochrome_variants_row(
+            {"id": target_key.casefold(), **patch},
+            kind=logo_kind,
+            source_url=hosted_url,
+            force=True,
+            s3_client=s3_client,
+            source="override",
+        )
+    except Exception as error:  # noqa: BLE001
+        if not _is_non_blocking_logo_variant_failure(error):
+            raise
+        logger.warning(
+            "Non-blocking brand logo variant mirror failure for %s %s (%s): %s",
+            target_type,
+            target_key,
+            source_url,
+            error,
+        )
+        variant_patch = None
     if variant_patch and isinstance(variant_patch.patch, dict):
         patch.update(variant_patch.patch)
 

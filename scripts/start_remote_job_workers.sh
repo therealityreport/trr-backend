@@ -9,6 +9,9 @@ if [[ -f .venv/bin/activate ]]; then
   source .venv/bin/activate
 fi
 
+REMOTE_EXECUTOR="${TRR_REMOTE_EXECUTOR:-legacy_worker}"
+MODAL_ENABLED="${TRR_MODAL_ENABLED:-0}"
+
 ADMIN_ENABLED="${TRR_ADMIN_OPERATION_WORKER_ENABLED:-1}"
 REDDIT_ENABLED="${TRR_REDDIT_REFRESH_WORKER_ENABLED:-1}"
 GOOGLE_NEWS_ENABLED="${TRR_GOOGLE_NEWS_WORKER_ENABLED:-1}"
@@ -36,6 +39,12 @@ flag_is_enabled() {
     *) return 1 ;;
   esac
 }
+
+if flag_is_enabled "$MODAL_ENABLED" && [[ "$(printf '%s' "$REMOTE_EXECUTOR" | tr '[:upper:]' '[:lower:]')" == "modal" ]]; then
+  echo "[remote-workers] Modal executor selected; local claim-loop workers are not started."
+  echo "[remote-workers] Background execution is owned by API-triggered Modal dispatch and deployed Modal cron/functions."
+  exit 0
+fi
 
 start_worker() {
   local label="$1"

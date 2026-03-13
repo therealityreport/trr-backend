@@ -142,6 +142,175 @@ def test_get_shared_account_sources(client: TestClient, monkeypatch: pytest.Monk
     assert body["sources"][0]["account_handle"] == "bravotv"
 
 
+def test_get_social_account_profile_summary(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "total_posts": 42,
+        "per_show_counts": [{"show_id": str(uuid4()), "show_name": "RHOSLC", "post_count": 12}],
+        "per_season_counts": [{"season_id": str(uuid4()), "season_number": 6, "post_count": 9}],
+        "top_hashtags": [{"hashtag": "rhoslc", "usage_count": 5}],
+        "top_collaborators": [],
+        "top_tags": [],
+        "source_status": [],
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_summary",
+        return_value=expected,
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/summary",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["platform"] == "instagram"
+    assert body["account_handle"] == "bravotv"
+    assert body["total_posts"] == 42
+
+
+def test_get_social_account_profile_posts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [
+            {
+                "id": "post-1",
+                "source_id": "source-1",
+                "platform": "instagram",
+                "account_handle": "bravotv",
+                "show_name": "RHOSLC",
+                "season_number": 6,
+            }
+        ],
+        "pagination": {"page": 2, "page_size": 10, "total": 11, "total_pages": 2},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_posts",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/posts?page=2&page_size=10",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["pagination"]["page"] == 2
+    assert mocked.call_args.kwargs["page"] == 2
+    assert mocked.call_args.kwargs["page_size"] == 10
+
+
+def test_put_social_account_profile_hashtags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    payload = {
+        "hashtags": [
+            {
+                "hashtag": "rhoslc",
+                "assignments": [
+                    {"show_id": show_id},
+                    {"show_id": show_id, "season_id": season_id},
+                ],
+            }
+        ]
+    }
+    expected = {
+        "items": [
+            {
+                "hashtag": "rhoslc",
+                "assignments": [
+                    {"show_id": show_id, "season_id": None},
+                    {"show_id": show_id, "season_id": season_id},
+                ],
+            }
+        ]
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.put_social_account_profile_hashtags",
+        return_value=expected,
+    ) as mocked:
+        response = client.put(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/hashtags",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["hashtag"] == "rhoslc"
+    assert mocked.call_args.kwargs["updated_by"] is None
+
+
+def test_get_social_account_profile_collaborators_tags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "collaborators": [{"handle": "andycohen", "usage_count": 3}],
+        "tags": [{"handle": "bravoandy", "usage_count": 5}],
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_collaborators_tags",
+        return_value=expected,
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/collaborators-tags",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["collaborators"][0]["handle"] == "andycohen"
+    assert body["tags"][0]["handle"] == "bravoandy"
+
+
+def test_social_account_profile_summary_invalid_platform_returns_400(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_summary",
+        side_effect=ValueError("INVALID_PLATFORM_FILTER: Unsupported platform 'myspace'"),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/myspace/bravotv/summary",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "INVALID_PLATFORM_FILTER"
+
+
+def test_social_account_profile_summary_missing_account_returns_404(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_summary",
+        side_effect=LookupError("Social account profile not found."),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/missing/summary",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Social account profile not found."
+
+
 def test_post_shared_ingest_returns_run_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")

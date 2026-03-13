@@ -11,6 +11,7 @@ SOCIAL_SUPPORTED_PLATFORMS: tuple[str, ...] = (
     "youtube",
     "facebook",
     "threads",
+    "reddit",
 )
 
 SOCIAL_SUPPORTED_PLATFORMS_SET: set[str] = set(SOCIAL_SUPPORTED_PLATFORMS)
@@ -22,6 +23,7 @@ SOCIAL_PLATFORM_DEFAULT_ORDER: tuple[str, ...] = (
     "twitter",
     "facebook",
     "threads",
+    "reddit",
 )
 
 # Explicit URL->platform mapping used by auto-discovery and adapter selection.

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from trr_backend.pipeline import admin_operations as pipeline_admin_operations
+from trr_backend.repositories import admin_operations as admin_ops_repo
 
 
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
@@ -414,3 +415,141 @@ def test_claim_and_execute_operation_claims_specific_operation() -> None:
     assert claimed is True
     claim_mock.assert_called_once()
     run_mock.assert_called_once_with(claimed_row)
+
+
+def test_modal_dispatch_emits_operation_and_dispatched_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When Modal dispatch succeeds, both an 'operation' envelope and
+    'dispatched_to_modal' event are emitted with monotonic event_seq.
+
+    Regression coverage for the Modal secret graph mismatch bug (March 2026):
+    operations stuck in 'pending' because Modal refused function startup.
+    The fix made secret resolution deterministic; this test ensures the
+    dispatch event emission path remains exercised.
+    """
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+
+    with patch("trr_backend.pipeline.admin_operations.dispatch_admin_operation", return_value=True):
+        with patch("trr_backend.pipeline.admin_operations.ensure_operation_execution"):
+            response = pipeline_admin_operations.start_operation_for_stream(
+                operation_type="admin_show_refresh",
+                producer=lambda: [],
+                request_payload={"show_id": str(uuid4())},
+                initiated_by="admin-regression-test",
+                request=None,
+            )
+
+    operation_id = str(response["id"])
+    events = admin_ops_repo.stream_events_after_seq(operation_id, after_seq=0)
+
+    # Must have at least 2 events: operation envelope + dispatched_to_modal
+    assert len(events) >= 2
+
+    # First event is the operation envelope
+    assert events[0]["event_type"] == "operation"
+    assert events[0]["event_payload"]["operation_id"] == operation_id
+    assert int(events[0]["event_seq"]) == 1
+
+    # Second event is dispatched_to_modal
+    assert events[1]["event_type"] == "dispatched_to_modal"
+    assert events[1]["event_payload"]["operation_id"] == operation_id
+    assert int(events[1]["event_seq"]) == 2
+
+    # event_seq is monotonically increasing with no duplicates
+    seqs = [int(e["event_seq"]) for e in events]
+    assert seqs == sorted(seqs)
+    assert len(set(seqs)) == len(seqs)
+
+    # Operation is still pending (no worker claimed it)
+    op = admin_ops_repo.get_operation(operation_id)
+    assert op is not None
+    assert op["status"] == "pending"
+
+
+def test_replay_stream_returns_all_events_after_modal_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After Modal claims and executes, replay stream returns all events
+    with monotonic event_seq including the terminal event.
+
+    This covers the full lifecycle: dispatch → claim → execute → replay,
+    ensuring the replay cursor (after_seq) correctly skips already-seen
+    events and the stream terminates after the operation reaches a
+    terminal status.
+    """
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+
+    # Phase 1: Start operation with Modal dispatch
+    with patch("trr_backend.pipeline.admin_operations.dispatch_admin_operation", return_value=True):
+        with patch("trr_backend.pipeline.admin_operations.ensure_operation_execution"):
+            response = pipeline_admin_operations.start_operation_for_stream(
+                operation_type="admin_show_refresh",
+                producer=lambda: [],
+                request_payload={"show_id": str(uuid4())},
+                initiated_by="admin-replay-test",
+                request=None,
+            )
+
+    operation_id = str(response["id"])
+
+    # Phase 2: Simulate what Modal worker does after claiming
+    admin_ops_repo.touch_operation_started(operation_id)
+    admin_ops_repo.append_operation_event(
+        operation_id,
+        event_type="progress",
+        event_payload={"stage": "sync_shows", "status": "running", "operation_id": operation_id},
+    )
+    admin_ops_repo.append_operation_event(
+        operation_id,
+        event_type="complete",
+        event_payload={"stage": "done", "status": "success", "operation_id": operation_id},
+    )
+    admin_ops_repo.update_operation_status(
+        operation_id,
+        status="completed",
+        result_payload={"details": {"status": "success"}},
+    )
+
+    # Phase 3: Replay from seq 0 — should get all events then terminate
+    async def _replay() -> list[tuple[str, dict[str, object]]]:
+        raw_chunks: list[str] = []
+        async for chunk in pipeline_admin_operations.operation_stream_generator(
+            operation_id,
+            after_seq=0,
+            request=None,
+        ):
+            raw_chunks.append(chunk)
+        return _parse_sse("".join(raw_chunks))
+
+    replayed = asyncio.run(_replay())
+
+    # At least 4 events: operation, dispatched_to_modal, progress, complete
+    assert len(replayed) >= 4
+
+    # Verify event types in expected order
+    event_types = [et for et, _ in replayed]
+    assert event_types[0] == "operation"
+    assert event_types[1] == "dispatched_to_modal"
+    assert "progress" in event_types
+    assert "complete" in event_types
+
+    # Verify monotonic event_seq
+    seqs = [int(p.get("event_seq", 0)) for _, p in replayed]
+    for i in range(1, len(seqs)):
+        assert seqs[i] > seqs[i - 1], f"event_seq not monotonic: {seqs}"
+
+    # Verify all events reference the correct operation
+    for _, payload in replayed:
+        assert str(payload.get("operation_id", "")) == operation_id
+
+    # Phase 4: Replay with after_seq > 0 skips already-seen events
+    async def _replay_partial() -> list[tuple[str, dict[str, object]]]:
+        raw_chunks: list[str] = []
+        async for chunk in pipeline_admin_operations.operation_stream_generator(
+            operation_id,
+            after_seq=2,
+            request=None,
+        ):
+            raw_chunks.append(chunk)
+        return _parse_sse("".join(raw_chunks))
+
+    partial = asyncio.run(_replay_partial())
+    partial_seqs = [int(p.get("event_seq", 0)) for _, p in partial]
+    assert all(s > 2 for s in partial_seqs), f"after_seq=2 should skip seqs <= 2, got {partial_seqs}"

@@ -43,9 +43,20 @@ def test_admin_brands_endpoints_require_authentication(client: TestClient) -> No
             "GET",
             "/api/v1/admin/brands/logos/options/sources?target_type=publication&target_key=instagram.com&logo_role=wordmark",
         ),
+        (
+            "GET",
+            "/api/v1/admin/brands/logos/options/modal?target_type=publication&target_key=instagram.com",
+        ),
+        (
+            "GET",
+            "/api/v1/admin/brands/logos/options/source-suggestions"
+            "?target_type=publication&target_key=instagram.com&logo_role=wordmark&source_provider=logos_fandom",
+        ),
         ("POST", "/api/v1/admin/brands/logos/options/discover"),
         ("POST", "/api/v1/admin/brands/logos/options/source-query"),
         ("POST", "/api/v1/admin/brands/logos/options/select"),
+        ("POST", "/api/v1/admin/brands/logos/options/assign"),
+        ("DELETE", "/api/v1/admin/brands/logos/options/saved/asset-1?target_type=publication&target_key=instagram.com"),
         ("GET", "/api/v1/admin/brands/logo-targets?target_type=network"),
         ("POST", "/api/v1/admin/brands/logos/sync"),
         ("PUT", "/api/v1/admin/brands/franchise-rules/real-housewives"),
@@ -296,6 +307,39 @@ def test_get_brand_logo_option_sources_success(client: TestClient, monkeypatch: 
     }
 
 
+def test_get_brand_logo_option_modal_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "saved_assets": [{"id": "asset-1", "source_provider": "saved"}],
+        "featured_assets": {
+            "wordmark": {"id": "asset-1", "selected_roles": ["wordmark"]},
+            "icon": {"id": "asset-2", "selected_roles": ["icon"]},
+        },
+        "sources": [{"source_provider": "logos1000", "total_count": 2, "has_more": False}],
+    }
+
+    with patch("api.routers.admin_brands._list_combined_logo_modal_state", return_value=expected) as mocked:
+        response = client.get(
+            (
+                "/api/v1/admin/brands/logos/options/modal"
+                "?target_type=publication&target_key=instagram.com&target_label=Instagram&include_related=false"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs == {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "target_label": "Instagram",
+        "include_related": False,
+    }
+
+
 def test_get_brand_logos_include_related_survives_missing_related_variant_columns(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -469,6 +513,46 @@ def test_post_brand_logo_option_source_query_success(client: TestClient, monkeyp
     assert mocked.call_args.args[0].query_values == ["instagram-logo", "instagram-icon"]
 
 
+def test_get_brand_logo_option_source_suggestions_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "target_type": "publication",
+        "target_key": "imdb.com",
+        "target_label": "IMDb",
+        "logo_role": "wordmark",
+        "source_provider": "logos_fandom",
+        "current_query_values": ["IMDb", "IMDb/Special_Logos"],
+        "suggestions": [
+            {
+                "query_value": "IMDb/Original",
+                "query_link": "https://logos.fandom.com/wiki/IMDb/Original",
+                "reason": "linked_from:IMDb",
+                "discovered_from": "https://logos.fandom.com/wiki/IMDb",
+            }
+        ],
+    }
+
+    with patch("api.routers.admin_brands._list_logo_source_suggestions", return_value=expected) as mocked:
+        response = client.get(
+            (
+                "/api/v1/admin/brands/logos/options/source-suggestions"
+                "?target_type=publication&target_key=imdb.com&target_label=IMDb&logo_role=wordmark&source_provider=logos_fandom"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs == {
+        "target_type": "publication",
+        "target_key": "imdb.com",
+        "target_label": "IMDb",
+        "logo_role": "wordmark",
+        "source_provider": "logos_fandom",
+    }
+
+
 def test_post_brand_logo_option_select_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -482,6 +566,7 @@ def test_post_brand_logo_option_select_success(client: TestClient, monkeypatch: 
         "target_label": "instagram.com",
         "logo_role": "wordmark",
         "asset_id": "asset-1",
+        "set_featured": False,
     }
     with patch("api.routers.admin_brands._select_logo_option", return_value=expected) as mocked:
         response = client.post(
@@ -493,6 +578,66 @@ def test_post_brand_logo_option_select_success(client: TestClient, monkeypatch: 
     assert response.json() == expected
     assert mocked.call_args.kwargs["payload"].target_type == "publication"
     assert mocked.call_args.kwargs["payload"].asset_id == "asset-1"
+    assert mocked.call_args.kwargs["payload"].set_featured is False
+
+
+def test_post_brand_logo_option_assign_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "selected": {"id": "asset-2", "logo_role": "icon"},
+        "summary": {"icon": {"selected_asset_id": "asset-2"}},
+    }
+    payload = {
+        "target_type": "publication",
+        "target_key": "instagram.com",
+        "target_label": "instagram.com",
+        "logo_role": "icon",
+        "asset_id": "asset-2",
+    }
+    with patch("api.routers.admin_brands._select_logo_option", return_value=expected) as mocked:
+        response = client.post(
+            "/api/v1/admin/brands/logos/options/assign",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    forwarded_payload = mocked.call_args.kwargs["payload"]
+    assert forwarded_payload.target_type == "publication"
+    assert forwarded_payload.logo_role == "icon"
+    assert forwarded_payload.asset_id == "asset-2"
+    assert forwarded_payload.set_featured is True
+
+
+def test_delete_brand_logo_saved_option_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "deleted_asset_id": "asset-1",
+        "saved_assets": [{"id": "asset-2"}],
+        "featured_assets": {"wordmark": {"id": "asset-2"}, "icon": None},
+    }
+
+    with (
+        patch("api.routers.admin_brands.get_supabase_admin_client", return_value=object()),
+        patch("api.routers.admin_brands._delete_saved_logo_option", return_value=expected) as mocked,
+    ):
+        response = client.delete(
+            (
+                "/api/v1/admin/brands/logos/options/saved/asset-1"
+                "?target_type=publication&target_key=instagram.com&target_label=Instagram"
+            ),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs["target_type"] == "publication"
+    assert mocked.call_args.kwargs["target_key"] == "instagram.com"
+    assert mocked.call_args.kwargs["target_label"] == "Instagram"
+    assert mocked.call_args.kwargs["asset_id"] == "asset-1"
 
 
 def test_get_brand_logo_targets_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

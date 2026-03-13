@@ -1,19 +1,23 @@
 # Plan — Task 11 (Plan A: Workspace + TRR-Backend Contract Completion)
 
 Repo: TRR-Backend
-Last updated: March 12, 2026
+Last updated: March 13, 2026
 
-## Status Snapshot (As of March 12, 2026)
+## Status Snapshot (As of March 13, 2026)
 
-- In progress.
-- Public traffic is now on the Render-hosted backend and the rollback observation window is open until March 13, 2026 at 16:09 EDT.
-- Better Stack can wait until after that observation window. It is required before CloudWatch is reduced or removed, but it does not block the current Render cutover validation window.
-- Logging decision: use Better Stack free first rather than paying up front. Upgrade only if real log volume or retention needs exceed the free tier.
-- Next TODO after the observation window closes cleanly:
-  - create or use a Better Stack free HTTP source and configure `BETTER_STACK_*` env on the live Render service and Modal job runtime
-  - verify backend API and Modal job logs arrive in Better Stack
-  - then run `scripts/ops/aws_teardown_pass.py --execute`
-  - then reduce CloudWatch usage and proceed with any follow-up cleanup outside the scripted pass
+- Closed.
+- Public traffic is on the Render-hosted backend and the legacy AWS API/network shell has been deleted.
+- R2 parity is complete for:
+  - `trr-backend` -> `trr-media-prod`
+  - `screenalytics` -> `screenalytics-artifacts-prod`
+  - `ltsr-data-bucket` -> `ltsr-archive-prod`
+- Runtime object storage is now cut over to R2 with a live public base URL on the Cloudflare-managed domain:
+  - `https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev`
+- Better Stack HTTP ingestion is live for the backend API and Modal jobs, with live tail verification green on the shipped path.
+- AWS teardown is complete for the migration scope; only intentionally retained low-cost reference artifacts remain:
+  - `/trr/staging/*` SSM parameters
+  - ACM certificate `api.thereality.report`
+- No remaining Task 11 blockers.
 
 ## Scope
 

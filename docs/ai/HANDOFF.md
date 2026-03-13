@@ -1,6 +1,463 @@
 # Session Handoff (TRR-Backend)
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
+## Latest Update (2026-03-13 18:17 EDT) — brand-logo delete tests now stub admin DB creation without breaking auth gating
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Preserved lazy admin DB creation inside `DELETE /api/v1/admin/brands/logos/options/saved/{asset_id}` so unauthorized requests are rejected before any DB dependency is resolved.
+  - Updated the saved-logo delete router test to patch `get_supabase_admin_client()` explicitly, removing the hidden dependency on local DB env vars while keeping the route’s auth behavior intact.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && env -u SUPABASE_URL -u SUPABASE_SERVICE_ROLE_KEY -u SUPABASE_ANON_KEY ./.venv/bin/python -m pytest tests/api/routers/test_admin_brands.py -k 'admin_brands_endpoints_require_authentication or delete_brand_logo_saved_option_success' -q` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && env -u SUPABASE_URL -u SUPABASE_SERVICE_ROLE_KEY -u SUPABASE_ANON_KEY ./.venv/bin/python -m pytest tests/api -q` (pass; `561 passed`)
+- blocked_checks:
+  - GitHub branch CI still needs to rerun after this repair commit is pushed.
+## Latest Update (2026-03-13 18:08 EDT) — brand-logo delete route now honors injected admin DB client in tests and CI
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed `DELETE /api/v1/admin/brands/logos/options/saved/{asset_id}` so it uses the FastAPI-injected `SupabaseAdminClient` instead of directly calling `get_supabase_admin_client()` inside the route body.
+  - This removes the hidden runtime dependency on real Supabase env vars during patched router tests, which is why the branch passed locally in a configured shell but failed in GitHub CI with a 500 on the saved-logo delete test.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && env -u SUPABASE_URL -u SUPABASE_SERVICE_ROLE_KEY -u SUPABASE_ANON_KEY ./.venv/bin/python -m pytest tests/api/routers/test_admin_brands.py -k delete_brand_logo_saved_option_success -q` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/python -m pytest tests/api/routers/test_admin_brands.py -k delete_brand_logo_saved_option_success -q` (pass)
+- blocked_checks:
+  - Full `tests/api` rerun is in progress in this session to confirm the CI failure is fully resolved before the branch is pushed.
+## Latest Update (2026-03-14 16:01 EDT) — historical show/season/episode/cast image cleanup now backfills unified media rows and variants
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+  - `functions.update_plan`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/media_assets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/backfill/backfill_media_assets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_media_assets_transform.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_backfill_media_assets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/README.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Extended the unified media transform layer so historical cleanup/backfill now covers:
+    - `show_images`
+    - `season_images`
+    - `episode_images`
+    - `person_images`
+    - `cast_photos`
+  - Added transform support for season, episode, and cast-photo rows in `trr_backend/repositories/media_assets.py`, matching the legacy bridge context contract (`legacy_table`, `legacy_id`, per-entity context fields).
+  - Backfilled assets now derive canonical hosted URLs from `hosted_key` when present, so old rows do not copy stale CloudFront/S3-style hosts into `core.media_assets`.
+  - Expanded `scripts/backfill/backfill_media_assets.py` so it can target `show|season|episode|person|cast|all` and optionally generate `thumb/card/detail` variants (plus crop variants) as part of the same cleanup run.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/repositories/test_media_assets_transform.py tests/scripts/test_backfill_media_assets.py` (pass; `8 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python3 -m py_compile trr_backend/repositories/media_assets.py scripts/backfill/backfill_media_assets.py tests/repositories/test_media_assets_transform.py tests/scripts/test_backfill_media_assets.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check trr_backend/repositories/media_assets.py scripts/backfill/backfill_media_assets.py tests/repositories/test_media_assets_transform.py tests/scripts/test_backfill_media_assets.py` (pass)
+- blocked_checks:
+  - No live historical backfill job was executed in this session.
+  - This pass updated the canonical repair path and regression coverage only.
+## Latest Update (2026-03-14 15:31 EDT) — historical social hosted-media cleanup now has a canonical all-history backfill path
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+  - `functions.update_plan`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/socials/backfill_social_media_mirror_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_backfill_social_media_mirror_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/README.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Extended `scripts/socials/backfill_social_media_mirror_jobs.py` so it can serve as the canonical historical hosted-media cleanup tool rather than just a recent-lookback mirror requeue helper.
+  - Added additive targeting and audit controls:
+    - `--all-history`
+    - repeatable `--season-id`
+    - repeatable `--post-id`
+    - repeatable `--source-id`
+    - `--repair-reasons`
+    - `--dry-run`
+  - Added per-row remediation-reason classification so old rows can be filtered and summarized by why they still need cleanup, including:
+    - `legacy_host`
+    - `hosted_content`
+    - `missing_hosted_thumbnail`
+    - `missing_hosted_media`
+    - `mirror_retry`
+    - `non_video_hosted_media`
+    - `source_quality`
+    - `twitter_video_thumbnail`
+  - Preserved the existing recent-window/default behavior and the narrow `--hosted-html-only` compatibility filter.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest -q tests/scripts/test_backfill_social_media_mirror_jobs.py` (pass; `4 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python3 -m py_compile scripts/socials/backfill_social_media_mirror_jobs.py tests/scripts/test_backfill_social_media_mirror_jobs.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check scripts/socials/backfill_social_media_mirror_jobs.py tests/scripts/test_backfill_social_media_mirror_jobs.py` (pass)
+- blocked_checks:
+  - No live backfill was executed in this session; this pass shipped the canonical historical cleanup path and its regression coverage only.
+## Latest Update (2026-03-14 14:55 EDT) — combined brand logo modal backend now serves shared saved assets, role assignment, and permanent delete with auto-recovery
+
+- primary_skill: `orchestrate-plan-execution`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added `GET /api/v1/admin/brands/logos/options/modal` so the app can hydrate a single combined picker with one shared saved library, featured wordmark/icon slots, and discovery-source summaries in one request.
+  - Added `POST /api/v1/admin/brands/logos/options/assign` as the explicit drag/drop role-assignment action. It forwards into the existing select flow with `set_featured=true`, allowing a saved asset to be reused across roles while keeping one featured wordmark and one featured icon.
+  - Added `DELETE /api/v1/admin/brands/logos/options/saved/{asset_id}` for permanent saved-logo deletion. The delete path removes mirrored object-storage variants, recomputes saved assets, and auto-recovers featured slots to the next deterministic saved option when possible.
+  - Discovery normalization now attaches additive preview metadata (`file_type`, `content_type`, `width`, `height`, `aspect_ratio`) and shape-aware role hints, so the combined picker can rank and label assets for the horizontal versus square frames.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_brands.py -q` (pass; `23 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python -m py_compile api/routers/admin_brands.py` (pass)
+- blocked_checks:
+  - No live backend deploy was required.
+  - Managed Chrome verification is still blocked in this session because the `chrome-devtools` MCP transport is closed.
+## Latest Update (2026-03-13 13:55 EDT) — Peacock `logos_fandom` queries now preserve exact Fandom URLs and scrape direct pages correctly
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+  - `functions.mcp__supabase__execute_sql`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed the `logos_fandom` query/profile path so explicit `logos.fandom.com` URLs are preserved instead of being rewritten into generic search terms or wiki slugs when the admin UI loads saved source queries.
+  - Fixed `collect_free_logo_candidates(...)` so direct Fandom page URLs such as `https://logos.fandom.com/wiki/Peacock/Other` scrape via the exact wiki title (`Peacock/Other`) rather than a lossy humanized search like `Peacock Other`.
+  - Tightened the Logopedia alias construction so direct-page and explicit search URLs no longer leak raw absolute URLs into lookup aliases.
+  - Updated the live `admin.brand_logo_source_queries` override for `publication / peacocktv.com / icon / logos_fandom` to the exact saved URL list requested by the operator:
+    - `https://logos.fandom.com/wiki/Peacock/Other`
+    - `https://logos.fandom.com/wiki/Peacock`
+    - `https://logos.fandom.com/wiki/Peacock/`
+    - `https://logos.fandom.com/wiki/Special:Search?scope=internal&query=peacock&ns%5B0%5D=6&filter=imageOnly`
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_brands_sync.py tests/api/routers/test_admin_brands.py tests/integrations/test_free_logo_sources.py -q` (pass; `69 passed`)
+  - Supabase SQL verification after update returned the Peacock `logos_fandom` row with the four exact URLs above.
+- blocked_checks:
+  - No deploy was required.
+## Latest Update (2026-03-14 00:38 EDT) — non-show logo saves no longer fail when monochrome variant decoding fails
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_scrape.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed the brand/publication/social logo save path so a base logo that already uploaded to object storage is not discarded just because monochrome variant generation raises `logo_decode_failed` or `transparent_extraction_failed`.
+  - `_import_non_show_logo_target(...)` now treats those variant-generation failures as non-blocking, logs a warning, preserves the base hosted R2 key/url, and completes the asset upsert/import audit.
+  - This specifically addresses admin modal saves that were failing even though the original logo bytes were valid enough to mirror into the canonical R2 location.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_scrape.py tests/api/routers/test_admin_brands.py tests/api/routers/test_admin_brands_sync.py tests/integrations/test_free_logo_sources.py` (pass; `67 passed`)
+- blocked_checks:
+  - No live deploy was required.
+## Latest Update (2026-03-14 00:26 EDT) — brand logo source queries now support multi-value overrides, non-featured batch imports, and `logos_fandom` suggestions
+
+- primary_skill: `senior-fullstack`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+  - `functions.mcp__supabase__apply_migration`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_brands_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_free_logo_sources.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added additive `set_featured` handling to the brand logo select flow so batch imports can save assets without immediately re-featuring each one.
+  - Added `GET /api/v1/admin/brands/logos/options/source-suggestions` for provider-specific suggestion payloads, currently used for `logos_fandom`.
+  - Tightened stale-schema handling around `admin.brand_logo_source_queries.query_values` so multi-value writes fail with an explicit migration error instead of a raw Postgres column error.
+  - Expanded `logos_fandom` query profiling with curated direct-page defaults for IMDb and Bravo plus linked-page suggestion crawling.
+  - Applied migration `0178_brand_logo_source_query_values.sql` to the active Supabase project; the `query_values` column now exists in the connected environment.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_brands.py tests/api/routers/test_admin_brands_sync.py tests/integrations/test_free_logo_sources.py` (pass; `66 passed`)
+  - Supabase MCP `apply_migration(name=\"brand_logo_source_query_values\", ...)` (pass; `{\"success\":true}`)
+- blocked_checks:
+  - No live backend deploy was required.
+## Latest Update (2026-03-13 23:31 EDT) — bug sweep fixed Modal import safety and normalized reddit as a first-class social platform
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `social-ingestion-reliability`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/modal_dispatch.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/socials/platforms.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/test_modal_jobs.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/socials/test_platforms.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_social_worker.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added a local/test-safe fallback stub for `modal` in `trr_backend/modal_jobs.py`, so importing the module no longer breaks `pytest` collection when the Modal package is absent.
+  - Normalized shared social platform constants to include `reddit`, and switched dispatcher/heartbeat defaults to the shared platform list instead of stale hardcoded arrays.
+  - Added regression coverage for reddit platform support and social worker argument parsing.
+- validation_evidence:
+  - `pytest TRR-Backend/tests/test_modal_jobs.py TRR-Backend/tests/socials/test_platforms.py TRR-Backend/tests/scripts/test_social_worker.py TRR-Backend/tests/api/routers/test_socials_reddit_refresh_routes.py -q` (pass; `48 passed`)
+- blocked_checks:
+  - No deploy was executed. This was a local/code-path verification pass only.
+## Latest Update (2026-03-12 23:24 EDT) — remote worker bootstrap now defers to Modal when the workspace/default executor is Modal
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/start_remote_job_workers.sh`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added explicit Modal-aware gating to `scripts/start_remote_job_workers.sh`.
+  - When `TRR_REMOTE_EXECUTOR=modal` and `TRR_MODAL_ENABLED=1`, the backend remote-worker bootstrap now exits cleanly after logging that local claim-loop workers are not started.
+  - This prevents the workspace remote-first default from accidentally starting the legacy local admin/reddit/google-news/social loops in parallel with the API-triggered Modal dispatch path.
+- validation_evidence:
+  - `bash -n /Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/start_remote_job_workers.sh` (pass)
+  - Live workspace run through `/Users/thomashulihan/Projects/TRR/make dev` showed:
+    - `[workspace] Remote job execution is Modal-owned; skipping local claim-loop workers.`
+    - `[workspace] Modal dispatch covers admin=1, reddit=1, google-news=1, social=1.`
+  - Workspace `make status` during the live run reported `TRR_REMOTE_WORKERS: not started locally (Modal dispatch active)`.
+- blocked_checks:
+  - This session did not trigger representative admin/reddit/google-news/social jobs to confirm each lane claimed work through Modal end-to-end.
+
+## Latest Update (2026-03-13 23:10 EDT) — Task 11 fully verified on the live path
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+  - `/Users/thomashulihan/Projects/TRR/screenalytics/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Reconciled the remaining task-level docs and handoff records to the final verified state after Better Stack live tail confirmation.
+  - Recorded Task 11 as fully complete with no remaining blockers:
+    - Render is the live public backend
+    - Modal is the live async executor
+    - R2 is the live storage backend
+    - Better Stack ingestion is verified on the live path
+    - AWS migration-scope resources are removed
+- validation_evidence:
+  - Better Stack live tail verification reported green by the operator on the live shipped path.
+  - Prior AWS zero-state checks in this session still stand: migration buckets absent, CloudWatch alarms/log groups absent, metrics Lambda/IAM role absent.
+- blocked_checks:
+  - No Task 11 blockers remain.
+
+## Latest Update (2026-03-13 22:45 EDT) — Task 11 closeout docs reconciled to the final shipped state
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+  - `functions.mcp__chrome-devtools__new_page`
+  - `functions.mcp__chrome-devtools__take_snapshot`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Reconciled the stale Task 11 backend closeout docs that still described Better Stack, CloudWatch cleanup, and the versioned `screenalytics` bucket as open blockers even though backend `STATUS.md` already recorded those items as complete.
+  - Updated the backend plan snapshot and cross-project notes so they now match the final shipped state:
+    - Render is the live public backend host
+    - Modal is the live async executor
+    - R2 is the live object-storage backend
+    - Better Stack ingestion is active
+    - AWS migration-scope teardown is complete
+  - Re-verified the live public surfaces are still healthy after the doc reconciliation:
+    - `https://trr-backend-api.onrender.com/health`
+    - `https://admin-56995--trr-backend-api.modal.run/health`
+    - `https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev/_healthcheck/README.md`
+- validation_evidence:
+  - `curl -fsS https://trr-backend-api.onrender.com/health` -> `{"status":"healthy"}`
+  - `curl -fsS https://admin-56995--trr-backend-api.modal.run/health` -> `{"status":"healthy"}`
+  - `curl -I -fsS https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev/_healthcheck/README.md` -> `200`
+- blocked_checks:
+  - No backend Task 11 blockers remain.
+## Latest Update (2026-03-13 19:32 EDT) — R2 cutover completed, AWS shell retired, Better Stack still blocks final observability cleanup
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+  - `senior-qa`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+  - `functions.mcp__awslabs-core__prompt_understanding`
+  - `functions.mcp__awslabs-aws-api__call_aws`
+  - `functions.mcp__chrome-devtools__new_page`
+  - `functions.mcp__chrome-devtools__take_snapshot`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/ops/aws_teardown_pass.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/render/sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/prepare_named_secrets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_prepare_named_secrets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/pyrightconfig.json`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/aws_teardown.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/PLAN.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/STATUS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/cross-collab/TASK11/OTHER_PROJECTS.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed the IDE/Pylance import-resolution issue for `boto3` / `botocore` in `trr_backend/object_storage.py` by adding a repo-local `pyrightconfig.json` pointing at `.venv`.
+  - Reworked the final teardown logic so the repo automation understands the real remaining AWS inventory, including route-table NAT cleanup, ALB alarms, metrics-publisher Lambda/IAM, and S3 buckets.
+  - Executed the live R2 finish pass:
+    - verified initial bucket drift
+    - synced the exact missing deltas into `trr-media-prod` and `screenalytics-artifacts-prod`
+    - re-verified parity for all three buckets
+  - Found that `media.thereality.report` was not actually attached to the R2 bucket; enabled the Cloudflare-managed `r2.dev` domain for `trr-media-prod` and switched runtime public URLs to that domain instead.
+  - Re-synced the Render service and redeployed Modal so live runtime now uses the working R2 public base URL.
+  - Executed the live AWS shell retirement:
+    - deleted `trr-api-asg`, `trr-api-lt`, `trr-api-alb`, `trr-api-tg`
+    - removed the NAT route, deleted NAT `nat-004581b7931e685e7`, released EIP `eipalloc-0c6c7ef0913e7a3d8`
+    - deleted both API shell security groups
+    - deleted manual snapshot `trr-metadata-db-final-2026-03-07`
+  - Left observability cleanup intentionally incomplete because the configured Better Stack source token still returns `401 Unauthorized`.
+  - Started force-removal of the remaining AWS buckets:
+    - `trr-backend` deleted
+    - `ltsr-data-bucket` deleted
+    - versioned bucket `screenalytics` still requires version purge before final deletion
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/scripts/test_sync_render_service_from_aws.py tests/scripts/test_prepare_named_secrets.py tests/test_observability.py` (pass; `14 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check scripts/render/sync_render_service_from_aws.py scripts/modal/prepare_named_secrets.py scripts/ops/aws_teardown_pass.py tests/scripts/test_sync_render_service_from_aws.py tests/scripts/test_prepare_named_secrets.py trr_backend/object_storage.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python3.11 -m py_compile scripts/render/sync_render_service_from_aws.py scripts/modal/prepare_named_secrets.py scripts/ops/aws_teardown_pass.py trr_backend/object_storage.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && npx pyright trr_backend/object_storage.py` (pass; `0 errors, 0 warnings, 0 informations`)
+  - bucket parity:
+    - `trr-backend` -> `trr-media-prod` matched at `65469` objects / `23450892661` bytes
+    - `screenalytics` -> `screenalytics-artifacts-prod` matched at `58878` objects / `8497507855` bytes
+    - `ltsr-data-bucket` -> `ltsr-archive-prod` matched at `8` objects / `21471` bytes
+  - `curl -fsS https://trr-backend-api.onrender.com/health` -> `{"status":"healthy"}`
+  - `curl -I -A 'Mozilla/5.0' https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev/_healthcheck/README.md` -> `200 OK`
+- blocked_checks:
+  - `BETTER_STACK_SOURCE_TOKEN` currently fails direct ingest with `401 Unauthorized`, so CloudWatch alarm/log migration is still blocked.
+  - `media.thereality.report` still does not resolve and is not attached to the R2 bucket; runtime is temporarily using the managed `r2.dev` domain instead.
+  - At the time of handoff, the only storage residue still on AWS was the versioned `screenalytics` bucket; verify the version-purge/delete job finishes before declaring AWS storage fully retired.
+## Latest Update (2026-03-12 20:01 EDT) — Added canonical R2 setup reference and token guidance
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `senior-backend`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+  - `web.run`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/R2-setup.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/r2_migration.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Added `docs/deploy/R2-setup.md` as the canonical setup reference for Cloudflare R2 bucket naming, token strategy, access model, custom-domain guidance, and canonical `OBJECT_STORAGE_*` runtime envs.
+  - Documented the preferred Cloudflare flow as `R2 Object Storage -> Manage API tokens -> Create Account API token`, rather than relying on the generic Cloudflare custom-token screen.
+  - Captured the recommended long-lived runtime token (`trr-r2-runtime`) with `Object Read & Write` on scoped buckets, plus the separate short-lived migration/admin token only when bucket administration is needed.
+  - Clarified that the generic Cloudflare bearer token is acceptable for management API calls like bucket creation, but Render and Modal still need the R2-native Access Key ID / Secret Access Key pair for S3-compatible boto3 access.
+  - Linked the existing migration runbook back to the new setup doc so operator flows now separate initial setup from sync/verification execution.
+- validation_evidence:
+  - Manual doc review only; no code-path or infrastructure behavior changed in this session.
+- blocked_checks:
+  - No Cloudflare account access exists in this Codex session, so bucket creation and token generation still require dashboard/operator execution.
+## Latest Update (2026-03-12 19:25 EDT) — Object storage is now R2-ready in code; live Better Stack and R2 cutover still blocked on missing credentials
+
+- primary_skill: `senior-devops`
+- supporting_skills:
+  - `aws-solution-architect`
+  - `senior-backend`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/object_storage.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/media/s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/pipeline/manifests.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/media/mirror_media_assets_to_s3.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/prepare_named_secrets.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/modal/render_cutover_commands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/storage/_s3_compatible.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/storage/sync_bucket_to_r2.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/storage/verify_bucket_sync.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/render/sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/media/test_s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/scripts/test_sync_render_service_from_aws.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/.env.example`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/api/run.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/r2_migration.md`
+- behavior_summary:
+  - Added a provider-neutral S3-compatible storage contract in `trr_backend.object_storage`, with `OBJECT_STORAGE_*` as the canonical envs and `AWS_*` kept as compatibility aliases.
+  - Updated backend media mirroring, uploads, manifest storage, and the async media mirroring worker to use the new object-storage contract without changing key layouts or API response shapes.
+  - Extended the Render sync script so operator-shell `OBJECT_STORAGE_*` values pass through to the live Render service env alongside the existing Better Stack passthrough behavior.
+  - Updated the Modal secret/cutover helper scripts to keep `TRR_MODAL_ADMIN_OPERATION_FUNCTION=run_admin_operation_v2`, matching the live runtime contract.
+  - Added operator migration scripts for bucket sync and verification:
+    - `scripts/storage/sync_bucket_to_r2.py`
+    - `scripts/storage/verify_bucket_sync.py`
+  - Added deployment docs for the R2 migration flow and updated the API/Render docs to describe the new canonical storage contract.
+  - Did not execute a live Render Better Stack wiring, Modal secret update, or R2 bucket cutover in this session because no local `BETTER_STACK_*` or `OBJECT_STORAGE_*`/R2 credentials were present.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/pytest -q tests/media/test_s3_mirror.py tests/media/test_user_uploads.py tests/scripts/test_sync_render_service_from_aws.py tests/test_observability.py` (pass; `95 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/ruff check trr_backend/object_storage.py trr_backend/media/s3_mirror.py trr_backend/pipeline/manifests.py scripts/media/mirror_media_assets_to_s3.py scripts/storage/_s3_compatible.py scripts/storage/sync_bucket_to_r2.py scripts/storage/verify_bucket_sync.py scripts/render/sync_render_service_from_aws.py tests/media/test_s3_mirror.py tests/scripts/test_sync_render_service_from_aws.py` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && python3.11 -m py_compile trr_backend/object_storage.py trr_backend/media/s3_mirror.py trr_backend/pipeline/manifests.py scripts/media/mirror_media_assets_to_s3.py scripts/storage/_s3_compatible.py scripts/storage/sync_bucket_to_r2.py scripts/storage/verify_bucket_sync.py scripts/render/sync_render_service_from_aws.py` (pass)
+- blocked_checks:
+  - Live Better Stack verification still requires `BETTER_STACK_SOURCE_TOKEN` and `BETTER_STACK_INGESTING_HOST`.
+  - Live Render/Modal storage cutover still requires `OBJECT_STORAGE_*` values for the Cloudflare R2 account and public base URL.
+  - AWS S3 deletion remains blocked until the R2 migration scripts are run, counts/bytes are verified, and a rollback window has elapsed.
 ## Latest Update (2026-03-12 16:40 EDT) — AWS teardown operator script added; live deletion still gated until March 13
 
 - primary_skill: `senior-devops`
@@ -519,6 +976,25 @@ Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Upd
   - No staging or production mutations were performed in this pass.
   - This pass intentionally did not perform a full staging or production runtime rollout; it updated the linked Supabase schema and local workspace verification only.
 ## Latest Update (2026-03-07 16:18 EST) — API cut over to local+Modal execution and EC2 worker ASG drained toward zero
+
+- Latest Update (2026-03-13 06:43 EST) — RHOSLC hashtag floor now applies across Bravo platforms and official profile hashtags infer default RHOSLC assignment
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py`
+- behavior_summary:
+  - Expanded the canonical RHOSLC social terms so the season-target default set now includes both `RHOSLC` and `RealHousewivesofSaltLakeCity`, plus the full keyword `Real Housewives of Salt Lake City`.
+  - Normalized RHOSLC hashtag floors across all Bravo-scope platforms instead of only `instagram` and `twitter`, so existing target rows and new writes both keep those canonical hashtags on official Bravo accounts.
+  - Added a fallback for account-level hashtag profiles so official Bravo handles like `bravo`, `bravotv`, `bravowwhl`, `wwhl`, and `bravodailydish` automatically show RHOSLC assignment rows for `#rhoslc` and `#realhousewivesofsaltlakecity` when the observed posts are already mapped to RHOSLC but explicit hashtag assignment rows have not been saved yet.
+- validation_evidence:
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/repositories/test_social_season_analytics.py -k 'rhoslc or get_targets or put_targets or social_account_profile_hashtags' -q` (pass; `20 passed`)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py -q` (pass; `107 passed`)
+- notes:
+  - Managed Chrome against `http://admin.localhost:3000/social/instagram/bravotv/hashtags` did not complete the hashtag-content render in this session, so UI verification for the inferred assignment remains backend-test verified rather than end-to-end confirmed.
 
 - primary_skill: `senior-backend`
 - supporting_skills:
@@ -15550,3 +16026,71 @@ Latest Update (2026-03-12 15:00 EST) — Vercel traffic is on Modal and the lega
 - notes:
   - Preview browser smoke remained limited by Vercel SSO protection in this session.
   - At handoff time, the legacy API instance is still draining from the target group, but the ASG is already fixed at `0/0/0` with no scaling or scheduled actions left to restore capacity automatically.
+
+Latest Update (2026-03-12 23:26 EST) — Account-level official social profile APIs added for global platform/handle routes
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/supabase/migrations/0180_social_account_hashtag_assignments.sql`
+- behavior_summary:
+  - Added additive admin social profile endpoints for `/api/v1/admin/socials/profiles/{platform}/{account_handle}` covering summary, posts, hashtags, hashtag assignment writes, and collaborators/tags.
+  - Reused the existing platform post tables to aggregate account-level stats across all shows and seasons for a normalized handle.
+  - Added the new `social.account_hashtag_assignments` migration for account-level hashtag-to-show/season assignment metadata.
+  - Hardened summary/hashtag reads so environments that have not applied migration `0180` still render safely with empty assignment state instead of failing the entire page; writes now return a clear schema-not-migrated error until the table exists.
+  - Fixed the shared account row ordering query to use columns guaranteed across normalized platform projections, avoiding `UndefinedColumn` failures on account summary fetches.
+- validation_evidence:
+  - `ruff check /Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/socials.py /Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py` (pass)
+  - `pytest /Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_socials_season_analytics.py -q` (pass; `107 passed`)
+  - live backend browser-backed verification against `http://admin.localhost:3000/social/instagram/bravotv` after the final restart (pass for summary stats; page rendered `1,013` posts and populated aggregate metrics)
+- notes:
+  - The current dev database used in this session does not yet contain `social.account_hashtag_assignments`; the code now degrades reads safely until `supabase db push` applies migration `0180`.
+
+## Latest Update (2026-03-13 15:25 EDT) — Hosted media/object-storage aliases normalized for the R2 runtime contract
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-fullstack`
+  - `senior-qa`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/media/s3_mirror.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/media/user_uploads.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/repositories/social_season_analytics.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/media/test_s3_mirror.py`
+- behavior_summary:
+  - Added provider-neutral hosted-media/object-storage helper aliases on top of the existing mirror module so runtime callers can use canonical hosted-media naming without breaking legacy `get_s3_*` integrations.
+  - Kept `OBJECT_STORAGE_*` as the canonical config path while preserving `AWS_*` and `AWS_CDN_BASE_URL` compatibility aliases.
+  - Updated the season social analytics hosted-host repair path to prefer the live `OBJECT_STORAGE_PUBLIC_BASE_URL` and only fall back to the legacy CDN env alias when needed.
+  - Left published payload/database field names unchanged (`hosted_url`, `hosted_key`, `thumbnail_url`, `hosted_thumbnail_url`, `media_mirror_*`).
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/media/test_s3_mirror.py tests/media/test_user_uploads.py -q` (pass; `87 passed`)
+- notes:
+  - This pass was runtime-contract cleanup only; no schema or API response-shape migration was introduced.
+
+## Latest Update (2026-03-13 16:56 EDT) — Mary Cosby Getty/NBCUMV person imports now crosswalk, batch, and persist Getty-only fallback gallery rows
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-qa`
+  - `senior-fullstack`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/trr_backend/integrations/getty.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_person_images.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/integrations/test_getty.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/tests/api/routers/test_admin_person_images.py`
+- behavior_summary:
+  - Getty person discovery for NBCUMV crosswalk imports now uses `phrase=<person name>` with `artistexact=bravo` as the primary search and falls back to `<person name> Bravo` only when the primary query yields no detail URLs.
+  - Getty asset details now expose a normalized preview/comp URL chosen from the watermark-capable Getty fields so unmatched Getty assets can be imported as visible fallback gallery rows.
+  - The person image refresh pipeline now imports only NBCUMV overlap assets into `media_assets/media_links`, while Getty-only unmatched results are persisted into `core.cast_photos` with `source='getty'`, `source_image_id=<editorial_id>`, `source_page_url=<detail_url>`, and full Getty/NBCUMV crosswalk metadata.
+  - Show-scoped runs filter both overlap imports and Getty-only fallback rows to the requested show before persistence, so `/people/mary-cosby/gallery?showId=rhoslc` only keeps RHOSLC-scoped Getty/NBCUMV results.
+  - Refresh stream payloads now track `getty_only_imported`, emit a dedicated `nbcumv_import` summary that includes Getty-only counts, and can mirror Getty-only fallback rows so they become visible in the merged person gallery.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && pytest tests/api/routers/test_admin_person_images.py tests/integrations/test_getty.py -q` (pass; `83 passed`)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ruff check api/routers/admin_person_images.py trr_backend/integrations/getty.py tests/api/routers/test_admin_person_images.py tests/integrations/test_getty.py` (pass)
+- notes:
+  - This pass changed backend behavior only; AWS/worker rollout was not executed in this session.
