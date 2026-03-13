@@ -452,11 +452,114 @@ def test_build_source_query_profile_uses_direct_logos_fandom_page_links_for_wiki
         ],
     )
 
-    assert profile["query_values"] == ["Bravo_(United_States)", "Bravo_(United_States)/Other"]
+    assert profile["query_values"] == [
+        "https://logos.fandom.com/wiki/Bravo_(United_States)",
+        "https://logos.fandom.com/wiki/Bravo_(United_States)/Other",
+    ]
     assert profile["query_links"] == [
         "https://logos.fandom.com/wiki/Bravo_(United_States)",
         "https://logos.fandom.com/wiki/Bravo_(United_States)/Other",
     ]
+
+
+def test_build_source_query_profile_preserves_explicit_logos_fandom_search_urls() -> None:
+    profile = mod.build_source_query_profile(
+        source_provider="logos_fandom",
+        target_label="Peacock",
+        target_key="peacocktv.com",
+        query_override=[
+            "https://logos.fandom.com/wiki/Peacock/",
+            "https://logos.fandom.com/wiki/Special:Search?scope=internal&query=peacock&ns%5B0%5D=6&filter=imageOnly",
+        ],
+    )
+
+    assert profile["query_values"] == [
+        "https://logos.fandom.com/wiki/Peacock/",
+        "https://logos.fandom.com/wiki/Special:Search?scope=internal&query=peacock&ns%5B0%5D=6&filter=imageOnly",
+    ]
+    assert profile["query_links"] == profile["query_values"]
+
+
+def test_build_source_query_profile_uses_curated_imdb_logos_fandom_defaults() -> None:
+    profile = mod.build_source_query_profile(
+        source_provider="logos_fandom",
+        target_label="IMDb",
+        target_key="imdb.com",
+        query_override=None,
+    )
+
+    assert profile["default_query_value"] == "IMDb"
+    assert profile["effective_query_value"] == "IMDb"
+    assert profile["query_values"] == ["IMDb", "IMDb/Special_Logos"]
+    assert profile["query_links"] == [
+        "https://logos.fandom.com/wiki/IMDb",
+        "https://logos.fandom.com/wiki/IMDb/Special_Logos",
+    ]
+
+
+def test_build_source_query_profile_uses_curated_bravo_logos_fandom_defaults() -> None:
+    profile = mod.build_source_query_profile(
+        source_provider="logos_fandom",
+        target_label="Bravo TV",
+        target_key="bravotv.com",
+        query_override=None,
+    )
+
+    assert profile["default_query_value"] == "Bravo_(United_States)"
+    assert profile["effective_query_value"] == "Bravo_(United_States)"
+    assert profile["query_values"] == ["Bravo_(United_States)", "Bravo_(United_States)/Special_Logos"]
+    assert profile["query_links"] == [
+        "https://logos.fandom.com/wiki/Bravo_(United_States)",
+        "https://logos.fandom.com/wiki/Bravo_(United_States)/Special_Logos",
+    ]
+
+
+def test_suggest_logos_fandom_query_values_collects_direct_page_and_linked_slugs() -> None:
+    session = MagicMock()
+    session.get.return_value = _FakeResponse(
+        url="https://logos.fandom.com/wiki/IMDb",
+        text=(
+            "<html><body><div class='mw-parser-output'>"
+            '<a href="/wiki/IMDb/Original">Original</a>'
+            '<a href="/wiki/IMDb/Special_Logos">Special Logos</a>'
+            '<a href="/wiki/Special:Search">Search</a>'
+            "</div></body></html>"
+        ),
+    )
+
+    suggestions = mod.suggest_logos_fandom_query_values(
+        target_label="IMDb",
+        target_key="imdb.com",
+        current_query_values=["IMDb"],
+        session=session,
+    )
+
+    assert suggestions[0]["query_value"] == "IMDb/Special_Logos"
+    assert any(row["query_value"] == "IMDb/Original" for row in suggestions)
+    assert not any("Special:Search" in row["query_value"] for row in suggestions)
+
+
+def test_suggest_logos_fandom_query_values_uses_bravo_defaults_when_current_queries_missing() -> None:
+    session = MagicMock()
+    session.get.return_value = _FakeResponse(
+        url="https://logos.fandom.com/wiki/Bravo_(United_States)",
+        text=(
+            "<html><body><div class='mw-parser-output'>"
+            '<a href="/wiki/Below_Deck">Below Deck</a>'
+            '<a href="/wiki/Bravo_(United_States)/Special_Logos">Special Logos</a>'
+            "</div></body></html>"
+        ),
+    )
+
+    suggestions = mod.suggest_logos_fandom_query_values(
+        target_label="Bravo TV",
+        target_key="bravotv.com",
+        current_query_values=[],
+        session=session,
+    )
+
+    assert suggestions[0]["query_value"] == "Below_Deck"
+    assert suggestions[0]["discovered_from"] == "https://logos.fandom.com/wiki/Bravo_(United_States)"
 
 
 def test_normalize_source_query_value_extracts_logos_fandom_page_slug_from_url() -> None:
@@ -519,6 +622,120 @@ def test_collect_free_logo_candidates_passes_query_override_to_provider_terms() 
         )
 
     assert wikimedia_mock.call_args.args[0] == ["peacock custom"]
+
+
+def test_collect_free_logo_candidates_passes_exact_logos_fandom_page_slug_to_logopedia() -> None:
+    with (
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
+            return_value=[
+                "https://static.wikia.nocookie.net/logopedia/images/1/11/Peacock_2020.svg/revision/latest"
+            ],
+        ) as fandom_mock,
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
+            return_value=[],
+        ),
+    ):
+        rows = mod.collect_free_logo_candidates(
+            target_label="Peacock",
+            target_key="peacocktv.com",
+            source_provider="logos_fandom",
+            query_override="https://logos.fandom.com/wiki/Peacock/Other",
+        )
+
+    assert fandom_mock.call_args.args[0] == "Peacock/Other"
+    assert rows[0].discovered_from == "https://logos.fandom.com/wiki/Peacock/Other"
+
+
+def test_collect_free_logo_candidates_preserves_explicit_logos_fandom_search_url() -> None:
+    explicit_search_url = (
+        "https://logos.fandom.com/wiki/Special:Search?scope=internal&query=peacock&ns%5B0%5D=6&filter=imageOnly"
+    )
+    with (
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_wikimedia_commons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
+            return_value=[
+                "https://static.wikia.nocookie.net/logopedia/images/1/11/Peacock_2020.svg/revision/latest"
+            ],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_worldvectorlogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_seeklogo_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logowik_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logo_wine_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_logosearch_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.search_simple_icons_logo_candidates",
+            return_value=[],
+        ),
+        patch(
+            "trr_backend.integrations.free_logo_sources.extract_official_logo_candidates",
+            return_value=[],
+        ),
+    ):
+        rows = mod.collect_free_logo_candidates(
+            target_label="Peacock",
+            target_key="peacocktv.com",
+            source_provider="logos_fandom",
+            query_override=explicit_search_url,
+        )
+
+    assert rows[0].discovered_from == explicit_search_url
 
 
 def test_collect_free_logo_candidates_passes_exact_slug_override_to_1000logos() -> None:

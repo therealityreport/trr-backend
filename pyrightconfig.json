@@ -1,0 +1,10 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    "api",
+    "trr_backend",
+    "scripts",
+    "tests"
+  ]
+}

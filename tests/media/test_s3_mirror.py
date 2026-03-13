@@ -197,6 +197,55 @@ def test_get_s3_client_falls_back_to_env_creds_when_profile_missing(monkeypatch:
     }
 
 
+def test_object_storage_env_aliases_override_aws_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_S3_BUCKET", "aws-bucket")
+    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.aws.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_PROVIDER", "r2")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "r2-bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "auto")
+    monkeypatch.setenv("OBJECT_STORAGE_ENDPOINT_URL", "https://example-account.r2.cloudflarestorage.com")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.r2.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_ACCESS_KEY_ID", "r2-key")
+    monkeypatch.setenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "r2-secret")
+
+    config = s3_mirror.get_s3_config()
+
+    assert config.provider == "r2"
+    assert config.bucket == "r2-bucket"
+    assert config.region == "auto"
+    assert config.endpoint_url == "https://example-account.r2.cloudflarestorage.com"
+    assert config.cdn_base_url == "https://cdn.r2.example.com"
+    assert config.access_key_id == "r2-key"
+    assert config.secret_access_key == "r2-secret"
+
+
+def test_get_s3_client_uses_endpoint_url_for_r2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_PROVIDER", "r2")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "auto")
+    monkeypatch.setenv("OBJECT_STORAGE_ENDPOINT_URL", "https://example-account.r2.cloudflarestorage.com")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.r2.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "secret")
+
+    session_calls: list[dict[str, object]] = []
+
+    def _fake_session(**kwargs):  # noqa: ANN001
+        session_calls.append(dict(kwargs))
+        return _FakeBotoSession(dict(kwargs))
+
+    monkeypatch.setattr(s3_mirror.boto3, "Session", _fake_session)
+
+    client = s3_mirror.get_s3_client()
+
+    assert session_calls == [{"region_name": "auto"}]
+    assert client["endpoint_url"] == "https://example-account.r2.cloudflarestorage.com"
+    assert client["aws_access_key_id"] == "key"
+    assert client["aws_secret_access_key"] == "secret"
+    assert client["region_name"] == "auto"
+
+
 def test_mirror_urls_to_s3_isolates_failures_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
@@ -349,6 +398,23 @@ def test_build_hosted_url_normalizes_slashes(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
     monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com/")
     assert s3_mirror.build_hosted_url("/images/test.png") == "https://cdn.example.com/images/test.png"
+    assert s3_mirror.build_public_object_url("/images/test.png") == "https://cdn.example.com/images/test.png"
+
+
+def test_provider_neutral_storage_aliases_match_legacy_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_PROVIDER", "r2")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "r2-bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "auto")
+    monkeypatch.setenv("OBJECT_STORAGE_ENDPOINT_URL", "https://example-account.r2.cloudflarestorage.com")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://pub.example.com")
+
+    config = s3_mirror.get_hosted_media_storage_config()
+
+    assert config.bucket == "r2-bucket"
+    assert s3_mirror.get_object_storage_bucket() == "r2-bucket"
+    assert s3_mirror.get_public_base_url() == "https://pub.example.com"
+    assert s3_mirror.get_cdn_base_url() == "https://pub.example.com"
+    assert s3_mirror.build_public_object_url("media/example.webp") == "https://pub.example.com/media/example.webp"
 
 
 def test_cdn_base_url_rejects_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:

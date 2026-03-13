@@ -1,5 +1,5 @@
 """
-User media uploads with S3 presigned POST flow.
+User media uploads with object-storage presigned POST flow.
 
 This module handles user-uploaded images:
 - source_url = NULL (no external source)
@@ -8,7 +8,7 @@ This module handles user-uploaded images:
 
 Flow:
 1. initiate: Create upload session, generate presigned POST
-2. (client): Upload directly to S3 temp location
+2. (client): Upload directly to temporary object-storage location
 3. finalize: Validate, compute SHA256, move to canonical key, create asset+link
 """
 
@@ -27,9 +27,12 @@ from botocore.exceptions import ClientError
 from PIL import Image
 
 from trr_backend.media.s3_mirror import (
-    get_cdn_base_url,
+    get_object_storage_bucket,
+    get_object_storage_client,
+    get_public_base_url,
     get_s3_bucket,
     get_s3_client,
+    get_cdn_base_url,
     guess_ext_from_content_type,
 )
 from trr_backend.observability import inc_suppressed_path_conversion
@@ -78,7 +81,7 @@ class FinalizedUpload:
 
 
 def _sanitize_filename(filename: str | None) -> str:
-    """Sanitize a filename for use in S3 paths."""
+    """Sanitize a filename for use in object-storage paths."""
     if not filename:
         return "upload"
     # Remove directory separators and dangerous characters
@@ -96,13 +99,13 @@ def _build_temp_key(
     upload_id: str,
     original_filename: str | None,
 ) -> str:
-    """Build the temporary S3 key for an upload."""
+    """Build the temporary object-storage key for an upload."""
     sanitized = _sanitize_filename(original_filename)
     return f"uploads/{entity_type}/{entity_id}/{upload_id}/{sanitized}"
 
 
 def _build_canonical_key(sha256: str, ext: str) -> str:
-    """Build the content-addressed canonical S3 key."""
+    """Build the content-addressed canonical object-storage key."""
     prefix = sha256[:2]
     return f"media/{prefix}/{sha256}{ext}"
 

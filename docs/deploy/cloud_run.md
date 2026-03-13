@@ -1,5 +1,10 @@
 # Cloud Run Deployment (TRR-Backend)
 
+This document is retained for legacy reference only. The current public-hosting
+target for TRR AWS exit is Render; use
+`/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md` for the
+active deployment path.
+
 This guide deploys the FastAPI app on Google Cloud Run using the repo `Dockerfile` at the repo root.
 Defaults use region `us-east1`, service name `trr-backend`, and min instances `0`.
 
@@ -37,7 +42,7 @@ Precedence is `SUPABASE_DB_URL` → `DATABASE_URL` → `TRR_DB_URL`.
 | `CORS_ALLOW_ORIGINS` | N | N | App config | Comma-separated origins. Include Vercel prod and any preview domains you need. Credentials require explicit origins. |
 | `ADMIN_EMAIL_ALLOWLIST` | N | N | App config | Comma-separated emails for allowlist-only admin endpoints. |
 | `SCREENALYTICS_SERVICE_TOKEN` | N (required for `/screenalytics` endpoints) | Y | Screenalytics | Bearer token for service-to-service auth. |
-| `SCREENALYTICS_API_URL` | N (required for auto-count) | N | Screenalytics | Base URL for Screenalytics API. |
+| `SCREENALYTICS_API_URL` | N (non-admin legacy consumers only) | N | Screenalytics | Base URL for Screenalytics API. Covered admin auto-count runs through the backend-owned vision runtime instead. |
 | `REDIS_URL` | N (required for multi-instance realtime) | Y | Redis provider | `redis://...` for pub/sub fanout. |
 
 ## Cloud Run Service Settings (Recommended Defaults)

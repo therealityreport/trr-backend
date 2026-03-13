@@ -127,6 +127,14 @@ def test_sentiment_for_text_handles_negation_and_contrast() -> None:
     assert score > 0
 
 
+def test_derive_show_terms_adds_canonical_rhoslc_full_hashtag() -> None:
+    hashtags, keywords = social_repo._derive_show_terms("The Real Housewives of Salt Lake City")
+
+    assert "RHOSLC" in hashtags
+    assert "RealHousewivesofSaltLakeCity" in hashtags
+    assert "Real Housewives of Salt Lake City" in keywords
+
+
 def test_normalize_week_totals_payload_defaults_zero_comment_pct() -> None:
     assert _normalize_week_totals_payload(
         {
@@ -2567,7 +2575,37 @@ def test_get_targets_enforces_rhoslc_instagram_account_floor_on_existing_rows(mo
     payload = get_targets(season_id, source_scope="bravo")
 
     assert payload["targets"][0]["accounts"] == ["bravotv", "bravowwhl"]
-    assert payload["targets"][0]["hashtags"] == ["RHOSLC"]
+    assert payload["targets"][0]["hashtags"] == ["RHOSLC", "RealHousewivesofSaltLakeCity"]
+
+
+def test_get_targets_enforces_rhoslc_hashtag_floor_on_existing_rows_for_non_instagram_platforms(monkeypatch) -> None:
+    season_id = "season-targets-rhoslc-youtube"
+    rows = [
+        {
+            "season_id": season_id,
+            "show_id": "show-rhoslc",
+            "season_number": 6,
+            "show_name": "The Real Housewives of Salt Lake City",
+            "platform": "youtube",
+            "source_scope": "bravo",
+            "timezone": "America/New_York",
+            "accounts": ["bravo"],
+            "hashtags": [],
+            "keywords": ["rhoslc"],
+            "is_active": True,
+            "config": {},
+            "updated_by": "admin@example.com",
+            "updated_at": datetime(2026, 2, 20, tzinfo=UTC),
+            "created_at": datetime(2026, 2, 20, tzinfo=UTC),
+        }
+    ]
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda _sql, _params: rows)
+
+    payload = get_targets(season_id, source_scope="bravo")
+
+    assert payload["targets"][0]["accounts"] == ["bravo"]
+    assert payload["targets"][0]["hashtags"] == ["RHOSLC", "RealHousewivesofSaltLakeCity"]
 
 
 def test_get_shared_account_sources_falls_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2880,6 +2918,92 @@ def test_put_targets_enforces_bravo_core_platform_accounts_on_write(monkeypatch:
     assert captured_calls
     stored_accounts = json.loads(str(captured_calls[0][5]))
     assert stored_accounts == ["bravotv", "bravowwhl"]
+
+
+def test_put_targets_enforces_rhoslc_hashtag_floor_on_all_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_calls: list[list[object]] = []
+
+    monkeypatch.setattr(
+        social_repo,
+        "get_season_context",
+        lambda _season_id: SeasonContext(
+            season_id="season-rhoslc",
+            show_id="show-rhoslc",
+            show_name="The Real Housewives of Salt Lake City",
+            show_slug="rhoslc",
+            season_number=6,
+            anchor_date=date(2026, 1, 1),
+        ),
+    )
+
+    def _fake_fetch_one(_sql: str, params: list[object]) -> dict[str, object]:
+        captured_calls.append(list(params))
+        return {"platform": str(params[2])}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    payload = social_repo.put_targets(
+        "season-rhoslc",
+        source_scope="bravo",
+        targets=[
+            {
+                "platform": "threads",
+                "accounts": ["bravotv"],
+                "hashtags": [],
+                "keywords": [],
+                "is_active": True,
+                "config": {},
+            }
+        ],
+        updated_by="tester",
+    )
+
+    assert payload["targets"] == [{"platform": "threads"}]
+    stored_hashtags = json.loads(str(captured_calls[0][6]))
+    assert stored_hashtags == ["RHOSLC", "RealHousewivesofSaltLakeCity"]
+
+
+def test_get_social_account_profile_hashtags_infers_rhoslc_assignment_for_official_bravo_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_fetch_social_account_profile_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "post-1",
+                "source_id": "post-1",
+                "show_id": "show-rhoslc",
+                "show_name": "The Real Housewives of Salt Lake City",
+                "show_slug": "rhoslc",
+                "season_id": "season-rhoslc-6",
+                "season_number": 6,
+                "posted_at": datetime(2026, 3, 1, tzinfo=UTC),
+                "hashtags": ["RHOSLC", "RealHousewivesofSaltLakeCity"],
+                "text": "Watch #RHOSLC tonight",
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
+
+    payload = social_repo.get_social_account_profile_hashtags("instagram", "bravotv")
+    items_by_hashtag = {item["hashtag"]: item for item in payload["items"]}
+
+    assert items_by_hashtag["rhoslc"]["assignments"] == [
+        {
+            "id": None,
+            "show_id": "show-rhoslc",
+            "show_name": "The Real Housewives of Salt Lake City",
+            "show_slug": "rhoslc",
+            "season_id": None,
+            "season_number": None,
+            "updated_by": "system:auto-rhoslc",
+            "updated_at": None,
+            "is_inferred": True,
+        }
+    ]
+    assert items_by_hashtag["realhousewivesofsaltlakecity"]["assigned_shows"][0]["show_slug"] == "rhoslc"
 
 
 def test_compute_post_metadata_counts_tags_and_mentions_for_cross_platform_tokens(

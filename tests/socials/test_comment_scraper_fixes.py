@@ -3011,6 +3011,57 @@ def test_youtube_scrape_keeps_paging_through_too_recent_no_hit_pages(monkeypatch
     assert int(scraper.last_retrieval_meta.get("after_window_pages") or 0) == 5
 
 
+def test_youtube_scrape_backfills_sparse_video_identity_fields_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = YouTubeScraper()
+    config = YouTubeScrapeConfig(
+        channel_handle="bravo",
+        date_start=datetime(2025, 10, 1, tzinfo=UTC),
+        date_end=datetime(2025, 10, 7, tzinfo=UTC),
+    )
+
+    monkeypatch.setattr(
+        scraper,
+        "fetch_channel_videos",
+        lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None,
+    )
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda data, fallback: ("bravo", "UC123"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda data: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda data: "https://images.test/avatar.jpg")
+    monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
+    monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: "token-0")
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_continuation",
+        lambda token, delay=0: {"ok": True} if token == "token-0" else None,
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_extract_continuation_videos_and_token",
+        lambda data: ([{"page_index": 0}], None),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_parse_video_renderer",
+        lambda renderer, cfg, **kwargs: SimpleNamespace(
+            video_id="vid-in-range",
+            title="Week 3 clip",
+            description="",
+            published_at=int(datetime(2025, 10, 2, tzinfo=UTC).timestamp()),
+            date_time="2025-10-02 00:00:00",
+            published_text="",
+        ),
+    )
+
+    videos = scraper.scrape(config)
+
+    assert [video.video_id for video in videos] == ["vid-in-range"]
+    assert videos[0].channel_id == "UC123"
+    assert videos[0].channel_title == "Bravo"
+    assert videos[0].user_avatar_url == "https://images.test/avatar.jpg"
+
+
 def test_youtube_scrape_stops_when_pre_window_cap_is_reached(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = YouTubeScraper()
     scraper.PRE_WINDOW_PAGE_CAP = 3

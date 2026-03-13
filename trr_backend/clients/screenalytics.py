@@ -281,27 +281,6 @@ def face_centroid(result: PeopleCountResult) -> tuple[float, float] | None:
     cy = ((best.y1 + best.y2) / 2) * 100
     return (round(cx, 1), round(cy, 1))
 
-
-def _base_url() -> str:
-    return os.getenv("SCREENALYTICS_API_URL", "").strip().rstrip("/")
-
-
-def _endpoint_candidates() -> list[str]:
-    configured = os.getenv("SCREENALYTICS_API_PATH", "").strip()
-    if configured:
-        paths = [p.strip() for p in configured.split(",") if p.strip()]
-        return paths
-    return ["/vision/people-count", "/api/v1/vision/people-count", "/people-count"]
-
-
-def _batch_endpoint_candidates() -> list[str]:
-    configured = os.getenv("SCREENALYTICS_BATCH_API_PATH", "").strip()
-    if configured:
-        paths = [p.strip() for p in configured.split(",") if p.strip()]
-        return paths
-    return ["/vision/people-count/batch", "/api/v1/vision/people-count/batch"]
-
-
 def _runtime_markers() -> set[str]:
     raw_values = (
         os.getenv("APP_ENV"),

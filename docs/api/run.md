@@ -1,7 +1,7 @@
 # TRR Backend API - Running Guide
 
 This document describes how to run the FastAPI-based TRR Backend API locally and deployment considerations.
-For production deployment, use `docs/deploy/cloud_run.md`.
+For the current production-target hosting plan, use `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`.
 
 ## Required Environment Variables
 
@@ -20,9 +20,9 @@ The API requires the following environment variables to be set:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `SCREENALYTICS_SERVICE_TOKEN` | Shared service token for Screenalytics endpoints | `change-me-long-random-token` |
-| `SCREENALYTICS_API_URL` | Base URL for the Screenalytics service (auto-count) | `https://screenalytics.example.com` |
+| `SCREENALYTICS_API_URL` | Base URL for the Screenalytics service (non-admin legacy consumers only) | `https://screenalytics.example.com` |
 
-If you call `/api/v1/screenalytics/*` or `/api/v1/screenalytics/v2/*`, the backend must have `SCREENALYTICS_SERVICE_TOKEN` set and clients must send it as a Bearer token. If the backend needs to call Screenalytics for auto-counting, set `SCREENALYTICS_API_URL` to the Screenalytics base URL.
+If you call `/api/v1/screenalytics/*` or `/api/v1/screenalytics/v2/*`, the backend must have `SCREENALYTICS_SERVICE_TOKEN` set and clients must send it as a Bearer token. Covered admin image-analysis routes now execute through the backend-owned vision runtime and Modal, so `SCREENALYTICS_API_URL` is no longer required for the admin auto-count happy path. Keep `SCREENALYTICS_API_URL` only if you still run non-admin flows that call the Screenalytics HTTP service directly.
 
 ### Internal Admin Proxy (TRR-APP -> TRR-Backend)
 
@@ -56,13 +56,50 @@ By default, `TRR_BACKEND_WORKERS` is `1` and `TRR_BACKEND_REQUIRE_REDIS_FOR_MULT
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `CORS_ALLOW_ORIGINS` | Comma-separated allowed origins | `https://therealityreport.com,https://app.therealityreport.com` |
+| `CORS_ALLOW_ORIGINS` | Comma-separated allowed origins | `https://trr-app.vercel.app,https://preview.example.vercel.app` |
 
 If `CORS_ALLOW_ORIGINS` is not set, the API allows all origins but disables credentials (safer default for development).
 
 When origins are explicitly set:
 - Only listed origins are allowed
 - Credentials are enabled (required for authenticated requests)
+- For the Render cutover, include the exact Vercel Production and Preview origins that should send cookies or auth headers
+
+### Better Stack logging (Optional; free tier first is fine)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `BETTER_STACK_SOURCE_TOKEN` | Better Stack source token for HTTP log ingestion | `source-token` |
+| `BETTER_STACK_INGESTING_HOST` | Better Stack ingest host | `in.logs.betterstack.com` |
+| `BETTER_STACK_LOG_TIMEOUT_SECONDS` | HTTP timeout for log shipping | `2.0` |
+| `BETTER_STACK_FAILURE_COOLDOWN_SECONDS` | Cooldown after a failed ship attempt | `60` |
+
+When `BETTER_STACK_SOURCE_TOKEN` is set, the backend ships structured Python logs directly to Better Stack over HTTP. This is intended for the final `Render API + Modal jobs` steady state so app logs remain available after the AWS API/CloudWatch footprint is retired. The default operator choice is to start with a Better Stack free source and only upgrade if actual volume or retention needs exceed the free tier.
+
+### Object storage (Optional locally, required for media mirroring and uploads)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `OBJECT_STORAGE_PROVIDER` | Storage backend name for operator clarity | `r2` |
+| `OBJECT_STORAGE_BUCKET` | Canonical object-storage bucket name | `trr-backend` |
+| `OBJECT_STORAGE_REGION` | Region or provider region token | `auto` |
+| `OBJECT_STORAGE_ENDPOINT_URL` | S3-compatible API endpoint | `https://<accountid>.r2.cloudflarestorage.com` |
+| `OBJECT_STORAGE_ACCESS_KEY_ID` | S3-compatible access key | `...` |
+| `OBJECT_STORAGE_SECRET_ACCESS_KEY` | S3-compatible secret key | `...` |
+| `OBJECT_STORAGE_PUBLIC_BASE_URL` | Public/custom base URL for hosted assets | `https://media.thereality.report` |
+| `OBJECT_STORAGE_PREFIX` | Optional key prefix | `media` |
+
+The backend still accepts the legacy AWS names during cutover:
+
+- `AWS_S3_BUCKET`
+- `AWS_CDN_BASE_URL`
+- `AWS_REGION`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_SESSION_TOKEN`
+- `AWS_PROFILE`
+
+When both are set, `OBJECT_STORAGE_*` wins.
 
 ## Running Locally
 
@@ -143,6 +180,7 @@ Admin allowlist
 **CORS guidance**
 
 - TRR App: set `CORS_ALLOW_ORIGINS` in the backend env to the app domain(s) so credentials are allowed.
+- Render target: keep `TRR_API_URL` pointing at the Render service URL for the public backend host while Modal remains the async executor.
 - Screenalytics: server-to-server calls do not require CORS.
 
 **Example calls**
@@ -172,7 +210,7 @@ python -m pytest tests/ --cov=api --cov-report=term-missing
 
 ## Production Deployment
 
-This guide is for local development. For production Docker and Cloud Run deployment, use `docs/deploy/cloud_run.md`.
+This guide is for local development. For the current production-target hosting plan, use `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`.
 
 ## API Endpoints
 

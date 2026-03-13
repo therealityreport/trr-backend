@@ -694,38 +694,56 @@ class TestRefreshShow:
 
         show_id = str(uuid4())
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
-            with patch("api.routers.admin_show_sync.sync_shows_all.main", return_value=0) as p_details:
-                with patch("api.routers.admin_show_sync.sync_seasons_episodes.main", return_value=0) as p_seasons:
-                    with patch("api.routers.admin_show_sync.sync_show_images.main", return_value=0) as p_show_images:
+            with patch("api.routers.admin_show_sync._maybe_reload_postgrest_schema_cache") as p_reload_cache:
+                with patch("api.routers.admin_show_sync.sync_shows.main", return_value=0) as p_sync_shows:
+                    with patch(
+                        "api.routers.admin_show_sync.sync_tmdb_show_entities.main",
+                        return_value=0,
+                    ) as p_tmdb_entities:
                         with patch(
-                            "api.routers.admin_show_sync.sync_season_episode_images.main",
+                            "api.routers.admin_show_sync.sync_tmdb_watch_providers.main",
                             return_value=0,
-                        ) as p_season_images:
+                        ) as p_watch_providers:
                             with patch(
-                                "api.routers.admin_show_sync.sync_show_cast.main",
+                                "api.routers.admin_show_sync.sync_seasons_episodes.main",
                                 return_value=0,
-                            ) as p_show_cast:
+                            ) as p_seasons:
                                 with patch(
-                                    "api.routers.admin_show_sync.sync_episode_appearances.main",
+                                    "api.routers.admin_show_sync.sync_show_images.main",
                                     return_value=0,
-                                ) as p_occurrences:
-                                    response = client.post(
-                                        f"/api/v1/admin/shows/{show_id}/refresh",
-                                        headers={"Authorization": f"Bearer {token}"},
-                                        json={
-                                            "targets": [
-                                                "details",
-                                                "seasons_episodes",
-                                                "photos",
-                                                "cast_credits",
-                                            ],
-                                            "skip_s3": True,
-                                            "verbose": True,
-                                        },
-                                    )
+                                ) as p_show_images:
+                                    with patch(
+                                        "api.routers.admin_show_sync.sync_season_episode_images.main",
+                                        return_value=0,
+                                    ) as p_season_images:
+                                        with patch(
+                                            "api.routers.admin_show_sync.sync_show_cast.main",
+                                            return_value=0,
+                                        ) as p_show_cast:
+                                            with patch(
+                                                "api.routers.admin_show_sync.sync_episode_appearances.main",
+                                                return_value=0,
+                                            ) as p_occurrences:
+                                                response = client.post(
+                                                    f"/api/v1/admin/shows/{show_id}/refresh",
+                                                    headers={"Authorization": f"Bearer {token}"},
+                                                    json={
+                                                        "targets": [
+                                                            "details",
+                                                            "seasons_episodes",
+                                                            "photos",
+                                                            "cast_credits",
+                                                        ],
+                                                        "skip_s3": True,
+                                                        "verbose": True,
+                                                    },
+                                                )
 
         assert response.status_code == 200
-        p_details.assert_called()
+        p_reload_cache.assert_called_once_with(False)
+        p_sync_shows.assert_called()
+        p_tmdb_entities.assert_called()
+        p_watch_providers.assert_called()
         p_seasons.assert_called()
         p_show_images.assert_called()
         p_season_images.assert_called()

@@ -6,6 +6,8 @@ from datetime import UTC
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid5
 
+from trr_backend.media.s3_mirror import build_hosted_url
+
 if TYPE_CHECKING:
     from trr_backend.db.session import DbSession
 else:
@@ -69,6 +71,21 @@ def _compact_dict(payload: Mapping[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _first_str(*values: Any) -> str | None:
+    for value in values:
+        cleaned = _as_str(value)
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _hosted_url_from_row(row: Mapping[str, Any]) -> str | None:
+    hosted_key = _as_str(row.get("hosted_key"))
+    if hosted_key:
+        return build_hosted_url(hosted_key)
+    return _as_str(row.get("hosted_url"))
+
+
 def _asset_id_for(source: str, source_asset_id: str | None, source_url: str | None) -> UUID | None:
     if source_asset_id:
         name = f"{source}:asset:{source_asset_id}"
@@ -113,7 +130,7 @@ def transform_show_images_to_media(
             continue
 
         source_asset_id = _as_str(row.get("source_image_id")) or _as_str(row.get("file_path"))
-        source_url = _as_str(row.get("url")) or _as_str(row.get("source_url"))
+        source_url = _first_str(row.get("url_original"), row.get("url"), row.get("source_url"))
         asset_id = _asset_id_for(source, source_asset_id, source_url)
         if asset_id is None:
             continue
@@ -143,7 +160,7 @@ def transform_show_images_to_media(
                 "caption": _as_str(row.get("caption")),
                 "hosted_bucket": _as_str(row.get("hosted_bucket")),
                 "hosted_key": _as_str(row.get("hosted_key")),
-                "hosted_url": _as_str(row.get("hosted_url")),
+                "hosted_url": _hosted_url_from_row(row),
                 "hosted_sha256": _as_str(row.get("hosted_sha256")),
                 "hosted_content_type": _as_str(row.get("hosted_content_type")),
                 "hosted_bytes": _as_int(row.get("hosted_bytes")),
@@ -190,6 +207,171 @@ def transform_show_images_to_media(
     return list(assets_by_id.values()), links
 
 
+def transform_season_images_to_media(
+    rows: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    assets_by_id: dict[str, dict[str, Any]] = {}
+    links: list[dict[str, Any]] = []
+
+    for row in rows:
+        season_id = _as_str(row.get("season_id"))
+        source = _as_str(row.get("source"))
+        kind = _as_str(row.get("kind"))
+        if not season_id or not source or not kind:
+            continue
+
+        source_asset_id = _as_str(row.get("source_image_id")) or _as_str(row.get("file_path"))
+        source_url = _first_str(row.get("url_original"), row.get("url"), row.get("source_url"))
+        asset_id = _asset_id_for(source, source_asset_id, source_url)
+        if asset_id is None:
+            continue
+
+        asset_id_str = str(asset_id)
+        if asset_id_str not in assets_by_id:
+            asset = {
+                "id": asset_id_str,
+                "media_type": "image",
+                "source": source,
+                "source_asset_id": source_asset_id,
+                "source_url": source_url,
+                "width": _as_int(row.get("width")),
+                "height": _as_int(row.get("height")),
+                "caption": _as_str(row.get("caption")),
+                "hosted_bucket": _as_str(row.get("hosted_bucket")),
+                "hosted_key": _as_str(row.get("hosted_key")),
+                "hosted_url": _hosted_url_from_row(row),
+                "hosted_sha256": _as_str(row.get("hosted_sha256")),
+                "hosted_content_type": _as_str(row.get("hosted_content_type")),
+                "hosted_bytes": _as_int(row.get("hosted_bytes")),
+                "hosted_etag": _as_str(row.get("hosted_etag")),
+                "hosted_at": row.get("hosted_at"),
+                "fetched_at": row.get("fetched_at"),
+                "metadata": dict(row.get("metadata")) if isinstance(row.get("metadata"), dict) else {},
+            }
+            assets_by_id[asset_id_str] = _compact_dict(asset)
+
+        context = _compact_dict(
+            {
+                "legacy_table": "season_images",
+                "legacy_id": _as_str(row.get("id")),
+                "file_path": _as_str(row.get("file_path")),
+                "url_path": _as_str(row.get("url_path")),
+                "iso_639_1": _as_str(row.get("iso_639_1")),
+                "tmdb_series_id": _as_str(row.get("tmdb_series_id")),
+                "season_number": _as_int(row.get("season_number")),
+                "source_image_id": source_asset_id,
+                "image_type": _as_str(row.get("image_type")),
+            }
+        )
+        position = _as_int(row.get("position"))
+        link_id = _link_id_for(
+            entity_type="season",
+            entity_id=season_id,
+            asset_id=asset_id_str,
+            kind=kind,
+            position=position,
+            is_primary=False,
+            context=context,
+        )
+        links.append(
+            {
+                "id": str(link_id),
+                "entity_type": "season",
+                "entity_id": season_id,
+                "media_asset_id": asset_id_str,
+                "kind": kind,
+                "position": position,
+                "is_primary": False,
+                "context": context,
+            }
+        )
+
+    return list(assets_by_id.values()), links
+
+
+def transform_episode_images_to_media(
+    rows: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    assets_by_id: dict[str, dict[str, Any]] = {}
+    links: list[dict[str, Any]] = []
+
+    for row in rows:
+        episode_id = _as_str(row.get("episode_id"))
+        source = _as_str(row.get("source"))
+        kind = _as_str(row.get("kind"))
+        if not episode_id or not source or not kind:
+            continue
+
+        source_asset_id = _as_str(row.get("source_image_id")) or _as_str(row.get("file_path"))
+        source_url = _first_str(row.get("url_original"), row.get("url"), row.get("source_url"))
+        asset_id = _asset_id_for(source, source_asset_id, source_url)
+        if asset_id is None:
+            continue
+
+        asset_id_str = str(asset_id)
+        if asset_id_str not in assets_by_id:
+            asset = {
+                "id": asset_id_str,
+                "media_type": "image",
+                "source": source,
+                "source_asset_id": source_asset_id,
+                "source_url": source_url,
+                "width": _as_int(row.get("width")),
+                "height": _as_int(row.get("height")),
+                "caption": _as_str(row.get("caption")),
+                "hosted_bucket": _as_str(row.get("hosted_bucket")),
+                "hosted_key": _as_str(row.get("hosted_key")),
+                "hosted_url": _hosted_url_from_row(row),
+                "hosted_sha256": _as_str(row.get("hosted_sha256")),
+                "hosted_content_type": _as_str(row.get("hosted_content_type")),
+                "hosted_bytes": _as_int(row.get("hosted_bytes")),
+                "hosted_etag": _as_str(row.get("hosted_etag")),
+                "hosted_at": row.get("hosted_at"),
+                "fetched_at": row.get("fetched_at"),
+                "metadata": dict(row.get("metadata")) if isinstance(row.get("metadata"), dict) else {},
+            }
+            assets_by_id[asset_id_str] = _compact_dict(asset)
+
+        context = _compact_dict(
+            {
+                "legacy_table": "episode_images",
+                "legacy_id": _as_str(row.get("id")),
+                "file_path": _as_str(row.get("file_path")),
+                "url_path": _as_str(row.get("url_path")),
+                "iso_639_1": _as_str(row.get("iso_639_1")),
+                "tmdb_series_id": _as_str(row.get("tmdb_series_id")),
+                "season_number": _as_int(row.get("season_number")),
+                "episode_number": _as_int(row.get("episode_number")),
+                "source_image_id": source_asset_id,
+                "image_type": _as_str(row.get("image_type")),
+            }
+        )
+        position = _as_int(row.get("position"))
+        link_id = _link_id_for(
+            entity_type="episode",
+            entity_id=episode_id,
+            asset_id=asset_id_str,
+            kind=kind,
+            position=position,
+            is_primary=False,
+            context=context,
+        )
+        links.append(
+            {
+                "id": str(link_id),
+                "entity_type": "episode",
+                "entity_id": episode_id,
+                "media_asset_id": asset_id_str,
+                "kind": kind,
+                "position": position,
+                "is_primary": False,
+                "context": context,
+            }
+        )
+
+    return list(assets_by_id.values()), links
+
+
 def transform_person_images_to_media(
     rows: Iterable[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -219,7 +401,7 @@ def transform_person_images_to_media(
                 "caption": _as_str(row.get("caption")),
                 "hosted_bucket": _as_str(row.get("hosted_bucket")),
                 "hosted_key": _as_str(row.get("hosted_key")),
-                "hosted_url": _as_str(row.get("hosted_url")),
+                "hosted_url": _hosted_url_from_row(row),
                 "hosted_sha256": _as_str(row.get("hosted_sha256")),
                 "hosted_content_type": _as_str(row.get("hosted_content_type")),
                 "hosted_bytes": _as_int(row.get("hosted_bytes")),
@@ -252,6 +434,93 @@ def transform_person_images_to_media(
             "context": {},
         }
         links.append(link)
+
+    return list(assets_by_id.values()), links
+
+
+def transform_cast_photos_to_media(
+    rows: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    assets_by_id: dict[str, dict[str, Any]] = {}
+    links: list[dict[str, Any]] = []
+
+    for row in rows:
+        person_id = _as_str(row.get("person_id"))
+        source = _as_str(row.get("source"))
+        source_url = _first_str(
+            row.get("image_url_canonical"),
+            row.get("image_url"),
+            row.get("url"),
+            row.get("thumb_url"),
+            row.get("source_url"),
+        )
+        if not person_id or not source or not source_url:
+            continue
+
+        source_asset_id = _as_str(row.get("source_image_id"))
+        asset_id = _asset_id_for(source, source_asset_id, source_url)
+        if asset_id is None:
+            continue
+
+        asset_id_str = str(asset_id)
+        if asset_id_str not in assets_by_id:
+            asset = {
+                "id": asset_id_str,
+                "media_type": "image",
+                "source": source,
+                "source_asset_id": source_asset_id,
+                "source_url": source_url,
+                "width": _as_int(row.get("width")),
+                "height": _as_int(row.get("height")),
+                "caption": _as_str(row.get("caption")),
+                "hosted_bucket": _as_str(row.get("hosted_bucket")),
+                "hosted_key": _as_str(row.get("hosted_key")),
+                "hosted_url": _hosted_url_from_row(row),
+                "hosted_sha256": _as_str(row.get("hosted_sha256")),
+                "hosted_content_type": _as_str(row.get("hosted_content_type")),
+                "hosted_bytes": _as_int(row.get("hosted_bytes")),
+                "hosted_etag": _as_str(row.get("hosted_etag")),
+                "hosted_at": row.get("hosted_at"),
+                "fetched_at": row.get("fetched_at"),
+                "metadata": dict(row.get("metadata")) if isinstance(row.get("metadata"), dict) else {},
+            }
+            assets_by_id[asset_id_str] = _compact_dict(asset)
+
+        position = _as_int(row.get("gallery_index"))
+        context = _compact_dict(
+            {
+                "legacy_table": "cast_photos",
+                "legacy_id": _as_str(row.get("id")),
+                "source_image_id": source_asset_id,
+                "viewer_id": _as_str(row.get("viewer_id")),
+                "mediaindex_url_path": _as_str(row.get("mediaindex_url_path")),
+                "mediaviewer_url_path": _as_str(row.get("mediaviewer_url_path")),
+                "image_url_canonical": _as_str(row.get("image_url_canonical")),
+                "gallery_index": position,
+                "gallery_total": _as_int(row.get("gallery_total")),
+            }
+        )
+        link_id = _link_id_for(
+            entity_type="person",
+            entity_id=person_id,
+            asset_id=asset_id_str,
+            kind="gallery",
+            position=position,
+            is_primary=False,
+            context=context,
+        )
+        links.append(
+            {
+                "id": str(link_id),
+                "entity_type": "person",
+                "entity_id": person_id,
+                "media_asset_id": asset_id_str,
+                "kind": "gallery",
+                "position": position,
+                "is_primary": False,
+                "context": context,
+            }
+        )
 
     return list(assets_by_id.values()), links
 
@@ -290,8 +559,14 @@ def upsert_media_with_links(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if entity_type == "show":
         assets, links = transform_show_images_to_media(rows)
+    elif entity_type == "season":
+        assets, links = transform_season_images_to_media(rows)
+    elif entity_type == "episode":
+        assets, links = transform_episode_images_to_media(rows)
     elif entity_type == "person":
         assets, links = transform_person_images_to_media(rows)
+    elif entity_type == "cast":
+        assets, links = transform_cast_photos_to_media(rows)
     else:
         raise ValueError(f"Unsupported entity_type for media upsert: {entity_type}")
 

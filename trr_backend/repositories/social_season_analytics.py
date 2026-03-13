@@ -31,6 +31,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import requests
+from psycopg2 import errors as psycopg_errors
 
 from trr_backend.db import pg
 from trr_backend.job_plane import (
@@ -3325,8 +3326,8 @@ def _derive_show_terms(show_name: str | None) -> tuple[list[str], list[str]]:
 
     # Canonical RHOSLC aliases requested by product requirements.
     if "salt lake city" in lower_name:
-        keywords.extend(["Salt Lake City", "RHOSLC"])
-        hashtags.append("RHOSLC")
+        keywords.extend(["Real Housewives of Salt Lake City", "Salt Lake City", "RHOSLC"])
+        hashtags.extend(["RHOSLC", "RealHousewivesofSaltLakeCity"])
 
     # Generic Real Housewives acronym fallback (e.g., RHOBH, RHOP).
     franchise_match = re.search(r"real housewives of (.+)", lower_name)
@@ -3400,13 +3401,19 @@ def _ensure_rhoslc_twitter_accounts(context: SeasonContext | None, accounts: lis
 def _ensure_rhoslc_instagram_hashtags(context: SeasonContext | None, hashtags: list[str]) -> list[str]:
     if not _show_is_rhoslc(context):
         return hashtags
-    return _normalize_unique_terms([*hashtags, "RHOSLC"])
+    return _normalize_unique_terms([*hashtags, "RHOSLC", "RealHousewivesofSaltLakeCity"])
 
 
 def _ensure_rhoslc_twitter_hashtags(context: SeasonContext | None, hashtags: list[str]) -> list[str]:
     if not _show_is_rhoslc(context):
         return hashtags
-    return _normalize_unique_terms([*hashtags, "RHOSLC"])
+    return _normalize_unique_terms([*hashtags, "RHOSLC", "RealHousewivesofSaltLakeCity"])
+
+
+def _ensure_rhoslc_platform_hashtags(context: SeasonContext | None, hashtags: list[str]) -> list[str]:
+    if not _show_is_rhoslc(context):
+        return hashtags
+    return _normalize_unique_terms([*hashtags, "RHOSLC", "RealHousewivesofSaltLakeCity"])
 
 
 def _use_authoritative_account_override(
@@ -5310,6 +5317,9 @@ _DEFAULT_PLATFORM_ACCOUNTS: dict[str, list[str]] = {
     "threads": ["bravotv"],
 }
 
+_BRAVO_OFFICIAL_ACCOUNT_ALIASES = {"bravo", "bravotv", "bravodailydish", "bravowwhl", "wwhl"}
+_RHOSLC_AUTO_ASSIGNED_HASHTAGS = {"rhoslc", "realhousewivesofsaltlakecity", "therealhousewivesofsaltlakecity"}
+
 
 def _default_platform_accounts(platform: str) -> list[str]:
     """Return default accounts for a platform when none are configured."""
@@ -5380,9 +5390,20 @@ def get_targets(season_id: str, *, source_scope: str = "bravo") -> dict[str, Any
                 ]
             )
             normalized_hashtags = _normalize_terms(target.get("hashtags"), strip_prefix="#")
-            if enforce_rhoslc_floor and platform == "instagram":
-                normalized_accounts = _normalize_unique_terms([*normalized_accounts, "bravotv", "bravowwhl"])
-                normalized_hashtags = _normalize_unique_terms([*normalized_hashtags, "RHOSLC"])
+            if enforce_rhoslc_floor:
+                if platform == "instagram":
+                    normalized_accounts = _normalize_unique_terms([*normalized_accounts, "bravotv", "bravowwhl"])
+                normalized_hashtags = _ensure_rhoslc_platform_hashtags(
+                    SeasonContext(
+                        season_id=str(target.get("season_id") or season_id),
+                        show_id=str(target.get("show_id") or ""),
+                        show_name=str(show_name or ""),
+                        show_slug=None,
+                        season_number=season_number,
+                        anchor_date=None,
+                    ),
+                    normalized_hashtags,
+                )
             normalized_accounts = _ensure_bravo_core_platform_accounts(
                 source_scope=source_scope,
                 platform=platform,
@@ -5625,12 +5646,11 @@ def put_targets(
         )
         hashtags = _normalize_terms(target.get("hashtags"), strip_prefix="#")
         keywords = _normalize_terms(target.get("keywords"))
+        hashtags = _ensure_rhoslc_platform_hashtags(context, hashtags)
         if platform == "instagram":
             accounts = _ensure_rhoslc_instagram_accounts(context, accounts)
-            hashtags = _ensure_rhoslc_instagram_hashtags(context, hashtags)
         elif platform == "twitter":
             accounts = _ensure_rhoslc_twitter_accounts(context, accounts)
-            hashtags = _ensure_rhoslc_twitter_hashtags(context, hashtags)
         timezone = str(target.get("timezone") or "America/New_York")
         is_active = bool(target.get("is_active", True))
         config = target.get("config") or {}
@@ -11252,7 +11272,9 @@ def _url_host(value: str) -> str:
 
 
 def _hosted_urls_need_cdn_host_repair(*, hosted_thumbnail_url: str, hosted_media_urls: list[str]) -> bool:
-    expected_host = _expected_cdn_host(str(os.getenv("AWS_CDN_BASE_URL") or ""))
+    expected_host = _expected_cdn_host(
+        str(os.getenv("OBJECT_STORAGE_PUBLIC_BASE_URL") or os.getenv("AWS_CDN_BASE_URL") or "")
+    )
     if not expected_host:
         return False
 
@@ -33589,3 +33611,1030 @@ def build_pdf(snapshot: dict[str, Any]) -> bytes:
 def pdf_filename(show_id: str, season_number: int, generated_at: datetime | None = None) -> str:
     ts = (generated_at or _now_utc()).strftime("%Y%m%d")
     return f"social_report_{show_id}_s{season_number}_{ts}.pdf"
+
+
+_SOCIAL_ACCOUNT_PROFILE_DEFAULT_PAGE_SIZE = 25
+_SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE = 100
+
+
+def _normalize_social_account_profile_platform(platform: Any) -> str:
+    normalized = _normalize_platform_name(platform)
+    if normalized not in SUPPORTED_PLATFORMS:
+        supported = ", ".join(SUPPORTED_PLATFORMS)
+        raise ValueError(
+            f"INVALID_PLATFORM_FILTER: Unsupported platform '{platform}'. Supported platforms: {supported}"
+        )
+    return normalized
+
+
+def _normalize_social_account_profile_handle(account_handle: Any) -> str:
+    normalized = _normalize_account_handle(account_handle)
+    if not normalized or not GENERIC_ACCOUNT_HANDLE_RE.match(normalized):
+        raise ValueError("Invalid account handle.")
+    return normalized
+
+
+def _normalize_social_account_profile_hashtag(value: Any) -> str:
+    normalized = str(value or "").strip().lower().lstrip("#")
+    normalized = re.sub(r"[^a-z0-9_]+", "", normalized)
+    if not normalized:
+        raise ValueError("Invalid hashtag.")
+    return normalized
+
+
+def _social_account_profile_post_url(platform: str, row: Mapping[str, Any], *, account_handle: str) -> str | None:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    explicit = _first_non_empty_str(
+        row.get("post_url"),
+        row.get("permalink_url"),
+        row.get("canonical_url"),
+        row.get("url"),
+        row.get("link"),
+    )
+    if explicit and explicit.startswith(("http://", "https://")):
+        return explicit
+
+    if normalized_platform == "instagram":
+        shortcode = str(row.get("shortcode") or "").strip()
+        if shortcode:
+            return f"https://www.instagram.com/p/{shortcode}/"
+    elif normalized_platform == "tiktok":
+        video_id = str(row.get("video_id") or "").strip()
+        if video_id:
+            return f"https://www.tiktok.com/@{account_handle}/video/{video_id}"
+    elif normalized_platform == "twitter":
+        tweet_id = str(row.get("tweet_id") or "").strip()
+        if tweet_id:
+            return f"https://x.com/{account_handle}/status/{tweet_id}"
+    elif normalized_platform == "youtube":
+        video_id = str(row.get("video_id") or "").strip()
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+    elif normalized_platform == "facebook":
+        post_id = str(row.get("post_id") or row.get("source_id") or "").strip()
+        if post_id:
+            return f"https://www.facebook.com/{account_handle}/posts/{post_id}"
+    elif normalized_platform == "threads":
+        post_id = str(row.get("post_id") or row.get("source_id") or "").strip()
+        if post_id:
+            return f"https://www.threads.com/@{account_handle}/post/{post_id}"
+    return None
+
+
+def _social_account_profile_title_text(platform: str, row: Mapping[str, Any]) -> str | None:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    if normalized_platform == "youtube":
+        return _first_non_empty_str(row.get("title"))
+    return _first_non_empty_str(row.get("title"), row.get("headline"))
+
+
+def _social_account_profile_content_text(platform: str, row: Mapping[str, Any]) -> str:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    if normalized_platform == "instagram":
+        return str(_first_non_empty_str(row.get("caption"), row.get("text")) or "")
+    if normalized_platform == "tiktok":
+        return str(_first_non_empty_str(row.get("description"), row.get("caption"), row.get("text")) or "")
+    if normalized_platform == "twitter":
+        return str(_first_non_empty_str(row.get("text"), row.get("full_text")) or "")
+    if normalized_platform == "youtube":
+        return str(_first_non_empty_str(row.get("description"), row.get("title")) or "")
+    if normalized_platform == "facebook":
+        return str(_first_non_empty_str(row.get("caption"), row.get("text"), row.get("message")) or "")
+    if normalized_platform == "threads":
+        return str(_first_non_empty_str(row.get("text"), row.get("caption")) or "")
+    return str(_first_non_empty_str(row.get("text"), row.get("caption"), row.get("description")) or "")
+
+
+def _social_account_profile_hashtags_for_row(platform: str, row: Mapping[str, Any]) -> list[str]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    token_text = " ".join(
+        filter(
+            None,
+            [
+                _social_account_profile_title_text(normalized_platform, row),
+                _social_account_profile_content_text(normalized_platform, row),
+            ],
+        )
+    )
+    stored = _json_text_list(row.get("hashtags"), strip_prefix="#")
+    if normalized_platform == "youtube":
+        stored = _normalize_unique_terms([*stored, *_as_text_list(row.get("tags"), strip_prefix="#")])
+    if stored:
+        return stored
+    return _normalize_unique_terms(_parse_hashtags(token_text))
+
+
+def _social_account_profile_mentions_for_row(platform: str, row: Mapping[str, Any]) -> list[str]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    stored = _json_text_list(row.get("mentions"), prefix="@", strip_prefix="@")
+    if stored:
+        return stored
+    token_text = " ".join(
+        filter(
+            None,
+            [
+                _social_account_profile_title_text(normalized_platform, row),
+                _social_account_profile_content_text(normalized_platform, row),
+            ],
+        )
+    )
+    return _normalize_unique_terms(_parse_mentions(token_text))
+
+
+def _social_account_profile_collaborators_for_row(row: Mapping[str, Any]) -> list[str]:
+    collaborators = _json_text_list(row.get("collaborators"), prefix="@", strip_prefix="@")
+    for detail in _as_json_object_list(row.get("collaborators_detail")):
+        handle = _detail_handle_from_payload(detail)
+        if handle:
+            collaborators.append(handle)
+    return _normalize_unique_terms(collaborators)
+
+
+def _social_account_profile_tags_for_row(platform: str, row: Mapping[str, Any]) -> list[str]:
+    profile_tags = _json_text_list(row.get("profile_tags"), prefix="@", strip_prefix="@")
+    mentions = _social_account_profile_mentions_for_row(platform, row)
+    return _normalize_unique_terms([*profile_tags, *mentions])
+
+
+def _social_account_profile_metric_payload(platform: str, row: Mapping[str, Any]) -> dict[str, int]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    likes = _normalize_non_negative_int(row.get("likes"))
+    comments = _normalize_non_negative_int(row.get("comments_count"))
+    views = _normalize_non_negative_int(row.get("views"))
+    shares = _normalize_non_negative_int(row.get("shares"))
+    retweets = _normalize_non_negative_int(row.get("retweets"))
+    replies = _normalize_non_negative_int(row.get("replies_count"))
+    quotes = _normalize_non_negative_int(row.get("quotes"))
+    engagement = likes + comments + shares + retweets + replies + quotes
+    payload = {
+        "likes": likes,
+        "comments_count": comments,
+        "views": views,
+        "shares": shares,
+        "retweets": retweets,
+        "replies_count": replies,
+        "quotes": quotes,
+        "engagement": engagement,
+    }
+    if normalized_platform == "youtube":
+        payload["engagement"] = likes + comments
+    return payload
+
+
+def _social_account_profile_post_item(platform: str, row: Mapping[str, Any], *, account_handle: str) -> dict[str, Any]:
+    metrics = _social_account_profile_metric_payload(platform, row)
+    hashtags = _social_account_profile_hashtags_for_row(platform, row)
+    collaborators = _social_account_profile_collaborators_for_row(row)
+    tags = _social_account_profile_tags_for_row(platform, row)
+    title = _social_account_profile_title_text(platform, row)
+    content = _social_account_profile_content_text(platform, row)
+    excerpt = content[:280].strip()
+    return {
+        "id": str(row.get("id") or ""),
+        "source_id": str(row.get("source_id") or ""),
+        "platform": _normalize_social_account_profile_platform(platform),
+        "account_handle": account_handle,
+        "title": title,
+        "content": content,
+        "excerpt": excerpt if excerpt else title,
+        "url": _social_account_profile_post_url(platform, row, account_handle=account_handle),
+        "profile_url": _platform_profile_url_for_handle(platform, account_handle),
+        "posted_at": row.get("posted_at"),
+        "show_id": str(row.get("show_id") or "") or None,
+        "show_name": row.get("show_name"),
+        "show_slug": row.get("show_slug"),
+        "season_id": str(row.get("season_id") or "") or None,
+        "season_number": _normalize_non_negative_int(row.get("season_number")) or None,
+        "hashtags": hashtags,
+        "mentions": _social_account_profile_mentions_for_row(platform, row),
+        "collaborators": collaborators,
+        "tags": tags,
+        "metrics": metrics,
+    }
+
+
+def _social_account_profile_base_query_parts(platform: str) -> tuple[str, str, str]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    table = PLATFORM_POST_TABLES.get(normalized_platform)
+    source_id_column = PLATFORM_SOURCE_ID_COLUMN.get(normalized_platform)
+    posted_at_column = PLATFORM_POSTED_AT_COLUMN.get(normalized_platform)
+    if not table or not source_id_column or not posted_at_column:
+        raise ValueError(f"INVALID_PLATFORM_FILTER: Unsupported platform '{platform}'")
+    return table, source_id_column, posted_at_column
+
+
+def _fetch_social_account_profile_source_rows(platform: str, account_handle: str) -> list[dict[str, Any]]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    return pg.fetch_all(
+        """
+        select
+          id::text as id,
+          source_scope,
+          platform,
+          account_handle,
+          is_active,
+          scrape_priority,
+          last_scrape_run_id::text as last_scrape_run_id,
+          last_scrape_job_id::text as last_scrape_job_id,
+          last_scrape_status,
+          last_scrape_at,
+          last_classified_at,
+          updated_by,
+          created_at,
+          updated_at
+        from social.shared_account_sources
+        where platform = %s
+          and account_handle = %s
+        order by case when source_scope = 'bravo' then 0 else 1 end, scrape_priority asc, created_at desc
+        """,
+        [normalized_platform, normalized_account],
+    )
+
+
+def _social_account_profile_total_posts(platform: str, account_handle: str) -> int:
+    table, _, _ = _social_account_profile_base_query_parts(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    row = pg.fetch_one(
+        f"""
+        select count(*)::int as total
+        from social.{table} p
+        where lower(coalesce(p.source_account, '')) = %s
+        """,
+        [normalized_account],
+    ) or {}
+    return _normalize_non_negative_int(row.get("total"))
+
+
+def _fetch_social_account_profile_rows(
+    platform: str,
+    account_handle: str,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    table, source_id_column, posted_at_column = _social_account_profile_base_query_parts(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    params: list[Any] = [normalized_account]
+    limit_clause = ""
+    if limit is not None:
+        safe_limit = max(1, min(int(limit), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+        limit_clause = "limit %s offset %s"
+        params.extend([safe_limit, max(0, int(offset))])
+    return pg.fetch_all(
+        f"""
+        select
+          p.id::text as id,
+          p.show_id::text as show_id,
+          p.season_id::text as season_id,
+          p.source_account,
+          p.{source_id_column} as source_id,
+          p.{posted_at_column} as posted_at,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          p.*
+        from social.{table} p
+        left join core.seasons s on s.id = p.season_id
+        left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+        where lower(coalesce(p.source_account, '')) = %s
+        order by p.{posted_at_column} desc nulls last, p.id desc
+        {limit_clause}
+        """,
+        params,
+    )
+
+
+def _assert_social_account_profile_exists(platform: str, account_handle: str) -> list[dict[str, Any]]:
+    source_rows = _fetch_social_account_profile_source_rows(platform, account_handle)
+    total_posts = _social_account_profile_total_posts(platform, account_handle)
+    if total_posts <= 0 and not source_rows:
+        raise LookupError("Social account profile not found.")
+    return source_rows
+
+
+def _fetch_social_account_profile_assignment_rows(platform: str, account_handle: str) -> list[dict[str, Any]]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    try:
+        return pg.fetch_all(
+            """
+            select
+              a.id::text as id,
+              a.platform,
+              a.account_handle,
+              a.normalized_hashtag,
+              a.display_hashtag,
+              a.show_id::text as show_id,
+              a.season_id::text as season_id,
+              a.updated_by,
+              a.created_at,
+              a.updated_at,
+              sh.name as show_name,
+              sh.slug as show_slug,
+              s.season_number
+            from social.account_hashtag_assignments a
+            join core.shows sh on sh.id = a.show_id
+            left join core.seasons s on s.id = a.season_id
+            where a.platform = %s
+              and a.account_handle = %s
+            order by a.normalized_hashtag asc, sh.name asc, s.season_number asc nulls first
+            """,
+            [normalized_platform, normalized_account],
+        )
+    except psycopg_errors.UndefinedTable:
+        logger.warning(
+            "social.account_hashtag_assignments is not migrated yet; returning empty assignments for %s/%s",
+            normalized_platform,
+            normalized_account,
+        )
+        return []
+
+
+def _social_account_profile_engagement_sql(platform: str, alias: str = "p") -> str:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    if normalized_platform == "instagram":
+        return f"(coalesce({alias}.likes, 0) + coalesce({alias}.comments_count, 0))"
+    if normalized_platform == "tiktok":
+        return f"(coalesce({alias}.likes, 0) + coalesce({alias}.comments_count, 0) + coalesce({alias}.shares, 0))"
+    if normalized_platform == "twitter":
+        return (
+            f"(coalesce({alias}.likes, 0) + coalesce({alias}.retweets, 0) + "
+            f"coalesce({alias}.replies_count, 0) + coalesce({alias}.quotes, 0))"
+        )
+    if normalized_platform == "youtube":
+        return f"(coalesce({alias}.likes, 0) + coalesce({alias}.comments_count, 0))"
+    if normalized_platform == "facebook":
+        return f"(coalesce({alias}.likes, 0) + coalesce({alias}.comments_count, 0) + coalesce({alias}.shares, 0))"
+    return f"(coalesce({alias}.likes, 0) + coalesce({alias}.comments_count, 0))"
+
+
+def _social_account_profile_views_sql(platform: str, alias: str = "p") -> str:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    if normalized_platform in {"instagram", "tiktok", "youtube", "twitter"}:
+        return f"coalesce({alias}.views, 0)"
+    return "0"
+
+
+def _social_account_profile_summary_totals(platform: str, account_handle: str) -> dict[str, Any]:
+    table, _, posted_at_column = _social_account_profile_base_query_parts(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    engagement_expr = _social_account_profile_engagement_sql(platform)
+    views_expr = _social_account_profile_views_sql(platform)
+    return pg.fetch_one(
+        f"""
+        select
+          count(*)::int as total_posts,
+          coalesce(sum({engagement_expr}), 0)::bigint as total_engagement,
+          coalesce(sum({views_expr}), 0)::bigint as total_views,
+          min(p.{posted_at_column}) as first_post_at,
+          max(p.{posted_at_column}) as last_post_at
+        from social.{table} p
+        where lower(coalesce(p.source_account, '')) = %s
+        """,
+        [normalized_account],
+    ) or {}
+
+
+def _social_account_profile_grouped_counts(
+    platform: str,
+    account_handle: str,
+    *,
+    group_by: Literal["show", "season"],
+) -> list[dict[str, Any]]:
+    table, _, _ = _social_account_profile_base_query_parts(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    engagement_expr = _social_account_profile_engagement_sql(platform)
+    if group_by == "show":
+        sql = f"""
+            select
+              sh.id::text as show_id,
+              sh.name as show_name,
+              sh.slug as show_slug,
+              count(*)::int as post_count,
+              coalesce(sum({engagement_expr}), 0)::bigint as engagement
+            from social.{table} p
+            left join core.seasons s on s.id = p.season_id
+            left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+            where lower(coalesce(p.source_account, '')) = %s
+            group by sh.id, sh.name, sh.slug
+            order by count(*) desc, sh.name asc
+        """
+    else:
+        sql = f"""
+            select
+              s.id::text as season_id,
+              s.season_number,
+              sh.id::text as show_id,
+              sh.name as show_name,
+              sh.slug as show_slug,
+              count(*)::int as post_count,
+              coalesce(sum({engagement_expr}), 0)::bigint as engagement
+            from social.{table} p
+            left join core.seasons s on s.id = p.season_id
+            left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+            where lower(coalesce(p.source_account, '')) = %s
+            group by s.id, s.season_number, sh.id, sh.name, sh.slug
+            order by count(*) desc, sh.name asc, s.season_number asc
+        """
+    return [row for row in pg.fetch_all(sql, [normalized_account]) if row.get("show_id") or row.get("season_id")]
+
+
+def _group_social_account_profile_assignments(
+    assignment_rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in assignment_rows:
+        hashtag = _normalize_social_account_profile_hashtag(row.get("normalized_hashtag") or row.get("display_hashtag"))
+        grouped.setdefault(hashtag, []).append(
+            {
+                "id": str(row.get("id") or ""),
+                "show_id": str(row.get("show_id") or "") or None,
+                "show_name": row.get("show_name"),
+                "show_slug": row.get("show_slug"),
+                "season_id": str(row.get("season_id") or "") or None,
+                "season_number": _normalize_non_negative_int(row.get("season_number")) or None,
+                "updated_by": row.get("updated_by"),
+                "updated_at": row.get("updated_at"),
+            }
+        )
+    return grouped
+
+
+def _is_rhoslc_official_hashtag_assignment_candidate(
+    *,
+    account_handle: str,
+    hashtag: str,
+) -> bool:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_hashtag = _normalize_social_account_profile_hashtag(hashtag)
+    return normalized_account in _BRAVO_OFFICIAL_ACCOUNT_ALIASES and normalized_hashtag in _RHOSLC_AUTO_ASSIGNED_HASHTAGS
+
+
+def _infer_social_account_profile_show_assignments(
+    *,
+    account_handle: str,
+    hashtag: str,
+    observed_shows: Mapping[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _is_rhoslc_official_hashtag_assignment_candidate(account_handle=account_handle, hashtag=hashtag):
+        return []
+
+    inferred: list[dict[str, Any]] = []
+    for show in observed_shows.values():
+        show_id = str(show.get("show_id") or "").strip()
+        show_slug = str(show.get("show_slug") or "").strip().lower()
+        show_name = str(show.get("show_name") or "").strip()
+        if not show_id:
+            continue
+        if show_slug != "rhoslc" and not _show_name_is_rhoslc(show_name):
+            continue
+        inferred.append(
+            {
+                "id": None,
+                "show_id": show_id,
+                "show_name": show.get("show_name"),
+                "show_slug": show.get("show_slug"),
+                "season_id": None,
+                "season_number": None,
+                "updated_by": "system:auto-rhoslc",
+                "updated_at": None,
+                "is_inferred": True,
+            }
+        )
+    return inferred
+
+
+def _serialize_social_account_profile_show_buckets(
+    buckets: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    items = list(buckets.values())
+    items.sort(
+        key=lambda item: (
+            -_normalize_non_negative_int(item.get("post_count")),
+            str(item.get("show_name") or "").lower(),
+            _normalize_non_negative_int(item.get("season_number")),
+        )
+    )
+    return items
+
+
+def _serialize_social_account_profile_post_buckets(
+    rows: list[dict[str, Any]],
+    platform: str,
+    *,
+    account_handle: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    show_buckets: dict[str, dict[str, Any]] = {}
+    season_buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        post = _social_account_profile_post_item(platform, row, account_handle=account_handle)
+        metrics = post["metrics"]
+        show_id = str(post.get("show_id") or "")
+        if show_id:
+            bucket = show_buckets.setdefault(
+                show_id,
+                {
+                    "show_id": show_id,
+                    "show_name": post.get("show_name"),
+                    "show_slug": post.get("show_slug"),
+                    "post_count": 0,
+                    "engagement": 0,
+                },
+            )
+            bucket["post_count"] = _normalize_non_negative_int(bucket.get("post_count")) + 1
+            bucket["engagement"] = _normalize_non_negative_int(bucket.get("engagement")) + _normalize_non_negative_int(
+                metrics.get("engagement")
+            )
+        season_id = str(post.get("season_id") or "")
+        if season_id:
+            bucket = season_buckets.setdefault(
+                season_id,
+                {
+                    "season_id": season_id,
+                    "season_number": post.get("season_number"),
+                    "show_id": post.get("show_id"),
+                    "show_name": post.get("show_name"),
+                    "show_slug": post.get("show_slug"),
+                    "post_count": 0,
+                    "engagement": 0,
+                },
+            )
+            bucket["post_count"] = _normalize_non_negative_int(bucket.get("post_count")) + 1
+            bucket["engagement"] = _normalize_non_negative_int(bucket.get("engagement")) + _normalize_non_negative_int(
+                metrics.get("engagement")
+            )
+    return _serialize_social_account_profile_show_buckets(show_buckets), _serialize_social_account_profile_show_buckets(
+        season_buckets
+    )
+
+
+def _build_social_account_profile_hashtag_items(
+    rows: list[dict[str, Any]],
+    *,
+    platform: str,
+    account_handle: str,
+    assignment_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    grouped_assignments = _group_social_account_profile_assignments(assignment_rows or [])
+    items: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        hashtags = _social_account_profile_hashtags_for_row(platform, row)
+        show_id = str(row.get("show_id") or "") or None
+        show_name = row.get("show_name")
+        show_slug = row.get("show_slug")
+        season_id = str(row.get("season_id") or "") or None
+        season_number = _normalize_non_negative_int(row.get("season_number")) or None
+        posted_at = row.get("posted_at")
+        source_id = str(row.get("source_id") or "") or None
+        for hashtag in hashtags:
+            normalized = _normalize_social_account_profile_hashtag(hashtag)
+            item = items.setdefault(
+                normalized,
+                {
+                    "hashtag": normalized,
+                    "display_hashtag": f"#{normalized}",
+                    "usage_count": 0,
+                    "latest_seen_at": None,
+                    "latest_source_id": None,
+                    "assigned_shows": [],
+                    "assigned_seasons": [],
+                    "assignments": grouped_assignments.get(normalized, []),
+                    "observed_shows": {},
+                    "observed_seasons": {},
+                },
+            )
+            item["usage_count"] = _normalize_non_negative_int(item.get("usage_count")) + 1
+            if posted_at and (item.get("latest_seen_at") is None or posted_at > item.get("latest_seen_at")):
+                item["latest_seen_at"] = posted_at
+                item["latest_source_id"] = source_id
+            if show_id:
+                observed_show = item["observed_shows"].setdefault(
+                    show_id,
+                    {
+                        "show_id": show_id,
+                        "show_name": show_name,
+                        "show_slug": show_slug,
+                        "post_count": 0,
+                    },
+                )
+                observed_show["post_count"] = _normalize_non_negative_int(observed_show.get("post_count")) + 1
+            if season_id:
+                observed_season = item["observed_seasons"].setdefault(
+                    season_id,
+                    {
+                        "season_id": season_id,
+                        "season_number": season_number,
+                        "show_id": show_id,
+                        "show_name": show_name,
+                        "show_slug": show_slug,
+                        "post_count": 0,
+                    },
+                )
+                observed_season["post_count"] = _normalize_non_negative_int(observed_season.get("post_count")) + 1
+
+    results: list[dict[str, Any]] = []
+    for normalized, item in items.items():
+        assignments = list(item.get("assignments") or [])
+        if not assignments:
+            assignments = _infer_social_account_profile_show_assignments(
+                account_handle=account_handle,
+                hashtag=normalized,
+                observed_shows=dict(item.get("observed_shows") or {}),
+            )
+            item["assignments"] = assignments
+        item["assigned_shows"] = _serialize_social_account_profile_show_buckets(
+            {
+                str(assignment.get("show_id") or ""): {
+                    "show_id": assignment.get("show_id"),
+                    "show_name": assignment.get("show_name"),
+                    "show_slug": assignment.get("show_slug"),
+                    "post_count": 1,
+                }
+                for assignment in assignments
+                if assignment.get("show_id")
+            }
+        )
+        item["assigned_seasons"] = _serialize_social_account_profile_show_buckets(
+            {
+                str(assignment.get("season_id") or ""): {
+                    "season_id": assignment.get("season_id"),
+                    "season_number": assignment.get("season_number"),
+                    "show_id": assignment.get("show_id"),
+                    "show_name": assignment.get("show_name"),
+                    "show_slug": assignment.get("show_slug"),
+                    "post_count": 1,
+                }
+                for assignment in assignments
+                if assignment.get("season_id")
+            }
+        )
+        item["observed_shows"] = _serialize_social_account_profile_show_buckets(
+            dict(item.get("observed_shows") or {})
+        )
+        item["observed_seasons"] = _serialize_social_account_profile_show_buckets(
+            dict(item.get("observed_seasons") or {})
+        )
+        item["platform"] = _normalize_social_account_profile_platform(platform)
+        item["account_handle"] = account_handle
+        results.append(item)
+        del normalized
+    results.sort(
+        key=lambda item: (-_normalize_non_negative_int(item.get("usage_count")), str(item.get("hashtag") or "").lower())
+    )
+    return results
+
+
+def _build_social_account_profile_entity_aggregates(
+    rows: list[dict[str, Any]],
+    *,
+    platform: str,
+    account_handle: str,
+) -> dict[str, list[dict[str, Any]]]:
+    entity_buckets: dict[str, dict[str, dict[str, Any]]] = {"collaborators": {}, "tags": {}}
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    for row in rows:
+        post_id = str(row.get("id") or "")
+        show_id = str(row.get("show_id") or "") or None
+        show_name = row.get("show_name")
+        show_slug = row.get("show_slug")
+        season_id = str(row.get("season_id") or "") or None
+        season_number = _normalize_non_negative_int(row.get("season_number")) or None
+        posted_at = row.get("posted_at")
+
+        for kind, handles in (
+            ("collaborators", _social_account_profile_collaborators_for_row(row)),
+            ("tags", _social_account_profile_tags_for_row(platform, row)),
+        ):
+            for raw_handle in handles:
+                handle = _normalize_account_handle(raw_handle)
+                if not handle or handle == normalized_account:
+                    continue
+                bucket = entity_buckets[kind].setdefault(
+                    handle,
+                    {
+                        "handle": handle,
+                        "platform": _normalize_social_account_profile_platform(platform),
+                        "profile_url": _platform_profile_url_for_handle(platform, handle),
+                        "usage_count": 0,
+                        "latest_seen_at": None,
+                        "post_ids": set(),
+                        "shows": {},
+                        "seasons": {},
+                    },
+                )
+                bucket["usage_count"] = _normalize_non_negative_int(bucket.get("usage_count")) + 1
+                bucket["post_ids"].add(post_id)
+                if posted_at and (bucket.get("latest_seen_at") is None or posted_at > bucket.get("latest_seen_at")):
+                    bucket["latest_seen_at"] = posted_at
+                if show_id:
+                    observed_show = bucket["shows"].setdefault(
+                        show_id,
+                        {
+                            "show_id": show_id,
+                            "show_name": show_name,
+                            "show_slug": show_slug,
+                            "post_count": 0,
+                        },
+                    )
+                    observed_show["post_count"] = _normalize_non_negative_int(observed_show.get("post_count")) + 1
+                if season_id:
+                    observed_season = bucket["seasons"].setdefault(
+                        season_id,
+                        {
+                            "season_id": season_id,
+                            "season_number": season_number,
+                            "show_id": show_id,
+                            "show_name": show_name,
+                            "show_slug": show_slug,
+                            "post_count": 0,
+                        },
+                    )
+                    observed_season["post_count"] = _normalize_non_negative_int(observed_season.get("post_count")) + 1
+
+    serialized: dict[str, list[dict[str, Any]]] = {}
+    for kind, buckets in entity_buckets.items():
+        items: list[dict[str, Any]] = []
+        for bucket in buckets.values():
+            items.append(
+                {
+                    "handle": bucket.get("handle"),
+                    "platform": bucket.get("platform"),
+                    "profile_url": bucket.get("profile_url"),
+                    "usage_count": _normalize_non_negative_int(bucket.get("usage_count")),
+                    "post_count": len(bucket.get("post_ids") or set()),
+                    "latest_seen_at": bucket.get("latest_seen_at"),
+                    "shows": _serialize_social_account_profile_show_buckets(dict(bucket.get("shows") or {})),
+                    "seasons": _serialize_social_account_profile_show_buckets(dict(bucket.get("seasons") or {})),
+                }
+            )
+        items.sort(
+            key=lambda item: (
+                -_normalize_non_negative_int(item.get("usage_count")),
+                str(item.get("handle") or "").lower(),
+            )
+        )
+        serialized[kind] = items
+    return serialized
+
+
+def get_social_account_profile_summary(platform: str, account_handle: str) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    source_rows = _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    rows = _fetch_social_account_profile_rows(normalized_platform, normalized_account, limit=250)
+    assignment_rows = _fetch_social_account_profile_assignment_rows(normalized_platform, normalized_account)
+    totals = _social_account_profile_summary_totals(normalized_platform, normalized_account)
+    hashtag_items = _build_social_account_profile_hashtag_items(
+        rows,
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        assignment_rows=assignment_rows,
+    )
+    entity_payload = _build_social_account_profile_entity_aggregates(
+        rows,
+        platform=normalized_platform,
+        account_handle=normalized_account,
+    )
+    return {
+        "platform": normalized_platform,
+        "account_handle": normalized_account,
+        "profile_url": _platform_profile_url_for_handle(normalized_platform, normalized_account),
+        "total_posts": _normalize_non_negative_int(totals.get("total_posts")),
+        "total_engagement": _normalize_non_negative_int(totals.get("total_engagement")),
+        "total_views": _normalize_non_negative_int(totals.get("total_views")),
+        "first_post_at": totals.get("first_post_at"),
+        "last_post_at": totals.get("last_post_at"),
+        "per_show_counts": _social_account_profile_grouped_counts(
+            normalized_platform,
+            normalized_account,
+            group_by="show",
+        ),
+        "per_season_counts": _social_account_profile_grouped_counts(
+            normalized_platform,
+            normalized_account,
+            group_by="season",
+        ),
+        "top_hashtags": hashtag_items[:10],
+        "top_collaborators": entity_payload.get("collaborators", [])[:10],
+        "top_tags": entity_payload.get("tags", [])[:10],
+        "source_status": source_rows,
+    }
+
+
+def get_social_account_profile_posts(
+    platform: str,
+    account_handle: str,
+    *,
+    page: int = 1,
+    page_size: int = _SOCIAL_ACCOUNT_PROFILE_DEFAULT_PAGE_SIZE,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    safe_page = max(1, int(page))
+    safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+    total = _social_account_profile_total_posts(normalized_platform, normalized_account)
+    rows = _fetch_social_account_profile_rows(
+        normalized_platform,
+        normalized_account,
+        limit=safe_page_size,
+        offset=(safe_page - 1) * safe_page_size,
+    )
+    return {
+        "items": [
+            _social_account_profile_post_item(
+                normalized_platform,
+                row,
+                account_handle=normalized_account,
+            )
+            for row in rows
+        ],
+        "pagination": {
+            "page": safe_page,
+            "page_size": safe_page_size,
+            "total": total,
+            "total_pages": max(1, (total + safe_page_size - 1) // safe_page_size) if safe_page_size else 1,
+        },
+    }
+
+
+def get_social_account_profile_hashtags(platform: str, account_handle: str) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    rows = _fetch_social_account_profile_rows(normalized_platform, normalized_account)
+    assignment_rows = _fetch_social_account_profile_assignment_rows(normalized_platform, normalized_account)
+    return {
+        "items": _build_social_account_profile_hashtag_items(
+            rows,
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            assignment_rows=assignment_rows,
+        )
+    }
+
+
+def _validate_social_account_profile_assignment_targets(
+    hashtags: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    show_ids = sorted(
+        {
+            str(item.get("show_id") or "").strip()
+            for item in hashtags
+            if str(item.get("show_id") or "").strip()
+        }
+    )
+    season_ids = sorted(
+        {str(item.get("season_id") or "").strip() for item in hashtags if str(item.get("season_id") or "").strip()}
+    )
+    shows_by_id: dict[str, dict[str, Any]] = {}
+    seasons_by_id: dict[str, dict[str, Any]] = {}
+    if show_ids:
+        show_rows = pg.fetch_all(
+            """
+            select id::text as id, name, slug
+            from core.shows
+            where id = any(%s)
+            """,
+            [show_ids],
+        )
+        shows_by_id = {str(row.get("id") or ""): row for row in show_rows if str(row.get("id") or "").strip()}
+    if season_ids:
+        season_rows = pg.fetch_all(
+            """
+            select id::text as id, show_id::text as show_id, season_number
+            from core.seasons
+            where id = any(%s)
+            """,
+            [season_ids],
+        )
+        seasons_by_id = {str(row.get("id") or ""): row for row in season_rows if str(row.get("id") or "").strip()}
+    missing_shows = [show_id for show_id in show_ids if show_id not in shows_by_id]
+    missing_seasons = [season_id for season_id in season_ids if season_id not in seasons_by_id]
+    if missing_shows:
+        raise ValueError(f"Unknown show ids: {', '.join(missing_shows)}")
+    if missing_seasons:
+        raise ValueError(f"Unknown season ids: {', '.join(missing_seasons)}")
+    return shows_by_id, seasons_by_id
+
+
+def put_social_account_profile_hashtags(
+    platform: str,
+    account_handle: str,
+    *,
+    hashtags: list[dict[str, Any]],
+    updated_by: str | None = None,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    if not hashtags:
+        raise ValueError("At least one hashtag payload item is required.")
+
+    normalized_payload: list[dict[str, Any]] = []
+    for item in hashtags:
+        normalized_hashtag = _normalize_social_account_profile_hashtag(
+            item.get("hashtag") or item.get("normalized_hashtag")
+        )
+        assignments_payload = list(item.get("assignments") or [])
+        normalized_assignments: list[dict[str, Any]] = []
+        for assignment in assignments_payload:
+            show_id = str(assignment.get("show_id") or "").strip()
+            season_id = str(assignment.get("season_id") or "").strip() or None
+            if not show_id:
+                raise ValueError(f"Hashtag #{normalized_hashtag} is missing show_id for one assignment.")
+            normalized_assignments.append({"show_id": show_id, "season_id": season_id})
+        normalized_payload.append(
+            {
+                "hashtag": normalized_hashtag,
+                "display_hashtag": f"#{normalized_hashtag}",
+                "assignments": normalized_assignments,
+            }
+        )
+
+    flat_assignments = [
+        {"show_id": assignment["show_id"], "season_id": assignment["season_id"]}
+        for item in normalized_payload
+        for assignment in item["assignments"]
+    ]
+    shows_by_id, seasons_by_id = _validate_social_account_profile_assignment_targets(flat_assignments)
+    for item in normalized_payload:
+        for assignment in item["assignments"]:
+            season_id = assignment.get("season_id")
+            if not season_id:
+                continue
+            season = seasons_by_id.get(season_id) or {}
+            season_show_id = str(season.get("show_id") or "").strip()
+            if season_show_id and season_show_id != assignment["show_id"]:
+                raise ValueError(
+                    "Season "
+                    f"{season_id} does not belong to show {assignment['show_id']} "
+                    f"for hashtag #{item['hashtag']}."
+                )
+
+    hashtag_keys = [item["hashtag"] for item in normalized_payload]
+    rows_to_insert = [
+        (
+            normalized_platform,
+            normalized_account,
+            item["hashtag"],
+            item["display_hashtag"],
+            assignment["show_id"],
+            assignment["season_id"],
+            updated_by,
+        )
+        for item in normalized_payload
+        for assignment in item["assignments"]
+    ]
+    with pg.db_connection() as conn:
+        try:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute(
+                    """
+                delete from social.account_hashtag_assignments
+                where platform = %s
+                  and account_handle = %s
+                  and normalized_hashtag = any(%s)
+                    """,
+                    [normalized_platform, normalized_account, hashtag_keys],
+                )
+            if rows_to_insert:
+                pg.execute_values_no_return(
+                    """
+                    insert into social.account_hashtag_assignments (
+                      platform,
+                      account_handle,
+                      normalized_hashtag,
+                      display_hashtag,
+                      show_id,
+                      season_id,
+                      updated_by
+                    ) values %s
+                    """,
+                    rows_to_insert,
+                    conn=conn,
+                )
+        except psycopg_errors.UndefinedTable as exc:
+            raise ValueError(
+                "Social account hashtag assignments schema is not migrated. "
+                "Apply migration 0180_social_account_hashtag_assignments.sql."
+            ) from exc
+
+    return get_social_account_profile_hashtags(normalized_platform, normalized_account)
+
+
+def get_social_account_profile_collaborators_tags(platform: str, account_handle: str) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    rows = _fetch_social_account_profile_rows(normalized_platform, normalized_account)
+    payload = _build_social_account_profile_entity_aggregates(
+        rows,
+        platform=normalized_platform,
+        account_handle=normalized_account,
+    )
+    return {
+        "collaborators": payload.get("collaborators", []),
+        "tags": payload.get("tags", []),
+    }

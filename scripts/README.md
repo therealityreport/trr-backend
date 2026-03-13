@@ -198,6 +198,72 @@ python scripts/shows/backfill_bravo_person_source_links.py \
   --fail-pending-person-sources 0
 ```
 
+### 9) Historical social hosted-media cleanup
+
+Use the canonical social media mirror backfill script for older posts that still need hosted-media repair, remirroring, or targeted cleanup:
+
+```bash
+PYTHONPATH=. python scripts/socials/backfill_social_media_mirror_jobs.py \
+  --all-history \
+  --platforms twitter,tiktok,youtube,facebook,threads,instagram \
+  --source-scope bravo \
+  --limit-per-platform 5000 \
+  --dry-run
+```
+
+Target specific seasons, rows, or repair classes when you want a narrower cleanup pass:
+
+```bash
+PYTHONPATH=. python scripts/socials/backfill_social_media_mirror_jobs.py \
+  --all-history \
+  --platforms twitter \
+  --season-id <season-uuid> \
+  --post-id <post-uuid> \
+  --source-id <platform-source-id> \
+  --repair-reasons twitter_video_thumbnail,legacy_host \
+  --source-scope bravo
+```
+
+Supported repair reasons:
+- `legacy_host`
+- `hosted_content`
+- `missing_hosted_thumbnail`
+- `missing_hosted_media`
+- `mirror_retry`
+- `non_video_hosted_media`
+- `source_quality`
+- `twitter_video_thumbnail`
+
+Notes:
+- `--dry-run` reports eligible historical cleanup rows without enqueueing mirror jobs.
+- Without `--all-history`, the script preserves the default recent lookback window (`--weeks`, default `8`).
+- `--hosted-html-only` remains available as a narrow compatibility filter for page-wrapper cleanup.
+
+### 10) Historical show/season/episode/cast image cleanup
+
+Backfill unified media rows for legacy image tables and optionally generate the variant URLs used by gallery, thumbnail, and lightbox surfaces:
+
+```bash
+PYTHONPATH=. python scripts/backfill/backfill_media_assets.py \
+  --entity-type all \
+  --with-variants \
+  --with-crops \
+  --verbose
+```
+
+Target a narrower historical slice:
+
+```bash
+PYTHONPATH=. python scripts/backfill/backfill_media_assets.py --entity-type season --with-variants
+PYTHONPATH=. python scripts/backfill/backfill_media_assets.py --entity-type episode --with-variants
+PYTHONPATH=. python scripts/backfill/backfill_media_assets.py --entity-type cast --with-variants
+```
+
+Notes:
+- `--entity-type all` now covers `show`, `season`, `episode`, `person`, and `cast`.
+- Legacy table aliases now include `show_images`, `season_images`, `episode_images`, `person_images`, and `cast_photos`.
+- The backfill now normalizes hosted URLs from `hosted_key` so imported `media_assets` rows use the canonical object-storage public base instead of preserving stale legacy hosts.
+
 Diagnostics for missing approved IMDb/TMDb links (example: Andy Cohen):
 
 ```bash

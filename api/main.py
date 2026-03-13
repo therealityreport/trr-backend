@@ -25,11 +25,14 @@ from api.realtime.broker import init_broker, shutdown_broker
 from trr_backend.observability import (
     CONTENT_TYPE_LATEST,
     bind_trace_id,
+    configure_runtime_observability,
     metrics_available,
     record_http_request,
     render_metrics,
     reset_trace_id,
 )
+
+configure_runtime_observability(service_name="trr-backend-api")
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +46,16 @@ def _validate_startup_config() -> None:
     if screenalytics_api_url:
         parsed = urlparse(screenalytics_api_url)
         if not parsed.scheme or not parsed.netloc:
-            logger.warning("[startup-config] SCREENALYTICS_API_URL looks malformed: %s", screenalytics_api_url)
+            logger.warning(
+                "[startup-config] SCREENALYTICS_API_URL looks malformed: %s; only legacy outbound Screenalytics HTTP "
+                "flows depend on this setting",
+                screenalytics_api_url,
+            )
     else:
-        logger.info("[startup-config] SCREENALYTICS_API_URL not set; screenalytics integrations will be unavailable")
+        logger.info(
+            "[startup-config] SCREENALYTICS_API_URL not set; only legacy outbound Screenalytics HTTP flows are "
+            "disabled. Admin image-analysis stays on the backend-owned vision runtime."
+        )
 
     if not admin_shared_secret:
         logger.warning("[startup-config] TRR_INTERNAL_ADMIN_SHARED_SECRET missing; admin proxy auth may fail")

@@ -40,6 +40,13 @@ export RENDER_API_KEY=...
 export BETTER_STACK_SOURCE_TOKEN=...
 export BETTER_STACK_INGESTING_HOST=in.logs.betterstack.com
 export CORS_ALLOW_ORIGINS=https://trr-app.vercel.app,https://preview.example.vercel.app
+export OBJECT_STORAGE_PROVIDER=r2
+export OBJECT_STORAGE_BUCKET=trr-backend
+export OBJECT_STORAGE_REGION=auto
+export OBJECT_STORAGE_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
+export OBJECT_STORAGE_ACCESS_KEY_ID=...
+export OBJECT_STORAGE_SECRET_ACCESS_KEY=...
+export OBJECT_STORAGE_PUBLIC_BASE_URL=https://media.thereality.report
 ```
 
 Notes:
@@ -51,6 +58,9 @@ Notes:
   do not upgrade until actual log volume or retention needs justify it.
 - `CORS_ALLOW_ORIGINS` should explicitly include the Vercel origins that need
   credentialed access.
+- `OBJECT_STORAGE_*` values are passed through into the Render service env so
+  the public API can cut over from AWS S3 to Cloudflare R2 without changing
+  object keys.
 
 ## Create Or Update The Service
 
@@ -65,6 +75,16 @@ What the script does:
 2. reads `/etc/trr-api.env` from the legacy AWS API host over SSM
 3. overlays `/trr/staging/*` SSM parameters
 4. overlays local pass-through env for:
+   - `OBJECT_STORAGE_PROVIDER`
+   - `OBJECT_STORAGE_BUCKET`
+   - `OBJECT_STORAGE_REGION`
+   - `OBJECT_STORAGE_ENDPOINT_URL`
+   - `OBJECT_STORAGE_ACCESS_KEY_ID`
+   - `OBJECT_STORAGE_SECRET_ACCESS_KEY`
+   - `OBJECT_STORAGE_SESSION_TOKEN`
+   - `OBJECT_STORAGE_PROFILE`
+   - `OBJECT_STORAGE_PUBLIC_BASE_URL`
+   - `OBJECT_STORAGE_PREFIX`
    - `BETTER_STACK_SOURCE_TOKEN`
    - `LOGTAIL_SOURCE_TOKEN`
    - `BETTER_STACK_INGESTING_HOST`

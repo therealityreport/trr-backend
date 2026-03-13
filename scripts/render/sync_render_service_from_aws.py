@@ -17,7 +17,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-DEFAULT_SERVICE_NAME = "trr-backend"
+DEFAULT_SERVICE_NAME = "trr-backend-api"
 DEFAULT_REPO_URL = "https://github.com/therealityreport/trr-backend.git"
 DEFAULT_BRANCH = "main"
 DEFAULT_RENDER_REGION = "virginia"
@@ -30,6 +30,54 @@ DEFAULT_SSM_PATH = "/trr/staging/"
 _POLL_SECONDS = 1.0
 _POLL_ATTEMPTS = 30
 _PAGE_SIZE = 100
+RENDER_PASSTHROUGH_ENV_KEYS = (
+    "OBJECT_STORAGE_PROVIDER",
+    "OBJECT_STORAGE_BUCKET",
+    "OBJECT_STORAGE_REGION",
+    "OBJECT_STORAGE_ENDPOINT_URL",
+    "OBJECT_STORAGE_ACCESS_KEY_ID",
+    "OBJECT_STORAGE_SECRET_ACCESS_KEY",
+    "OBJECT_STORAGE_SESSION_TOKEN",
+    "OBJECT_STORAGE_PROFILE",
+    "OBJECT_STORAGE_PUBLIC_BASE_URL",
+    "OBJECT_STORAGE_PREFIX",
+    "BETTER_STACK_SOURCE_TOKEN",
+    "LOGTAIL_SOURCE_TOKEN",
+    "BETTER_STACK_INGESTING_HOST",
+    "LOGTAIL_INGESTING_HOST",
+    "BETTER_STACK_LOG_TIMEOUT_SECONDS",
+    "BETTER_STACK_FAILURE_COOLDOWN_SECONDS",
+    "CORS_ALLOW_ORIGINS",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_SERVICE_ACCOUNT_FILE",
+    "FIREBASE_SERVICE_ACCOUNT_FILE",
+    "TWIKIT_COOKIES_FILE",
+    "SOCIAL_TWITTER_COOKIES_JSON",
+    "SOCIAL_TWITTER_COOKIES_FILE",
+    "TWITTER_COOKIES_FILE",
+    "TIKTOK_COOKIES_FILE",
+    "SOCIAL_TIKTOK_COOKIES_FILE",
+    "SOCIAL_FACEBOOK_COOKIES_FILE",
+    "FACEBOOK_COOKIES_FILE",
+    "SOCIAL_THREADS_COOKIES_FILE",
+    "THREADS_COOKIES_FILE",
+)
+RENDER_CANONICAL_ENV_DEFAULTS = {
+    "TRR_JOB_PLANE_MODE": "remote",
+    "TRR_LONG_JOB_ENFORCE_REMOTE": "1",
+    "TRR_REMOTE_EXECUTOR": "modal",
+    "TRR_MODAL_ENABLED": "1",
+    "TRR_MODAL_APP_NAME": "trr-backend-jobs",
+    "TRR_MODAL_ADMIN_OPERATION_FUNCTION": "run_admin_operation_v2",
+    "TRR_MODAL_GOOGLE_NEWS_FUNCTION": "run_google_news_sync",
+    "TRR_MODAL_REDDIT_REFRESH_FUNCTION": "run_reddit_refresh",
+    "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
+    "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
+}
+RETIRED_STORAGE_ALIAS_KEYS = (
+    "AWS_S3_BUCKET",
+    "AWS_CDN_BASE_URL",
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_ROOT = REPO_ROOT.parent
@@ -257,10 +305,27 @@ def normalize_env(env: dict[str, str], *, service_url: str | None) -> dict[str, 
         if key in normalized:
             normalized[key] = target
 
+    if normalized.get("OBJECT_STORAGE_BUCKET"):
+        for key in RETIRED_STORAGE_ALIAS_KEYS:
+            normalized.pop(key, None)
+
     if service_url:
         normalized["TRR_API_URL"] = service_url.rstrip("/")
 
     return normalized
+
+
+def overlay_process_env(
+    env: dict[str, str],
+    *,
+    passthrough_keys: tuple[str, ...] = RENDER_PASSTHROUGH_ENV_KEYS,
+) -> dict[str, str]:
+    merged = dict(env)
+    for key in passthrough_keys:
+        value = str(os.getenv(key) or "").strip()
+        if value:
+            merged[key] = value
+    return merged
 
 
 def build_service_payload(config: RenderServiceConfig, env: dict[str, str]) -> dict[str, Any]:
@@ -299,16 +364,26 @@ def build_env_var_payload(env: dict[str, str]) -> list[dict[str, str]]:
     return [{"key": key, "value": value} for key, value in sorted(env.items())]
 
 
+def _normalize_json_env_value(raw_value: str) -> str:
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
 def build_secret_file_payloads(env: dict[str, str]) -> list[dict[str, str]]:
     payloads: list[dict[str, str]] = []
 
     for filename, source_keys in SECRET_FILE_SPECS.items():
         content: str | None = None
         if filename == "twikit-cookies.json":
-            raw_json = (env.get("SOCIAL_TWITTER_COOKIES_JSON") or "").strip()
+            raw_json = _normalize_json_env_value(env.get("SOCIAL_TWITTER_COOKIES_JSON") or "")
             if raw_json:
-                content = json.dumps(json.loads(raw_json), indent=2, sort_keys=True)
-            else:
+                try:
+                    content = json.dumps(json.loads(raw_json), indent=2, sort_keys=True)
+                except json.JSONDecodeError:
+                    content = None
+            if content is None:
                 for source_key in source_keys:
                     resolved = _resolve_candidate_path(env.get(source_key, ""))
                     if resolved:
@@ -485,7 +560,10 @@ def build_effective_env(
     env = dict(render_env)
     env.update(live_env)
     env.update(ssm_env)
-    return normalize_env(env, service_url=service_url)
+    normalized = normalize_env(overlay_process_env(env), service_url=service_url)
+    for key, value in RENDER_CANONICAL_ENV_DEFAULTS.items():
+        normalized.setdefault(key, value)
+    return normalized
 
 
 def main() -> int:
@@ -522,6 +600,7 @@ def main() -> int:
     merged_env = dict(render_env)
     merged_env.update(live_env)
     merged_env.update(ssm_env)
+    merged_env = overlay_process_env(merged_env)
     effective_env = normalize_env(merged_env, service_url=service_url)
     service_payload = build_service_payload(config, effective_env)
     env_payload = build_env_var_payload(effective_env)

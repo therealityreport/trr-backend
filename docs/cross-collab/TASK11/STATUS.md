@@ -3,6 +3,104 @@
 Repo: TRR-Backend
 Last updated: March 13, 2026
 
+## March 13, 2026 — Final live verification complete; Task 11 remains CLOSED
+
+- Better Stack live tail verification is green on the shipped runtime path.
+- Final verified steady state:
+  - public backend on Render
+  - async execution on Modal
+  - object storage on R2
+  - log ingestion on Better Stack
+- AWS migration-scope cleanup is complete:
+  - legacy API/network shell deleted
+  - migration S3 buckets deleted
+  - manual RDS snapshot deleted
+  - migration CloudWatch alarms/log groups deleted
+  - metrics publisher Lambda and IAM role deleted
+- No remaining Task 11 blockers or deferred follow-ups remain in this workstream.
+
+## March 12, 2026 — Better Stack log ingestion activated; Task 11 is CLOSED
+
+- Better Stack HTTP source created and credentials deployed to all three environments:
+  - Source name: `TRR Backend` (ID: `2295477`, platform: `http`, region: `eu-nbg-2`)
+  - Source token: deployed to `.env`, Render env vars, and Modal named secrets (`trr-backend-runtime`)
+  - Ingesting host: `s2295477.eu-nbg-2.betterstackdata.com`
+  - Ingestion verified: `POST` to source endpoint returns `202`
+- Root cause of prior 401: `.env` had the Better Stack **management API token** stored as `BETTER_STACK_SOURCE_TOKEN`. Management tokens authenticate against `https://logs.betterstack.com/api/v1/*` but cannot ingest logs. Created a proper HTTP source via the management API, which issued a dedicated source token for ingestion.
+- Credential deployment:
+  - `.env` updated with correct `BETTER_STACK_SOURCE_TOKEN`, `BETTER_STACK_INGESTING_HOST`, and new `BETTER_STACK_API_TOKEN`
+  - Render env vars updated via REST API (service `srv-d6pi4m8gjchc73a68o4g`)
+  - Modal named secrets updated via `prepare_named_secrets.py --apply`
+  - Modal app redeployed (`modal deploy trr_backend/modal_jobs.py` — all 8 functions + web endpoint)
+  - Render redeploy triggered (deploy `dep-d6pledia214c73e7et7g`)
+- Post-deployment health:
+  - `GET https://admin-56995--trr-backend-api.modal.run/health` → `200 {"status":"healthy"}`
+  - `GET https://trr-backend-api.onrender.com/health` → `200 {"status":"healthy"}`
+- Observability tests pass: `pytest tests/test_observability.py` → 2/2 PASS
+- **Task 11 is now fully closed.** All phases complete:
+  - Regression tests added (Phase 1)
+  - Canary re-validation GREEN (Phase 2)
+  - Better Stack + R2 credentials verified (Phase 3)
+  - AWS teardown complete (Phase 4)
+  - No remaining blockers
+
+## March 12, 2026 — AWS observability/storage tail fully deleted; only SSM params and ACM cert remain
+
+- Completed the remaining AWS cleanup pass (observability + storage tail):
+  - S3 bucket `trr-backend`: already deleted (drain completed earlier)
+  - S3 bucket `screenalytics`: purged ~209K versioned objects + ~58K delete markers, bucket deleted
+  - CloudWatch alarms deleted: `trr-long-job-failures-high`, `trr-queue-depth-high`, `trr-stale-leases-high`
+  - CloudWatch log groups deleted (8): `/aws/lambda/trr-jobplane-metrics-publisher`, `/aws/rds/instance/trr-metadata-db/postgresql`, `/aws/ssm/AWS-RunShellScript`, `/trr/api/bootstrap`, `/trr/ec2/cloud-init`, `/trr/ec2/cloud-init-output`, `/trr/worker/bootstrap`, `RDSOSMetrics`
+  - Lambda deleted: `trr-jobplane-metrics-publisher`
+  - IAM roles deleted: `trr-metrics-publisher-role` (Lambda role) and `trr-ec2-role` (EC2 instance profile + role)
+  - Security groups deleted: `sg-09b039c604dd9d077` (`trr-worker-sg`) and `sg-0d65ae6822a009c2f` (`trr-db-access`)
+- Remaining AWS artifacts (low-cost, intentionally kept):
+  - SSM parameters under `/trr/staging/` (~34 params) — free, useful as configuration reference
+  - ACM certificate `api.thereality.report` — free, can be cleaned up later
+  - VPC default security group — cannot be deleted
+- Post-teardown health verification:
+  - `GET https://admin-56995--trr-backend-api.modal.run/health` → `200 {"status":"healthy"}`
+  - `GET https://trr-app.vercel.app/` → `200`
+- Better Stack: resolved in subsequent entry (March 12, 2026 — Better Stack log ingestion activated)
+  - This is the only remaining non-AWS item before Task 11 is fully closed
+
+## March 13, 2026 — AWS shell retired, R2 parity closed, Better Stack still blocks final observability cleanup
+
+- Closed the final R2 parity gap with live bucket deltas:
+  - `trr-backend` -> `trr-media-prod`: synced `100` missing/size-mismatched objects (`29,771,768` bytes)
+  - `screenalytics` -> `screenalytics-artifacts-prod`: synced `605` missing/size-mismatched objects (`15,766,188` bytes)
+  - `ltsr-data-bucket` -> `ltsr-archive-prod`: already matched
+- Verification now passes for all three source/destination bucket pairs by count and total bytes.
+- The original public media hostname `media.thereality.report` was not actually attached to the R2 bucket, so runtime public reads were moved to the Cloudflare-managed domain:
+  - `https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev`
+- Live runtime follow-up completed:
+  - local backend `.env` now uses the managed `r2.dev` public base
+  - Render service `trr-backend-api` was re-synced and redeployed as `dep-d6pkn1vafjfc73afprbg`
+  - Modal runtime secrets were re-applied and `trr-backend-jobs` was redeployed
+- Validation:
+  - `GET https://trr-backend-api.onrender.com/health` -> `200`
+  - `curl -I -A 'Mozilla/5.0' https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev/_healthcheck/README.md` -> `200`
+  - `npx pyright trr_backend/object_storage.py` -> `0 errors`
+- Retired the dead AWS API/network shell:
+  - deleted `trr-api-asg`
+  - deleted `trr-api-lt`
+  - deleted `trr-api-alb`
+  - deleted `trr-api-tg`
+  - removed the NAT route from `rtb-04176689ad967a8ae`
+  - deleted NAT `nat-004581b7931e685e7`
+  - released EIP `eipalloc-0c6c7ef0913e7a3d8`
+  - deleted security groups `sg-054ae25e1699a3845` and `sg-09ad087d9a6b689dd`
+  - deleted manual snapshot `trr-metadata-db-final-2026-03-07`
+- Current remaining AWS items are now limited to the observability/storage tail:
+  - versioned S3 bucket `screenalytics` is still draining historical versions before final deletion
+  - CloudWatch alarms `trr-long-job-failures-high`, `trr-queue-depth-high`, `trr-stale-leases-high`
+  - log groups `/aws/lambda/trr-jobplane-metrics-publisher`, `/aws/ssm/AWS-RunShellScript`, `/trr/api/bootstrap`, `/trr/ec2/cloud-init`, `/trr/ec2/cloud-init-output`, `/trr/worker/bootstrap`
+  - Lambda `trr-jobplane-metrics-publisher`
+  - IAM role `trr-metrics-publisher-role`
+- Better Stack remains the last hard blocker:
+  - the configured `BETTER_STACK_SOURCE_TOKEN` still returns `401 Unauthorized`
+  - because of that, CloudWatch operational alarm/log removal is intentionally not done yet
+
 ## March 13, 2026 — Canary re-validation passed against Vercel → Modal live path; R2 connectivity confirmed; Better Stack token still invalid
 
 - Re-ran live-path canary validation against the deployed Vercel → Modal backend after the March 12 Modal secret graph mismatch fix.

@@ -4,9 +4,11 @@
 
 This runbook covers social ingest queue operations, with Modal as the canonical
 production remote executor and the legacy worker scripts retained for local/dev
-and rollback only:
+and rollback only. The final public hosting target is Render; Modal remains the
+job plane:
 
-- Modal-hosted backend API readiness (`serve_backend_api`)
+- Render-hosted backend API readiness
+- Modal dispatcher readiness (`serve_backend_api` and worker functions)
 - Modal dispatcher heartbeat availability (`social.scrape_workers`)
 - Queue backlog and stuck jobs (`social.scrape_jobs`, `social.scrape_runs`)
 - Comment persistence diagnostics (`comment_stats` metadata + ID guardrails)
@@ -106,14 +108,18 @@ cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 ```
 
 After deploy, capture the public backend URL from the readiness output and point
-the app/runtime `TRR_API_URL` at that Modal endpoint before running admin smoke
-checks.
+the deployed TRR-APP runtime at the Render service URL before running admin
+smoke checks. Keep the Modal API URL available only as the rollback target
+during the observation window. In this phase, staging means Vercel Preview and
+production means Vercel Production. `TRR_API_URL` is owned by Vercel env
+configuration, not repo-local `.env` files.
 
 Full backend EC2 retirement is not complete until:
 
-- the Modal backend API URL is the canonical `TRR_API_URL` for TRR-APP
+- the Render backend API URL is the canonical `TRR_API_URL` for both Vercel Preview and Vercel Production
 - covered admin image-analysis jobs no longer depend on EC2-hosted runtime
 - social and non-social background work run only through Modal
+- Better Stack is receiving backend and Modal job logs so CloudWatch can be reduced
 
 ## Legacy Worker Start Commands
 

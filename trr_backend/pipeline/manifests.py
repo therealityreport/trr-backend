@@ -1,25 +1,21 @@
-"""S3 manifest storage for pipeline stages."""
+"""S3-compatible manifest storage for pipeline stages."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 
-import boto3
 from botocore.exceptions import ClientError
 
+from trr_backend.object_storage import build_s3_client, load_object_storage_config
 from trr_backend.pipeline.models import StageManifest
 
 logger = logging.getLogger(__name__)
 
 
 def get_manifest_bucket() -> str:
-    """Get S3 bucket for manifests."""
-    bucket = os.environ.get("AWS_S3_BUCKET")
-    if not bucket:
-        raise RuntimeError("AWS_S3_BUCKET environment variable is required for manifest storage")
-    return bucket
+    """Get object-storage bucket for manifests."""
+    return load_object_storage_config(require_bucket=True).bucket
 
 
 def get_manifest_key(run_id: str, stage_name: str) -> str:
@@ -45,14 +41,14 @@ def write_manifest(manifest: StageManifest, *, skip_s3: bool = False) -> str | N
     key = get_manifest_key(manifest.run_id, manifest.stage_name)
     bucket = get_manifest_bucket()
 
-    s3 = boto3.client("s3")
+    s3 = build_s3_client(load_object_storage_config(require_bucket=True))
     s3.put_object(
         Bucket=bucket,
         Key=key,
         Body=json.dumps(manifest.to_dict(), indent=2),
         ContentType="application/json",
     )
-    logger.debug(f"Wrote manifest to s3://{bucket}/{key}")
+    logger.debug("Wrote manifest to s3://%s/%s", bucket, key)
     return key
 
 
@@ -70,7 +66,7 @@ def read_manifest(run_id: str, stage_name: str) -> StageManifest | None:
     key = get_manifest_key(run_id, stage_name)
     bucket = get_manifest_bucket()
 
-    s3 = boto3.client("s3")
+    s3 = build_s3_client(load_object_storage_config(require_bucket=True))
     try:
         response = s3.get_object(Bucket=bucket, Key=key)
         data = json.loads(response["Body"].read())

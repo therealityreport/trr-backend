@@ -43,3 +43,20 @@ def test_apply_runtime_overrides_can_be_disabled() -> None:
     original = {"SUPABASE_DB_URL": "postgresql://example"}
 
     assert cli._apply_runtime_overrides(original, disabled=True) == original
+
+
+def test_apply_runtime_overrides_drops_retired_storage_aliases_when_object_storage_present() -> None:
+    result = cli._apply_runtime_overrides(
+        {
+            "OBJECT_STORAGE_BUCKET": "trr-media-prod",
+            "OBJECT_STORAGE_PUBLIC_BASE_URL": "https://media.thereality.report",
+            "AWS_S3_BUCKET": "trr-backend",
+            "AWS_CDN_BASE_URL": "https://d1fmdyqfafwim3.cloudfront.net",
+        },
+        disabled=False,
+    )
+
+    assert result["OBJECT_STORAGE_BUCKET"] == "trr-media-prod"
+    assert result["OBJECT_STORAGE_PUBLIC_BASE_URL"] == "https://media.thereality.report"
+    assert "AWS_S3_BUCKET" not in result
+    assert "AWS_CDN_BASE_URL" not in result

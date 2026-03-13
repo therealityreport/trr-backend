@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from trr_backend.job_plane import execution_backend_canonical
+from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def modal_dispatch_enabled() -> bool:
 
 
 def modal_admin_function_name() -> str:
-    return str(os.getenv("TRR_MODAL_ADMIN_OPERATION_FUNCTION") or "run_admin_operation").strip()
+    return str(os.getenv("TRR_MODAL_ADMIN_OPERATION_FUNCTION") or "run_admin_operation_v2").strip()
 
 
 def modal_google_news_function_name() -> str:
@@ -264,5 +265,5 @@ def dispatch_social_job(*, job_id: str) -> dict[str, Any]:
         log_label="social ingest",
         kwargs={"job_id": job_id},
         dispatcher_name="social",
-        supported_platforms=["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"],
+        supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
     )
