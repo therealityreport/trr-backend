@@ -3628,11 +3628,12 @@ def delete_brand_logo_saved_option(
     target_type: BrandLogoTargetType = Query(...),
     target_key: str = Query(...),
     target_label: str | None = Query(default=None),
+    db: SupabaseAdminClient = None,
     _: AdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _delete_saved_logo_option(
-            db=get_supabase_admin_client(),
+            db=db,
             target_type=target_type,
             target_key=target_key,
             target_label=target_label,

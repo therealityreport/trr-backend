@@ -1,6 +1,26 @@
 # Session Handoff (TRR-Backend)
 
 Purpose: persistent state for multi-turn AI agent sessions in `TRR-Backend`. Update before ending a session or requesting handoff.
+## Latest Update (2026-03-13 18:08 EDT) — brand-logo delete route now honors injected admin DB client in tests and CI
+
+- primary_skill: `senior-backend`
+- supporting_skills:
+  - `senior-qa`
+  - `code-reviewer`
+- mcp_tools_used:
+  - `functions.exec_command`
+  - `functions.apply_patch`
+- files_changed:
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/api/routers/admin_brands.py`
+  - `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/ai/HANDOFF.md`
+- behavior_summary:
+  - Fixed `DELETE /api/v1/admin/brands/logos/options/saved/{asset_id}` so it uses the FastAPI-injected `SupabaseAdminClient` instead of directly calling `get_supabase_admin_client()` inside the route body.
+  - This removes the hidden runtime dependency on real Supabase env vars during patched router tests, which is why the branch passed locally in a configured shell but failed in GitHub CI with a 500 on the saved-logo delete test.
+- validation_evidence:
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && env -u SUPABASE_URL -u SUPABASE_SERVICE_ROLE_KEY -u SUPABASE_ANON_KEY ./.venv/bin/python -m pytest tests/api/routers/test_admin_brands.py -k delete_brand_logo_saved_option_success -q` (pass)
+  - `cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/python -m pytest tests/api/routers/test_admin_brands.py -k delete_brand_logo_saved_option_success -q` (pass)
+- blocked_checks:
+  - Full `tests/api` rerun is in progress in this session to confirm the CI failure is fully resolved before the branch is pushed.
 ## Latest Update (2026-03-14 16:01 EDT) — historical show/season/episode/cast image cleanup now backfills unified media rows and variants
 
 - primary_skill: `orchestrate-plan-execution`
