@@ -620,7 +620,10 @@ def test_delete_brand_logo_saved_option_success(client: TestClient, monkeypatch:
         "featured_assets": {"wordmark": {"id": "asset-2"}, "icon": None},
     }
 
-    with patch("api.routers.admin_brands._delete_saved_logo_option", return_value=expected) as mocked:
+    with (
+        patch("api.routers.admin_brands.get_supabase_admin_client", return_value=object()),
+        patch("api.routers.admin_brands._delete_saved_logo_option", return_value=expected) as mocked,
+    ):
         response = client.delete(
             (
                 "/api/v1/admin/brands/logos/options/saved/asset-1"
