@@ -1,0 +1,345 @@
+{
+  "schema": "core",
+  "table": "cast_tmdb",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tmdb_id",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "name",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "also_known_as",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "biography",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "birthday",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "deathday",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "gender",
+      "data_type": "smallint",
+      "is_nullable": "YES",
+      "default": "0",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "adult",
+      "data_type": "boolean",
+      "is_nullable": "YES",
+      "default": "true",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "homepage",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "known_for_department",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "place_of_birth",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "popularity",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": "0",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "profile_path",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "imdb_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "freebase_mid",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "freebase_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tvrage_id",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "wikidata_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "facebook_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "instagram_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tiktok_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "twitter_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "youtube_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "cast_tmdb_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "person_id"
+    ],
+    [
+      "tmdb_id"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "cast_tmdb_person_id_unique",
+      "columns": [
+        "person_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_tmdb_person_id_unique ON core.cast_tmdb USING btree (person_id)"
+    },
+    {
+      "name": "cast_tmdb_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_tmdb_pkey ON core.cast_tmdb USING btree (id)"
+    },
+    {
+      "name": "cast_tmdb_tmdb_id_unique",
+      "columns": [
+        "tmdb_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX cast_tmdb_tmdb_id_unique ON core.cast_tmdb USING btree (tmdb_id)"
+    },
+    {
+      "name": "idx_cast_tmdb_imdb_id",
+      "columns": [
+        "imdb_id) WHERE (imdb_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_cast_tmdb_imdb_id ON core.cast_tmdb USING btree (imdb_id) WHERE (imdb_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_cast_tmdb_instagram_id",
+      "columns": [
+        "instagram_id) WHERE (instagram_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_cast_tmdb_instagram_id ON core.cast_tmdb USING btree (instagram_id) WHERE (instagram_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_cast_tmdb_person_id",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_cast_tmdb_person_id ON core.cast_tmdb USING btree (person_id)"
+    },
+    {
+      "name": "idx_cast_tmdb_tmdb_id",
+      "columns": [
+        "tmdb_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_cast_tmdb_tmdb_id ON core.cast_tmdb USING btree (tmdb_id)"
+    },
+    {
+      "name": "idx_cast_tmdb_twitter_id",
+      "columns": [
+        "twitter_id) WHERE (twitter_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_cast_tmdb_twitter_id ON core.cast_tmdb USING btree (twitter_id) WHERE (twitter_id IS NOT NULL)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "tmdb_id": 0,
+    "name": "example",
+    "also_known_as": [],
+    "biography": "example",
+    "birthday": "1970-01-01",
+    "deathday": "1970-01-01",
+    "gender": 0,
+    "adult": false,
+    "homepage": "example",
+    "known_for_department": "example",
+    "place_of_birth": "example",
+    "popularity": 0,
+    "profile_path": "example",
+    "imdb_id": "example",
+    "freebase_mid": "example",
+    "freebase_id": "example",
+    "tvrage_id": 0,
+    "wikidata_id": "example",
+    "facebook_id": "example",
+    "instagram_id": "example",
+    "tiktok_id": "example",
+    "twitter_id": "example",
+    "youtube_id": "example",
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

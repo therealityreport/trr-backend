@@ -1,0 +1,115 @@
+{
+  "schema": "core",
+  "table": "admin_operation_events",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "bigint",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "YES",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "operation_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "event_seq",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "event_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "event_payload",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "admin_operation_events_operation_id_fkey",
+      "column": "operation_id",
+      "references": "core.admin_operations.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "operation_id",
+      "event_seq"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "admin_operation_events_op_seq_unique",
+      "columns": [
+        "operation_id",
+        "event_seq"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX admin_operation_events_op_seq_unique ON core.admin_operation_events USING btree (operation_id, event_seq)"
+    },
+    {
+      "name": "admin_operation_events_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX admin_operation_events_pkey ON core.admin_operation_events USING btree (id)"
+    },
+    {
+      "name": "idx_admin_operation_events_created_at",
+      "columns": [
+        "created_at"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operation_events_created_at ON core.admin_operation_events USING btree (created_at)"
+    },
+    {
+      "name": "idx_admin_operation_events_operation_seq",
+      "columns": [
+        "operation_id",
+        "event_seq"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operation_events_operation_seq ON core.admin_operation_events USING btree (operation_id, event_seq)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": 0,
+    "operation_id": "00000000-0000-0000-0000-000000000000",
+    "event_seq": 0,
+    "event_type": "example",
+    "event_payload": {},
+    "created_at": "1970-01-01T00:00:00Z"
+  }
+}

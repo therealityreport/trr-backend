@@ -1,0 +1,44 @@
+# core.season_images - Table Structure Diagram
+
+Auto-generated schema diagram showing columns and data types.
+```mermaid
+erDiagram
+    CORE_SEASON_IMAGES {
+        UUID id
+        UUID show_id
+        UUID season_id
+        INTEGER tmdb_series_id
+        INTEGER season_number
+        TEXT source
+        TEXT kind
+        TEXT iso_639_1
+        TEXT file_path
+        TEXT url_original
+        INTEGER width
+        INTEGER height
+        NUMERIC aspect_ratio
+        TIMESTAMP_WITH_TIME_ZONE fetched_at
+        TEXT hosted_url
+        TEXT hosted_sha256
+        TEXT hosted_key
+        TEXT hosted_bucket
+        TEXT hosted_content_type
+        BIGINT hosted_bytes
+        TEXT hosted_etag
+        TIMESTAMP_WITH_TIME_ZONE hosted_at
+        TEXT source_image_id
+        TEXT caption
+        TEXT image_type
+        INTEGER position
+        TEXT url
+        TEXT url_path
+        JSONB metadata
+        TIMESTAMP_WITH_TIME_ZONE updated_at
+        TIMESTAMP_WITH_TIME_ZONE created_at
+        TEXT fetch_method
+        TEXT fetched_from_url
+        TIMESTAMP_WITH_TIME_ZONE archived_at
+        TEXT archived_by_firebase_uid
+        TEXT archived_reason
+    }
+```

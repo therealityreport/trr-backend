@@ -1,0 +1,168 @@
+{
+  "schema": "core",
+  "table": "person_external_ids",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "bigint",
+      "is_nullable": "NO",
+      "default": "nextval('core.person_external_ids_id_seq'::regclass)",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "external_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "is_primary",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "true",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "valid_from",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "valid_to",
+      "data_type": "date",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "observed_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "person_external_ids_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    },
+    {
+      "constraint": "person_external_ids_source_id_fkey",
+      "column": "source_id",
+      "references": "core.sources.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "person_external_ids_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX person_external_ids_person_id_idx ON core.person_external_ids USING btree (person_id)"
+    },
+    {
+      "name": "person_external_ids_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX person_external_ids_pkey ON core.person_external_ids USING btree (id)"
+    },
+    {
+      "name": "person_external_ids_primary_uq",
+      "columns": [
+        "person_id",
+        "source_id) WHERE (is_primary = true"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX person_external_ids_primary_uq ON core.person_external_ids USING btree (person_id, source_id) WHERE (is_primary = true)"
+    },
+    {
+      "name": "person_external_ids_unique_active_handles_uq",
+      "columns": [
+        "source_id",
+        "external_id) WHERE ((source_id = ANY (ARRAY['twitter'::text",
+        "'instagram'::text",
+        "'facebook'::text",
+        "'tiktok'::text",
+        "'youtube'::text])) AND (valid_to IS NULL)"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX person_external_ids_unique_active_handles_uq ON core.person_external_ids USING btree (source_id, external_id) WHERE ((source_id = ANY (ARRAY['twitter'::text, 'instagram'::text, 'facebook'::text, 'tiktok'::text, 'youtube'::text])) AND (valid_to IS NULL))"
+    },
+    {
+      "name": "person_external_ids_unique_identifiers_uq",
+      "columns": [
+        "source_id",
+        "external_id) WHERE (source_id = ANY (ARRAY['imdb'::text",
+        "'tmdb'::text",
+        "'wikidata'::text",
+        "'tvdb'::text",
+        "'tvrage'::text])"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX person_external_ids_unique_identifiers_uq ON core.person_external_ids USING btree (source_id, external_id) WHERE (source_id = ANY (ARRAY['imdb'::text, 'tmdb'::text, 'wikidata'::text, 'tvdb'::text, 'tvrage'::text]))"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": 0,
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "source_id": "example",
+    "external_id": "example",
+    "is_primary": false,
+    "valid_from": "1970-01-01",
+    "valid_to": "1970-01-01",
+    "observed_at": "1970-01-01T00:00:00Z",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

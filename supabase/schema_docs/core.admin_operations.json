@@ -1,0 +1,287 @@
+{
+  "schema": "core",
+  "table": "admin_operations",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "operation_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "initiated_by",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "request_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "client_session_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "client_workflow_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "request_payload",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "progress_payload",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "result_payload",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "error_payload",
+      "data_type": "jsonb",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "cancel_requested_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "started_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "completed_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "claimed_by_worker_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "claim_token",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "lease_expires_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "heartbeat_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "attempt_count",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": "0",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "next_retry_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "admin_operations_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX admin_operations_pkey ON core.admin_operations USING btree (id)"
+    },
+    {
+      "name": "idx_admin_operations_claim_hotpath",
+      "columns": [
+        "status",
+        "next_retry_at",
+        "created_at"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_claim_hotpath ON core.admin_operations USING btree (status, next_retry_at, created_at)"
+    },
+    {
+      "name": "idx_admin_operations_client_session_created_at",
+      "columns": [
+        "client_session_id",
+        "created_at DESC) WHERE (client_session_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_client_session_created_at ON core.admin_operations USING btree (client_session_id, created_at DESC) WHERE (client_session_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_admin_operations_client_workflow_status",
+      "columns": [
+        "client_session_id",
+        "client_workflow_id",
+        "status",
+        "created_at DESC) WHERE ((client_session_id IS NOT NULL) AND (client_workflow_id IS NOT NULL)"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_client_workflow_status ON core.admin_operations USING btree (client_session_id, client_workflow_id, status, created_at DESC) WHERE ((client_session_id IS NOT NULL) AND (client_workflow_id IS NOT NULL))"
+    },
+    {
+      "name": "idx_admin_operations_lease_expires_at",
+      "columns": [
+        "lease_expires_at"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_lease_expires_at ON core.admin_operations USING btree (lease_expires_at)"
+    },
+    {
+      "name": "idx_admin_operations_operation_type_created_at",
+      "columns": [
+        "operation_type",
+        "created_at DESC"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_operation_type_created_at ON core.admin_operations USING btree (operation_type, created_at DESC)"
+    },
+    {
+      "name": "idx_admin_operations_status_created_at",
+      "columns": [
+        "status",
+        "created_at DESC"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_status_created_at ON core.admin_operations USING btree (status, created_at DESC)"
+    },
+    {
+      "name": "idx_admin_operations_worker_heartbeat",
+      "columns": [
+        "claimed_by_worker_id",
+        "heartbeat_at) WHERE (claimed_by_worker_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_worker_heartbeat ON core.admin_operations USING btree (claimed_by_worker_id, heartbeat_at) WHERE (claimed_by_worker_id IS NOT NULL)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "operation_type": "example",
+    "status": "example",
+    "initiated_by": "example",
+    "request_id": "example",
+    "client_session_id": "example",
+    "client_workflow_id": "example",
+    "request_payload": {},
+    "progress_payload": {},
+    "result_payload": {},
+    "error_payload": {},
+    "cancel_requested_at": "1970-01-01T00:00:00Z",
+    "started_at": "1970-01-01T00:00:00Z",
+    "completed_at": "1970-01-01T00:00:00Z",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z",
+    "claimed_by_worker_id": "example",
+    "claim_token": "example",
+    "lease_expires_at": "1970-01-01T00:00:00Z",
+    "heartbeat_at": "1970-01-01T00:00:00Z",
+    "attempt_count": 0,
+    "next_retry_at": "1970-01-01T00:00:00Z"
+  }
+}

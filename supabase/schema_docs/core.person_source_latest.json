@@ -1,0 +1,140 @@
+{
+  "schema": "core",
+  "table": "person_source_latest",
+  "columns": [
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "variant",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'default'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetch_method",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'success'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "error",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "payload",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "payload_sha256",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [],
+  "foreign_keys": [
+    {
+      "constraint": "person_source_latest_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    },
+    {
+      "constraint": "person_source_latest_source_id_fkey",
+      "column": "source_id",
+      "references": "core.sources.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "person_id",
+      "source_id",
+      "variant"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "person_source_latest_person_id_source_id_variant_key",
+      "columns": [
+        "person_id",
+        "source_id",
+        "variant"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX person_source_latest_person_id_source_id_variant_key ON core.person_source_latest USING btree (person_id, source_id, variant)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "source_id": "example",
+    "variant": "example",
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "fetch_method": "example",
+    "status": "example",
+    "error": "example",
+    "payload": {},
+    "payload_sha256": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

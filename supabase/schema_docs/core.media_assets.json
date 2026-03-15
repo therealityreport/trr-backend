@@ -1,0 +1,424 @@
+{
+  "schema": "core",
+  "table": "media_assets",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "media_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'image'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_asset_id",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "content_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "width",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "height",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "caption",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "alt_text",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bucket",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_key",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_url",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_etag",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_sha256",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_content_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "hosted_bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "metadata",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "ingest_status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'pending'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "ingest_retry_count",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": "0",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "ingest_last_error",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "ingest_failed_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "ingest_completed_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "ingest_next_retry_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_by_firebase_uid",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "archived_reason",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "idx_media_assets_archived",
+      "columns": [
+        "archived_at) WHERE (archived_at IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_media_assets_archived ON core.media_assets USING btree (archived_at) WHERE (archived_at IS NOT NULL)"
+    },
+    {
+      "name": "idx_media_assets_id_source_hosted",
+      "columns": [
+        "id",
+        "source",
+        "hosted_url"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_media_assets_id_source_hosted ON core.media_assets USING btree (id, source, hosted_url)"
+    },
+    {
+      "name": "media_assets_hosted_url_idx",
+      "columns": [
+        "hosted_url) WHERE (hosted_url IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_assets_hosted_url_idx ON core.media_assets USING btree (hosted_url) WHERE (hosted_url IS NOT NULL)"
+    },
+    {
+      "name": "media_assets_ingest_next_retry_idx",
+      "columns": [
+        "ingest_next_retry_at) WHERE ((ingest_status = 'failed'::text) AND (ingest_next_retry_at IS NOT NULL)"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_assets_ingest_next_retry_idx ON core.media_assets USING btree (ingest_next_retry_at) WHERE ((ingest_status = 'failed'::text) AND (ingest_next_retry_at IS NOT NULL))"
+    },
+    {
+      "name": "media_assets_ingest_pending_failed_idx",
+      "columns": [
+        "source",
+        "ingest_status) WHERE (ingest_status = ANY (ARRAY['pending'::text",
+        "'failed'::text])"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_assets_ingest_pending_failed_idx ON core.media_assets USING btree (source, ingest_status) WHERE (ingest_status = ANY (ARRAY['pending'::text, 'failed'::text]))"
+    },
+    {
+      "name": "media_assets_metadata_idx",
+      "columns": [
+        "metadata"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_assets_metadata_idx ON core.media_assets USING gin (metadata)"
+    },
+    {
+      "name": "media_assets_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_assets_pkey ON core.media_assets USING btree (id)"
+    },
+    {
+      "name": "media_assets_sha256_idx",
+      "columns": [
+        "sha256) WHERE (sha256 IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_assets_sha256_idx ON core.media_assets USING btree (sha256) WHERE (sha256 IS NOT NULL)"
+    },
+    {
+      "name": "media_assets_sha256_unique",
+      "columns": [
+        "sha256) WHERE (sha256 IS NOT NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_assets_sha256_unique ON core.media_assets USING btree (sha256) WHERE (sha256 IS NOT NULL)"
+    },
+    {
+      "name": "media_assets_source_asset_id_unique",
+      "columns": [
+        "source",
+        "source_asset_id) WHERE (source_asset_id IS NOT NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_assets_source_asset_id_unique ON core.media_assets USING btree (source, source_asset_id) WHERE (source_asset_id IS NOT NULL)"
+    },
+    {
+      "name": "media_assets_source_hosted_sha_uq",
+      "columns": [
+        "source",
+        "hosted_sha256) WHERE (hosted_sha256 IS NOT NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_assets_source_hosted_sha_uq ON core.media_assets USING btree (source, hosted_sha256) WHERE (hosted_sha256 IS NOT NULL)"
+    },
+    {
+      "name": "media_assets_source_idx",
+      "columns": [
+        "source"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_assets_source_idx ON core.media_assets USING btree (source)"
+    },
+    {
+      "name": "media_assets_source_url_unique",
+      "columns": [
+        "source",
+        "source_url) WHERE (source_url IS NOT NULL"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_assets_source_url_unique ON core.media_assets USING btree (source, source_url) WHERE (source_url IS NOT NULL)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "media_type": "example",
+    "source": "example",
+    "source_asset_id": "example",
+    "source_url": "example",
+    "sha256": "example",
+    "content_type": "example",
+    "bytes": 0,
+    "width": 0,
+    "height": 0,
+    "caption": "example",
+    "alt_text": "example",
+    "hosted_bucket": "example",
+    "hosted_key": "example",
+    "hosted_url": "example",
+    "hosted_etag": "example",
+    "hosted_at": "1970-01-01T00:00:00Z",
+    "hosted_sha256": "example",
+    "hosted_content_type": "example",
+    "hosted_bytes": 0,
+    "metadata": {},
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z",
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "ingest_status": "example",
+    "ingest_retry_count": 0,
+    "ingest_last_error": "example",
+    "ingest_failed_at": "1970-01-01T00:00:00Z",
+    "ingest_completed_at": "1970-01-01T00:00:00Z",
+    "ingest_next_retry_at": "1970-01-01T00:00:00Z",
+    "archived_at": "1970-01-01T00:00:00Z",
+    "archived_by_firebase_uid": "example",
+    "archived_reason": "example"
+  }
+}
