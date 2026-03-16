@@ -52,7 +52,7 @@ The TRR Backend Data Pipeline is a Supabase-first data processing system that tr
 4. **Add credentials**
    - Set Supabase credentials in `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
    - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `TVDB_API_KEY`, `IMDB_API_KEY`, `GEMINI_API_KEY`
-   - Optional: `AWS_S3_BUCKET`, `AWS_REGION`, `AWS_CDN_BASE_URL` for media mirroring
+   - Optional: `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_PUBLIC_BASE_URL` for media mirroring
 
 5. **Verify environment**
    ```bash
@@ -87,10 +87,10 @@ PYTHONPATH=. python scripts/sync/sync_cast_photos.py --imdb-person-id nm11883948
 PYTHONPATH=. python scripts/sync/resolve_tmdb_ids_via_find.py --all --verbose
 PYTHONPATH=. python scripts/backfill/backfill_tmdb_show_details.py --all --verbose
 
-# TMDb entities (networks, production companies) + S3 logo mirroring
+# TMDb entities (networks, production companies) + object-storage logo mirroring
 PYTHONPATH=. python scripts/sync/sync_tmdb_show_entities.py --all --verbose
 
-# TMDb watch providers + S3 logo mirroring
+# TMDb watch providers + object-storage logo mirroring
 PYTHONPATH=. python scripts/sync/sync_tmdb_watch_providers.py --all --verbose
 ```
 
@@ -103,7 +103,7 @@ python -m scripts.sync_all_tables --tables shows,episodes,episode_appearances --
 
 Common filters: `--show-id`, `--tmdb-id`, `--imdb-id`, `--limit`, `--dry-run`, `--verbose`.
 
-Media mirroring requires `AWS_S3_BUCKET`, `AWS_REGION` (or `AWS_DEFAULT_REGION`), and `AWS_CDN_BASE_URL` (must start with https:// and not contain placeholders like dxxxx). Optional: `AWS_PROFILE`/`AWS_DEFAULT_PROFILE`.
+Media mirroring requires `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, and `OBJECT_STORAGE_PUBLIC_BASE_URL` (must start with `https://` and not contain placeholders like `dxxxx`). Optional: `OBJECT_STORAGE_PROFILE`.
 Schema verification uses `SUPABASE_DB_URL` (remote Supabase only).
 
 TMDb backfill flow: resolve missing `tmdb_id` via `/find` using IMDb ids, then backfill `/tv/{id}` details into `core.shows` (typed columns + `tmdb_meta`). Both scripts are idempotent; omit `--all` for incremental updates. See `docs/architecture.md` for the full TMDb enrichment pipeline documentation.

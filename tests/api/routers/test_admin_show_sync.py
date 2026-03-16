@@ -750,6 +750,55 @@ class TestRefreshShow:
         p_show_cast.assert_called()
         p_occurrences.assert_called()
 
+    def test_calls_inline_refresh_helpers_for_extended_targets(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        show_id = str(uuid4())
+        show_resp = MagicMock()
+        show_resp.data = [
+            {
+                "id": show_id,
+                "name": "The Real Housewives of Beverly Hills",
+                "networks": ["Bravo"],
+                "imdb_id": "tt1234567",
+                "external_ids": {},
+            }
+        ]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_show_sync._refresh_show_videos_target",
+                return_value=0,
+            ) as p_videos:
+                with patch(
+                    "api.routers.admin_show_sync._refresh_show_news_target",
+                    return_value=0,
+                ) as p_news:
+                    with patch(
+                        "api.routers.admin_show_sync._refresh_show_social_setup_target",
+                        return_value=0,
+                    ) as p_social:
+                        response = client.post(
+                            f"/api/v1/admin/shows/{show_id}/refresh",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={"targets": ["videos", "news", "social_setup"]},
+                        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["targets"] == ["videos", "news", "social_setup"]
+        assert payload["results"]["videos"]["status"] == "success"
+        assert payload["results"]["news"]["status"] == "success"
+        assert payload["results"]["social_setup"]["status"] == "success"
+        p_videos.assert_called_once()
+        p_news.assert_called_once()
+        p_social.assert_called_once()
+
     def test_refresh_stream_emits_complete_event(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -852,6 +901,44 @@ class TestRefreshShow:
         assert '"stage_key": "details_sync_shows"' in text
         assert '"topic": "shows"' in text
         assert '"provider": "mixed"' in text
+
+    def test_refresh_stream_supports_extended_targets(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        show_id = str(uuid4())
+        show_resp = MagicMock()
+        show_resp.data = [{"id": show_id, "name": "Summer House", "networks": ["Bravo"]}]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        from api.routers.admin_show_sync import RefreshStepResult
+
+        ok_result = RefreshStepResult(status="success", duration_ms=1, exit_code=0, error=None)
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync._run_script_step", return_value=ok_result):
+                with patch("api.routers.admin_show_sync._refresh_show_videos_target", return_value=0):
+                    with patch("api.routers.admin_show_sync._refresh_show_news_target", return_value=0):
+                        with patch("api.routers.admin_show_sync._refresh_show_social_setup_target", return_value=0):
+                            with client.stream(
+                                "POST",
+                                f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                                headers={"Authorization": f"Bearer {token}"},
+                                json={"targets": ["videos", "news", "social_setup"]},
+                            ) as response:
+                                assert response.status_code == 200
+                                text = "\n".join(
+                                    line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+                                    for line in response.iter_lines()
+                                )
+
+        assert '"stage_key": "videos_bravo_import"' in text
+        assert '"stage_key": "news_google_sync"' in text
+        assert '"social_setup"' in text
+        assert '"operation_id":' in text
+        assert "event: error" not in text
 
     def test_refresh_stream_emits_heartbeat_and_request_id(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")

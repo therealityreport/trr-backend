@@ -40,6 +40,8 @@ import scripts.sync.sync_tmdb_show_entities as sync_tmdb_show_entities
 import scripts.sync.sync_tmdb_watch_providers as sync_tmdb_watch_providers
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
+from api.routers import admin_show_bravo, admin_show_links, admin_show_news
+from trr_backend.db import pg
 from trr_backend.ingestion.show_importer import (
     collect_candidates_from_lists,
     parse_imdb_headers_json_env,
@@ -2209,7 +2211,7 @@ def set_logo_primary(
     )
 
 
-ShowRefreshTarget = Literal["details", "seasons_episodes", "photos", "cast_credits"]
+ShowRefreshTarget = Literal["details", "seasons_episodes", "photos", "cast_credits", "videos", "news", "social_setup"]
 
 
 class ShowRefreshRequest(BaseModel):
@@ -2296,6 +2298,38 @@ def _run_script_step(
     )
 
 
+def _run_inline_step(
+    name: str,
+    fn: Callable[[], int | None],
+) -> RefreshStepResult:
+    started = time.perf_counter()
+    try:
+        code = fn()
+    except HTTPException as exc:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        return RefreshStepResult(
+            status="failed",
+            duration_ms=duration_ms,
+            exit_code=exc.status_code,
+            error=str(exc.detail),
+        )
+    except Exception as exc:  # noqa: BLE001
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        logger.exception("admin show inline refresh step failed: %s", name)
+        return RefreshStepResult(status="failed", duration_ms=duration_ms, error=str(exc))
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    normalized_code = 0 if code is None else int(code)
+    if normalized_code == 0:
+        return RefreshStepResult(status="success", duration_ms=duration_ms, exit_code=0)
+    return RefreshStepResult(
+        status="failed",
+        duration_ms=duration_ms,
+        exit_code=normalized_code,
+        error=f"non-zero exit code: {normalized_code}",
+    )
+
+
 def _combine_step_results(results: list[tuple[str, RefreshStepResult]]) -> RefreshStepResult:
     total_ms = sum(r.duration_ms for _, r in results)
     failures = [(name, r) for name, r in results if r.status != "success"]
@@ -2334,6 +2368,171 @@ def _ensure_cast_refresh_imdb_id(show_row: dict[str, Any] | None, show_id: str) 
     )
 
 
+def _normalize_text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        cleaned = str(item or "").strip()
+        if cleaned:
+            normalized.append(cleaned)
+    return normalized
+
+
+def _slugify_show_name(value: str | None) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return normalized
+
+
+def _show_is_bravo(show_row: dict[str, Any] | None) -> bool:
+    if not isinstance(show_row, dict):
+        return False
+    return any(network.strip().lower() == "bravo" for network in _normalize_text_list(show_row.get("networks")))
+
+
+def _resolve_show_official_page_url(show_id: str, *, show_row: dict[str, Any] | None) -> str | None:
+    row = pg.fetch_one(
+        """
+        SELECT url
+        FROM core.entity_links
+        WHERE entity_type = 'show'
+          AND entity_id = %s
+          AND show_id = %s
+          AND link_kind = 'official_page'
+          AND season_number = 0
+        ORDER BY
+          CASE status
+            WHEN 'approved' THEN 0
+            WHEN 'pending' THEN 1
+            ELSE 2
+          END,
+          updated_at DESC NULLS LAST,
+          created_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        [show_id, show_id],
+    )
+    if isinstance(row, dict):
+        url = str(row.get("url") or "").strip()
+        if url:
+            return url
+    if not _show_is_bravo(show_row):
+        return None
+    slug = _slugify_show_name(str((show_row or {}).get("name") or ""))
+    if not slug:
+        return None
+    return f"https://www.bravotv.com/{slug}"
+
+
+def _list_show_season_ids(show_id: str) -> list[str]:
+    rows = pg.fetch_all(
+        """
+        SELECT id::text AS id
+        FROM core.seasons
+        WHERE show_id = %s
+        ORDER BY season_number ASC, created_at ASC
+        """,
+        [show_id],
+    )
+    return [str(row.get("id") or "").strip() for row in rows if str(row.get("id") or "").strip()]
+
+
+def _seed_show_social_targets(show_id: str, *, show_row: dict[str, Any] | None) -> int:
+    from trr_backend.repositories.social_season_analytics import (
+        _default_targets,
+        get_season_context,
+        get_targets,
+        put_targets,
+    )
+
+    season_ids = _list_show_season_ids(show_id)
+    if not season_ids:
+        return 0
+
+    for season_id in season_ids:
+        context = get_season_context(season_id)
+        current_payload = get_targets(season_id, source_scope="bravo")
+        current_targets = (
+            [dict(item) for item in current_payload.get("targets", []) if isinstance(item, dict)]
+            if isinstance(current_payload, dict)
+            else []
+        )
+        existing_platforms = {
+            str(item.get("platform") or "").strip().lower()
+            for item in current_targets
+            if str(item.get("platform") or "").strip()
+        }
+        merged_targets = list(current_targets)
+        for default_target in _default_targets(context, source_scope="bravo"):
+            platform = str(default_target.get("platform") or "").strip().lower()
+            if not platform or platform in existing_platforms:
+                continue
+            merged_targets.append(default_target)
+            existing_platforms.add(platform)
+        put_targets(
+            season_id,
+            source_scope="bravo",
+            targets=merged_targets,
+            updated_by="admin_show_refresh",
+        )
+
+    return len(season_ids)
+
+
+def _refresh_show_videos_target(
+    *,
+    show_id: str,
+    show_row: dict[str, Any] | None,
+    db: SupabaseAdminClient,
+    admin_user: AdminUser | dict[str, Any] | None,
+) -> int:
+    official_page_url = _resolve_show_official_page_url(show_id, show_row=show_row)
+    if not official_page_url:
+        raise HTTPException(status_code=409, detail="Official show page is not configured for Bravo video import.")
+    payload = admin_show_bravo.BravoCommitRequest(show_url=official_page_url)
+    admin_show_bravo.commit_bravo_import(
+        show_id=UUID(show_id),
+        payload=payload,
+        db=db,
+        admin_user=admin_user,
+    )
+    return 0
+
+
+def _refresh_show_news_target(
+    *,
+    show_id: str,
+    db: SupabaseAdminClient,
+    admin_user: AdminUser | dict[str, Any] | None,
+) -> int:
+    admin_show_news._run_google_news_sync_impl(
+        show_id_str=show_id,
+        force=True,
+        db=db,
+        admin_user=admin_user,
+    )
+    return 0
+
+
+def _refresh_show_social_setup_target(
+    *,
+    show_id: str,
+    show_row: dict[str, Any] | None,
+    db: SupabaseAdminClient,
+    admin_user: AdminUser | dict[str, Any] | None,
+) -> int:
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
+    admin_show_links.discover_show_links(
+        show_id=UUID(show_id),
+        payload=admin_show_links.LinkDiscoverRequest(include_seasons=True, include_people=True),
+        db=db,
+        admin=admin_user or {"id": actor},
+    )
+    if _show_is_bravo(show_row):
+        _seed_show_social_targets(show_id, show_row=show_row)
+    return 0
+
+
 @router.post("/{show_id}/refresh", response_model=ShowRefreshResponse)
 def refresh_show(
     show_id: UUID,
@@ -2348,7 +2547,12 @@ def refresh_show(
     show_id_str = str(show_id)
     # Preflight: ensure show exists
     show_resp = (
-        db.schema("core").table("shows").select("id,imdb_id,external_ids").eq("id", show_id_str).limit(1).execute()
+        db.schema("core")
+        .table("shows")
+        .select("id,name,networks,imdb_id,external_ids")
+        .eq("id", show_id_str)
+        .limit(1)
+        .execute()
     )
     if hasattr(show_resp, "error") and show_resp.error:
         raise HTTPException(status_code=502, detail="Database error fetching show")
@@ -2431,6 +2635,33 @@ def refresh_show(
             results["cast_credits"] = _combine_step_results(step_results)
             continue
 
+        if target == "videos":
+            videos_result = _run_inline_step(
+                "videos_bravo_import",
+                lambda: _refresh_show_videos_target(show_id=show_id_str, show_row=show_row, db=db, admin_user=_),
+            )
+            results["videos_bravo_import"] = videos_result
+            results["videos"] = videos_result
+            continue
+
+        if target == "news":
+            news_result = _run_inline_step(
+                "news_google_sync",
+                lambda: _refresh_show_news_target(show_id=show_id_str, db=db, admin_user=_),
+            )
+            results["news_google_sync"] = news_result
+            results["news"] = news_result
+            continue
+
+        if target == "social_setup":
+            social_result = _run_inline_step(
+                "social_setup_seed",
+                lambda: _refresh_show_social_setup_target(show_id=show_id_str, show_row=show_row, db=db, admin_user=_),
+            )
+            results["social_setup_seed"] = social_result
+            results["social_setup"] = social_result
+            continue
+
         raise HTTPException(status_code=400, detail=f"Unknown refresh target: {target}")
 
     return ShowRefreshResponse(show_id=show_id_str, targets=ordered, results=results)
@@ -2453,7 +2684,12 @@ def refresh_show_stream(
     show_id_str = str(show_id)
     request_id = str(request.headers.get("x-trr-request-id") or "").strip() or None
     show_resp = (
-        db.schema("core").table("shows").select("id,imdb_id,external_ids").eq("id", show_id_str).limit(1).execute()
+        db.schema("core")
+        .table("shows")
+        .select("id,name,networks,imdb_id,external_ids")
+        .eq("id", show_id_str)
+        .limit(1)
+        .execute()
     )
     if hasattr(show_resp, "error") and show_resp.error:
         raise HTTPException(status_code=502, detail="Database error fetching show")
@@ -2559,6 +2795,63 @@ def refresh_show_stream(
                     argv2,
                     "episodes",
                     "imdb",
+                )
+            )
+            continue
+
+        if target == "videos":
+            steps.append(
+                (
+                    "videos",
+                    "videos_bravo_import",
+                    lambda _argv, sid=show_id_str, row=show_row, local_db=db, local_admin=admin: (
+                        _refresh_show_videos_target(
+                            show_id=sid,
+                            show_row=row,
+                            db=local_db,
+                            admin_user=local_admin,
+                        )
+                    ),
+                    [],
+                    "bravotv",
+                    "bravo",
+                )
+            )
+            continue
+
+        if target == "news":
+            steps.append(
+                (
+                    "news",
+                    "news_google_sync",
+                    lambda _argv, sid=show_id_str, local_db=db, local_admin=admin: _refresh_show_news_target(
+                        show_id=sid,
+                        db=local_db,
+                        admin_user=local_admin,
+                    ),
+                    [],
+                    "shows",
+                    "google_news",
+                )
+            )
+            continue
+
+        if target == "social_setup":
+            steps.append(
+                (
+                    "social_setup",
+                    "social_setup_seed",
+                    lambda _argv, sid=show_id_str, row=show_row, local_db=db, local_admin=admin: (
+                        _refresh_show_social_setup_target(
+                            show_id=sid,
+                            show_row=row,
+                            db=local_db,
+                            admin_user=local_admin,
+                        )
+                    ),
+                    [],
+                    "people",
+                    "mixed",
                 )
             )
             continue
@@ -2743,6 +3036,18 @@ def refresh_show_stream(
                             ("episode_appearances", results["cast_credits_episode_appearances"]),
                         ]
                     )
+                    continue
+
+                if target == "videos":
+                    results["videos"] = results["videos_bravo_import"]
+                    continue
+
+                if target == "news":
+                    results["news"] = results["news_google_sync"]
+                    continue
+
+                if target == "social_setup":
+                    results["social_setup"] = results["social_setup_seed"]
                     continue
 
             out = ShowRefreshResponse(show_id=show_id_str, targets=ordered, results=results)

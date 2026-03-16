@@ -30,6 +30,7 @@ CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
     "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
+    "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_MODAL_RUNTIME_SECRET_NAME": DEFAULT_RUNTIME_SECRET,
     "TRR_MODAL_SOCIAL_SECRET_NAME": DEFAULT_SOCIAL_SECRET,
     "TRR_ADMIN_IMAGE_EXECUTION_BACKEND": "modal",
@@ -47,13 +48,9 @@ DEPLOY_ONLY_ENV_KEYS = {
 SOCIAL_AUTH_EXACT_KEYS = {
     "SOCIAL_TWITTER_BEARER_TOKEN",
     "TWITTER_BEARER_TOKEN",
+    "SOCIALBLADE_EMAIL",
+    "SOCIALBLADE_PASSWORD",
 }
-RETIRED_STORAGE_ALIAS_KEYS = {
-    "AWS_S3_BUCKET",
-    "AWS_CDN_BASE_URL",
-}
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -159,9 +156,6 @@ def _apply_runtime_overrides(values: dict[str, str], *, disabled: bool) -> dict[
         return dict(values)
     merged = dict(values)
     merged.update(CANONICAL_REMOTE_RUNTIME_OVERRIDES)
-    if merged.get("OBJECT_STORAGE_BUCKET"):
-        for key in RETIRED_STORAGE_ALIAS_KEYS:
-            merged.pop(key, None)
     return merged
 
 

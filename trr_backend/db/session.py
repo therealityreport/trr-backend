@@ -350,3 +350,8 @@ class DbRpc:
 
 def get_db_session() -> DbSession:
     return DbSession()
+
+
+def get_db() -> DbSession:
+    """FastAPI dependency compatibility wrapper for DbSession."""
+    return get_db_session()

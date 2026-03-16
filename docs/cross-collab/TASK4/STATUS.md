@@ -3,6 +3,17 @@
 Repo: TRR-Backend
 Last updated: February 9, 2026
 
+## Handoff Snapshot
+```yaml
+handoff:
+  include: true
+  state: blocked
+  last_updated: 2026-03-16
+  current_phase: "6j/6k deferred cleanup"
+  next_action: "Reopen when Reddit scraping or legacy image-table removal is reprioritized"
+  detail: self
+```
+
 ## Phase Status
 
 | Phase | Description | Status | Notes |

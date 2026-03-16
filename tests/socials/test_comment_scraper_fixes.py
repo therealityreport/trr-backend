@@ -199,7 +199,53 @@ def test_youtube_parse_video_renderer_marks_shorts_and_canonical_url() -> None:
     assert parsed is not None
     assert parsed.is_short is True
     assert parsed.source_surface == "shorts"
+    assert parsed.title == ""
+    assert parsed.description == "RHOSLC short"
     assert parsed.url == "https://www.youtube.com/shorts/short12345"
+
+
+def test_youtube_fetch_transcript_reads_watch_page_caption_tracks_without_ytdlp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = YouTubeScraper()
+    html = """
+    <html><body><script>
+    var ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[
+      {"baseUrl":"https://captions.test/track.vtt?fmt=vtt","languageCode":"en","name":{"simpleText":"English"}}
+    ]}}};
+    </script></body></html>
+    """
+    calls: list[str] = []
+
+    def _fake_get(url: str, **kwargs: object) -> _FakeResponse:
+        del kwargs
+        calls.append(url)
+        if "captions.test" in url:
+            return _FakeResponse(
+                status_code=200,
+                payload={},
+                text=(
+                    "WEBVTT\n\n"
+                    "00:00:00.000 --> 00:00:01.000\n"
+                    "You guys!\n\n"
+                    "00:00:01.000 --> 00:00:03.000\n"
+                    "Seriously! What about Britani?\n"
+                ),
+            )
+        return _FakeResponse(status_code=200, payload={}, text=html)
+
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _name: None)
+
+    payload = scraper.fetch_transcript("short-vid")
+
+    assert payload["error"] is None
+    assert payload["language"] == "en"
+    assert payload["source"] == "manual_captions"
+    assert "You guys!" in payload["text"]
+    assert any("watch?v=short-vid" in call for call in calls)
+    assert any("captions.test/track.vtt" in call for call in calls)
 
 
 def test_youtube_parse_video_renderer_extracts_channel_avatar() -> None:
@@ -465,6 +511,37 @@ def test_youtube_fetch_precise_publish_timestamp_parses_iso_upload_date(
     assert calls == 1
 
 
+def test_youtube_fetch_precise_publish_timestamp_falls_back_to_shorts_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = YouTubeScraper()
+    responses = {
+        "https://www.youtube.com/watch?v=short-vid": "<html><body>watch page without upload date</body></html>",
+        "https://www.youtube.com/shorts/short-vid": (
+            '<script>{"uploadDate":"2025-11-18T10:00:53-08:00"}</script>'
+            '<meta itemprop="datePublished" content="2025-11-18T10:00:53-08:00">'
+        ),
+    }
+    called_urls: list[str] = []
+
+    def _fake_get(url: str, **kwargs: object) -> _FakeResponse:
+        del kwargs
+        called_urls.append(url)
+        return _FakeResponse(status_code=200, payload={}, text=responses[url])
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+
+    expected = int(datetime.fromisoformat("2025-11-18T10:00:53-08:00").timestamp())
+    resolved = scraper._fetch_precise_publish_timestamp("short-vid", delay=0)  # noqa: SLF001
+
+    assert resolved == expected
+    assert called_urls == [
+        "https://www.youtube.com/watch?v=short-vid",
+        "https://www.youtube.com/shorts/short-vid",
+    ]
+
+
 def test_youtube_process_video_data_refines_month_precision_dates(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = YouTubeScraper()
     config = YouTubeScrapeConfig(
@@ -539,6 +616,35 @@ def test_youtube_process_video_data_refines_low_precision_even_when_initially_in
     assert fetched == ["vid-precise-2"]
     assert len(videos) == 1
     assert videos[0].published_at == precise_expected
+
+
+def test_youtube_process_video_data_skips_undated_shorts_for_bounded_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = YouTubeScraper()
+    config = YouTubeScrapeConfig(
+        channel_handle="bravo",
+        keywords=["RHOSLC"],
+        date_start=datetime(2025, 8, 15, tzinfo=UTC),
+        date_end=datetime(2025, 9, 16, tzinfo=UTC),
+    )
+    renderer = {
+        "videoId": "short-undated-1",
+        "title": {"runs": [{"text": "RHOSLC short"}]},
+        "descriptionSnippet": {"runs": [{"text": "Bravo short"}]},
+        "publishedTimeText": {"simpleText": ""},
+        "navigationEndpoint": {"commandMetadata": {"webCommandMetadata": {"url": "/shorts/short-undated-1"}}},
+        "thumbnail": {"thumbnails": [{"url": "https://example.com/thumb-short.jpg"}]},
+    }
+
+    monkeypatch.setattr(scraper, "_iter_video_renderers", lambda _data: iter([renderer]))
+    monkeypatch.setattr(scraper, "_fetch_precise_publish_timestamp", lambda _video_id, delay=2.0: 0)
+
+    videos, stats = scraper._process_video_data({}, config, surface="shorts", return_stats=True)  # noqa: SLF001
+
+    assert videos == []
+    assert stats["timestamp_unknown"] == 1
+    assert stats["shorts_undated_skipped"] == 1
 
 
 def test_youtube_search_via_ytdlp_uses_date_aware_mode_for_windowed_scrapes(
@@ -1812,12 +1918,63 @@ def test_instagram_parse_post_node_supports_actor_style_payload_and_normalizes_m
     assert parsed.comments == 187
     assert parsed.video_views == 528654
     assert parsed.username == "natgeotv"
-    assert parsed.media_urls == ["https://example.com/cover.jpg", "https://example.com/video.mp4"]
+    assert parsed.media_urls == ["https://example.com/video.mp4"]
     assert parsed.thumbnail_url == "https://example.com/cover.jpg"
     assert parsed.hashtags == ["TheLastRhinosANewHope"]
     assert parsed.mentions == ["@DisneyPlus", "@hulu"]
     assert parsed.profile_tags == ["natgeo", "natgeoanimals"]
     assert parsed.collaborators == ["amivitale", "natgeoanimals"]
+
+
+def test_instagram_parse_post_node_keeps_one_source_url_for_single_image_with_mixed_variants() -> None:
+    scraper = InstagramScraper(cookies={})
+    config = InstagramScrapeConfig(username="bravotv")
+    node = {
+        "id": "180001",
+        "shortcode": "MIXED01",
+        "taken_at_timestamp": 1735689600,
+        "media_type": 1,
+        "edge_media_to_caption": {"edges": [{"node": {"text": "Caption"}}]},
+        "image_versions2": {"candidates": [{"url": "https://example.com/rest-primary.jpg"}]},
+        "display_url": "https://example.com/graphql-display.jpg",
+        "displayUrl": "https://example.com/actor-display.jpg",
+        "images": [{"url": "https://example.com/legacy-image.jpg"}],
+    }
+
+    parsed = scraper._parse_post_node(node, config)  # noqa: SLF001
+
+    assert parsed.post_type == "image"
+    assert parsed.media_urls == ["https://example.com/rest-primary.jpg"]
+    assert parsed.thumbnail_url == "https://example.com/rest-primary.jpg"
+
+
+def test_instagram_parse_post_node_preserves_per_slide_urls_for_carousel_posts() -> None:
+    scraper = InstagramScraper(cookies={})
+    config = InstagramScrapeConfig(username="bravotv")
+    node = {
+        "id": "180002",
+        "shortcode": "CARO01",
+        "taken_at_timestamp": 1735689600,
+        "type": "carousel",
+        "carousel_media": [
+            {
+                "image_versions2": {"candidates": [{"url": "https://example.com/slide-1.jpg"}]},
+            },
+            {
+                "video_versions": [{"url": "https://example.com/slide-2.mp4"}],
+                "image_versions2": {"candidates": [{"url": "https://example.com/slide-2-cover.jpg"}]},
+            },
+        ],
+    }
+
+    parsed = scraper._parse_post_node(node, config)  # noqa: SLF001
+
+    assert parsed.post_type == "carousel"
+    assert parsed.media_urls == [
+        "https://example.com/slide-1.jpg",
+        "https://example.com/slide-2.mp4",
+    ]
+    assert parsed.thumbnail_url == "https://example.com/slide-1.jpg"
 
 
 def test_instagram_parse_post_node_extracts_compact_reel_views_and_reel_url() -> None:

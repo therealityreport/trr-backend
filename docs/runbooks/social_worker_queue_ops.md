@@ -51,6 +51,8 @@ job plane:
 - `SOCIAL_WORKER_POOL_POST_CLASSIFY` (optional, default `10`; internal classification concurrency target)
 - `SOCIAL_WORKER_POOL_SEASON_MATERIALIZE` (optional, default `10`; internal materialization concurrency target)
 - `SOCIAL_WORKER_POOL_ANALYTICS_REFRESH` (optional, default `4`; internal analytics refresh concurrency target)
+- `SOCIAL_MODAL_DISPATCH_LIMIT` (optional, default `25`; maximum jobs dispatched per Modal sweep)
+- `TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT` (optional, default `64`; Modal `run_social_job` container cap)
 - `SOCIAL_WORKER_POOL_INTERVAL_SEC` (optional, default `2`; worker idle sleep interval)
 - `SOCIAL_STALE_RECOVERY_INTERVAL_SEC` (optional, default `30`; stale job recovery cadence)
 - `SOCIAL_RUN_SUMMARY_RECONCILE_INTERVAL_SEC` (optional, default `60`; run-summary reconciliation cadence)
@@ -73,6 +75,12 @@ When Crawlee runtime is enabled for a platform, auth preflight checks run before
 - TikTok: requires `SOCIAL_TIKTOK_COOKIES_JSON` / `SOCIAL_TIKTOK_COOKIES_FILE` (or legacy `TIKTOK_COOKIES_*`)
 - Twitter/X: requires one of cookie auth (`SOCIAL_TWITTER_COOKIES_*`), bearer auth (`SOCIAL_TWITTER_BEARER_TOKEN`), or `TWIKIT_*` credentials
 - YouTube: public mode supported (no auth required)
+
+In workspace dev, `WORKSPACE_TRR_REMOTE_SOCIAL_WORKERS` remains a lane enable flag only.
+Throughput tuning comes from `WORKSPACE_TRR_REMOTE_SOCIAL_DISPATCH_LIMIT`,
+`WORKSPACE_TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT`, and the remote social stage
+caps (`WORKSPACE_TRR_REMOTE_SOCIAL_POSTS`, `...COMMENTS`, `...MEDIA_MIRROR`,
+`...COMMENT_MEDIA_MIRROR`).
 
 ## Modal Secret Prep And Cutover Commands
 
@@ -114,12 +122,12 @@ during the observation window. In this phase, staging means Vercel Preview and
 production means Vercel Production. `TRR_API_URL` is owned by Vercel env
 configuration, not repo-local `.env` files.
 
-Full backend EC2 retirement is not complete until:
+Full legacy backend retirement is not complete until:
 
 - the Render backend API URL is the canonical `TRR_API_URL` for both Vercel Preview and Vercel Production
-- covered admin image-analysis jobs no longer depend on EC2-hosted runtime
+- covered admin image-analysis jobs no longer depend on the retired legacy host
 - social and non-social background work run only through Modal
-- Better Stack is receiving backend and Modal job logs so CloudWatch can be reduced
+- Better Stack is receiving backend and Modal job logs so centralized log access stays intact
 
 ## Legacy Worker Start Commands
 

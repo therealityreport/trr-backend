@@ -11,6 +11,8 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret() -> None:
             "MODAL_TOKEN_ID": "modal-token-id",
             "MODAL_TOKEN_SECRET": "modal-token-secret",
             "SOCIAL_TWITTER_COOKIES_JSON": '{"cookies": []}',
+            "SOCIALBLADE_EMAIL": "ops@example.com",
+            "SOCIALBLADE_PASSWORD": "secret",
         }
     )
 
@@ -20,6 +22,8 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret() -> None:
     }
     assert social_values == {
         "SOCIAL_TWITTER_COOKIES_JSON": '{"cookies": []}',
+        "SOCIALBLADE_EMAIL": "ops@example.com",
+        "SOCIALBLADE_PASSWORD": "secret",
     }
 
 
@@ -45,18 +49,14 @@ def test_apply_runtime_overrides_can_be_disabled() -> None:
     assert cli._apply_runtime_overrides(original, disabled=True) == original
 
 
-def test_apply_runtime_overrides_drops_retired_storage_aliases_when_object_storage_present() -> None:
+def test_apply_runtime_overrides_preserves_object_storage_values() -> None:
     result = cli._apply_runtime_overrides(
         {
             "OBJECT_STORAGE_BUCKET": "trr-media-prod",
             "OBJECT_STORAGE_PUBLIC_BASE_URL": "https://media.thereality.report",
-            "AWS_S3_BUCKET": "trr-backend",
-            "AWS_CDN_BASE_URL": "https://d1fmdyqfafwim3.cloudfront.net",
         },
         disabled=False,
     )
 
     assert result["OBJECT_STORAGE_BUCKET"] == "trr-media-prod"
     assert result["OBJECT_STORAGE_PUBLIC_BASE_URL"] == "https://media.thereality.report"
-    assert "AWS_S3_BUCKET" not in result
-    assert "AWS_CDN_BASE_URL" not in result

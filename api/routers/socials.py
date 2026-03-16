@@ -12,7 +12,9 @@ Provides endpoints to:
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -23,9 +25,9 @@ from time import monotonic, perf_counter
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.auth import AdminUser
@@ -2075,6 +2077,10 @@ class SeasonSocialIngestRequest(BaseModel):
     runner_b_start_offset_hours: int | None = Field(default=None, ge=0, le=168)
     day_weight_profile: Literal["default", "rhoslc_default"] | None = Field(default=None)
     priority_mode: Literal["default", "episode_peak_weighted"] | None = Field(default=None)
+    youtube_source_mode: Literal["hybrid", "api_only", "scraper_only"] | None = Field(default=None)
+    youtube_force_reindex: bool = Field(default=False)
+    youtube_force_media_refresh: bool = Field(default=False)
+    youtube_force_comment_refresh: bool = Field(default=False)
     allow_inline_dev_fallback: bool = Field(default=False)
     client_session_id: str | None = Field(default=None, max_length=200)
     client_workflow_id: str | None = Field(default=None, max_length=200)
@@ -2109,6 +2115,10 @@ class SeasonSocialOrchestrationRequest(BaseModel):
     runner_b_start_offset_hours: int | None = Field(default=None, ge=0, le=168)
     day_weight_profile: Literal["default", "rhoslc_default"] | None = Field(default=None)
     priority_mode: Literal["default", "episode_peak_weighted"] | None = Field(default=None)
+    youtube_source_mode: Literal["hybrid", "api_only", "scraper_only"] | None = Field(default=None)
+    youtube_force_reindex: bool = Field(default=False)
+    youtube_force_media_refresh: bool = Field(default=False)
+    youtube_force_comment_refresh: bool = Field(default=False)
     resume_existing: bool = Field(default=True)
     client_session_id: str | None = Field(default=None, max_length=200)
     client_workflow_id: str | None = Field(default=None, max_length=200)
@@ -2125,6 +2135,15 @@ class SharedAccountSourceInput(BaseModel):
 class SharedAccountSourcesPutRequest(BaseModel):
     source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
     sources: list[SharedAccountSourceInput]
+
+
+class SyncSessionRetryRequest(BaseModel):
+    retry_kind: Literal[
+        "retry_missing_comments",
+        "retry_failed_media",
+        "retry_missing_avatars",
+        "retry_missing_comment_media",
+    ]
 
 
 class SharedSocialIngestRequest(BaseModel):
@@ -2425,6 +2444,10 @@ async def ingest_season_social(
             runner_b_start_offset_hours=payload.runner_b_start_offset_hours,
             day_weight_profile=payload.day_weight_profile,
             priority_mode=payload.priority_mode,
+            youtube_source_mode=payload.youtube_source_mode,
+            youtube_force_reindex=payload.youtube_force_reindex,
+            youtube_force_media_refresh=payload.youtube_force_media_refresh,
+            youtube_force_comment_refresh=payload.youtube_force_comment_refresh,
             week_index=payload.week_index,
             window_timezone=payload.timezone,
             run_scope_label=(resolved_week or {}).get("label"),
@@ -2659,6 +2682,10 @@ async def orchestrate_season_social_ingest(
             runner_b_start_offset_hours=payload.runner_b_start_offset_hours,
             day_weight_profile=payload.day_weight_profile,
             priority_mode=payload.priority_mode,
+            youtube_source_mode=payload.youtube_source_mode,
+            youtube_force_reindex=payload.youtube_force_reindex,
+            youtube_force_media_refresh=payload.youtube_force_media_refresh,
+            youtube_force_comment_refresh=payload.youtube_force_comment_refresh,
             accounts_override=payload.accounts_override,
             hashtags_override=payload.hashtags_override,
             keywords_override=payload.keywords_override,
@@ -2688,6 +2715,208 @@ async def orchestrate_season_social_ingest(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to orchestrate social ingest: season=%s", sid)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/seasons/{season_id}/sync-sessions")
+async def create_season_sync_session(
+    season_id: UUID,
+    payload: SeasonSocialIngestRequest,
+    _: BackgroundTasks,
+    user: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_sync_orchestrator import create_sync_session
+
+    sid = str(season_id)
+    try:
+        resolved_date_start, resolved_date_end, _ = _resolve_ingest_window(
+            season_id=sid,
+            source_scope=payload.source_scope,
+            week_index=payload.week_index,
+            timezone=payload.timezone,
+            date_start=payload.date_start,
+            date_end=payload.date_end,
+        )
+        if resolved_date_start is None or resolved_date_end is None:
+            raise HTTPException(status_code=400, detail="date_start/date_end or week_index is required")
+        config = payload.model_dump()
+        config["date_start"] = resolved_date_start
+        config["date_end"] = resolved_date_end
+        result = create_sync_session(
+            sid,
+            source_scope=payload.source_scope,
+            platforms=payload.platforms,
+            date_start=resolved_date_start,
+            date_end=resolved_date_end,
+            config=config,
+            initiated_by=(user or {}).get("email"),
+        )
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to create sync session: season=%s", sid)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _social_sync_sse_chunk(event_type: str, payload: dict[str, Any]) -> bytes:
+    return f"event: {event_type}\ndata: {json.dumps(jsonable_encoder(payload))}\n\n".encode()
+
+
+def _build_sync_session_stream_payload(sync_session_id: str) -> dict[str, Any]:
+    from trr_backend.repositories import social_season_analytics as social_repo
+    from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
+
+    sync_session = evaluate_sync_session(sync_session_id)
+    current_run_id = str(sync_session.get("current_run_id") or "").strip()
+    run_progress = (
+        social_repo.get_run_progress_snapshot(current_run_id, recent_log_limit=20)
+        if current_run_id
+        else None
+    )
+    return {
+        "sync_session": sync_session,
+        "run_progress": run_progress,
+        "emitted_at": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/seasons/{season_id}/sync-sessions/{sync_session_id}")
+async def get_season_sync_session(
+    season_id: UUID,
+    sync_session_id: UUID,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
+
+    try:
+        payload = evaluate_sync_session(str(sync_session_id))
+        if payload.get("season_id") != str(season_id):
+            raise HTTPException(status_code=404, detail="sync_session_not_found")
+        return payload
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        message = str(exc)
+        if message == "sync_session_not_found":
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch sync session: season=%s sync_session=%s", season_id, sync_session_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/seasons/{season_id}/sync-sessions/{sync_session_id}/stream")
+async def stream_season_sync_session(
+    season_id: UUID,
+    sync_session_id: UUID,
+    request: Request,
+    _: AdminUser = None,
+) -> StreamingResponse:
+    async def event_stream() -> Any:
+        sync_session_token = str(sync_session_id)
+        season_token = str(season_id)
+        sequence = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                payload = _build_sync_session_stream_payload(sync_session_token)
+                session_payload = payload.get("sync_session") if isinstance(payload.get("sync_session"), dict) else {}
+                if str(session_payload.get("season_id") or "") != season_token:
+                    yield _social_sync_sse_chunk(
+                        "error",
+                        {"error": "sync_session_not_found", "sync_session_id": sync_session_token},
+                    )
+                    break
+                sequence += 1
+                yield _social_sync_sse_chunk(
+                    "sync_session",
+                    {
+                        "seq": sequence,
+                        **payload,
+                    },
+                )
+                session_status = str(session_payload.get("status") or "").strip().lower()
+                if session_status in {"completed", "failed", "cancelled"}:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "Failed to stream sync session: season=%s sync_session=%s",
+                    season_id,
+                    sync_session_id,
+                )
+                yield _social_sync_sse_chunk(
+                    "error",
+                    {
+                        "error": str(exc),
+                        "sync_session_id": sync_session_token,
+                    },
+                )
+                break
+            yield b": keep-alive\n\n"
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/seasons/{season_id}/sync-sessions/{sync_session_id}/cancel")
+async def cancel_season_sync_session(
+    season_id: UUID,
+    sync_session_id: UUID,
+    user: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_sync_orchestrator import cancel_sync_session
+
+    try:
+        return cancel_sync_session(
+            str(season_id),
+            str(sync_session_id),
+            cancelled_by=(user or {}).get("email"),
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if message == "sync_session_not_found":
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to cancel sync session: season=%s sync_session=%s", season_id, sync_session_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/seasons/{season_id}/sync-sessions/{sync_session_id}/retry")
+async def retry_season_sync_session(
+    season_id: UUID,
+    sync_session_id: UUID,
+    payload: SyncSessionRetryRequest,
+    user: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_sync_orchestrator import retry_sync_session
+
+    try:
+        return retry_sync_session(
+            str(season_id),
+            str(sync_session_id),
+            retry_kind=payload.retry_kind,
+            initiated_by=(user or {}).get("email"),
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if message == "sync_session_not_found":
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to retry sync session: season=%s sync_session=%s", season_id, sync_session_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

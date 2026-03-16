@@ -74,7 +74,7 @@ When origins are explicitly set:
 | `BETTER_STACK_LOG_TIMEOUT_SECONDS` | HTTP timeout for log shipping | `2.0` |
 | `BETTER_STACK_FAILURE_COOLDOWN_SECONDS` | Cooldown after a failed ship attempt | `60` |
 
-When `BETTER_STACK_SOURCE_TOKEN` is set, the backend ships structured Python logs directly to Better Stack over HTTP. This is intended for the final `Render API + Modal jobs` steady state so app logs remain available after the AWS API/CloudWatch footprint is retired. The default operator choice is to start with a Better Stack free source and only upgrade if actual volume or retention needs exceed the free tier.
+When `BETTER_STACK_SOURCE_TOKEN` is set, the backend ships structured Python logs directly to Better Stack over HTTP. This is intended for the final `Render API + Modal jobs` steady state so app logs remain available after the legacy host and ad-hoc log sinks are retired. The default operator choice is to start with a Better Stack free source and only upgrade if actual volume or retention needs exceed the free tier.
 
 ### Object storage (Optional locally, required for media mirroring and uploads)
 
@@ -88,18 +88,6 @@ When `BETTER_STACK_SOURCE_TOKEN` is set, the backend ships structured Python log
 | `OBJECT_STORAGE_SECRET_ACCESS_KEY` | S3-compatible secret key | `...` |
 | `OBJECT_STORAGE_PUBLIC_BASE_URL` | Public/custom base URL for hosted assets | `https://media.thereality.report` |
 | `OBJECT_STORAGE_PREFIX` | Optional key prefix | `media` |
-
-The backend still accepts the legacy AWS names during cutover:
-
-- `AWS_S3_BUCKET`
-- `AWS_CDN_BASE_URL`
-- `AWS_REGION`
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `AWS_SESSION_TOKEN`
-- `AWS_PROFILE`
-
-When both are set, `OBJECT_STORAGE_*` wins.
 
 ## Running Locally
 

@@ -37,6 +37,7 @@ from trr_backend.integrations.fandom import (
     refresh_fandom_community_allowlist_cache,
     search_allowlisted_fandom_wikis,
     search_fandom_community_wiki_candidates,
+    search_fandom_person_related_pages,
     search_real_housewives_wiki,
 )
 from trr_backend.integrations.fandom_discovery import discover_fandom_candidate_pages
@@ -1913,6 +1914,49 @@ def _classify_submitted_link_input(
     }
 
     rows = [primary_row]
+    if primary_row["link_kind"] == "fandom" and entity_type == "person":
+        person_record = context["people_by_id"].get(entity_id) if entity_id else None
+        expected_person_name = str((person_record or {}).get("name") or wiki_title_text or label or "").strip()
+        expanded_rows: list[dict[str, Any]] = []
+        if expected_person_name:
+            for related_url in _discover_related_person_fandom_urls(
+                expected_name=expected_person_name,
+                validated_fandom_url=canonical_url,
+                max_results=_link_discovery_people_fandom_candidates_per_person_cap(),
+            ):
+                canonical_related_url = _canonicalize_url(related_url)
+                if not canonical_related_url:
+                    continue
+                if _url_key(canonical_related_url) != _url_key(canonical_url):
+                    validated_related_url = _validated_person_knowledge_url(
+                        canonical_related_url,
+                        kind="fandom",
+                        expected_name=expected_person_name,
+                    )
+                    if not validated_related_url:
+                        continue
+                    canonical_related_url = _canonicalize_url(validated_related_url)
+                    if not canonical_related_url:
+                        continue
+
+                fandom_title = _extract_fandom_page_title_from_url(canonical_related_url)
+                row_metadata = _build_fandom_link_metadata(canonical_related_url, title=fandom_title)
+                row_metadata["submitted_input"] = submitted
+                expanded_rows.append(
+                    {
+                        "entity_type": entity_type,
+                        "entity_id": entity_id,
+                        "season_number": season_number,
+                        "link_group": link_group,
+                        "link_kind": "fandom",
+                        "label": fandom_title or expected_person_name or "Fandom",
+                        "url": canonical_related_url,
+                        "source": source,
+                        "metadata": row_metadata,
+                    }
+                )
+        if expanded_rows:
+            rows = expanded_rows
     if primary_row["link_kind"] in {"imdb", "tmdb", "wikipedia", "wikidata"}:
         rows.extend(
             _build_connected_knowledge_rows(
@@ -4508,6 +4552,48 @@ def _score_fandom_candidate_url(url: str, *, expected_name: str) -> int:
     return 0
 
 
+def _discover_related_person_fandom_urls(
+    *,
+    expected_name: str,
+    validated_fandom_url: str,
+    max_results: int,
+    fandom_allowlist: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    canonical_url = _canonicalize_url(validated_fandom_url)
+    if not canonical_url:
+        return []
+
+    domain = str(urlparse(canonical_url).hostname or "").strip().lower()
+    if not domain:
+        return [canonical_url]
+
+    if fandom_allowlist is not None and not is_allowlisted_fandom_domain(domain, allowlist=fandom_allowlist):
+        return [canonical_url]
+
+    related_urls = search_fandom_person_related_pages(
+        expected_name,
+        community_domain=domain,
+        owner_page_url=canonical_url,
+        timeout_seconds=_source_timeout_seconds("fandom"),
+        max_results=max_results,
+    )
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in [*related_urls, canonical_url]:
+        normalized = _canonicalize_url(candidate)
+        if not normalized:
+            continue
+        key = _url_key(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+        if len(deduped) >= max_results:
+            break
+    return deduped or [canonical_url]
+
+
 def _discover_people_links(
     show_id: str,
     *,
@@ -4656,6 +4742,7 @@ def _discover_people_links(
     seen_person_links: set[tuple[str, str, str]] = set()
     matched_show_cast_wikidata_candidates: set[str] = set()
     tmdb_external_ids_cache: dict[str, dict[str, str]] = {}
+    related_fandom_urls_by_key: dict[tuple[str, str], list[str]] = {}
 
     def append_person_row(row: dict[str, Any]) -> None:
         person_key = str(row.get("entity_id") or "").strip()
@@ -4981,21 +5068,55 @@ def _discover_people_links(
                 canonical_fandom_url = _canonicalize_url(validated_fandom_url)
                 if not canonical_fandom_url:
                     continue
-                dedupe_key = _url_key(canonical_fandom_url)
-                if dedupe_key in seen_fandom_urls:
-                    continue
-                seen_fandom_urls.add(dedupe_key)
-                fandom_title = _extract_fandom_page_title_from_url(canonical_fandom_url)
-                append_person_row(
-                    _build_person_link_row(
-                        person_id=person_id,
-                        link_kind="fandom",
-                        label=fandom_title or (name if name else "Fandom"),
-                        url=canonical_fandom_url,
-                        source="core.cast_fandom" if fandom_candidate == fandom_url else "fandom_search",
-                        metadata=_build_fandom_link_metadata(canonical_fandom_url, title=fandom_title),
+                fandom_host = str(urlparse(canonical_fandom_url).hostname or "").strip().lower()
+                fandom_owner = _normalized_person_name(_extract_person_name_from_fandom_url(canonical_fandom_url) or name)
+                related_cache_key = (fandom_host, fandom_owner)
+                related_fandom_urls = related_fandom_urls_by_key.get(related_cache_key)
+                if related_fandom_urls is None:
+                    related_fandom_urls = _discover_related_person_fandom_urls(
+                        expected_name=name,
+                        validated_fandom_url=canonical_fandom_url,
+                        max_results=max_candidates_per_person,
+                        fandom_allowlist=fandom_allowlist,
                     )
-                )
+                    related_fandom_urls_by_key[related_cache_key] = related_fandom_urls
+
+                base_source = "core.cast_fandom" if fandom_candidate == fandom_url else "fandom_search"
+                for related_url in related_fandom_urls:
+                    canonical_related_url = _canonicalize_url(related_url)
+                    if not canonical_related_url:
+                        continue
+                    if _url_key(canonical_related_url) != _url_key(canonical_fandom_url):
+                        if not _can_attempt_fandom_candidate(stats):
+                            break
+                        validated_related_url = _validated_person_knowledge_url(
+                            canonical_related_url,
+                            kind="fandom",
+                            expected_name=name if name else None,
+                            fandom_allowlist=fandom_allowlist,
+                        )
+                        if not validated_related_url:
+                            continue
+                        canonical_related_url = _canonicalize_url(validated_related_url)
+                        if not canonical_related_url:
+                            continue
+
+                    dedupe_key = _url_key(canonical_related_url)
+                    if dedupe_key in seen_fandom_urls:
+                        continue
+                    seen_fandom_urls.add(dedupe_key)
+                    fandom_title = _extract_fandom_page_title_from_url(canonical_related_url)
+                    source_value = base_source if canonical_related_url == canonical_fandom_url else f"{base_source}:related_page"
+                    append_person_row(
+                        _build_person_link_row(
+                            person_id=person_id,
+                            link_kind="fandom",
+                            label=fandom_title or (name if name else "Fandom"),
+                            url=canonical_related_url,
+                            source=source_value,
+                            metadata=_build_fandom_link_metadata(canonical_related_url, title=fandom_title),
+                        )
+                    )
         if is_bravo_show and person_id in housewife_friend_ids and name:
             slug = _slug(name)
             if slug:

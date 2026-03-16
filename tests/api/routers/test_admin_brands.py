@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from api.routers import admin_brands
+from trr_backend.integrations.free_logo_sources import FreeLogoCandidate
 
 
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
@@ -476,6 +477,105 @@ def test_post_brand_logo_option_discover_success(client: TestClient, monkeypatch
     assert response.json() == expected
     assert mocked.call_args.args[0].target_type == "publication"
     assert mocked.call_args.args[0].target_key == "instagram.com"
+
+
+def test_previewable_logo_url_accepts_logopedia_revision_latest_urls() -> None:
+    assert admin_brands._is_previewable_logo_url(
+        "https://static.wikia.nocookie.net/logopedia/images/0/00/Bravo_%282005%29_%28Print%29.svg/revision/latest?cb=20250725204030"
+    )
+    assert admin_brands._infer_logo_file_type(
+        source_url=(
+            "https://static.wikia.nocookie.net/logopedia/images/7/78/Bravo_2005_small.png/revision/latest?cb=20250725213343"
+        ),
+        content_type=None,
+    ) == "png"
+
+
+def test_discover_logo_candidates_by_source_includes_logopedia_revision_latest_candidates() -> None:
+    payload = admin_brands.BrandLogosOptionDiscoverRequest(
+        target_type="publication",
+        target_key="bravotv.com",
+        target_label="Bravo",
+        logo_role="wordmark",
+        source_provider="logos_fandom",
+        query_overrides=["https://logos.fandom.com/wiki/Bravo_(United_States)/Other"],
+        offset=0,
+        limit=10,
+        include_related=True,
+    )
+    candidate_url = (
+        "https://static.wikia.nocookie.net/logopedia/images/0/00/Bravo_%282005%29_%28Print%29.svg"
+        "/revision/latest?cb=20250725204030"
+    )
+
+    with (
+        patch("api.routers.admin_brands._list_brand_logos", return_value={"rows": []}),
+        patch(
+            "api.routers.admin_brands.collect_free_logo_candidates",
+            return_value=[
+                FreeLogoCandidate(
+                    url=candidate_url,
+                    source_provider="logos_fandom",
+                    discovered_from="https://logos.fandom.com/wiki/Bravo_(United_States)/Other",
+                    context="search",
+                )
+            ],
+        ),
+        patch("api.routers.admin_brands.download_image", return_value=(b"<svg></svg>", "image/svg+xml")),
+    ):
+        result = admin_brands._discover_logo_candidates_by_source(payload)
+
+    assert result["total_count"] == 1
+    assert len(result["candidates"]) == 1
+    candidate = result["candidates"][0]
+    assert candidate["source_url"] == candidate_url
+    assert candidate["source_provider"] == "logos_fandom"
+    assert candidate["file_type"] == "svg"
+    assert candidate["detected_logo_role"] == "wordmark"
+
+
+def test_seed_logo_targets_from_entity_links_adds_fandom_publication_fallback() -> None:
+    rows = [
+        {
+            "show_id": "show-1",
+            "entity_type": "show",
+            "entity_id": "entity-1",
+            "season_number": None,
+            "link_kind": "official",
+            "label": "The Real Housewives Wiki",
+            "url": "https://real-housewives.fandom.com/wiki/Home_Page",
+        }
+    ]
+
+    with patch("api.routers.admin_brands.pg.fetch_all", return_value=rows):
+        seeded = admin_brands._seed_logo_targets_from_entity_links(show_id="show-1")
+
+    by_key = {
+        (str(row.get("target_type")), str(row.get("target_key"))): row
+        for row in seeded
+    }
+    assert ("publication", "real-housewives.fandom.com") in by_key
+    assert ("publication", "fandom.com") in by_key
+
+    fandom_row = by_key[("publication", "fandom.com")]
+    assert fandom_row["target_label"] == "Fandom"
+    assert fandom_row["discovered_from"] == "https://www.fandom.com/"
+    assert fandom_row["discovered_from_urls"] == ["https://www.fandom.com/"]
+    assert fandom_row["show_ids"] == ["show-1"]
+    assert "fandom_fallback" in fandom_row["source_link_kinds"]
+
+
+def test_detect_logo_role_uses_context_hint_for_fandom_icon_fallback() -> None:
+    assert (
+        admin_brands._detect_logo_role(
+            candidate_url="https://www.fandom.com/brand/images/Logo_transparent_1.png",
+            content_type=None,
+            width=None,
+            height=None,
+            context_hint="fandom_brand_icon",
+        )
+        == "icon"
+    )
 
 
 def test_post_brand_logo_option_source_query_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

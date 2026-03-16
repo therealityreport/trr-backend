@@ -34,6 +34,7 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
             "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
             "run_admin_operation": _StubFunctionHandle(),
             "run_social_job": _StubFunctionHandle(),
+            "run_socialblade_scrape": _StubFunctionHandle(),
         },
     )
 
@@ -41,7 +42,7 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
         app_name="trr-backend-jobs",
         runtime_secret_name="trr-backend-runtime",
         social_secret_name="trr-social-auth",
-        function_names=("serve_backend_api", "run_admin_operation", "run_social_job"),
+        function_names=("serve_backend_api", "run_admin_operation", "run_social_job", "run_socialblade_scrape"),
     )
 
     assert summary["ok"] is True
@@ -68,12 +69,12 @@ def test_verify_modal_readiness_reports_missing_secret_and_function(monkeypatch:
         app_name="trr-backend-jobs",
         runtime_secret_name="trr-backend-runtime",
         social_secret_name="trr-social-auth",
-        function_names=("serve_backend_api", "run_admin_operation", "run_social_job"),
+        function_names=("serve_backend_api", "run_admin_operation", "run_social_job", "run_socialblade_scrape"),
     )
 
     assert summary["ok"] is False
     assert summary["missing_secrets"] == ["trr-social-auth"]
-    assert summary["missing_functions"] == ["run_social_job"]
+    assert summary["missing_functions"] == ["run_social_job", "run_socialblade_scrape"]
     assert summary["missing_web_endpoints"] == ["serve_backend_api"]
 
 

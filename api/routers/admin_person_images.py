@@ -17,6 +17,7 @@ import os
 import re
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import AsyncGenerator, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -55,6 +56,8 @@ _GETTY_PERSON_GALLERY_VARIANT = "person_gallery_nbcumv_crosswalk"
 # Valid sources for person images
 SourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"]
 ALL_SOURCES: list[SourceType] = ["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"]
+SourceProgressStatus = Literal["pending", "running", "completed", "skipped", "failed"]
+SOURCE_PROGRESS_KEY_ORDER = ("imdb", "tmdb", "fandom", "fandom_gallery", "getty_nbcumv")
 TEXT_OVERLAY_FAILURE_REASONS = (
     "download_failed",
     "gemini_request_failed",
@@ -279,6 +282,7 @@ class RefreshImagesResponse(BaseModel):
     resize_crop_failed: int = 0
     retry_attempts: dict[str, int] = Field(default_factory=dict)
     failed_parts: list[dict[str, Any]] = Field(default_factory=list)
+    source_progress: dict[str, dict[str, Any]] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
 
 
@@ -418,6 +422,39 @@ def _read_positive_int_env(name: str, default: int) -> int:
     except ValueError:
         return max(1, default)
     return max(1, parsed)
+
+
+def _normalize_source_progress_key(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    if not normalized:
+        return None
+    if normalized == "nbcumv":
+        return "getty_nbcumv"
+    return normalized
+
+
+def _empty_source_progress_entry() -> dict[str, Any]:
+    return {
+        "discovered_total": None,
+        "scraped_current": 0,
+        "saved_current": 0,
+        "failed_current": 0,
+        "skipped_current": 0,
+        "remaining": None,
+        "status": "pending",
+        "message": None,
+    }
+
+
+def _ordered_source_progress_snapshot(source_progress: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    def _sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
+        key = item[0]
+        try:
+            return SOURCE_PROGRESS_KEY_ORDER.index(key), key
+        except ValueError:
+            return len(SOURCE_PROGRESS_KEY_ORDER), key
+
+    return dict(sorted(source_progress.items(), key=_sort_key))
 
 
 def _resolve_execution_profile(profile: str | None) -> Literal["speed", "balanced", "safe"]:
@@ -587,6 +624,129 @@ def _resolve_refresh_sources(
     return _apply_show_source_policy(db, request.show_id, requested_sources)
 
 
+def _slugify_gallery_bucket_key(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return text
+
+
+def _extract_getty_caption_show_title(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text or " -- " not in text:
+        return None
+    candidate = text.split(" -- ", 1)[0].strip()
+    return candidate or None
+
+
+def _find_show_row_by_text_fragment(
+    by_alias: dict[str, dict[str, Any]],
+    value: str | None,
+) -> dict[str, Any] | None:
+    direct = _find_show_row_by_alias(by_alias, value)
+    if direct:
+        return direct
+    normalized_text = _normalize_show_lookup_key(value)
+    if not normalized_text:
+        return None
+
+    best_match: tuple[int, dict[str, Any]] | None = None
+    for alias, row in by_alias.items():
+        if len(alias) < 4:
+            continue
+        if alias in normalized_text:
+            score = len(alias)
+            if best_match is None or score > best_match[0]:
+                best_match = (score, row)
+    return best_match[1] if best_match else None
+
+
+def _resolve_gallery_bucket_metadata(
+    *,
+    asset: dict[str, Any],
+    resolved_asset_show: dict[str, Any] | None,
+    show_lookup_by_alias: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    event_group_title = (
+        str(asset.get("getty_event_group_title") or asset.get("event_name") or "").strip() or None
+    )
+    title = str(asset.get("search_title") or asset.get("title") or "").strip() or None
+    caption = str(asset.get("caption") or asset.get("search_caption") or "").strip() or None
+
+    resolved_show_row = resolved_asset_show if isinstance(resolved_asset_show, dict) else None
+    if resolved_show_row is None:
+        for candidate in (
+            event_group_title,
+            title,
+            _extract_getty_caption_show_title(caption),
+        ):
+            resolved_show_row = _find_show_row_by_text_fragment(show_lookup_by_alias, candidate)
+            if resolved_show_row:
+                break
+
+    event_text = " ".join(value for value in (event_group_title, title) if value).strip()
+    normalized_event_text = _normalize_show_lookup_key(event_text)
+    if "bravocon" in normalized_event_text:
+        return {
+            "bucket_type": "bravocon",
+            "bucket_key": "bravocon",
+            "bucket_label": "BravoCon",
+            "resolved_show_id": None,
+            "resolved_show_name": None,
+            "getty_event_group_title": event_group_title,
+            "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
+            "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+        }
+    if "watch what happens live" in normalized_event_text or re.search(r"\bwwhl\b", normalized_event_text):
+        return {
+            "bucket_type": "wwhl",
+            "bucket_key": "wwhl",
+            "bucket_label": "WWHL",
+            "resolved_show_id": None,
+            "resolved_show_name": "Watch What Happens Live with Andy Cohen",
+            "getty_event_group_title": event_group_title,
+            "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
+            "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+        }
+    if isinstance(resolved_show_row, dict):
+        resolved_show_id = str(resolved_show_row.get("id") or "").strip() or None
+        resolved_show_name = str(resolved_show_row.get("name") or resolved_show_row.get("title") or "").strip() or None
+        return {
+            "bucket_type": "show",
+            "bucket_key": resolved_show_id or _slugify_gallery_bucket_key(resolved_show_name),
+            "bucket_label": resolved_show_name,
+            "resolved_show_id": resolved_show_id,
+            "resolved_show_name": resolved_show_name,
+            "getty_event_group_title": event_group_title,
+            "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
+            "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+        }
+
+    event_label = event_group_title or title
+    if event_label:
+        return {
+            "bucket_type": "event",
+            "bucket_key": _slugify_gallery_bucket_key(event_label),
+            "bucket_label": event_label,
+            "resolved_show_id": None,
+            "resolved_show_name": None,
+            "getty_event_group_title": event_group_title,
+            "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
+            "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+        }
+
+    return {
+        "bucket_type": "unknown",
+        "bucket_key": None,
+        "bucket_label": None,
+        "resolved_show_id": None,
+        "resolved_show_name": None,
+        "getty_event_group_title": None,
+        "getty_event_group_id": None,
+        "getty_event_group_slug": None,
+    }
+
+
 def _import_nbcumv_person_media(
     db: SupabaseAdminClient,
     *,
@@ -653,6 +813,12 @@ def _import_nbcumv_person_media(
 
     def _candidate_show_titles_from_getty(asset: dict[str, Any]) -> list[str]:
         candidates: list[str] = []
+        event_group_title = str(asset.get("getty_event_group_title") or asset.get("event_name") or "").strip()
+        if event_group_title:
+            candidates.append(event_group_title)
+        search_title = str(asset.get("search_title") or "").strip()
+        if search_title:
+            candidates.append(search_title)
         title = str(asset.get("title") or "").strip()
         if title:
             candidates.append(title)
@@ -807,11 +973,10 @@ def _import_nbcumv_person_media(
         search_phrase = fallback_phrase
     result["getty_candidates_total"] = len(getty_assets)
     if not getty_assets:
-        result["errors"].append(f"Getty search returned no assets for '{normalized_person_name}'.")
         return result
 
     _ensure_sources(db)
-    matched_assets: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    matched_assets: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
     matched_summaries: list[dict[str, Any]] = []
     unmatched_assets: list[dict[str, Any]] = []
     filtered_out_assets: list[dict[str, Any]] = []
@@ -820,6 +985,7 @@ def _import_nbcumv_person_media(
     normalized_show = _normalize_show_title_key(resolved_show_name)
     resolved_getty_show_cache: dict[str, dict[str, Any] | None] = {}
     show_image_indexes: dict[str, dict[str, dict[str, Any]]] = {}
+    _, show_lookup_by_alias, _ = _build_show_lookup_maps(db)
 
     def _resolve_asset_show(asset: dict[str, Any]) -> dict[str, Any] | None:
         for candidate in _candidate_show_titles_from_getty(asset):
@@ -838,7 +1004,7 @@ def _import_nbcumv_person_media(
             show_image_indexes[normalized_id] = nbcumv_integration.build_show_image_index(normalized_id)
         return show_image_indexes[normalized_id]
 
-    scoped_assets: list[tuple[dict[str, Any], dict[str, Any] | None, str | None]] = []
+    scoped_assets: list[tuple[dict[str, Any], dict[str, Any] | None, str | None, dict[str, Any]]] = []
     if normalized_show:
         _emit_progress(0, len(getty_assets), f"Filtering {len(getty_assets)} Getty assets to '{resolved_show_name}'...")
     for asset in getty_assets:
@@ -867,12 +1033,20 @@ def _import_nbcumv_person_media(
                     _summarize_getty_asset(asset, reason="requested_show_mismatch")
                 )
                 continue
-        scoped_assets.append((asset, resolved_asset_show, resolved_asset_show_title or None))
+        bucket_metadata = _resolve_gallery_bucket_metadata(
+            asset=asset,
+            resolved_asset_show=resolved_asset_show,
+            show_lookup_by_alias=show_lookup_by_alias,
+        )
+        scoped_assets.append((asset, resolved_asset_show, resolved_asset_show_title or None, bucket_metadata))
 
     result["getty_candidates_total"] = len(scoped_assets)
     match_total = len(scoped_assets)
     _emit_progress(0, match_total, f"Matching {match_total} Getty assets against NBCUMV...")
-    for match_index, (asset, resolved_asset_show, resolved_asset_show_title) in enumerate(scoped_assets, start=1):
+    for match_index, (asset, resolved_asset_show, resolved_asset_show_title, bucket_metadata) in enumerate(
+        scoped_assets,
+        start=1,
+    ):
         filename = str(asset.get("object_name") or "").strip()
         _emit_progress(
             match_index - 1,
@@ -893,10 +1067,24 @@ def _import_nbcumv_person_media(
             unmatched_assets.append(_summarize_getty_asset(asset, reason="no_nbcumv_match"))
             getty_row = _build_getty_cast_photo_row(
                 asset,
-                asset_show_name=resolved_asset_show_title or resolved_show_name or None,
+                asset_show_name=(
+                    str(bucket_metadata.get("resolved_show_name") or "").strip()
+                    or resolved_asset_show_title
+                    or resolved_show_name
+                    or None
+                ),
                 crosswalk_reason="no_nbcumv_match",
             )
             if getty_row is not None:
+                metadata = getty_row.get("metadata")
+                if isinstance(metadata, dict):
+                    metadata["gallery_bucket"] = dict(bucket_metadata)
+                    metadata.update(dict(bucket_metadata))
+                if (
+                    bucket_metadata.get("bucket_type") == "show"
+                    and bucket_metadata.get("resolved_show_name")
+                ):
+                    getty_row["title_names"] = [str(bucket_metadata["resolved_show_name"])]
                 getty_only_rows.append(getty_row)
             _emit_progress(
                 match_index,
@@ -930,7 +1118,7 @@ def _import_nbcumv_person_media(
             _emit_progress(match_index, match_total, f"Skipped duplicate or invalid NBCUMV asset for {filename}.")
             continue
         seen_lbx_ids.add(lbx_id)
-        matched_assets.append((asset, image))
+        matched_assets.append((asset, image, dict(bucket_metadata)))
         matched_summaries.append(_summarize_getty_asset(asset, reason="matched", image=image))
         _emit_progress(match_index, match_total, f"Matched NBCUMV asset {len(matched_assets)}: {filename}")
 
@@ -994,18 +1182,12 @@ def _import_nbcumv_person_media(
         )
 
     if not matched_assets and not getty_only_rows:
-        if resolved_show_name:
-            result["errors"].append(
-                f"No Getty/NBCUMV crosswalk matches found for '{normalized_person_name}' on '{resolved_show_name}'."
-            )
-        else:
-            result["errors"].append(f"No Getty/NBCUMV crosswalk matches found for '{normalized_person_name}'.")
         return result
 
     total = len(matched_assets)
     if total > 0:
         _emit_progress(0, total, f"Importing {total} NBCUMV assets...")
-    for index, (asset, image) in enumerate(matched_assets, start=1):
+    for index, (asset, image, bucket_metadata) in enumerate(matched_assets, start=1):
         filename = str(image.get("lbx_filename") or "").strip()
         lbx_id = str(image.get("lbx_id") or "").strip()
         _emit_progress(index - 1, total, f"Importing NBCUMV {index}/{total}: {filename or lbx_id}")
@@ -1024,6 +1206,7 @@ def _import_nbcumv_person_media(
                     show_ids=[value for value in image.get("showIds") or [] if isinstance(value, str)],
                     link_show_ids=[show_id] if show_id else [],
                     getty_detail_url=str(asset.get("detail_url") or "").strip() or None,
+                    gallery_bucket=dict(bucket_metadata),
                     person_ids=[UUID(person_id)],
                 ),
                 assign_people=True,
@@ -6981,6 +7164,58 @@ async def refresh_person_images_stream(
         tmdb_profile_status: Literal["ok", "skipped", "failed"] | None = None
         tmdb_profile_error_code: str | None = None
         tmdb_profile_error_detail: str | None = None
+        source_progress: dict[str, dict[str, Any]] = {}
+        source_progress_lock = Lock()
+        source_progress_unset = object()
+
+        def update_source_progress(
+            source_key: str | None,
+            *,
+            discovered_total: int | None | object = source_progress_unset,
+            scraped_current: int | None | object = source_progress_unset,
+            saved_current: int | None | object = source_progress_unset,
+            failed_current: int | None | object = source_progress_unset,
+            skipped_current: int | None | object = source_progress_unset,
+            remaining: int | None | object = source_progress_unset,
+            status: SourceProgressStatus | object = source_progress_unset,
+            message: str | None | object = source_progress_unset,
+        ) -> None:
+            normalized_key = _normalize_source_progress_key(source_key)
+            if normalized_key is None:
+                return
+            with source_progress_lock:
+                entry = source_progress.setdefault(normalized_key, _empty_source_progress_entry())
+                if discovered_total is not source_progress_unset:
+                    entry["discovered_total"] = (
+                        max(0, int(discovered_total)) if isinstance(discovered_total, int) else None
+                    )
+                if scraped_current is not source_progress_unset:
+                    entry["scraped_current"] = max(0, int(scraped_current or 0))
+                if saved_current is not source_progress_unset:
+                    entry["saved_current"] = max(0, int(saved_current or 0))
+                if failed_current is not source_progress_unset:
+                    entry["failed_current"] = max(0, int(failed_current or 0))
+                if skipped_current is not source_progress_unset:
+                    entry["skipped_current"] = max(0, int(skipped_current or 0))
+                if remaining is not source_progress_unset:
+                    entry["remaining"] = max(0, int(remaining)) if isinstance(remaining, int) else None
+                elif isinstance(entry.get("discovered_total"), int):
+                    entry["remaining"] = max(
+                        0,
+                        int(entry["discovered_total"]) - int(entry.get("scraped_current") or 0),
+                    )
+                if status is not source_progress_unset:
+                    entry["status"] = cast(SourceProgressStatus, status)
+                if message is not source_progress_unset:
+                    entry["message"] = str(message).strip() if isinstance(message, str) and message.strip() else None
+
+        def source_progress_snapshot() -> dict[str, dict[str, Any]]:
+            with source_progress_lock:
+                snapshot = {
+                    key: dict(value)
+                    for key, value in source_progress.items()
+                }
+            return _ordered_source_progress_snapshot(snapshot)
 
         def build_live_counts() -> dict[str, int]:
             return {
@@ -7009,6 +7244,7 @@ async def refresh_person_images_stream(
                         {
                             "run_id": run_id,
                             "live_counts": build_live_counts(),
+                            "source_progress": source_progress_snapshot(),
                             **payload,
                         }
                     )
@@ -7072,6 +7308,7 @@ async def refresh_person_images_stream(
                 db,
                 person_id_str,
             )
+            requested_sources = list(request.sources or ALL_SOURCES)
             sources, fandom_skipped = await asyncio.to_thread(_resolve_refresh_sources, db, request)
             if fandom_skipped:
                 errors.append("Fandom sources skipped for non-Real Housewives show context.")
@@ -7085,6 +7322,25 @@ async def refresh_person_images_stream(
                 stage_error_detail=str(exc),
             )
             return
+
+        for requested_source in requested_sources:
+            update_source_progress(requested_source, status="pending", message="Pending")
+
+        for filtered_source in set(requested_sources) - set(sources):
+            update_source_progress(
+                filtered_source,
+                status="skipped",
+                remaining=0,
+                message="Skipped by source policy.",
+            )
+        if "imdb" in requested_sources and not imdb_person_id:
+            update_source_progress("imdb", status="skipped", remaining=0, message="No IMDb person ID.")
+        if "tmdb" in requested_sources and not tmdb_person_id:
+            update_source_progress("tmdb", status="skipped", remaining=0, message="No TMDb person ID.")
+        if "fandom" in requested_sources and not person_name:
+            update_source_progress("fandom", status="skipped", remaining=0, message="No person name.")
+        if "fandom-gallery" in requested_sources and not person_name:
+            update_source_progress("fandom-gallery", status="skipped", remaining=0, message="No person name.")
 
         # 1.5 Refresh person profiles (best-effort)
         if await _client_disconnected("tmdb_profile"):
@@ -7290,6 +7546,14 @@ async def refresh_person_images_stream(
                     "started_at": time.perf_counter(),
                 }
             )
+            update_source_progress(
+                source_name,
+                status="running",
+                discovered_total=None,
+                scraped_current=0,
+                remaining=None,
+                message=f"Syncing {label}...",
+            )
             yield progress(
                 {
                     "stage": stage,
@@ -7361,10 +7625,24 @@ async def refresh_person_images_stream(
                     rows = task.result()
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"{label}: {exc}")
+                    update_source_progress(
+                        source_name,
+                        status="failed",
+                        failed_current=1,
+                        message=f"{label} sync failed: {exc}",
+                    )
                     rows = []
                 photos.extend(rows)
                 processed_sources += 1
                 elapsed_ms = int((time.perf_counter() - float(entry.get("started_at") or time.perf_counter())) * 1000)
+                update_source_progress(
+                    source_name,
+                    status="completed",
+                    discovered_total=len(rows),
+                    scraped_current=len(rows),
+                    remaining=0,
+                    message=f"Synced {label} ({len(rows)} photos).",
+                )
                 yield progress(
                     {
                         "stage": stage,
@@ -7450,6 +7728,11 @@ async def refresh_person_images_stream(
             )
             imdb_photos = [p for p in photos if p.get("source") == "imdb"]
             other_photos = [p for p in photos if p.get("source") != "imdb"]
+            per_source_photo_counts = Counter(
+                _normalize_source_progress_key(str(photo.get("source") or ""))
+                for photo in photos
+                if _normalize_source_progress_key(str(photo.get("source") or ""))
+            )
             try:
                 if imdb_photos:
                     upserted = await asyncio.to_thread(upsert_cast_photos, db, imdb_photos, dedupe_on="source_image_id")
@@ -7461,8 +7744,25 @@ async def refresh_person_images_stream(
                     )
                     photos_upserted += len(upserted)
                     upserted_photo_ids.extend([str(row["id"]) for row in upserted if row.get("id")])
+                for source_key, count in per_source_photo_counts.items():
+                    update_source_progress(
+                        source_key,
+                        saved_current=int(count),
+                        message=(
+                            f"Saved {int(count)} photo{'s' if int(count) != 1 else ''}."
+                            if int(count) > 0
+                            else "No photos saved."
+                        ),
+                    )
             except Exception as exc:
                 errors.append(str(exc))
+                for source_key, count in per_source_photo_counts.items():
+                    update_source_progress(
+                        source_key,
+                        failed_current=int(count),
+                        message=f"Save failed: {exc}",
+                        status="failed",
+                    )
             yield progress(
                 {
                     "stage": "upserting",
@@ -7698,7 +7998,16 @@ async def refresh_person_images_stream(
                 with nbcumv_progress_lock:
                     nbcumv_progress.update(snapshot)
                     nbcumv_progress_events.append(snapshot)
+                update_source_progress(
+                    "nbcumv",
+                    status="running",
+                    discovered_total=snapshot["total"] if snapshot["total"] > 0 else None,
+                    scraped_current=snapshot["current"],
+                    remaining=max(0, snapshot["total"] - snapshot["current"]) if snapshot["total"] > 0 else 0,
+                    message=snapshot["message"],
+                )
 
+            update_source_progress("nbcumv", status="running", message="Importing NBCUMV press photos...")
             yield progress(
                 {
                     "stage": "nbcumv_import",
@@ -7844,6 +8153,21 @@ async def refresh_person_images_stream(
                         "total": max(nbcumv_photos_fetched, int(nbcumv_snapshot.get("total") or 0)),
                     }
                 )
+                update_source_progress(
+                    "nbcumv",
+                    status="failed" if nbcumv_failed > 0 else "completed",
+                    discovered_total=getty_candidates_total,
+                    scraped_current=getty_candidates_total,
+                    saved_current=nbcumv_assets_imported + getty_only_imported,
+                    failed_current=nbcumv_failed,
+                    skipped_current=nbcumv_assets_skipped,
+                    remaining=0,
+                    message=(
+                        f"Getty/NBCUMV complete: {nbcumv_assets_imported} imported, "
+                        f"{getty_only_imported} Getty-only, {nbcumv_assets_skipped} skipped, "
+                        f"{nbcumv_failed} failed."
+                    ),
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("NBCUMV stream import failed for person_id=%s", person_id_str)
                 nbcumv_failed += 1
@@ -7851,6 +8175,12 @@ async def refresh_person_images_stream(
                 errors.append(f"NBCUMV: {exc}")
                 with nbcumv_progress_lock:
                     nbcumv_snapshot = dict(nbcumv_progress)
+                update_source_progress(
+                    "nbcumv",
+                    status="failed",
+                    failed_current=nbcumv_failed,
+                    message=f"NBCUMV import failed: {exc}",
+                )
                 yield progress(
                     {
                         "stage": "nbcumv_import",
@@ -9071,6 +9401,7 @@ async def refresh_person_images_stream(
             "failed_parts": failed_parts,
             "sources_skipped": len(source_skip_details),
             "source_skip_details": source_skip_details,
+            "source_progress": source_progress_snapshot(),
             "live_counts": build_live_counts(),
             "errors": errors,
         }

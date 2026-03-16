@@ -40,9 +40,7 @@ def _first_env(*names: str) -> str:
 def _validate_public_base_url(value: str) -> str:
     base = str(value or "").strip()
     if not base:
-        raise RuntimeError(
-            "Missing required environment variable: OBJECT_STORAGE_PUBLIC_BASE_URL (or AWS_CDN_BASE_URL)"
-        )
+        raise RuntimeError("Missing required environment variable: OBJECT_STORAGE_PUBLIC_BASE_URL")
     if not base.startswith("https://"):
         raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL must start with https://")
     parsed = urlparse(base)
@@ -63,29 +61,29 @@ def load_object_storage_config(
     require_bucket: bool = True,
     require_public_base_url: bool = False,
 ) -> ObjectStorageConfig:
-    bucket = _first_env("OBJECT_STORAGE_BUCKET", "AWS_S3_BUCKET")
+    bucket = _first_env("OBJECT_STORAGE_BUCKET")
     if require_bucket and not bucket:
-        raise RuntimeError("Missing required environment variable: OBJECT_STORAGE_BUCKET (or AWS_S3_BUCKET)")
+        raise RuntimeError("Missing required environment variable: OBJECT_STORAGE_BUCKET")
 
-    region = _first_env("OBJECT_STORAGE_REGION", "AWS_REGION", "AWS_DEFAULT_REGION") or "us-east-1"
-    public_base_url = _first_env("OBJECT_STORAGE_PUBLIC_BASE_URL", "AWS_CDN_BASE_URL") or None
+    region = _first_env("OBJECT_STORAGE_REGION") or "us-east-1"
+    public_base_url = _first_env("OBJECT_STORAGE_PUBLIC_BASE_URL") or None
     if require_public_base_url:
         public_base_url = _validate_public_base_url(public_base_url or "")
     elif public_base_url:
         public_base_url = _validate_public_base_url(public_base_url)
 
-    prefix = _first_env("OBJECT_STORAGE_PREFIX", "AWS_S3_PREFIX").strip().strip("/")
-    endpoint_url = _first_env("OBJECT_STORAGE_ENDPOINT_URL", "AWS_ENDPOINT_URL") or None
+    prefix = _first_env("OBJECT_STORAGE_PREFIX").strip().strip("/")
+    endpoint_url = _first_env("OBJECT_STORAGE_ENDPOINT_URL") or None
     provider = (_first_env("OBJECT_STORAGE_PROVIDER") or "").lower()
     if not provider:
         provider = "r2" if endpoint_url and "cloudflarestorage.com" in endpoint_url else "s3"
 
-    access_key_id = _first_env("OBJECT_STORAGE_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID") or None
-    secret_access_key = _first_env("OBJECT_STORAGE_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY") or None
-    session_token = _first_env("OBJECT_STORAGE_SESSION_TOKEN", "AWS_SESSION_TOKEN") or None
+    access_key_id = _first_env("OBJECT_STORAGE_ACCESS_KEY_ID") or None
+    secret_access_key = _first_env("OBJECT_STORAGE_SECRET_ACCESS_KEY") or None
+    session_token = _first_env("OBJECT_STORAGE_SESSION_TOKEN") or None
     profile_name = None
     if not (access_key_id and secret_access_key):
-        profile_name = _first_env("OBJECT_STORAGE_PROFILE", "AWS_PROFILE", "AWS_DEFAULT_PROFILE") or None
+        profile_name = _first_env("OBJECT_STORAGE_PROFILE") or None
 
     return ObjectStorageConfig(
         provider=provider,

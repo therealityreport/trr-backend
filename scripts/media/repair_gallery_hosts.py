@@ -131,7 +131,11 @@ def _source_matches(source: str | None, allowed_sources: set[str]) -> bool:
         return True
     if "fandom" in allowed_sources and normalized.startswith("fandom"):
         return True
-    if "bravo" in allowed_sources and normalized.startswith("bravo"):
+    if "bravo" in allowed_sources and (
+        normalized.startswith("bravo")
+        or normalized.startswith("web_scrape:bravo")
+        or "bravotv.com" in normalized
+    ):
         return True
     return False
 

@@ -5,13 +5,13 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-_AWS_PROFILE_ENV_KEYS = frozenset({"AWS_PROFILE", "AWS_DEFAULT_PROFILE"})
+_OBJECT_STORAGE_PROFILE_ENV_KEYS = frozenset({"OBJECT_STORAGE_PROFILE"})
 
 
-def _has_explicit_aws_credentials() -> bool:
+def _has_explicit_object_storage_credentials() -> bool:
     return bool(
-        str(os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
-        and str(os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+        str(os.getenv("OBJECT_STORAGE_ACCESS_KEY_ID") or "").strip()
+        and str(os.getenv("OBJECT_STORAGE_SECRET_ACCESS_KEY") or "").strip()
     )
 
 
@@ -23,11 +23,11 @@ def load_env(*, override: bool = False) -> Path | None:
     ]
     for path in candidates:
         if path.is_file():
-            skip_profile_env = _has_explicit_aws_credentials()
+            skip_profile_env = _has_explicit_object_storage_credentials()
             for key, value in dotenv_values(path).items():
                 if value is None:
                     continue
-                if skip_profile_env and key in _AWS_PROFILE_ENV_KEYS:
+                if skip_profile_env and key in _OBJECT_STORAGE_PROFILE_ENV_KEYS:
                     continue
                 if override or key not in os.environ:
                     os.environ[key] = value

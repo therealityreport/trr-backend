@@ -85,7 +85,7 @@ def main() -> int:
     print(f"  4. Update {args.frontend_runtime_target} so `TRR_API_URL` points at the verified Modal API URL.")
     print("  5. Verify `/health`, admin flows, and social worker-health against the Modal backend URL.")
     print("  6. Confirm Modal Cron owns dispatcher heartbeat and social recovery after cutover.")
-    print("  7. Retire EC2 backend runtime only after staging and production Modal smoke checks both pass.")
+    print("  7. Retire the legacy backend runtime only after staging and production Modal smoke checks both pass.")
     return 0
 
 

@@ -1,7 +1,7 @@
-Media Mirroring (S3)
-====================
+Media Mirroring (S3-Compatible Object Storage)
+==============================================
 
-This directory contains scripts to mirror media assets (cast photos) to S3 and
+This directory contains scripts to mirror media assets (cast photos) to S3-compatible object storage and
 store hosted URLs back into Supabase.
 
 Scripts live in this directory:
@@ -15,17 +15,17 @@ Scripts live in this directory:
 Required environment variables
 ------------------------------
 
-- AWS_REGION (or AWS_DEFAULT_REGION)
-- AWS_ACCESS_KEY_ID
-- AWS_SECRET_ACCESS_KEY
-- AWS_S3_BUCKET
-- AWS_S3_PREFIX (example: dev, prod)
-- AWS_CDN_BASE_URL (example: https://cdn.example.com)
+- OBJECT_STORAGE_REGION
+- OBJECT_STORAGE_ACCESS_KEY_ID
+- OBJECT_STORAGE_SECRET_ACCESS_KEY
+- OBJECT_STORAGE_BUCKET
+- OBJECT_STORAGE_PREFIX (example: dev, prod)
+- OBJECT_STORAGE_PUBLIC_BASE_URL (example: https://cdn.example.com)
 - TRR_MEDIA_MIRROR_TO_S3 (optional, feature flag for future ingestion hooks)
 
 Notes:
-- AWS_CDN_BASE_URL must start with https:// and must not contain placeholder domains (e.g., dxxxx).
-- If AWS_PROFILE or AWS_DEFAULT_PROFILE is set, boto3 uses that profile.
+- OBJECT_STORAGE_PUBLIC_BASE_URL must start with https:// and must not contain placeholder domains (e.g., dxxxx).
+- If `OBJECT_STORAGE_PROFILE` is set, boto3 uses that profile.
 
 Example usage
 -------------
@@ -54,11 +54,27 @@ PYTHONPATH=. python scripts/media/mirror_cast_photos_to_s3.py --source fandom --
 Troubleshooting
 ---------------
 
-- Ensure the S3 bucket and CDN base URL are correct.
+- Ensure the object-storage bucket and public base URL are correct.
 - If images return 403/404 from Fandom, verify the source_page_url is populated
   so the Referer header can be set on download.
 - Re-run the script safely; it is idempotent and skips existing hosted URLs
   unless --force is supplied.
+
+Canonical hosted-URL rebuild
+----------------------------
+
+Rewrite stale hosted-media URLs onto the current public base without re-uploading:
+
+```bash
+PYTHONPATH=. python scripts/media/rebuild_hosted_urls.py --table all --dry-run
+PYTHONPATH=. python scripts/media/rebuild_hosted_urls.py --table all
+```
+
+Notes:
+- Covers unified gallery tables (`media_assets`, `media_asset_variants`) plus legacy image tables and `cast_photos`.
+- Rebuilds `hosted_url` from `hosted_key` when available.
+- Rewrites embedded legacy hosted-media URLs inside gallery metadata, including `/media-variants/...`, `/cast-photo-variants/...`, and `/face-crops/...` URLs.
+- Use `repair_gallery_hosts.py` afterwards only for rows that are still truly broken or unreachable.
 
 Backfill optimized media variants
 ---------------------------------

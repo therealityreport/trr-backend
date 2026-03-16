@@ -17,10 +17,15 @@ def _base_args(**overrides):
         "source_scope": "bravo",
         "limit_per_platform": 5000,
         "season_id": [],
+        "show_id": [],
+        "season_number": [],
         "post_id": [],
         "source_id": [],
         "failed_only": False,
         "hosted_html_only": False,
+        "normalize_only": False,
+        "mirror_only": False,
+        "repair_all": False,
         "repair_reasons": "",
         "dry_run": False,
     }
@@ -33,7 +38,7 @@ def test_main_fails_fast_when_s3_preflight_fails(monkeypatch) -> None:
     monkeypatch.setattr(mod, "_parse_args", lambda: _base_args())
 
     def _fail_preflight() -> None:
-        raise RuntimeError("Missing required environment variable: AWS_S3_BUCKET")
+        raise RuntimeError("Missing required environment variable: OBJECT_STORAGE_BUCKET")
 
     monkeypatch.setattr(mod.social_repo, "ensure_media_mirror_s3_ready", _fail_preflight)
 
@@ -103,7 +108,7 @@ def test_main_hosted_html_only_filters_non_html_rows(monkeypatch, capsys) -> Non
         "queued": 1,
         "skipped": 1,
         "failed": 0,
-        "repair_reasons": {"hosted_content": 1, "non_video_hosted_media": 1},
+        "repair_reasons": {"hosted_content": 1, "non_video_hosted_media": 1, "missing_source_avatar": 1},
     }
     assert enqueued_ids == ["tt-1"]
 
@@ -126,9 +131,10 @@ def test_row_repair_reasons_detects_historical_cleanup_cases(monkeypatch) -> Non
         }
 
         assert mod._row_repair_reasons("twitter", row) == [
-            "legacy_host",
-            "missing_hosted_media",
+            "legacy_hosted_url",
             "twitter_video_thumbnail",
+            "missing_hosted_media",
+            "missing_source_avatar",
         ]
     finally:
         mod.social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
@@ -145,7 +151,7 @@ def test_row_repair_reasons_marks_instagram_reresolve_as_mirror_retry() -> None:
         "media_mirror_status": "mirrored",
     }
 
-    assert mod._row_repair_reasons("instagram", row) == ["mirror_retry"]
+    assert mod._row_repair_reasons("instagram", row) == ["mirror_retry", "missing_source_avatar"]
 
 
 def test_main_all_history_dry_run_and_reason_filters(monkeypatch, capsys) -> None:
@@ -157,6 +163,8 @@ def test_main_all_history_dry_run_and_reason_filters(monkeypatch, capsys) -> Non
             all_history=True,
             platforms="twitter",
             season_id=["season-1"],
+            show_id=["show-1"],
+            season_number=["6"],
             post_id=["post-1"],
             source_id=["tweet-1"],
             repair_reasons="twitter_video_thumbnail",
@@ -233,6 +241,8 @@ def test_main_all_history_dry_run_and_reason_filters(monkeypatch, capsys) -> Non
             "cutoff": None,
             "limit": 5000,
             "season_ids": ["season-1"],
+            "show_ids": ["show-1"],
+            "season_numbers": [6],
             "post_ids": ["post-1"],
             "source_ids": ["tweet-1"],
         }
@@ -241,6 +251,8 @@ def test_main_all_history_dry_run_and_reason_filters(monkeypatch, capsys) -> Non
     assert payload["all_history"] is True
     assert payload["cutoff"] is None
     assert payload["season_ids"] == ["season-1"]
+    assert payload["show_ids"] == ["show-1"]
+    assert payload["season_numbers"] == [6]
     assert payload["post_ids"] == ["post-1"]
     assert payload["source_ids"] == ["tweet-1"]
     assert payload["repair_reasons"] == ["twitter_video_thumbnail"]
@@ -250,3 +262,24 @@ def test_main_all_history_dry_run_and_reason_filters(monkeypatch, capsys) -> Non
         "missing_hosted_media": 1,
         "twitter_video_thumbnail": 1,
     }
+
+
+def test_parse_repair_reasons_accepts_legacy_host_alias() -> None:
+    assert mod._parse_repair_reasons("legacy_host,missing_hosted_media") == {
+        "legacy_hosted_url",
+        "missing_hosted_media",
+    }
+
+
+def test_row_matches_mode_distinguishes_normalize_only_rows() -> None:
+    assert mod._row_matches_mode(["legacy_hosted_url"], normalize_only=True, mirror_only=False) is True
+    assert mod._row_matches_mode(
+        ["legacy_hosted_url", "missing_hosted_media"],
+        normalize_only=True,
+        mirror_only=False,
+    ) is False
+    assert mod._row_matches_mode(
+        ["legacy_hosted_url", "missing_hosted_avatar"],
+        normalize_only=False,
+        mirror_only=True,
+    ) is True

@@ -481,10 +481,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         storage = load_object_storage_config(require_bucket=True, require_public_base_url=True)
         if not storage.bucket:
-            print("ERROR: OBJECT_STORAGE_BUCKET (or AWS_S3_BUCKET) is required", file=sys.stderr)
+            print("ERROR: OBJECT_STORAGE_BUCKET is required", file=sys.stderr)
             return 1
         if not storage.public_base_url:
-            print("ERROR: OBJECT_STORAGE_PUBLIC_BASE_URL (or AWS_CDN_BASE_URL) is required", file=sys.stderr)
+            print("ERROR: OBJECT_STORAGE_PUBLIC_BASE_URL is required", file=sys.stderr)
             return 1
 
     # Load database

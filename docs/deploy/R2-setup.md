@@ -133,11 +133,6 @@ Optional:
 OBJECT_STORAGE_PREFIX=
 ```
 
-Compatibility aliases already supported in code:
-
-- `AWS_S3_BUCKET` -> `OBJECT_STORAGE_BUCKET`
-- `AWS_CDN_BASE_URL` -> `OBJECT_STORAGE_PUBLIC_BASE_URL`
-
 ## Custom Domain
 
 For `trr-media-prod`:

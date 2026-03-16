@@ -833,8 +833,8 @@ def test_upsert_youtube_video_persists_short_flags(monkeypatch) -> None:
         video_id="short-abc",
         channel_id="channel-1",
         channel_title="Bravo",
-        title="RHOSLC short",
-        description="desc",
+        title="You guys! Seriously! What about Britani! #RHOSLC #BritaniBateman #RealityTV",
+        description="",
         duration="PT45S",
         duration_seconds=45,
         views=100,
@@ -862,6 +862,9 @@ def test_upsert_youtube_video_persists_short_flags(monkeypatch) -> None:
     assert isinstance(saved, dict)
     assert saved["is_short"] is True
     assert saved["source_surface"] == "shorts"
+    assert saved["title"] == ""
+    assert saved["description"] == "You guys! Seriously! What about Britani! #RHOSLC #BritaniBateman #RealityTV"
+    assert saved["hashtags"] == ["RHOSLC", "BritaniBateman", "RealityTV"]
 
 
 def test_upsert_tiktok_post_persists_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1486,6 +1489,17 @@ def test_resolve_depth_defaults_respects_explicit_values_and_env_defaults(monkey
     assert replies4 == 90
     assert fetch_replies4 is True
 
+    posts5, comments5, replies5, fetch_replies5 = _resolve_depth_defaults(
+        max_posts_per_target=0,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=True,
+    )
+    assert posts5 == 0
+    assert comments5 == 1_000_000
+    assert replies5 == 1_000_000
+    assert fetch_replies5 is True
+
 
 def test_load_existing_posts_normalizes_account_filter(monkeypatch) -> None:
     captured: dict[str, object] = {}
@@ -1680,6 +1694,82 @@ def test_ingest_season_dedupes_normalized_account_overrides(monkeypatch: pytest.
     run_config = run_config_holder.get("config")
     assert isinstance(run_config, dict)
     assert run_config.get("accounts_override") == ["bravotv"]
+
+
+def test_ingest_season_persists_youtube_hybrid_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = SeasonContext(
+        season_id="season-ingest-youtube-controls",
+        show_id="show-ingest-youtube-controls",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    run_config_holder: dict[str, object] = {}
+    created_job_configs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: context)
+    monkeypatch.setattr(
+        social_repo,
+        "get_targets",
+        lambda *_args, **_kwargs: {
+            "targets": [
+                {
+                    "platform": "youtube",
+                    "accounts": ["bravo"],
+                    "hashtags": [],
+                    "keywords": [],
+                    "is_active": True,
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(
+        social_repo,
+        "dispatch_due_social_jobs",
+        lambda **_kwargs: {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda _context, **kwargs: run_config_holder.update({"config": kwargs.get("config")}) or "run-youtube-controls",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda _context, **kwargs: (
+            created_job_configs.append(dict(kwargs.get("config") or {})) or f"job-{len(created_job_configs)}"
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_update_run_summary", lambda _run_id: {"total_jobs": len(created_job_configs)})
+
+    payload = social_repo.ingest_season(
+        context.season_id,
+        platforms=["youtube"],
+        source_scope="bravo",
+        max_posts_per_target=25,
+        max_comments_per_post=10,
+        max_replies_per_post=5,
+        fetch_replies=True,
+        ingest_mode="posts_and_comments",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 8, tzinfo=UTC),
+        youtube_source_mode="api_only",
+        youtube_force_reindex=True,
+        youtube_force_media_refresh=True,
+        youtube_force_comment_refresh=True,
+        initiated_by=None,
+    )
+
+    assert payload["queued_or_started_jobs"] == 2
+    run_config = run_config_holder.get("config")
+    assert isinstance(run_config, dict)
+    assert run_config["youtube_source_mode"] == "api_only"
+    assert run_config["youtube_force_reindex"] is True
+    assert run_config["youtube_force_media_refresh"] is True
+    assert run_config["youtube_force_comment_refresh"] is True
+    assert all(config["youtube_source_mode"] == "api_only" for config in created_job_configs)
 
 
 @pytest.mark.parametrize("platform", ["instagram", "tiktok", "twitter"])
@@ -2712,6 +2802,8 @@ def test_get_season_shared_status_summarizes_stage_buckets(monkeypatch: pytest.M
     def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any] | None:
         if "from social.shared_post_review_queue" in sql and "count(*)::int as count" in sql:
             return {"count": 2}
+        if "status = 'unmatched'" in sql:
+            return {"count": 7}
         if "from social.scrape_runs r" in sql:
             return {
                 "id": "shared-run-1",
@@ -2737,6 +2829,7 @@ def test_get_season_shared_status_summarizes_stage_buckets(monkeypatch: pytest.M
 
     assert payload["matched_posts"] == 1
     assert payload["review_queue_count"] == 2
+    assert payload["retained_unassigned_count"] == 7
     assert payload["shared_scrape_status"]["status"] == "running"
     assert payload["classification_status"]["status"] == "complete"
     assert payload["materialization_status"]["status"] == "queued"
@@ -6065,7 +6158,7 @@ def test_ingest_youtube_comments_stage_syncs_comment_counts_and_uses_snapshot_ex
     assert meta["youtube_comment_count_sync_targets"] == 1
 
 
-def test_refresh_post_comments_youtube_reports_comment_count_sync(monkeypatch) -> None:
+def test_refresh_post_comments_youtube_zero_limit_fetches_uncapped_comments(monkeypatch) -> None:
     monkeypatch.setattr(
         social_repo,
         "get_season_context",
@@ -6083,8 +6176,16 @@ def test_refresh_post_comments_youtube_reports_comment_count_sync(monkeypatch) -
         lambda sql, params: {"id": "db-yt-1", "account": "bravo"},
     )
 
+    captured: dict[str, Any] = {}
+    marked_missing: list[str] = []
+
     class _FakeYouTubeScraper:
+        comments_auth_failed = False
+        last_comment_fetch_reason = ""
+
         def fetch_comments(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
             return []
 
     monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
@@ -6099,6 +6200,12 @@ def test_refresh_post_comments_youtube_reports_comment_count_sync(monkeypatch) -
         "_count_stored_comments",
         lambda post_ids, platform: {"db-yt-1": 0},
     )
+    monkeypatch.setattr(
+        social_repo,
+        "_mark_missing_comments_for_anchor",
+        lambda **kwargs: marked_missing.append(str(kwargs.get("anchor_id"))) or 0,
+    )
+    monkeypatch.setattr(social_repo, "_reconcile_post_comment_count", lambda **kwargs: None)
 
     payload = social_repo.refresh_post_comments(
         "season-1",
@@ -6106,10 +6213,12 @@ def test_refresh_post_comments_youtube_reports_comment_count_sync(monkeypatch) -
         source_id="vid123",
         max_comments_per_post=0,
     )
+    assert captured["kwargs"]["max_comments"] == 1_000_000
     assert payload["youtube_comment_count_synced"] == 1
-    assert payload["is_complete"] is False
-    assert payload["incomplete_reason"] == "fetch_disabled"
-    assert payload["comment_fail_reasons"] == ["fetch_disabled"]
+    assert payload["is_complete"] is True
+    assert payload["incomplete_reason"] is None
+    assert payload["comment_fail_reasons"] == []
+    assert marked_missing == ["db-yt-1"]
 
 
 def test_refresh_youtube_post_detail_sync_derives_duration_from_iso_when_numeric_missing(monkeypatch) -> None:
@@ -6529,7 +6638,7 @@ def test_refresh_post_uses_null_detail_job_id_and_trace_id_for_media(monkeypatch
 
 
 def test_refresh_post_skips_media_sync_when_post_already_mirrored(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AWS_CDN_BASE_URL", raising=False)
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.thereality.report")
     social_repo._expected_cdn_host.cache_clear()
     monkeypatch.setattr(
         social_repo,
@@ -6554,6 +6663,7 @@ def test_refresh_post_skips_media_sync_when_post_already_mirrored(monkeypatch: p
                     "comments_count": 70,
                     "source_id": "abc123",
                     "thumbnail_url": "https://img.youtube.com/vi/abc123/maxresdefault.jpg",
+                    "user_avatar_url": "https://yt3.googleusercontent.com/avatar=s176",
                 },
             }
         return {
@@ -6565,6 +6675,8 @@ def test_refresh_post_skips_media_sync_when_post_already_mirrored(monkeypatch: p
                 "thumbnail_url": "https://img.youtube.com/vi/abc123/maxresdefault.jpg",
                 "hosted_thumbnail_url": "https://cdn.thereality.report/youtube/thumb.jpg",
                 "hosted_media_urls": ["https://cdn.thereality.report/youtube/video.mp4"],
+                "user_avatar_url": "https://yt3.googleusercontent.com/avatar=s176",
+                "hosted_user_avatar_url": "https://cdn.thereality.report/youtube/avatar.jpg",
             },
         }
 
@@ -6685,7 +6797,7 @@ def test_refresh_post_comments_tiktok_returns_additive_completeness_fields(monke
     assert marked_missing == []
 
 
-def test_refresh_post_comments_twitter_zero_limit_sets_fetch_disabled(monkeypatch) -> None:
+def test_refresh_post_comments_twitter_zero_limit_fetches_uncapped_replies(monkeypatch) -> None:
     monkeypatch.setattr(
         social_repo,
         "get_season_context",
@@ -6707,16 +6819,32 @@ def test_refresh_post_comments_twitter_zero_limit_sets_fetch_disabled(monkeypatc
     monkeypatch.setattr(social_repo, "_count_stored_quotes", lambda *_args, **_kwargs: {"123": 0})
     monkeypatch.setattr(social_repo, "_load_twitter_auth", lambda: ({}, "bearer"))
     monkeypatch.setattr(social_repo, "_load_twikit_credentials", lambda: {})
+    monkeypatch.setattr(social_repo, "_fetch_and_apply_twitter_metric_summary", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_mark_missing_comments_for_anchor",
+        lambda **_kwargs: 0,
+    )
+    monkeypatch.setattr(social_repo, "_reconcile_post_comment_count", lambda **_kwargs: None)
+    captured: dict[str, int] = {"reply_calls": 0, "quote_calls": 0}
 
     class _FakeTwitterScraper:
         comments_auth_failed = False
         last_reply_fetch_reason = ""
+        last_quote_fetch_reason = ""
 
         def __init__(self, *args, **kwargs) -> None:
             del args, kwargs
 
         def fetch_tweet_replies(self, *args, **kwargs):
-            raise AssertionError("fetch_tweet_replies should not be called when max_comments_per_post=0")
+            del args
+            captured["reply_calls"] += 1
+            return []
+
+        def fetch_tweet_quotes(self, *args, **kwargs):
+            del args, kwargs
+            captured["quote_calls"] += 1
+            return []
 
     monkeypatch.setattr("trr_backend.socials.twitter.TwitterScraper", _FakeTwitterScraper)
 
@@ -6728,11 +6856,13 @@ def test_refresh_post_comments_twitter_zero_limit_sets_fetch_disabled(monkeypatc
         fetch_replies=True,
     )
 
+    assert captured["reply_calls"] == 1
+    assert captured["quote_calls"] == 1
     assert payload["comments_fetched"] == 0
     assert payload["fetch_failed"] is False
-    assert payload["is_complete"] is False
-    assert payload["incomplete_reason"] == "fetch_disabled"
-    assert payload["comment_fail_reasons"] == ["fetch_disabled"]
+    assert payload["is_complete"] is True
+    assert payload["incomplete_reason"] is None
+    assert payload["comment_fail_reasons"] == []
 
 
 def test_refresh_post_comments_twitter_infers_auth_failed_when_no_session_artifacts(monkeypatch) -> None:
@@ -7956,6 +8086,29 @@ def test_ingest_season_stores_sync_strategy_and_platform_scope(monkeypatch) -> N
     captured_run_configs.clear()
     created_job_configs.clear()
 
+    uncapped_comments_payload = social_repo.ingest_season(
+        "season-1",
+        platforms=["instagram"],
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=0,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_and_comments",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 10, tzinfo=UTC),
+        initiated_by="admin@test",
+    )
+    assert uncapped_comments_payload["stages"] == ["posts", "comments"]
+    assert any(config["stage"] == "comments" for config in created_job_configs)
+    assert all(config["max_posts_per_target"] == 0 for config in created_job_configs)
+    assert all(config["max_comments_per_post"] == 1_000_000 for config in created_job_configs)
+    assert all(config["max_replies_per_post"] == 1_000_000 for config in created_job_configs)
+
+    captured_run_configs.clear()
+    created_job_configs.clear()
+
     with pytest.raises(social_repo.SocialIngestValidationError) as exc_info:
         social_repo.ingest_season(
             "season-1",
@@ -8123,6 +8276,77 @@ def test_ingest_season_creates_sharded_posts_for_adaptive_dual_runner(monkeypatc
     assert all(config.get("window_start") for config in created_job_configs)
     assert all(config.get("window_end") for config in created_job_configs)
     assert {str(config.get("runner_lane") or "") for config in created_job_configs} == {"A"}
+
+
+def test_ingest_season_keeps_multi_account_targeted_runs_dual_lane_and_fair(monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id = "21111111-1111-4111-8111-111111111111"
+    context = SeasonContext(
+        season_id="season-fair-run",
+        show_id="show-fair-run",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2026, 1, 1),
+    )
+    captured_run_configs: list[dict[str, object]] = []
+    created_job_configs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: context)
+    monkeypatch.setattr(
+        social_repo,
+        "get_targets",
+        lambda *_args, **_kwargs: {
+            "targets": [
+                {
+                    "platform": "instagram",
+                    "accounts": ["bravotv", "bravowwhl"],
+                    "hashtags": [],
+                    "keywords": [],
+                    "is_active": True,
+                }
+            ]
+        },
+    )
+
+    def _fake_create_run(*_args, **kwargs):
+        captured_run_configs.append(kwargs["config"])
+        return run_id
+
+    def _fake_create_job(*_args, **kwargs):
+        created_job_configs.append(kwargs["config"])
+        return f"job-{len(created_job_configs)}"
+
+    monkeypatch.setattr(social_repo, "_create_run", _fake_create_run)
+    monkeypatch.setattr(social_repo, "_create_job", _fake_create_job)
+    monkeypatch.setattr(social_repo, "_update_run_summary", lambda _run_id: {"total_jobs": len(created_job_configs)})
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+
+    payload = social_repo.ingest_season(
+        context.season_id,
+        platforms=["instagram"],
+        source_scope="creator",
+        sync_strategy="incremental",
+        max_posts_per_target=100,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_only",
+        date_start=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        date_end=datetime(2026, 1, 1, 5, 59, tzinfo=UTC),
+        runner_strategy="single_runner",
+        runner_count=1,
+        window_shard_hours=2,
+        day_weight_profile="rhoslc_default",
+        priority_mode="episode_peak_weighted",
+        initiated_by="admin@test",
+    )
+
+    assert payload["run_id"] == run_id
+    assert payload["queued_or_started_jobs"] == 2
+    assert captured_run_configs[0]["runner_strategy"] == "adaptive_dual_runner"
+    assert captured_run_configs[0]["runner_count"] == 2
+    assert created_job_configs[0]["account"] == "bravotv"
+    assert created_job_configs[1]["account"] == "bravowwhl"
 
 
 def test_assert_worker_available_when_queue_enabled_raises_without_healthy_worker(monkeypatch) -> None:
@@ -8560,6 +8784,68 @@ def test_dispatch_due_social_jobs_modal_dispatches_eligible_jobs(monkeypatch: py
     assert metadata_updates
     assert any(update[1].get("remote_invocation_id") == "call-job-1" for update in metadata_updates)
     assert dispatcher_heartbeats
+
+
+def test_dispatch_due_social_jobs_uses_env_dispatch_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("SOCIAL_MODAL_DISPATCH_LIMIT", "1")
+
+    candidates = [
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "platform": "instagram",
+            "job_type": "posts",
+            "config": {"stage": "posts"},
+            "metadata": {},
+        },
+        {
+            "id": "job-2",
+            "run_id": "run-1",
+            "platform": "tiktok",
+            "job_type": "posts",
+            "config": {"stage": "posts"},
+            "metadata": {},
+        },
+    ]
+    dispatched_job_ids: list[str] = []
+
+    monkeypatch.setattr(social_repo, "_modal_social_dispatch_ready", lambda: (True, None))
+    monkeypatch.setattr(
+        social_repo,
+        "_list_candidate_jobs_for_modal_dispatch",
+        lambda *, run_id=None, limit=200: list(candidates),
+    )
+    monkeypatch.setattr(social_repo, "_current_modal_dispatch_running_counts", lambda: ({}, {}))
+    monkeypatch.setattr(social_repo, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
+    monkeypatch.setattr(
+        social_repo,
+        "dispatch_social_job",
+        lambda *, job_id: dispatched_job_ids.append(job_id)
+        or {"dispatched": True, "reason": None, "call_id": f"call-{job_id}"},
+    )
+
+    result = social_repo.dispatch_due_social_jobs(run_id="run-1")
+
+    assert result["dispatched_job_ids"] == ["job-1"]
+    assert result["dispatch_attempts"] == 1
+    assert dispatched_job_ids == ["job-1"]
+
+
+def test_modal_dispatch_stage_caps_follow_worker_pool_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOCIAL_WORKER_POOL_POSTS", "13")
+    monkeypatch.setenv("SOCIAL_WORKER_POOL_COMMENTS", "11")
+    monkeypatch.setenv("SOCIAL_WORKER_POOL_MEDIA_MIRROR", "7")
+    monkeypatch.setenv("SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR", "5")
+
+    assert social_repo._modal_dispatch_stage_global_cap("posts") == 13
+    assert social_repo._modal_dispatch_stage_global_cap("comments") == 11
+    assert social_repo._modal_dispatch_stage_global_cap("media_mirror") == 7
+    assert social_repo._modal_dispatch_stage_global_cap("comment_media_mirror") == 5
 
 
 def test_claim_and_process_social_job_dispatches_follow_up_work(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -9476,6 +9762,7 @@ def test_ingest_instagram_posts_stage_passes_hashtags_and_matches_structured_tok
 
 def test_ingest_instagram_details_refresh_prefers_gallery_views_when_detail_missing(monkeypatch) -> None:
     refreshed_calls: list[dict[str, object]] = []
+    load_existing_posts_source_ids: list[object] = []
 
     class _FakeInstagramScraper:
         comments_auth_failed = False
@@ -9516,6 +9803,7 @@ def test_ingest_instagram_details_refresh_prefers_gallery_views_when_detail_miss
         ingest_mode="details_refresh",
         date_start=datetime(2026, 2, 1, tzinfo=UTC),
         date_end=datetime(2026, 2, 28, tzinfo=UTC),
+        comment_anchor_source_ids={"instagram": {"abc123"}},
     )
 
     monkeypatch.setattr("trr_backend.socials.instagram.InstagramScraper", _FakeInstagramScraper)
@@ -9526,8 +9814,9 @@ def test_ingest_instagram_details_refresh_prefers_gallery_views_when_detail_miss
     monkeypatch.setattr(
         social_repo,
         "_load_existing_posts",
-        lambda platform, *_args, **_kwargs: (
-            [
+        lambda platform, *_args, **kwargs: (
+            load_existing_posts_source_ids.append(kwargs.get("source_ids"))
+            or [
                 {
                     "id": "post-db-1",
                     "shortcode": "abc123",
@@ -9561,6 +9850,7 @@ def test_ingest_instagram_details_refresh_prefers_gallery_views_when_detail_miss
     assert posts == 1
     assert comments == 0
     assert len(refreshed_calls) == 1
+    assert load_existing_posts_source_ids == [{"abc123"}]
     call = refreshed_calls[0]
     assert call["views"] == 2151
     assert call["views_source"] == "node.overlay.play_count"
@@ -9569,6 +9859,8 @@ def test_ingest_instagram_details_refresh_prefers_gallery_views_when_detail_miss
 
 def test_ingest_instagram_details_refresh_preserves_views_when_detail_has_no_view_candidate(monkeypatch) -> None:
     refreshed_calls: list[dict[str, object]] = []
+    upserted_shortcodes: list[str] = []
+    enqueued_post_ids: list[str] = []
 
     class _FakeInstagramScraper:
         comments_auth_failed = False
@@ -9585,6 +9877,15 @@ def test_ingest_instagram_details_refresh_preserves_views_when_detail_has_no_vie
 
         def _parse_post_node(self, _node, _config):  # noqa: SLF001
             return SimpleNamespace(
+                shortcode="abc123",
+                caption="Updated caption",
+                hashtags=["RHOSLC"],
+                mentions=[],
+                collaborators=[],
+                profile_tags=[],
+                media_urls=["https://cdn.example/video.mp4"],
+                thumbnail_url="https://cdn.example/thumb.jpg",
+                taken_at=int(datetime(2026, 2, 15, tzinfo=UTC).timestamp()),
                 likes=91,
                 comments=12,
                 video_views=0,
@@ -9641,6 +9942,33 @@ def test_ingest_instagram_details_refresh_preserves_views_when_detail_has_no_vie
         "_refresh_instagram_post_metrics_only",
         lambda **kwargs: refreshed_calls.append(kwargs),
     )
+    monkeypatch.setattr(
+        social_repo,
+        "_enrich_instagram_post_from_permalink",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_upsert_instagram_post",
+        lambda _context, **kwargs: (
+            upserted_shortcodes.append(str(getattr(kwargs.get("post"), "shortcode", "")))
+            or {
+                "id": "post-db-1",
+                "shortcode": "abc123",
+                "thumbnail_url": "https://cdn.example/thumb.jpg",
+                "media_urls": ["https://cdn.example/video.mp4"],
+                "media_mirror_status": "pending",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_instagram_media_mirror_job",
+        lambda _context, **kwargs: (
+            enqueued_post_ids.append(str((kwargs.get("post_row") or {}).get("id") or ""))
+            or "mirror-job-1"
+        ),
+    )
 
     posts, comments, meta = social_repo._ingest_instagram(
         context,
@@ -9656,9 +9984,12 @@ def test_ingest_instagram_details_refresh_preserves_views_when_detail_has_no_vie
     assert posts == 1
     assert comments == 0
     assert len(refreshed_calls) == 1
+    assert upserted_shortcodes == ["abc123"]
+    assert enqueued_post_ids == ["post-db-1"]
     call = refreshed_calls[0]
     assert call["views"] is None
     assert meta.get("details_refresh_views_preserved_missing") == 1
+    assert meta.get("media_mirror_jobs_enqueued") == 1
 
 
 def test_ingest_tiktok_posts_stage_passes_hashtags_and_matches_structured_tokens(monkeypatch) -> None:
@@ -9992,7 +10323,7 @@ def test_refresh_post_comments_instagram_returns_additive_completeness_fields(mo
     assert marked_missing == []
 
 
-def test_refresh_post_comments_instagram_zero_limit_sets_fetch_disabled(monkeypatch) -> None:
+def test_refresh_post_comments_instagram_zero_limit_fetches_uncapped_comments(monkeypatch) -> None:
     monkeypatch.setattr(
         social_repo,
         "get_season_context",
@@ -10013,8 +10344,16 @@ def test_refresh_post_comments_instagram_zero_limit_sets_fetch_disabled(monkeypa
     monkeypatch.setattr(
         social_repo,
         "_count_stored_comments",
-        lambda _post_ids, _platform: {"ig-db-1": 2},
+        lambda _post_ids, _platform: {"ig-db-1": 0},
     )
+    marked_missing: list[str] = []
+    monkeypatch.setattr(
+        social_repo,
+        "_mark_missing_comments_for_anchor",
+        lambda **kwargs: marked_missing.append(str(kwargs.get("anchor_id"))) or 0,
+    )
+    monkeypatch.setattr(social_repo, "_reconcile_post_comment_count", lambda **kwargs: None)
+    captured: dict[str, Any] = {}
 
     class _FakeInstagramScraper:
         comments_auth_failed = False
@@ -10024,7 +10363,9 @@ def test_refresh_post_comments_instagram_zero_limit_sets_fetch_disabled(monkeypa
             del args, kwargs
 
         def fetch_comments(self, *args, **kwargs):
-            raise AssertionError("fetch_comments should not be called when max_comments_per_post=0")
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return []
 
     monkeypatch.setattr("trr_backend.socials.instagram.InstagramScraper", _FakeInstagramScraper)
 
@@ -10036,11 +10377,13 @@ def test_refresh_post_comments_instagram_zero_limit_sets_fetch_disabled(monkeypa
         fetch_replies=False,
     )
 
+    assert captured["kwargs"]["max_comments"] == 1_000_000
     assert payload["comments_fetched"] == 0
-    assert payload["is_complete"] is False
-    assert payload["incomplete_reason"] == "fetch_disabled"
-    assert payload["comment_fetch_reason"] == "fetch_disabled"
-    assert payload["comment_fail_reasons"] == ["fetch_disabled"]
+    assert payload["is_complete"] is True
+    assert payload["incomplete_reason"] is None
+    assert payload["comment_fetch_reason"] == ""
+    assert payload["comment_fail_reasons"] == []
+    assert marked_missing == ["ig-db-1"]
 
 
 def test_mirror_instagram_media_to_s3_dedupes_thumbnail_and_media(monkeypatch) -> None:
@@ -10186,7 +10529,7 @@ def test_platform_post_needs_media_mirror_tiktok_requires_hosted_media_urls() ->
 
 
 def test_platform_post_needs_media_mirror_flags_non_cdn_thumbnail_host(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
         post_row = {
@@ -10205,7 +10548,7 @@ def test_platform_post_needs_media_mirror_flags_non_cdn_thumbnail_host(monkeypat
 
 
 def test_platform_post_needs_media_mirror_flags_non_cdn_media_host(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
         post_row = {
@@ -10224,7 +10567,7 @@ def test_platform_post_needs_media_mirror_flags_non_cdn_media_host(monkeypatch) 
 
 
 def test_platform_post_needs_media_mirror_flags_html_hosted_media_urls(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
         post_row = {
@@ -10243,7 +10586,7 @@ def test_platform_post_needs_media_mirror_flags_html_hosted_media_urls(monkeypat
 
 
 def test_platform_post_needs_media_mirror_flags_page_like_hosted_media_urls(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
         post_row = {
@@ -10262,7 +10605,7 @@ def test_platform_post_needs_media_mirror_flags_page_like_hosted_media_urls(monk
 
 
 def test_platform_post_needs_media_mirror_flags_non_video_hosted_urls_for_youtube(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
         post_row = {
@@ -10281,7 +10624,7 @@ def test_platform_post_needs_media_mirror_flags_non_video_hosted_urls_for_youtub
 
 
 def test_platform_post_needs_media_mirror_accepts_matching_cdn_hosts(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
         post_row = {
@@ -10299,8 +10642,58 @@ def test_platform_post_needs_media_mirror_accepts_matching_cdn_hosts(monkeypatch
         social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
 
 
+def test_platform_post_needs_media_mirror_detects_missing_hosted_avatar_for_youtube(monkeypatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "yt-db-avatar-1",
+            "video_id": "video-123",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://www.youtube.com/watch?v=video-123"],
+            "hosted_thumbnail_url": "https://cdn.test/social/youtube/x/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/youtube/x/media-01.mp4"],
+            "user_avatar_url": "https://yt3.googleusercontent.com/avatar=s176",
+            "hosted_user_avatar_url": "",
+            "media_mirror_status": "mirrored",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("youtube", post_row) is True
+        assert social_repo._platform_post_repair_reasons("youtube", post_row) == ["missing_hosted_avatar"]  # noqa: SLF001
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_platform_post_needs_media_mirror_detects_stale_media_asset_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        post_row = {
+            "id": "yt-db-meta-1",
+            "video_id": "video-123",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://www.youtube.com/watch?v=video-123"],
+            "hosted_thumbnail_url": "https://cdn.test/social/youtube/x/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/social/youtube/x/media-01.mp4"],
+            "user_avatar_url": "https://yt3.googleusercontent.com/avatar=s176",
+            "hosted_user_avatar_url": "https://cdn.test/social/youtube/profile-pics/bravo/avatar.jpg",
+            "raw_data": {
+                "media_asset_meta": {
+                    "hosted_assets": [],
+                    "thumbnail_hosted": {"url": "https://cdn.test/social/youtube/x/thumb.jpg"},
+                }
+            },
+            "media_mirror_status": "mirrored",
+        }
+
+        assert social_repo._platform_post_needs_media_mirror("youtube", post_row) is True
+        assert social_repo._platform_post_repair_reasons("youtube", post_row) == ["stale_media_metadata"]  # noqa: SLF001
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
 def test_platform_post_needs_media_mirror_ignores_failed_status_when_hosted_urls_are_complete(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
         post_row = {
@@ -10310,6 +10703,8 @@ def test_platform_post_needs_media_mirror_ignores_failed_status_when_hosted_urls
             "media_urls": [],
             "hosted_thumbnail_url": "https://cdn.test/social/youtube/x/thumb.jpg",
             "hosted_media_urls": ["https://cdn.test/social/youtube/x/media-01.mp4"],
+            "user_avatar_url": "https://yt3.googleusercontent.com/avatar=s176",
+            "hosted_user_avatar_url": "https://cdn.test/social/youtube/profile-pics/bravo/avatar.jpg",
             "media_mirror_status": "failed",
         }
 
@@ -10321,7 +10716,7 @@ def test_platform_post_needs_media_mirror_ignores_failed_status_when_hosted_urls
 def test_platform_post_needs_media_mirror_twitter_flags_video_hosted_thumbnail_with_image_candidate(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.test")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
         post_row = {
@@ -10902,6 +11297,90 @@ def test_run_platform_media_mirror_stage_youtube_resolves_source_media(monkeypat
     assert updates and updates[0]["media_mirror_status"] == "pending"
 
 
+def test_run_platform_media_mirror_stage_threads_uses_supported_table(monkeypatch) -> None:
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    post_id = "00000000-0000-0000-0000-000000000114"
+    updates: list[dict[str, object]] = []
+    mirrored_inputs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": post_id,
+            "source_id": "threads-post-1",
+            "thumbnail_url": "https://images.test/threads-thumb.jpg",
+            "media_urls": ["https://images.test/threads-video.mp4"],
+            "post_username": "bravotv",
+            "raw_data": {},
+            "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+            "hosted_thumbnail_url": "",
+            "hosted_media_urls": [],
+            "media_mirror_status": "failed",
+            "media_mirror_error": "old",
+            "user_avatar_url": "https://images.test/threads-avatar.jpg",
+            "hosted_user_avatar_url": "https://cdn.test/profile-pics/threads-avatar.jpg",
+            "owner_profile_pic_url": "",
+            "hosted_owner_profile_pic_url": "",
+            "hosted_tagged_profile_pics": {},
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_platform_post_media_mirror_fields",
+        lambda **kwargs: updates.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(social_repo, "_update_platform_post_media_asset_meta", lambda **_kwargs: None)
+
+    def _fake_mirror_result(_context, *, platform: str, post, week_index: int | None, display_name: str | None = None):  # noqa: ANN001
+        del display_name
+        mirrored_inputs.append(
+            {
+                "platform": platform,
+                "week_index": week_index,
+                "thumbnail_url": post.thumbnail_url,
+                "media_urls": list(post.media_urls or []),
+            }
+        )
+        return {
+            "hosted_thumbnail_url": "https://cdn.test/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/video.mp4"],
+            "status": "mirrored",
+            "error": None,
+            "retryable_error": False,
+            "mirrored_count": 2,
+            "source_count": 2,
+        }
+
+    monkeypatch.setattr(social_repo, "_mirror_platform_media_to_s3_result", _fake_mirror_result)
+
+    posts, mirrored, metadata = social_repo._run_platform_media_mirror_stage(
+        context=context,
+        platform="threads",
+        job_id="job-threads-1",
+        config={"post_id": post_id, "_attempt_count": 1, "week_index": 1},
+    )
+
+    assert posts == 1
+    assert mirrored == 2
+    assert mirrored_inputs == [
+        {
+            "platform": "threads",
+            "week_index": 1,
+            "thumbnail_url": "https://images.test/threads-thumb.jpg",
+            "media_urls": ["https://images.test/threads-video.mp4"],
+        }
+    ]
+    assert metadata["mirror"]["status"] == "mirrored"
+    assert updates and updates[0]["media_mirror_status"] == "pending"
+
+
 def test_run_platform_media_mirror_stage_twitter_resolves_video_from_public_summary(monkeypatch) -> None:
     context = SeasonContext(
         season_id="season-1",
@@ -11061,7 +11540,7 @@ def test_run_platform_media_mirror_stage_twitter_prefers_non_video_thumbnail_fro
 def test_run_platform_media_mirror_stage_youtube_skips_when_media_is_already_hosted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AWS_CDN_BASE_URL", raising=False)
+    monkeypatch.delenv("OBJECT_STORAGE_PUBLIC_BASE_URL", raising=False)
     social_repo._expected_cdn_host.cache_clear()
     context = SeasonContext(
         season_id="season-1",
@@ -11087,8 +11566,8 @@ def test_run_platform_media_mirror_stage_youtube_skips_when_media_is_already_hos
             "hosted_media_urls": ["https://cdn.test/video.mp4"],
             "media_mirror_status": "mirrored",
             "media_mirror_error": "",
-            "user_avatar_url": "",
-            "hosted_user_avatar_url": "",
+            "user_avatar_url": "https://yt3.googleusercontent.com/avatar=s176",
+            "hosted_user_avatar_url": "https://cdn.test/social/youtube/profile-pics/bravo/avatar.jpg",
         },
     )
     monkeypatch.setattr(
@@ -11114,6 +11593,110 @@ def test_run_platform_media_mirror_stage_youtube_skips_when_media_is_already_hos
     assert metadata["activity"]["phase"] == "media_mirror_skipped"
     assert metadata["mirror"]["status"] == "skipped"
     assert metadata["mirror"]["reason"] == "already_mirrored"
+
+
+def test_run_platform_media_mirror_stage_youtube_repairs_avatar_without_remirroring_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OBJECT_STORAGE_PUBLIC_BASE_URL", raising=False)
+    social_repo._expected_cdn_host.cache_clear()
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    post_id = "00000000-0000-0000-0000-000000000113"
+    updated_source_avatar: list[dict[str, object]] = []
+    updated_hosted_avatar: list[dict[str, object]] = []
+    mirrored_avatar_inputs: list[dict[str, object]] = []
+    media_mirror_status_updates: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": post_id,
+            "source_id": "yt-video-avatar",
+            "thumbnail_url": "https://img.youtube.com/vi/yt-video-avatar/maxresdefault.jpg",
+            "media_urls": ["https://www.youtube.com/watch?v=yt-video-avatar"],
+            "post_username": "BravoTV",
+            "raw_data": {},
+            "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+            "hosted_thumbnail_url": "https://cdn.test/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/video.mp4"],
+            "media_mirror_status": "mirrored",
+            "media_mirror_error": "",
+            "user_avatar_url": "",
+            "hosted_user_avatar_url": "",
+            "owner_profile_pic_url": "",
+            "hosted_owner_profile_pic_url": "",
+            "hosted_tagged_profile_pics": {},
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_youtube_media_for_video_id",
+        lambda **_kwargs: {
+            "source": "youtube_api",
+            "media_urls": ["https://www.youtube.com/watch?v=yt-video-avatar"],
+            "thumbnail_url": "https://img.youtube.com/vi/yt-video-avatar/maxresdefault.jpg",
+            "author_avatar_url": "https://yt3.googleusercontent.com/avatar=s176",
+            "media_asset_meta": {},
+            "attempts": [],
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_mirror_platform_media_to_s3_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("media should not be remirrored")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_platform_post_media_mirror_fields",
+        lambda **kwargs: media_mirror_status_updates.append(kwargs),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_platform_posts_has_column",
+        lambda _platform, column: column in {"hosted_user_avatar_url", "raw_data"},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_platform_post_field",
+        lambda **kwargs: updated_source_avatar.append(kwargs),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_mirror_post_author_avatar_to_s3",
+        lambda **kwargs: mirrored_avatar_inputs.append(kwargs) or "https://cdn.test/profile-pics/avatar.jpg",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_post_hosted_avatar",
+        lambda **kwargs: updated_hosted_avatar.append(kwargs),
+    )
+    monkeypatch.setattr(social_repo, "_update_platform_post_media_asset_meta", lambda **_kwargs: None)
+
+    posts, mirrored, metadata = social_repo._run_platform_media_mirror_stage(
+        context=context,
+        platform="youtube",
+        job_id="job-youtube-avatar-only",
+        config={"post_id": post_id, "_attempt_count": 1, "week_index": 1},
+    )
+
+    assert posts == 1
+    assert mirrored == 2
+    assert media_mirror_status_updates == []
+    assert updated_source_avatar[0]["field"] == "user_avatar_url"
+    assert updated_source_avatar[0]["value"] == "https://yt3.googleusercontent.com/avatar=s176"
+    assert mirrored_avatar_inputs[0]["source_avatar_url"] == "https://yt3.googleusercontent.com/avatar=s176"
+    assert updated_hosted_avatar[0]["hosted_user_avatar_url"] == "https://cdn.test/profile-pics/avatar.jpg"
+    assert metadata["mirror"]["status"] == "up_to_date"
+    assert metadata["mirror"]["repair_reasons"] == ["missing_source_avatar"]
+    assert metadata["avatar_recovery"]["status"] == "recovered"
+    assert metadata["avatar_mirror"]["status"] == "mirrored"
 
 
 def test_requeue_media_mirror_jobs_supports_non_instagram_platforms(monkeypatch) -> None:
@@ -11700,6 +12283,435 @@ def test_ingest_youtube_incremental_existing_window_applies_page_cap_when_unlimi
     assert captured["max_pages"] == 6
     assert meta["incremental_existing_window_page_cap"] == 6
     assert meta["incremental_existing_window_videos"] == 1
+
+
+def test_ingest_youtube_hybrid_mode_merges_api_and_scraper_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    upserted_ids: list[str] = []
+    channel_sync_saves: list[dict[str, Any]] = []
+    video_sync_saves: list[dict[str, Any]] = []
+
+    class _FakeYouTubeScraper:
+        last_retrieval_meta: dict[str, object] = {"scraper_candidate_videos": 1}
+
+        def resolve_channel_identity(self, handle: str, delay: float = 0.0) -> dict[str, str]:
+            return {"canonical_handle": handle, "channel_id": "channel-123"}
+
+        def scrape(self, _config, progress_cb=None):
+            if progress_cb:
+                progress_cb({"phase": "scrape_posts", "pages_scanned": 1, "posts_checked": 1, "matched_posts": 1})
+            return [
+                SimpleNamespace(
+                    video_id="short-api-1",
+                    title="RHOSLC short teaser",
+                    description="RHOSLC",
+                    comments=0,
+                    source_surface="shorts",
+                    is_short=True,
+                    url="https://www.youtube.com/shorts/short-api-1",
+                    thumbnail_url="https://img.youtube.com/vi/short-api-1/maxresdefault.jpg",
+                    tags=["RHOSLC"],
+                )
+            ]
+
+        def fetch_comments(self, *args, **kwargs):
+            return []
+
+    class _FakeYouTubeApiClient:
+        def enabled(self) -> bool:
+            return True
+
+        def resolve_channel(self, handle: str) -> dict[str, Any]:
+            return {
+                "channel_id": "channel-123",
+                "title": "Bravo",
+                "canonical_handle": handle,
+                "uploads_playlist_id": "uploads-123",
+            }
+
+        def list_channel_videos(self, **kwargs) -> dict[str, Any]:
+            return {
+                "channel": self.resolve_channel("bravo"),
+                "next_page_token": "page-2",
+                "api_calls": 3,
+                "items": [
+                    {
+                        "video_id": "vid-api-1",
+                        "playlist_item": {"snippet": {"publishedAt": "2026-01-05T12:00:00Z"}},
+                        "video": {
+                            "id": "vid-api-1",
+                            "snippet": {
+                                "publishedAt": "2026-01-05T12:00:00Z",
+                                "title": "RHOSLC preview",
+                                "description": "RHOSLC",
+                                "channelId": "channel-123",
+                                "channelTitle": "Bravo",
+                                "thumbnails": {
+                                    "high": {"url": "https://img.youtube.com/vi/vid-api-1/hqdefault.jpg"}
+                                },
+                                "tags": ["RHOSLC"],
+                            },
+                            "contentDetails": {"duration": "PT4M5S"},
+                            "statistics": {"viewCount": "100", "likeCount": "20", "commentCount": "0"},
+                        },
+                    }
+                ],
+            }
+
+    context = SeasonContext(
+        season_id="season-youtube-hybrid",
+        show_id="show-youtube-hybrid",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    opts = social_repo.IngestOptions(
+        platforms={"youtube"},
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=0,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_only",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 31, tzinfo=UTC),
+        youtube_source_mode="hybrid",
+    )
+
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeDataApiClient", _FakeYouTubeApiClient)
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
+    monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_cleanup_mismatched_youtube_rows",
+        lambda **kwargs: {"scanned": 0, "videos_deleted": 0, "comments_deleted": 0},
+    )
+    monkeypatch.setattr(social_repo, "_load_existing_posts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(social_repo, "_load_youtube_channel_sync_state", lambda **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_save_youtube_channel_sync_state",
+        lambda *args, **kwargs: channel_sync_saves.append(kwargs),
+    )
+    monkeypatch.setattr(social_repo, "_load_youtube_video_sync_state", lambda **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_save_youtube_video_sync_state",
+        lambda *args, **kwargs: video_sync_saves.append(kwargs),
+    )
+    monkeypatch.setattr(social_repo, "_youtube_video_matches_owner_identity", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_youtube_transcript_ingest_enabled", lambda: False)
+    monkeypatch.setattr(social_repo, "_enqueue_platform_media_mirror_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_youtube_media_for_video_id",
+        lambda **kwargs: {
+            "source": "watch_page_streaming_data",
+            "media_urls": [f"https://cdn.test/{kwargs['video_id']}.mp4"],
+            "thumbnail_url": f"https://cdn.test/{kwargs['video_id']}.jpg",
+            "attempts": [{"source": "watch_page_streaming_data", "success": True}],
+            "media_asset_meta": {"source_assets": []},
+        },
+    )
+    monkeypatch.setattr(social_repo, "_update_youtube_post_source_media_fields", lambda **kwargs: None)
+    monkeypatch.setattr(social_repo, "_update_platform_post_media_asset_meta", lambda **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_upsert_youtube_video",
+        lambda *_args, **kwargs: (
+            upserted_ids.append(str(getattr(kwargs.get("video"), "video_id", ""))),
+            {"id": f"db-{getattr(kwargs.get('video'), 'video_id', 'unknown')}"},
+        )[1],
+    )
+    monkeypatch.setattr(social_repo, "_sync_youtube_video_comment_counts", lambda *_args, **_kwargs: 0)
+
+    posts, comments, meta = social_repo._ingest_youtube(
+        context,
+        run_id="run-youtube-hybrid",
+        account="bravo",
+        hashtags=["RHOSLC"],
+        keywords=["RHOSLC"],
+        opts=opts,
+        job_id="job-youtube-hybrid",
+        stage="posts",
+    )
+
+    assert posts == 2
+    assert comments == 0
+    assert sorted(upserted_ids) == ["short-api-1", "vid-api-1"]
+    assert meta["discovery_source"] == "hybrid"
+    assert meta["matched_videos"] == 1
+    assert meta["matched_shorts"] == 1
+    assert meta["api_calls"] == 3
+    assert channel_sync_saves
+    assert video_sync_saves
+
+
+def test_ingest_youtube_repairs_epoch_short_row_when_rediscovered(monkeypatch: pytest.MonkeyPatch) -> None:
+    upserted_videos: list[dict[str, object]] = []
+
+    class _FakeYouTubeScraper:
+        last_retrieval_meta: dict[str, object] = {
+            "shorts_candidates_found": 1,
+            "shorts_precise_publish_attempts": 1,
+            "shorts_precise_publish_successes": 1,
+            "shorts_precise_publish_failures": 0,
+            "shorts_undated_skipped": 0,
+        }
+
+        def resolve_channel_identity(self, handle: str, delay: float = 0.0) -> dict[str, str]:
+            return {"canonical_handle": handle, "channel_id": "channel-short"}
+
+        def scrape(self, _config, progress_cb=None):
+            if progress_cb:
+                progress_cb({"phase": "scrape_posts", "pages_scanned": 1, "posts_checked": 1, "matched_posts": 1})
+            return [
+                SimpleNamespace(
+                    video_id="short-repair-1",
+                    title="RHOSLC short repair",
+                    description="RHOSLC",
+                    comments=0,
+                    source_surface="shorts",
+                    is_short=True,
+                    url="https://www.youtube.com/shorts/short-repair-1",
+                    thumbnail_url="https://img.youtube.com/vi/short-repair-1/maxresdefault.jpg",
+                    published_at=int(datetime(2025, 9, 5, 12, 0, tzinfo=UTC).timestamp()),
+                    tags=["RHOSLC"],
+                )
+            ]
+
+        def fetch_comments(self, *args, **kwargs):
+            return []
+
+    class _DisabledYouTubeApiClient:
+        def enabled(self) -> bool:
+            return False
+
+    context = SeasonContext(
+        season_id="season-youtube-short-repair",
+        show_id="show-youtube-short-repair",
+        show_name="The Real Housewives of Salt Lake City",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+        show_slug="rhoslc",
+    )
+    opts = social_repo.IngestOptions(
+        platforms={"youtube"},
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=0,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_only",
+        date_start=datetime(2025, 8, 14, tzinfo=UTC),
+        date_end=datetime(2025, 9, 16, tzinfo=UTC),
+        youtube_source_mode="scraper_only",
+    )
+
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeDataApiClient", _DisabledYouTubeApiClient)
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
+    monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_cleanup_mismatched_youtube_rows",
+        lambda **kwargs: {"scanned": 0, "videos_deleted": 0, "comments_deleted": 0},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_load_existing_posts",
+        lambda *args, **kwargs: [
+            {
+                "id": "db-short-repair-1",
+                "video_id": "short-repair-1",
+                "published_at": datetime(1970, 1, 1, tzinfo=UTC),
+                "comments_count": 0,
+                "thumbnail_url": "",
+                "media_urls": [],
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo, "_load_youtube_channel_sync_state", lambda **kwargs: None)
+    monkeypatch.setattr(social_repo, "_save_youtube_channel_sync_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_load_youtube_video_sync_state", lambda **kwargs: None)
+    monkeypatch.setattr(social_repo, "_save_youtube_video_sync_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_youtube_video_matches_owner_identity", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_youtube_transcript_ingest_enabled", lambda: False)
+    monkeypatch.setattr(social_repo, "_enqueue_platform_media_mirror_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_youtube_media_for_video_id",
+        lambda **kwargs: {
+            "source": "watch_page_streaming_data",
+            "media_urls": [f"https://cdn.test/{kwargs['video_id']}.mp4"],
+            "thumbnail_url": f"https://cdn.test/{kwargs['video_id']}.jpg",
+            "attempts": [{"source": "watch_page_streaming_data", "success": True}],
+            "media_asset_meta": {"source_assets": []},
+        },
+    )
+    monkeypatch.setattr(social_repo, "_update_youtube_post_source_media_fields", lambda **kwargs: None)
+    monkeypatch.setattr(social_repo, "_update_platform_post_media_asset_meta", lambda **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_upsert_youtube_video",
+        lambda *_args, **kwargs: (
+            upserted_videos.append(
+                {
+                    "video_id": str(getattr(kwargs.get("video"), "video_id", "")),
+                    "published_at": int(getattr(kwargs.get("video"), "published_at", 0) or 0),
+                    "source_surface": str(getattr(kwargs.get("video"), "source_surface", "")),
+                }
+            ),
+            {"id": "db-short-repair-1"},
+        )[1],
+    )
+    monkeypatch.setattr(social_repo, "_sync_youtube_video_comment_counts", lambda *_args, **_kwargs: 0)
+
+    posts, comments, meta = social_repo._ingest_youtube(
+        context,
+        run_id="run-youtube-short-repair",
+        account="bravo",
+        hashtags=["RHOSLC"],
+        keywords=["RHOSLC"],
+        opts=opts,
+        job_id="job-youtube-short-repair",
+        stage="posts",
+    )
+
+    assert posts == 1
+    assert comments == 0
+    assert upserted_videos == [
+        {
+            "video_id": "short-repair-1",
+            "published_at": int(datetime(2025, 9, 5, 12, 0, tzinfo=UTC).timestamp()),
+            "source_surface": "shorts",
+        }
+    ]
+    assert meta["matched_shorts"] == 1
+    assert meta["shorts_epoch_rows_repaired"] == 1
+    assert meta["shorts_precise_publish_attempts"] == 1
+    assert meta["shorts_precise_publish_successes"] == 1
+    assert meta["shorts_undated_skipped"] == 0
+
+
+def test_ingest_youtube_reports_missing_media_and_persists_sync_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    sync_state_updates: list[dict[str, Any]] = []
+
+    class _FakeYouTubeScraper:
+        last_retrieval_meta: dict[str, object] = {}
+
+        def resolve_channel_identity(self, handle: str, delay: float = 0.0) -> dict[str, str]:
+            return {"canonical_handle": handle, "channel_id": "channel-xyz"}
+
+        def scrape(self, _config, progress_cb=None):
+            if progress_cb:
+                progress_cb({"phase": "scrape_posts", "pages_scanned": 1, "posts_checked": 1, "matched_posts": 1})
+            return [
+                SimpleNamespace(
+                    video_id="vid-missing-media",
+                    title="RHOSLC missing media",
+                    description="RHOSLC",
+                    comments=0,
+                    source_surface="videos",
+                    is_short=False,
+                    url="https://www.youtube.com/watch?v=vid-missing-media",
+                    thumbnail_url="",
+                    tags=["RHOSLC"],
+                )
+            ]
+
+        def fetch_comments(self, *args, **kwargs):
+            return []
+
+    class _DisabledYouTubeApiClient:
+        def enabled(self) -> bool:
+            return False
+
+    context = SeasonContext(
+        season_id="season-youtube-media",
+        show_id="show-youtube-media",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    opts = social_repo.IngestOptions(
+        platforms={"youtube"},
+        source_scope="bravo",
+        sync_strategy="incremental",
+        max_posts_per_target=0,
+        max_comments_per_post=0,
+        max_replies_per_post=0,
+        fetch_replies=False,
+        ingest_mode="posts_only",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 31, tzinfo=UTC),
+        youtube_source_mode="scraper_only",
+        youtube_force_media_refresh=True,
+    )
+
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeDataApiClient", _DisabledYouTubeApiClient)
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
+    monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_cleanup_mismatched_youtube_rows",
+        lambda **kwargs: {"scanned": 0, "videos_deleted": 0, "comments_deleted": 0},
+    )
+    monkeypatch.setattr(social_repo, "_load_existing_posts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(social_repo, "_load_youtube_channel_sync_state", lambda **kwargs: None)
+    monkeypatch.setattr(social_repo, "_save_youtube_channel_sync_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_load_youtube_video_sync_state", lambda **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_save_youtube_video_sync_state",
+        lambda *args, **kwargs: sync_state_updates.append(kwargs),
+    )
+    monkeypatch.setattr(social_repo, "_youtube_video_matches_owner_identity", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_youtube_transcript_ingest_enabled", lambda: False)
+    monkeypatch.setattr(social_repo, "_enqueue_platform_media_mirror_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_youtube_media_for_video_id",
+        lambda **kwargs: {
+            "source": "resolve_exception",
+            "media_urls": [],
+            "thumbnail_url": None,
+            "attempts": [{"source": "resolve_exception", "success": False}],
+            "media_asset_meta": {},
+        },
+    )
+    monkeypatch.setattr(social_repo, "_update_youtube_post_source_media_fields", lambda **kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_upsert_youtube_video",
+        lambda *_args, **kwargs: {"id": "db-vid-missing-media"},
+    )
+    monkeypatch.setattr(social_repo, "_sync_youtube_video_comment_counts", lambda *_args, **_kwargs: 0)
+
+    posts, comments, meta = social_repo._ingest_youtube(
+        context,
+        run_id="run-youtube-media",
+        account="bravo",
+        hashtags=["RHOSLC"],
+        keywords=["RHOSLC"],
+        opts=opts,
+        job_id="job-youtube-media",
+        stage="posts",
+    )
+
+    assert posts == 1
+    assert comments == 0
+    assert meta["rows_missing_media"] == 1
+    assert meta["rows_missing_thumbnails"] == 1
+    assert meta["media_completion_failures"] == 2
+    assert sync_state_updates
+    assert sync_state_updates[0]["media_resolution_status"] == "missing_media"
 
 
 def test_ingest_twitter_comments_stage_treats_non_positive_post_limit_as_no_cap(monkeypatch) -> None:
@@ -13033,7 +14045,7 @@ def test_get_run_progress_snapshot_includes_dynamic_stages_and_per_handle(monkey
             "created_at": datetime(2026, 3, 5, 15, 1, tzinfo=UTC),
             "started_at": datetime(2026, 3, 5, 15, 2, tzinfo=UTC),
             "completed_at": None,
-            "config": {"account": "@bravotv", "stage": "posts"},
+            "config": {"account": "@bravotv", "stage": "posts", "runner_lane": "A"},
             "metadata": {"stage_counters": {"posts": 12}, "persist_counters": {"posts_upserted": 4}},
             "worker_id": "social-worker:a",
         },
@@ -13047,7 +14059,7 @@ def test_get_run_progress_snapshot_includes_dynamic_stages_and_per_handle(monkey
             "created_at": datetime(2026, 3, 5, 15, 3, tzinfo=UTC),
             "started_at": datetime(2026, 3, 5, 15, 3, tzinfo=UTC),
             "completed_at": datetime(2026, 3, 5, 15, 4, tzinfo=UTC),
-            "config": {"account": "@bravowwhl"},
+            "config": {"account": "@bravowwhl", "runner_lane": "B"},
             "metadata": {"stage": "comment_media_mirror", "persist_counters": {"comments_upserted": 2}},
             "worker_id": "social-worker:b",
         },
@@ -13091,6 +14103,8 @@ def test_get_run_progress_snapshot_includes_dynamic_stages_and_per_handle(monkey
     )
     assert posts_handle["jobs_running"] == 1
     assert posts_handle["jobs_waiting"] == 0
+    assert posts_handle["runner_lanes"] == ["A"]
+    assert posts_handle["has_started"] is True
 
 
 def test_get_run_progress_snapshot_counts_only_running_workers_as_active(monkeypatch: pytest.MonkeyPatch) -> None:

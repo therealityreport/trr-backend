@@ -19,40 +19,60 @@ class _FakeCursor:
         return self._rows
 
 
-def test_rewrite_to_cdn_replaces_s3_host_and_preserves_path() -> None:
+def test_rewrite_to_cdn_replaces_legacy_cloudfront_host_and_preserves_path() -> None:
     rewritten, changed = mod._rewrite_to_cdn(
-        "https://trr-backend.s3.amazonaws.com/social/youtube/a/media-01.mp4",
-        cdn_base_url="https://d1fmdyqfafwim3.cloudfront.net",
+        "https://d1fmdyqfafwim3.cloudfront.net/social/youtube/a/media-01.mp4",
+        cdn_base_url="https://pub.example.r2.dev",
     )
     assert changed is True
-    assert rewritten == "https://d1fmdyqfafwim3.cloudfront.net/social/youtube/a/media-01.mp4"
+    assert rewritten == "https://pub.example.r2.dev/social/youtube/a/media-01.mp4"
 
 
-def test_rewrite_to_cdn_leaves_non_s3_host_unchanged() -> None:
-    original = "https://d1fmdyqfafwim3.cloudfront.net/social/facebook/a/thumb.jpg"
-    rewritten, changed = mod._rewrite_to_cdn(original, cdn_base_url="https://d1fmdyqfafwim3.cloudfront.net")
-    assert changed is False
-    assert rewritten == original
+def test_rewrite_media_asset_meta_updates_nested_hosted_urls() -> None:
+    raw_data, rewrite_count = mod._rewrite_media_asset_meta(
+        {
+            "media_asset_meta": {
+                "hosted_assets": [{"url": "https://legacy.example/social/youtube/a/video.mp4"}],
+                "thumbnail_hosted": {"url": "https://legacy.example/social/youtube/a/thumb.jpg"},
+            }
+        },
+        cdn_base_url="https://pub.example.r2.dev",
+    )
+    assert rewrite_count == 2
+    meta = raw_data["media_asset_meta"]
+    assert meta["hosted_assets"][0]["url"] == "https://pub.example.r2.dev/social/youtube/a/video.mp4"
+    assert meta["thumbnail_hosted"]["url"] == "https://pub.example.r2.dev/social/youtube/a/thumb.jpg"
 
 
-def test_repair_platform_dry_run_reports_rewrites_without_updates() -> None:
+def test_repair_platform_dry_run_reports_rewrites_without_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mod.social_repo, "_platform_posts_has_column", lambda *_args, **_kwargs: False)
     cur = _FakeCursor(
         rows=[
             {
                 "id": "00000000-0000-0000-0000-000000000111",
-                "hosted_thumbnail_url": "https://trr-backend.s3.amazonaws.com/social/facebook/a/thumb.jpg",
-                "hosted_media_urls": [
-                    "https://trr-backend.s3.amazonaws.com/social/facebook/a/media-01.mp4",
-                ],
+                "hosted_thumbnail_url": "https://legacy.example/social/facebook/a/thumb.jpg",
+                "hosted_media_urls": ["https://legacy.example/social/facebook/a/media-01.mp4"],
+                "hosted_user_avatar_url": "https://legacy.example/social/facebook/profile-pics/a/avatar.jpg",
+                "hosted_owner_profile_pic_url": "",
+                "hosted_tagged_profile_pics": {},
+                "raw_data": {
+                    "media_asset_meta": {
+                        "hosted_assets": [{"url": "https://legacy.example/social/facebook/a/media-01.mp4"}],
+                        "thumbnail_hosted": {"url": "https://legacy.example/social/facebook/a/thumb.jpg"},
+                    }
+                },
             }
         ]
     )
 
     stats = mod._repair_platform(
         cur,
+        platform="facebook",
         table="facebook_posts",
-        cdn_base_url="https://d1fmdyqfafwim3.cloudfront.net",
-        season_id="",
+        cdn_base_url="https://pub.example.r2.dev",
+        season_ids=[],
+        show_ids=[],
+        season_numbers=[],
         limit_per_platform=100,
         dry_run=True,
     )
@@ -62,28 +82,42 @@ def test_repair_platform_dry_run_reports_rewrites_without_updates() -> None:
     assert stats.rows_updated == 0
     assert stats.thumbnail_urls_rewritten == 1
     assert stats.media_urls_rewritten == 1
-    assert len(cur.statements) == 1  # select only
+    assert stats.avatar_urls_rewritten == 1
+    assert stats.media_asset_meta_urls_rewritten == 2
+    assert len(cur.statements) == 1
 
 
-def test_repair_platform_apply_updates_rows() -> None:
+def test_repair_platform_apply_updates_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        mod.social_repo,
+        "_platform_posts_has_column",
+        lambda _platform, column: column in {"hosted_user_avatar_url", "hosted_tagged_profile_pics"},
+    )
     cur = _FakeCursor(
         rows=[
             {
                 "id": "00000000-0000-0000-0000-000000000222",
-                "hosted_thumbnail_url": "https://trr-backend.s3.amazonaws.com/social/youtube/a/thumb.jpg",
+                "hosted_thumbnail_url": "https://legacy.example/social/instagram/a/thumb.jpg",
                 "hosted_media_urls": [
-                    "https://trr-backend.s3.amazonaws.com/social/youtube/a/media-01.mp4",
-                    "https://d1fmdyqfafwim3.cloudfront.net/social/youtube/a/media-02.mp4",
+                    "https://legacy.example/social/instagram/a/media-01.jpg",
+                    "https://pub.example.r2.dev/social/instagram/a/media-02.jpg",
                 ],
+                "hosted_user_avatar_url": "",
+                "hosted_owner_profile_pic_url": "",
+                "hosted_tagged_profile_pics": {"bravo": "https://legacy.example/social/instagram/profile-pics/bravo/a.jpg"},
+                "raw_data": {},
             }
         ]
     )
 
     stats = mod._repair_platform(
         cur,
-        table="youtube_videos",
-        cdn_base_url="https://d1fmdyqfafwim3.cloudfront.net",
-        season_id="",
+        platform="instagram",
+        table="instagram_posts",
+        cdn_base_url="https://pub.example.r2.dev",
+        season_ids=[],
+        show_ids=[],
+        season_numbers=[],
         limit_per_platform=100,
         dry_run=False,
     )
@@ -93,19 +127,24 @@ def test_repair_platform_apply_updates_rows() -> None:
     assert stats.rows_updated == 1
     assert stats.thumbnail_urls_rewritten == 1
     assert stats.media_urls_rewritten == 1
-    assert len(cur.statements) == 2  # select + update
+    assert stats.avatar_urls_rewritten == 1
+    assert len(cur.statements) == 2
 
     update_sql, update_params = cur.statements[1]
-    assert "update social.youtube_videos" in " ".join(update_sql.lower().split())
+    assert "update social.instagram_posts" in " ".join(update_sql.lower().split())
     assert isinstance(update_params, tuple)
-    assert update_params[0] == "https://d1fmdyqfafwim3.cloudfront.net/social/youtube/a/thumb.jpg"
+    assert update_params[0] == "https://pub.example.r2.dev/social/instagram/a/thumb.jpg"
     media_urls = json.loads(str(update_params[1]))
     assert media_urls == [
-        "https://d1fmdyqfafwim3.cloudfront.net/social/youtube/a/media-01.mp4",
-        "https://d1fmdyqfafwim3.cloudfront.net/social/youtube/a/media-02.mp4",
+        "https://pub.example.r2.dev/social/instagram/a/media-01.jpg",
+        "https://pub.example.r2.dev/social/instagram/a/media-02.jpg",
     ]
+    tagged_profile_pics = json.loads(str(update_params[4]))
+    assert tagged_profile_pics == {
+        "bravo": "https://pub.example.r2.dev/social/instagram/profile-pics/bravo/a.jpg"
+    }
 
 
 def test_parse_platforms_rejects_invalid_platforms() -> None:
     with pytest.raises(RuntimeError, match="Unsupported platforms"):
-        mod._parse_platforms("facebook,instagram")
+        mod._parse_platforms("facebook,invalid")
