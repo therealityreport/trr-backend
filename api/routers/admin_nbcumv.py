@@ -86,6 +86,7 @@ class NbcumvImportItem(BaseModel):
     show_ids: list[str] = Field(default_factory=list)
     link_show_ids: list[UUID] = Field(default_factory=list)
     getty_detail_url: str | None = None
+    gallery_bucket: dict[str, Any] | None = None
     person_ids: list[UUID] | None = None
 
 
@@ -378,6 +379,7 @@ def _build_asset_metadata(
     resolved_people: list[dict[str, str]],
     unmatched_people: list[str],
     existing_metadata: dict[str, Any] | None = None,
+    gallery_bucket: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     published_at = (
         (getty_asset or {}).get("date_created")
@@ -396,6 +398,9 @@ def _build_asset_metadata(
         "getty": getty_asset or {},
         "embedded_file": embedded_metadata or {},
     }
+    if isinstance(gallery_bucket, dict):
+        payload["gallery_bucket"] = dict(gallery_bucket)
+        payload.update(dict(gallery_bucket))
     return _merge_dict(existing_metadata or {}, payload)
 
 
@@ -406,8 +411,9 @@ def _build_person_link_context(
     tagged_people: list[str],
     resolved_people: list[dict[str, str]],
     unmatched_people: list[str],
+    gallery_bucket: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "source": _NBCUMV_SOURCE,
         "source_asset_id": str(image.get("lbx_id") or ""),
         "source_url": image.get("location"),
@@ -420,6 +426,10 @@ def _build_person_link_context(
         "live_date": image.get("liveDate"),
         "created": image.get("created"),
     }
+    if isinstance(gallery_bucket, dict):
+        payload["gallery_bucket"] = dict(gallery_bucket)
+        payload.update(dict(gallery_bucket))
+    return payload
 
 
 def _upsert_nbcumv_asset(
@@ -578,6 +588,7 @@ def _import_single_item(
         resolved_people=resolved_people,
         unmatched_people=unmatched_people,
         existing_metadata=existing_metadata,
+        gallery_bucket=item.gallery_bucket,
     )
     asset = _upsert_nbcumv_asset(
         db,
@@ -600,6 +611,7 @@ def _import_single_item(
             tagged_people=tagged_people,
             resolved_people=resolved_people,
             unmatched_people=unmatched_people,
+            gallery_bucket=item.gallery_bucket,
         )
         for person in resolved_people:
             person_id = str(person["person_id"])
@@ -634,6 +646,7 @@ def _import_single_item(
                 tagged_people=tagged_people,
                 resolved_people=resolved_people,
                 unmatched_people=unmatched_people,
+                gallery_bucket=item.gallery_bucket,
             ),
         )
 

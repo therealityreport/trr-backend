@@ -20,6 +20,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,23 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def default_download_root() -> Path:
+    """Return a cache-like root outside the repo for ad hoc media downloads."""
+    override = str(os.getenv("TRR_WORKSPACE_CACHE_ROOT") or "").strip()
+    if override:
+        return Path(override).expanduser() / "youtube-downloads"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "TRR" / "youtube-downloads"
+    return Path.home() / ".cache" / "trr" / "youtube-downloads"
+
+
+def resolve_download_dir(download_dir: str | None, channel_handle: str) -> Path:
+    """Resolve the target download directory for yt-dlp media exports."""
+    if download_dir:
+        return Path(download_dir).expanduser().resolve()
+    return default_download_root() / channel_handle
 
 
 def parse_date(date_str: str) -> datetime:
@@ -294,6 +312,13 @@ Examples:
         action="store_true",
         help="Download videos/shorts at best quality using yt-dlp",
     )
+    parser.add_argument(
+        "--download-dir",
+        help=(
+            "Optional download directory. Defaults to an OS cache path outside the repo "
+            "(for example ~/Library/Caches/TRR/youtube-downloads/<channel> on macOS)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -423,7 +448,7 @@ Examples:
 
         # Download if requested
         if args.download:
-            download_dir = output_path.parent / f"{config.channel_handle}_downloads"
+            download_dir = resolve_download_dir(args.download_dir, config.channel_handle)
             download_videos(videos, download_dir)
 
 

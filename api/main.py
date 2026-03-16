@@ -11,6 +11,7 @@ Provides endpoints for:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -35,6 +36,48 @@ from trr_backend.observability import (
 configure_runtime_observability(service_name="trr-backend-api")
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _cast_screentime_stale_sweeper_enabled() -> bool:
+    return _env_flag("CAST_SCREENTIME_STALE_SWEEPER_ENABLED", False)
+
+
+def _cast_screentime_stale_sweeper_interval_seconds() -> int:
+    raw = (os.getenv("CAST_SCREENTIME_STALE_SWEEPER_INTERVAL_SECONDS") or "").strip()
+    try:
+        if raw:
+            return max(int(raw), 60)
+    except ValueError:
+        return 300
+    return 300
+
+
+async def _run_cast_screentime_stale_sweeper(stop_event: asyncio.Event) -> None:
+    from api.routers import admin_cast_screentime
+
+    interval_seconds = _cast_screentime_stale_sweeper_interval_seconds()
+    while not stop_event.is_set():
+        try:
+            reconciled = await asyncio.to_thread(admin_cast_screentime.reconcile_stale_runs_once)
+            if reconciled:
+                logger.warning(
+                    "[cast-screentime] reconciled stale runs count=%s stale_after_seconds=%s",
+                    len(reconciled),
+                    admin_cast_screentime._stale_after_seconds(),
+                )
+        except Exception:
+            logger.exception("[cast-screentime] stale-run sweeper failed")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
 
 
 def _validate_startup_config() -> None:
@@ -82,9 +125,25 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up TRR Backend API...")
     _validate_startup_config()
     await init_broker()
+    stale_sweeper_stop: asyncio.Event | None = None
+    stale_sweeper_task: asyncio.Task[None] | None = None
+    if _cast_screentime_stale_sweeper_enabled():
+        stale_sweeper_stop = asyncio.Event()
+        stale_sweeper_task = asyncio.create_task(_run_cast_screentime_stale_sweeper(stale_sweeper_stop))
+        logger.info(
+            "[startup-config] cast screentime stale-run sweeper enabled interval_seconds=%s",
+            _cast_screentime_stale_sweeper_interval_seconds(),
+        )
     yield
     # Shutdown
     logger.info("Shutting down TRR Backend API...")
+    if stale_sweeper_stop is not None:
+        stale_sweeper_stop.set()
+    if stale_sweeper_task is not None:
+        try:
+            await asyncio.wait_for(stale_sweeper_task, timeout=5)
+        except asyncio.TimeoutError:
+            stale_sweeper_task.cancel()
     await shutdown_broker()
 
 
@@ -142,6 +201,7 @@ from api.routers import (  # noqa: E402
     admin_asset_flags,
     admin_brands,
     admin_cast,
+    admin_cast_screentime,
     admin_cast_photos,
     admin_fandom_sync,
     admin_image_counts,
@@ -150,6 +210,7 @@ from api.routers import (  # noqa: E402
     admin_operations,
     admin_person_images,
     admin_scrape,
+    admin_socialblade,
     admin_show_bravo,
     admin_show_icons,
     admin_show_links,
@@ -176,6 +237,7 @@ app.include_router(screenalytics_runs_v2.router, prefix="/api/v1")
 app.include_router(admin_asset_flags.router, prefix="/api/v1")
 app.include_router(admin_asset_batch_jobs.router, prefix="/api/v1")
 app.include_router(admin_cast.router, prefix="/api/v1")
+app.include_router(admin_cast_screentime.router, prefix="/api/v1")
 app.include_router(admin_cast_photos.router, prefix="/api/v1")
 app.include_router(admin_brands.router, prefix="/api/v1")
 app.include_router(admin_fandom_sync.router, prefix="/api/v1")
@@ -191,6 +253,7 @@ app.include_router(admin_nbcumv.router, prefix="/api/v1")
 app.include_router(admin_show_bravo.router, prefix="/api/v1")
 app.include_router(admin_show_news.router, prefix="/api/v1")
 app.include_router(admin_scrape.router, prefix="/api/v1")
+app.include_router(admin_socialblade.router, prefix="/api/v1")
 app.include_router(admin_show_sync.router, prefix="/api/v1")
 app.include_router(socials.router, prefix="/api/v1")
 

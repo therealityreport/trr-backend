@@ -25,15 +25,22 @@ class PlatformCounters:
 
 
 REPAIR_REASON_CHOICES = (
-    "legacy_host",
+    "legacy_hosted_url",
     "hosted_content",
     "missing_hosted_thumbnail",
     "missing_hosted_media",
+    "missing_source_avatar",
+    "missing_hosted_avatar",
     "mirror_retry",
     "non_video_hosted_media",
     "source_quality",
+    "stale_media_metadata",
     "twitter_video_thumbnail",
 )
+
+REPAIR_REASON_ALIASES = {
+    "legacy_host": "legacy_hosted_url",
+}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -61,6 +68,18 @@ def _parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Optional season UUID filter. Repeat to target multiple seasons.",
+    )
+    parser.add_argument(
+        "--show-id",
+        action="append",
+        default=[],
+        help="Optional show UUID filter. Repeat to target multiple shows.",
+    )
+    parser.add_argument(
+        "--season-number",
+        action="append",
+        default=[],
+        help="Optional season number filter. Repeat to target multiple season numbers.",
     )
     parser.add_argument(
         "--post-id",
@@ -93,6 +112,28 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Report eligible historical cleanup rows without enqueueing mirror jobs.",
     )
+    parser.add_argument(
+        "--commit-batch-size",
+        type=int,
+        default=100,
+        help="Commit queued jobs every N successful enqueue operations (default: 100).",
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--normalize-only",
+        action="store_true",
+        help="Only include rows whose remaining work is hosted-URL normalization.",
+    )
+    mode_group.add_argument(
+        "--mirror-only",
+        action="store_true",
+        help="Exclude normalization-only rows and target rows that still need mirror/avatar/media work.",
+    )
+    mode_group.add_argument(
+        "--repair-all",
+        action="store_true",
+        help="Explicitly include all repair classes (default behavior).",
+    )
     return parser.parse_args()
 
 
@@ -120,7 +161,11 @@ def _normalize_text_filters(values: list[str] | tuple[str, ...] | None) -> list[
 
 
 def _parse_repair_reasons(value: str) -> set[str]:
-    reasons = {item.strip().lower() for item in str(value or "").split(",") if item.strip()}
+    reasons = {
+        REPAIR_REASON_ALIASES.get(item.strip().lower(), item.strip().lower())
+        for item in str(value or "").split(",")
+        if item.strip()
+    }
     invalid = sorted(reason for reason in reasons if reason not in REPAIR_REASON_CHOICES)
     if invalid:
         valid = ", ".join(REPAIR_REASON_CHOICES)
@@ -129,68 +174,31 @@ def _parse_repair_reasons(value: str) -> set[str]:
 
 
 def _row_repair_reasons(platform: str, row: dict[str, Any]) -> list[str]:
-    normalized_platform = (platform or "").strip().lower()
-    hosted_thumbnail_url = str(row.get("hosted_thumbnail_url") or "").strip()
-    hosted_media_urls = social_repo._as_text_list(row.get("hosted_media_urls"))  # noqa: SLF001
-    source_thumbnail_url, source_media_urls = social_repo._platform_post_source_urls(  # noqa: SLF001
-        normalized_platform,
-        row,
-    )
-    mirror_status = str(row.get("media_mirror_status") or "").strip().lower()
-    source_id = social_repo._platform_source_id(normalized_platform, row)  # noqa: SLF001
+    return social_repo._platform_post_repair_reasons((platform or "").strip().lower(), row)  # noqa: SLF001
 
-    reasons: list[str] = []
 
-    if social_repo._hosted_urls_need_cdn_host_repair(  # noqa: SLF001
-        hosted_thumbnail_url=hosted_thumbnail_url,
-        hosted_media_urls=hosted_media_urls,
-    ):
-        reasons.append("legacy_host")
-    if social_repo._hosted_media_urls_need_content_repair(hosted_media_urls=hosted_media_urls):  # noqa: SLF001
-        reasons.append("hosted_content")
-    if social_repo._source_media_urls_need_quality_repair(  # noqa: SLF001
-        platform=normalized_platform,
-        source_media_urls=source_media_urls,
-    ):
-        reasons.append("source_quality")
-    if source_thumbnail_url and not hosted_thumbnail_url:
-        reasons.append("missing_hosted_thumbnail")
-    if source_media_urls and len(hosted_media_urls) < len(source_media_urls):
-        reasons.append("missing_hosted_media")
-    if normalized_platform in {"tiktok", "youtube"} and not hosted_media_urls:
-        reasons.append("missing_hosted_media")
-    if (
-        normalized_platform in {"tiktok", "youtube"}
-        and hosted_media_urls
-        and not any(social_repo._is_video_like_media_url(url) for url in hosted_media_urls)  # noqa: SLF001
-    ):
-        reasons.append("non_video_hosted_media")
-    if normalized_platform == "instagram" and source_id:
-        if mirror_status in {"failed", "partial", "pending"}:
-            reasons.append("mirror_retry")
-        if not source_thumbnail_url and not source_media_urls:
-            reasons.append("mirror_retry")
-    if (
-        normalized_platform == "twitter"
-        and hosted_thumbnail_url
-        and social_repo._is_video_like_media_url(hosted_thumbnail_url)  # noqa: SLF001
-        and (
-            social_repo._select_non_video_media_url(hosted_media_urls)  # noqa: SLF001
-            or social_repo._select_non_video_media_url(source_media_urls)  # noqa: SLF001
-        )
-    ):
-        reasons.append("twitter_video_thumbnail")
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for reason in reasons:
-        if reason in seen:
+def _normalize_int_filters(values: list[str] | tuple[str, ...] | None) -> list[int]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw in values or []:
+        try:
+            value = int(str(raw or "").strip())
+        except (TypeError, ValueError):
             continue
-        seen.add(reason)
-        deduped.append(reason)
-    if not deduped and mirror_status in {"failed", "partial", "pending"}:
-        deduped.append("mirror_retry")
-    return deduped
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _row_matches_mode(row_reasons: list[str], *, normalize_only: bool, mirror_only: bool) -> bool:
+    reason_set = set(row_reasons)
+    if normalize_only:
+        return bool(reason_set) and reason_set.issubset({"legacy_hosted_url"})
+    if mirror_only:
+        return bool(reason_set - {"legacy_hosted_url"})
+    return True
 
 
 def _load_rows(
@@ -199,6 +207,8 @@ def _load_rows(
     cutoff: datetime | None,
     limit: int,
     season_ids: list[str],
+    show_ids: list[str],
+    season_numbers: list[int],
     post_ids: list[str],
     source_ids: list[str],
 ) -> list[dict[str, Any]]:
@@ -232,12 +242,31 @@ def _load_rows(
     if season_ids:
         filters.append("p.season_id::text = any(%s)")
         params.append(season_ids)
+    if show_ids:
+        filters.append("p.show_id::text = any(%s)")
+        params.append(show_ids)
+    if season_numbers:
+        filters.append("s.season_number = any(%s)")
+        params.append(season_numbers)
     if post_ids:
         filters.append("p.id::text = any(%s)")
         params.append(post_ids)
     if source_ids:
         filters.append(f"p.{source_id_column}::text = any(%s)")
         params.append(source_ids)
+    filters.append(
+        """
+        not exists (
+          select 1
+          from social.scrape_jobs j
+          where j.platform = %s
+            and j.status in ('queued', 'pending', 'retrying', 'running')
+            and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
+            and j.config->>'post_id' = p.id::text
+        )
+        """.strip()
+    )
+    params.extend([normalized_platform, social_repo.INSTAGRAM_MEDIA_MIRROR_STAGE])
     where_clause = f"where {' and '.join(filters)}" if filters else ""
     params.append(max(1, int(limit)))
 
@@ -246,6 +275,8 @@ def _load_rows(
         select
           p.id::text as id,
           p.season_id::text as season_id,
+          p.show_id::text as show_id,
+          s.season_number as season_number,
           p.{source_id_column} as source_id,
           {account_expr} as account,
           p.{posted_at_column} as posted_at,
@@ -253,8 +284,15 @@ def _load_rows(
           {media_urls_expr} as media_urls,
           coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', '') as hosted_thumbnail_url,
           coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
-          coalesce(to_jsonb(p) ->> 'media_mirror_status', '') as media_mirror_status
+          coalesce(to_jsonb(p) ->> 'media_mirror_status', '') as media_mirror_status,
+          coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data,
+          coalesce(to_jsonb(p) ->> 'user_avatar_url', '') as user_avatar_url,
+          coalesce(to_jsonb(p) ->> 'hosted_user_avatar_url', '') as hosted_user_avatar_url,
+          coalesce(to_jsonb(p) ->> 'owner_profile_pic_url', '') as owner_profile_pic_url,
+          coalesce(to_jsonb(p) ->> 'hosted_owner_profile_pic_url', '') as hosted_owner_profile_pic_url,
+          coalesce(to_jsonb(p) -> 'hosted_tagged_profile_pics', '{{}}'::jsonb) as hosted_tagged_profile_pics
         from social.{table} p
+        left join core.seasons s on s.id = p.season_id
         {where_clause}
         order by coalesce(p.{posted_at_column}, p.scraped_at) desc
         limit %s
@@ -278,21 +316,27 @@ def main() -> int:
     if not platforms:
         raise SystemExit("No valid platforms requested")
     season_ids = _normalize_text_filters(args.season_id)
+    show_ids = _normalize_text_filters(args.show_id)
+    season_numbers = _normalize_int_filters(args.season_number)
     post_ids = _normalize_text_filters(args.post_id)
     source_ids = _normalize_text_filters(args.source_id)
     repair_reasons = _parse_repair_reasons(args.repair_reasons)
+    commit_batch_size = max(1, int(getattr(args, "commit_batch_size", 100)))
 
     context_cache: dict[str, social_repo.SeasonContext] = {}
     windows_cache: dict[str, list[social_repo.WeekWindow]] = {}
     counters: dict[str, PlatformCounters] = defaultdict(PlatformCounters)
 
     with pg.db_connection() as conn:
+        pending_commits = 0
         for platform in platforms:
             rows = _load_rows(
                 platform=platform,
                 cutoff=cutoff,
                 limit=args.limit_per_platform,
                 season_ids=season_ids,
+                show_ids=show_ids,
+                season_numbers=season_numbers,
                 post_ids=post_ids,
                 source_ids=source_ids,
             )
@@ -305,11 +349,21 @@ def main() -> int:
                 if args.hosted_html_only and not _row_has_html_hosted_media(row):
                     counters[platform].skipped += 1
                     continue
-                if not social_repo._platform_post_needs_media_mirror(platform, row):  # noqa: SLF001
+                row_reasons = _row_repair_reasons(platform, row)
+                if not row_reasons:
                     counters[platform].skipped += 1
                     continue
-                row_reasons = _row_repair_reasons(platform, row)
+                if not _row_matches_mode(
+                    row_reasons,
+                    normalize_only=bool(args.normalize_only),
+                    mirror_only=bool(args.mirror_only),
+                ):
+                    counters[platform].skipped += 1
+                    continue
                 if repair_reasons and not repair_reasons.intersection(row_reasons):
+                    counters[platform].skipped += 1
+                    continue
+                if not social_repo._platform_post_needs_media_mirror(platform, row):  # noqa: SLF001
                     counters[platform].skipped += 1
                     continue
                 counters[platform].eligible += 1
@@ -362,10 +416,17 @@ def main() -> int:
                     )
                     if job_id:
                         counters[platform].queued += 1
+                        pending_commits += 1
+                        if pending_commits >= commit_batch_size and hasattr(conn, "commit"):
+                            conn.commit()
+                            pending_commits = 0
                     else:
                         counters[platform].skipped += 1
                 except Exception:
                     counters[platform].failed += 1
+            if pending_commits > 0 and hasattr(conn, "commit"):
+                conn.commit()
+                pending_commits = 0
 
     totals = PlatformCounters()
     by_platform = {}
@@ -395,10 +456,15 @@ def main() -> int:
                 "cutoff": social_repo._iso(cutoff) if cutoff else None,  # noqa: SLF001
                 "platforms": platforms,
                 "season_ids": season_ids,
+                "show_ids": show_ids,
+                "season_numbers": season_numbers,
                 "post_ids": post_ids,
                 "source_ids": source_ids,
                 "failed_only": bool(args.failed_only),
                 "hosted_html_only": bool(args.hosted_html_only),
+                "normalize_only": bool(args.normalize_only),
+                "mirror_only": bool(args.mirror_only),
+                "repair_all": bool(args.repair_all or (not args.normalize_only and not args.mirror_only)),
                 "repair_reasons": sorted(repair_reasons),
                 "dry_run": bool(args.dry_run),
                 "totals": {

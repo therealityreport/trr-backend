@@ -26,9 +26,9 @@ def test_infer_media_extension_prefers_url_suffix() -> None:
 
 
 def test_mirror_url_to_s3_uploads_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     class _FakeResponse:
         headers = {"Content-Type": "video/mp4"}
@@ -65,9 +65,9 @@ def test_mirror_url_to_s3_uploads_when_missing(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_mirror_url_to_s3_skips_upload_when_existing_object(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     class _FakeResponse:
         headers = {"Content-Type": "video/mp4"}
@@ -113,9 +113,9 @@ def test_mirror_url_to_s3_invalid_url_is_skipped() -> None:
 
 
 def test_mirror_url_to_s3_fails_for_oversized_assets(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     class _FakeResponse:
         headers = {"Content-Type": "video/mp4"}
@@ -154,12 +154,12 @@ class _FakeBotoSession:
 
 
 def test_load_s3_config_ignores_profile_when_explicit_creds_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
-    monkeypatch.setenv("AWS_PROFILE", "trr")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_PROFILE", "trr")
+    monkeypatch.setenv("OBJECT_STORAGE_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "secret")
 
     config = s3_mirror.get_s3_config()
 
@@ -167,13 +167,13 @@ def test_load_s3_config_ignores_profile_when_explicit_creds_present(monkeypatch:
 
 
 def test_get_s3_client_falls_back_to_env_creds_when_profile_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
-    monkeypatch.setenv("AWS_PROFILE", "trr")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
-    monkeypatch.setenv("AWS_SESSION_TOKEN", "token")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_PROFILE", "trr")
+    monkeypatch.setenv("OBJECT_STORAGE_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("OBJECT_STORAGE_SESSION_TOKEN", "token")
 
     session_calls: list[dict[str, object]] = []
 
@@ -198,9 +198,9 @@ def test_get_s3_client_falls_back_to_env_creds_when_profile_missing(monkeypatch:
 
 
 def test_object_storage_env_aliases_override_aws_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "aws-bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.aws.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "aws-bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.aws.example.com")
     monkeypatch.setenv("OBJECT_STORAGE_PROVIDER", "r2")
     monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "r2-bucket")
     monkeypatch.setenv("OBJECT_STORAGE_REGION", "auto")
@@ -347,9 +347,9 @@ def test_build_monochrome_logo_variants_preserves_transparency() -> None:
 
 
 def test_apply_logo_variant_upload_skips_upload_when_sha_matches_without_force(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     data = b"same-bytes"
     sha = s3_mirror._sha256_bytes(data)
@@ -394,9 +394,9 @@ def test_get_show_s3_prefix() -> None:
 
 
 def test_build_hosted_url_normalizes_slashes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com/")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com/")
     assert s3_mirror.build_hosted_url("/images/test.png") == "https://cdn.example.com/images/test.png"
     assert s3_mirror.build_public_object_url("/images/test.png") == "https://cdn.example.com/images/test.png"
 
@@ -418,9 +418,9 @@ def test_provider_neutral_storage_aliases_match_legacy_helpers(monkeypatch: pyte
 
 
 def test_cdn_base_url_rejects_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://dxxxx.cloudfront.net")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://dxxxx.cloudfront.net")
     with pytest.raises(RuntimeError):
         s3_mirror.get_cdn_base_url()
 
@@ -435,9 +435,9 @@ def test_cdn_base_url_rejects_placeholder(monkeypatch: pytest.MonkeyPatch) -> No
     ],
 )
 def test_cdn_base_url_rejects_s3_endpoints(monkeypatch: pytest.MonkeyPatch, cdn_url: str) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", cdn_url)
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", cdn_url)
     with pytest.raises(RuntimeError, match="must not be a direct S3 endpoint"):
         s3_mirror.get_cdn_base_url()
 
@@ -512,10 +512,10 @@ def test_normalize_fandom_file_url_strips_revision_latest_suffix() -> None:
 
 
 def test_mirror_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_S3_PREFIX", "dev")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PREFIX", "dev")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     fake_s3 = MagicMock()
     fake_s3.head_object.return_value = {
@@ -548,10 +548,10 @@ def test_mirror_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_mirror_cast_photo_fallbacks_to_thumb_when_primary_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_S3_PREFIX", "dev")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PREFIX", "dev")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     fake_s3 = MagicMock()
     monkeypatch.setattr(s3_mirror, "_head_object", lambda *args, **kwargs: None)
@@ -582,9 +582,9 @@ def test_mirror_cast_photo_fallbacks_to_thumb_when_primary_fails(monkeypatch: py
 
 
 def test_mirror_tmdb_logo_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     fake_s3 = MagicMock()
     fake_s3.head_object.return_value = {
@@ -614,9 +614,9 @@ def test_mirror_tmdb_logo_skips_upload_if_object_exists(monkeypatch: pytest.Monk
 
 
 def test_mirror_tmdb_logo_skips_when_already_hosted(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     row = {
         "id": 99,
@@ -629,9 +629,9 @@ def test_mirror_tmdb_logo_skips_when_already_hosted(monkeypatch: pytest.MonkeyPa
 
 
 def test_mirror_external_logo_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     fake_s3 = MagicMock()
     fake_s3.head_object.return_value = {
@@ -664,9 +664,9 @@ def test_mirror_external_logo_skips_upload_if_object_exists(monkeypatch: pytest.
 
 
 def test_mirror_external_logo_skips_when_already_hosted(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     row = {
         "id": 777,
@@ -684,9 +684,9 @@ def test_mirror_external_logo_skips_when_already_hosted(monkeypatch: pytest.Monk
 def test_mirror_logo_monochrome_variants_row_generates_black_and_white(monkeypatch: pytest.MonkeyPatch) -> None:
     from PIL import Image
 
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     img = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
     for y in range(2, 6):
@@ -717,9 +717,9 @@ def test_mirror_logo_monochrome_variants_row_generates_black_and_white(monkeypat
 
 
 def test_mirror_logo_monochrome_variants_row_skips_when_existing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     result = s3_mirror.mirror_logo_monochrome_variants_row(
         {
@@ -734,9 +734,9 @@ def test_mirror_logo_monochrome_variants_row_skips_when_existing(monkeypatch: py
 
 
 def test_mirror_logo_monochrome_variants_row_raises_on_transparency_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
     monkeypatch.setattr(s3_mirror, "download_image", lambda *args, **kwargs: (b"not-an-image", "image/png"))
     monkeypatch.setattr(
         s3_mirror,
@@ -825,9 +825,9 @@ def test_delete_s3_objects_partial_failure() -> None:
 
 def test_prune_orphaned_cast_photo_objects_no_orphans(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test prune when all S3 objects are referenced in DB."""
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     fake_s3 = MagicMock()
     fake_paginator = MagicMock()
@@ -858,9 +858,9 @@ def test_prune_orphaned_cast_photo_objects_no_orphans(monkeypatch: pytest.Monkey
 
 def test_prune_orphaned_cast_photo_objects_with_orphans(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test prune deletes S3 objects not referenced in DB."""
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     fake_s3 = MagicMock()
     fake_paginator = MagicMock()
@@ -892,9 +892,9 @@ def test_prune_orphaned_cast_photo_objects_with_orphans(monkeypatch: pytest.Monk
 
 def test_prune_orphaned_cast_photo_objects_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test prune with dry_run=True doesn't delete."""
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_S3_BUCKET", "bucket")
-    monkeypatch.setenv("AWS_CDN_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
 
     fake_s3 = MagicMock()
     fake_paginator = MagicMock()

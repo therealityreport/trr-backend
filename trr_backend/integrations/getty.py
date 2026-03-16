@@ -68,8 +68,15 @@ def search_editorial_assets(
     if not cleaned:
         return []
 
-    detail_urls = _search_detail_urls_for_phrase(cleaned, limit=limit, session=session, query_params=query_params)
-    total = min(len(detail_urls), max(0, int(limit)))
+    candidates = _search_asset_candidates_for_phrase(cleaned, limit=limit, session=session, query_params=query_params)
+    candidates = _merge_grouped_event_metadata(
+        cleaned,
+        candidates,
+        session=session,
+        query_params=query_params,
+        limit=limit,
+    )
+    total = min(len(candidates), max(0, int(limit)))
     if progress_cb:
         progress_cb(0, total, f"Getty search found {total} candidate asset pages.")
     results: list[dict[str, Any]] = []
@@ -77,21 +84,25 @@ def search_editorial_assets(
     safe_max_workers = max(1, int(detail_max_workers or DEFAULT_DETAIL_MAX_WORKERS))
 
     for batch_start in range(0, total, safe_batch_size):
-        batch_urls = detail_urls[batch_start : batch_start + safe_batch_size]
-        batch_end = batch_start + len(batch_urls)
+        batch_candidates = candidates[batch_start : batch_start + safe_batch_size]
+        batch_urls = [str(candidate.get("detail_url") or "").strip() for candidate in batch_candidates]
+        batch_end = batch_start + len(batch_candidates)
         if progress_cb:
             progress_cb(batch_start, total, f"Fetching Getty assets {batch_start + 1}-{batch_end}/{total}...")
 
         with ThreadPoolExecutor(max_workers=min(safe_max_workers, len(batch_urls))) as executor:
             batch_details = list(executor.map(fetch_asset_detail, batch_urls))
 
-        for offset, (detail_url, detail) in enumerate(zip(batch_urls, batch_details, strict=False), start=1):
+        for offset, (candidate, detail_url, detail) in enumerate(
+            zip(batch_candidates, batch_urls, batch_details, strict=False),
+            start=1,
+        ):
             index = batch_start + offset
             if not detail:
                 if progress_cb:
                     progress_cb(index, total, f"Getty asset {index}/{total} did not return detail.")
                 continue
-            results.append(detail)
+            results.append(_merge_search_candidate_with_detail(candidate, detail))
             if progress_cb:
                 object_name = str(detail.get("object_name") or "").strip()
                 label = object_name or str(detail.get("editorial_id") or detail_url)
@@ -99,6 +110,83 @@ def search_editorial_assets(
             if len(results) >= limit:
                 return results
     return results
+
+
+def _merge_grouped_event_metadata(
+    phrase: str,
+    candidates: list[dict[str, Any]],
+    *,
+    session: Session | None = None,
+    query_params: dict[str, str] | None = None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return candidates
+
+    grouped_query_params = dict(query_params or {})
+    grouped_query_params["groupbyevent"] = "true"
+    grouped_candidates = _search_asset_candidates_for_phrase(
+        phrase,
+        limit=limit,
+        session=session,
+        query_params=grouped_query_params,
+    )
+    if not grouped_candidates:
+        return candidates
+
+    by_detail_url = {
+        str(candidate.get("detail_url") or "").strip(): candidate
+        for candidate in grouped_candidates
+        if str(candidate.get("detail_url") or "").strip()
+    }
+    by_editorial_id = {
+        str(candidate.get("editorial_id") or "").strip(): candidate
+        for candidate in grouped_candidates
+        if str(candidate.get("editorial_id") or "").strip()
+    }
+    by_object_name = {
+        str(candidate.get("object_name") or "").strip().casefold(): candidate
+        for candidate in grouped_candidates
+        if str(candidate.get("object_name") or "").strip()
+    }
+
+    merged_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        detail_url = str(candidate.get("detail_url") or "").strip()
+        editorial_id = str(candidate.get("editorial_id") or "").strip()
+        object_name = str(candidate.get("object_name") or "").strip().casefold()
+        grouped_candidate = (
+            by_detail_url.get(detail_url)
+            or by_editorial_id.get(editorial_id)
+            or by_object_name.get(object_name)
+        )
+        if grouped_candidate:
+            merged_candidates.append(_merge_search_candidate_with_detail(grouped_candidate, candidate))
+        else:
+            merged_candidates.append(candidate)
+    return merged_candidates
+
+
+def _merge_search_candidate_with_detail(candidate: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(candidate)
+    merged.update(detail)
+    if "detail_url" not in merged or not merged["detail_url"]:
+        merged["detail_url"] = candidate.get("detail_url")
+    if "event_name" not in merged and candidate.get("event_name"):
+        merged["event_name"] = candidate.get("event_name")
+    if "event_id" not in merged and candidate.get("event_id"):
+        merged["event_id"] = candidate.get("event_id")
+    if "event_url_slug" not in merged and candidate.get("event_url_slug"):
+        merged["event_url_slug"] = candidate.get("event_url_slug")
+    if "search_title" not in merged and candidate.get("search_title"):
+        merged["search_title"] = candidate.get("search_title")
+    if "search_caption" not in merged and candidate.get("search_caption"):
+        merged["search_caption"] = candidate.get("search_caption")
+    if "grouped_image_count" not in merged and candidate.get("grouped_image_count") is not None:
+        merged["grouped_image_count"] = candidate.get("grouped_image_count")
+    if "getty_event_group_title" not in merged and candidate.get("event_name"):
+        merged["getty_event_group_title"] = candidate.get("event_name")
+    return merged
 
 
 def _build_search_url(
@@ -156,8 +244,26 @@ def _search_detail_urls_for_phrase(
     session: Session | None = None,
     query_params: dict[str, str] | None = None,
 ) -> list[str]:
+    return [
+        str(candidate.get("detail_url") or "").strip()
+        for candidate in _search_asset_candidates_for_phrase(
+            phrase,
+            limit=limit,
+            session=session,
+            query_params=query_params,
+        )
+    ]
+
+
+def _search_asset_candidates_for_phrase(
+    phrase: str,
+    *,
+    limit: int,
+    session: Session | None = None,
+    query_params: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     client = _session(session)
-    deduped: list[str] = []
+    deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     for page in range(1, MAX_SEARCH_PAGES + 1):
@@ -169,20 +275,126 @@ def _search_detail_urls_for_phrase(
             logger.warning("Getty search failed for %s page=%s: %s", phrase, page, exc)
             break
 
-        matches = re.findall(r'href="(/detail/(?:news-photo|photo)/[^"]+/\d+)"', response.text)
+        page_candidates = _extract_search_asset_candidates(response.text)
+        if not page_candidates:
+            page_candidates = [{"detail_url": url} for url in _extract_detail_urls_from_html(response.text)]
+
         page_new = 0
-        for match in matches:
-            absolute = f"{BASE_URL}{match}"
-            if absolute in seen:
+        for candidate in page_candidates:
+            absolute = str(candidate.get("detail_url") or "").strip()
+            if not absolute or absolute in seen:
                 continue
             seen.add(absolute)
-            deduped.append(absolute)
+            deduped.append(candidate)
             page_new += 1
             if len(deduped) >= limit:
                 return deduped
-        if page_new == 0 or len(matches) < DEFAULT_SEARCH_PAGE_SIZE:
+        if page_new == 0 or len(page_candidates) < DEFAULT_SEARCH_PAGE_SIZE:
             break
     return deduped
+
+
+def _extract_detail_urls_from_html(html: str) -> list[str]:
+    matches = re.findall(r'href="(/detail/(?:news-photo|photo)/[^"]+/\d+)"', html)
+    return [f"{BASE_URL}{match}" for match in matches]
+
+
+def _extract_search_asset_candidates(html: str) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html, "html.parser")
+    for script in soup.find_all("script"):
+        script_text = script.string or script.get_text()
+        if not script_text:
+            continue
+        data_component = str(script.get("data-component") or "").strip().lower()
+        script_id = str(script.get("id") or "").strip()
+        if data_component == "search" or script_id.startswith("Search_"):
+            candidates = _extract_search_asset_candidates_from_payload_text(script_text)
+            if candidates:
+                return candidates
+
+    for script in soup.find_all("script"):
+        script_text = script.string or script.get_text()
+        if not script_text:
+            continue
+        normalized = script_text.strip()
+        if '"search"' not in normalized and '"searchItems"' not in normalized and '"landingUrl"' not in normalized:
+            continue
+        candidates = _extract_search_asset_candidates_from_payload_text(normalized)
+        if candidates:
+            return candidates
+
+    inline_payload_match = re.search(r"(\{\"search\":.+?\})\s*</script>", html, flags=re.DOTALL)
+    if inline_payload_match:
+        candidates = _extract_search_asset_candidates_from_payload_text(inline_payload_match.group(1))
+        if candidates:
+            return candidates
+
+    return []
+
+
+def _extract_search_asset_candidates_from_payload_text(payload_text: str) -> list[dict[str, Any]]:
+    payload = _parse_embedded_json_payload(payload_text)
+    if not isinstance(payload, dict):
+        return []
+    return _extract_search_asset_candidates_from_payload(payload)
+
+
+def _parse_embedded_json_payload(payload_text: str) -> dict[str, Any] | None:
+    normalized = str(payload_text or "").strip()
+    if not normalized:
+        return None
+    try:
+        payload = json.loads(normalized)
+    except json.JSONDecodeError:
+        start = normalized.find("{")
+        end = normalized.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            payload = json.loads(normalized[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _extract_search_asset_candidates_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    search_payload = payload.get("search")
+    if isinstance(search_payload, dict):
+        gallery = search_payload.get("gallery")
+        if isinstance(gallery, dict) and isinstance(gallery.get("assets"), list):
+            assets = gallery.get("assets")
+        else:
+            assets = search_payload.get("searchItems") or search_payload.get("assets") or search_payload.get("items")
+    else:
+        assets = payload.get("searchItems") or payload.get("assets") or payload.get("items")
+    if not isinstance(assets, list):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        landing_url = str(asset.get("landingUrl") or "").strip()
+        detail_url = f"{BASE_URL}{landing_url}" if landing_url.startswith("/") else landing_url
+        if not detail_url:
+            continue
+        candidate = {
+            "detail_url": detail_url,
+            "event_name": str(asset.get("eventName") or "").strip() or None,
+            "event_id": str(asset.get("eventId") or "").strip() or None,
+            "event_url_slug": str(asset.get("eventUrlSlug") or "").strip() or None,
+            "search_title": str(asset.get("title") or asset.get("shortTitle") or "").strip() or None,
+            "search_caption": str(asset.get("caption") or "").strip() or None,
+            "grouped_image_count": asset.get("collapsedImageCount"),
+        }
+        editorial_id = str(asset.get("id") or asset.get("editorialId") or asset.get("assetId") or "").strip()
+        if editorial_id:
+            candidate["editorial_id"] = editorial_id
+        object_name = str(asset.get("objectName") or "").strip()
+        if object_name:
+            candidate["object_name"] = object_name
+        candidates.append(candidate)
+    return candidates
 
 
 def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> dict[str, Any] | None:
@@ -214,6 +426,10 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
     result["license_type"] = _first_present(asset_json, "licenseType", "license_type")
     result["date_created"] = _first_present(asset_json, "dateCreated", "date_created")
     result["upload_date"] = _first_present(asset_json, "uploadDate", "upload_date")
+    result["event_name"] = _first_present(asset_json, "eventName", "event_name")
+    result["event_id"] = _first_present(asset_json, "eventId", "event_id")
+    result["event_url_slug"] = _first_present(asset_json, "eventUrlSlug", "event_url_slug")
+    result["getty_event_group_title"] = result["event_name"]
     result["thumb_url"] = _first_present(asset_json, "thumbUrl")
     result["comp_url"] = _first_present(asset_json, "compUrl")
     result["preview_image_url"] = _first_present(

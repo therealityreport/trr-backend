@@ -308,6 +308,10 @@ def _normalize_single_line(value: str) -> str:
     return ", ".join(cleaned).strip()
 
 
+def _normalize_space(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
 def _normalize_birthdate(value: str) -> str | None:
     if not value:
         return None
@@ -488,6 +492,204 @@ def _extract_fandom_search_result_candidates_from_html(
         if len(candidates) >= limit:
             break
     return candidates
+
+
+def _build_fandom_wiki_url_from_slug(slug: str, community_domain: str) -> str | None:
+    domain = _normalize_fandom_community_domain(community_domain)
+    normalized_slug = str(slug or "").strip().strip("/")
+    if not domain or not normalized_slug:
+        return None
+    return f"https://{domain}/wiki/{quote(unquote(normalized_slug), safe='()_:-/')}"
+
+
+def _extract_fandom_owner_slug(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        path = unquote(parsed.path or "")
+        if "/wiki/" not in path:
+            return None
+        raw = path.split("/wiki/", 1)[1]
+
+    candidate = str(raw or "").strip().strip("/")
+    if not candidate:
+        return None
+    owner = candidate.split("/", 1)[0].strip()
+    if not owner:
+        return None
+    lower_owner = owner.casefold()
+    if any(lower_owner.startswith(prefix) for prefix in _FANDOM_SPECIAL_PAGE_PREFIXES):
+        return None
+    return owner
+
+
+def _normalize_fandom_owner_slug(value: str | None) -> str:
+    owner = _extract_fandom_owner_slug(value)
+    if not owner:
+        return ""
+    return re.sub(r"\s+", " ", unquote(owner).replace("_", " ")).strip().casefold()
+
+
+def _extract_fandom_search_next_page_url(
+    html: str,
+    *,
+    community_domain: str,
+    current_url: str,
+) -> str | None:
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    domain = _normalize_fandom_community_domain(community_domain)
+    if not domain:
+        return None
+
+    for anchor in soup.select("a[href]"):
+        href = str(anchor.get("href") or "").strip()
+        if not href:
+            continue
+        candidate = str(urljoin(current_url, href)).strip()
+        parsed = urlparse(candidate)
+        if str(parsed.hostname or "").strip().lower() != domain:
+            continue
+        if unquote(parsed.path or "").strip() != "/wiki/Special:Search":
+            continue
+
+        link_text = _normalize_space(anchor.get_text(" ", strip=True)).casefold()
+        classes = " ".join(str(token) for token in (anchor.get("class") or []))
+        rel = " ".join(str(token) for token in (anchor.get("rel") or []))
+        marker = " ".join((link_text, classes.casefold(), rel.casefold()))
+        if "next" not in marker:
+            continue
+        return candidate
+    return None
+
+
+def search_fandom_person_related_pages(
+    query: str,
+    *,
+    community_domain: str,
+    owner_page_url: str | None = None,
+    owner_slug: str | None = None,
+    timeout_seconds: float = 20.0,
+    max_results: int = 8,
+) -> list[str]:
+    normalized_query = _normalize_space(query)
+    domain = _normalize_fandom_community_domain(community_domain)
+    owner_token = _extract_fandom_owner_slug(owner_page_url) or _extract_fandom_owner_slug(owner_slug)
+    if not normalized_query or not domain or not owner_token:
+        return []
+
+    limit = max(1, min(int(max_results or 1), 50))
+    expected_owner = _normalize_fandom_owner_slug(owner_token)
+    if not expected_owner:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(raw_value: str | None) -> None:
+        raw_candidate = str(raw_value or "").strip()
+        if not raw_candidate:
+            return
+
+        owner_match = _normalize_fandom_owner_slug(raw_candidate)
+        if not owner_match or owner_match != expected_owner:
+            return
+
+        candidate_url = (
+            raw_candidate
+            if raw_candidate.startswith("http://") or raw_candidate.startswith("https://")
+            else build_fandom_wiki_url_from_name(raw_candidate, domain)
+        )
+        candidate_url = str(candidate_url or "").strip()
+        if not candidate_url:
+            return
+
+        key = candidate_url.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate_url)
+
+    owner_page_candidate = _build_fandom_wiki_url_from_slug(owner_token, domain)
+    add_candidate(owner_page_candidate)
+
+    headers = {"accept": "application/json"}
+    offset = 0
+    seen_offsets: set[int] = set()
+    while len(candidates) < limit and offset not in seen_offsets:
+        seen_offsets.add(offset)
+        params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": normalized_query,
+            "srlimit": str(min(50, limit)),
+            "format": "json",
+        }
+        if offset > 0:
+            params["sroffset"] = str(offset)
+        api_query_url = f"https://{domain}/api.php?{urlencode(params)}"
+        status, body, _ = fetch_html(api_query_url, timeout=timeout_seconds, headers=headers)
+        if status != 200 or not body:
+            break
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            break
+
+        query_block = payload.get("query") if isinstance(payload, dict) else None
+        results = query_block.get("search") if isinstance(query_block, dict) else None
+        if isinstance(results, list):
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                title = str(result.get("title") or "").strip()
+                if not title:
+                    continue
+                add_candidate(title)
+                if len(candidates) >= limit:
+                    break
+
+        continuation = payload.get("continue") if isinstance(payload, dict) else None
+        next_offset = continuation.get("sroffset") if isinstance(continuation, dict) else None
+        try:
+            offset = int(next_offset) if next_offset is not None else -1
+        except (TypeError, ValueError):
+            offset = -1
+        if offset < 0:
+            break
+
+    if len(candidates) >= limit:
+        return candidates[:limit]
+
+    next_page_url = (
+        f"https://{domain}/wiki/Special:Search?"
+        f"{urlencode({'scope': 'internal', 'navigationSearch': 'true', 'query': normalized_query})}"
+    )
+    seen_page_urls: set[str] = set()
+    while len(candidates) < limit and next_page_url not in seen_page_urls:
+        seen_page_urls.add(next_page_url)
+        status, body, _ = fetch_html(next_page_url, timeout=timeout_seconds)
+        if status != 200 or not body:
+            break
+        for candidate_url in _extract_fandom_search_result_candidates_from_html(
+            body,
+            community_domain=domain,
+            limit=limit,
+        ):
+            add_candidate(candidate_url)
+            if len(candidates) >= limit:
+                break
+        next_page_url = _extract_fandom_search_next_page_url(
+            body,
+            community_domain=domain,
+            current_url=next_page_url,
+        )
+
+    return candidates[:limit]
 
 
 def _fandom_allpages_prefix_candidates(query: str) -> list[str]:

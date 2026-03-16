@@ -470,3 +470,8 @@ def test_parse_args_includes_retry_and_confirm_defaults() -> None:
     assert args.retry_attempts == 2
     assert args.retry_backoff_ms == 500
     assert args.confirm_unreachable_pass is True
+
+
+def test_source_matches_bravo_web_scrape_sources() -> None:
+    assert mod._source_matches("web_scrape:bravotv.com", {"bravo"}) is True
+    assert mod._source_matches("web_scrape:bravo", {"bravo"}) is True

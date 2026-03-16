@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 
 import pytest
@@ -137,15 +138,24 @@ def test_inject_modal_runtime_defaults_overrides_explicit_env(
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
 
 
-def test_inject_modal_runtime_defaults_clears_aws_profile_when_static_creds_present(
+def test_inject_modal_runtime_defaults_clears_object_storage_profile_when_static_creds_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("AWS_PROFILE", "trr")
-    monkeypatch.setenv("AWS_DEFAULT_PROFILE", "trr")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("OBJECT_STORAGE_PROFILE", "trr")
+    monkeypatch.setenv("OBJECT_STORAGE_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "secret")
 
     modal_jobs._inject_modal_runtime_defaults()
 
-    assert "AWS_PROFILE" not in os.environ
-    assert "AWS_DEFAULT_PROFILE" not in os.environ
+    assert "OBJECT_STORAGE_PROFILE" not in os.environ
+
+
+def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "17")
+
+    reloaded = importlib.reload(modal_jobs)
+    try:
+        assert reloaded._SOCIAL_CONCURRENCY_LIMIT == 17
+    finally:
+        monkeypatch.delenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", raising=False)
+        importlib.reload(modal_jobs)

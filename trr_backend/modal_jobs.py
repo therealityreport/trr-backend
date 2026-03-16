@@ -34,6 +34,9 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by local/test import
         def pip_install(self, *_args, **_kwargs):
             return self
 
+        def run_commands(self, *_args, **_kwargs):
+            return self
+
     class _ModalSecret:
         @staticmethod
         def from_name(name: str):
@@ -102,6 +105,7 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
     "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
+    "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_ADMIN_IMAGE_EXECUTION_BACKEND": "modal",
     "SOCIAL_QUEUE_ENABLED": "true",
 }
@@ -161,6 +165,19 @@ _vision_image = (
         "insightface==0.7.3",
         "ultralytics==8.3.39",
     )
+    .add_local_python_source("api", "trr_backend")
+)
+
+_browser_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install(
+        "libnss3", "libnspr4", "libatk1.0-0", "libatk-bridge2.0-0",
+        "libcups2", "libdrm2", "libxkbcommon0", "libxcomposite1",
+        "libxdamage1", "libxfixes3", "libxrandr2", "libgbm1",
+        "libpango-1.0-0", "libcairo2", "libasound2", "libatspi2.0-0",
+    )
+    .pip_install_from_requirements(str(_BACKEND_ROOT / "requirements.lock.txt"))
+    .run_commands("playwright install chromium")
     .add_local_python_source("api", "trr_backend")
 )
 
@@ -245,9 +262,10 @@ def _resolve_modal_secrets() -> list[modal.Secret]:
 def _inject_modal_runtime_defaults() -> None:
     for key, value in _CANONICAL_MODAL_RUNTIME_DEFAULTS.items():
         os.environ[key] = value
-    if (os.getenv("AWS_ACCESS_KEY_ID") or "").strip() and (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip():
-        os.environ.pop("AWS_PROFILE", None)
-        os.environ.pop("AWS_DEFAULT_PROFILE", None)
+    if (os.getenv("OBJECT_STORAGE_ACCESS_KEY_ID") or "").strip() and (
+        os.getenv("OBJECT_STORAGE_SECRET_ACCESS_KEY") or ""
+    ).strip():
+        os.environ.pop("OBJECT_STORAGE_PROFILE", None)
 
 
 _secrets = _resolve_modal_secrets()
@@ -442,3 +460,32 @@ def run_admin_vision(payload: dict[str, object], batch: bool = False) -> dict[st
             "error": str(exc),
             "unavailable": False,
         }
+
+
+@app.function(
+    image=_browser_image,
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+)
+def run_socialblade_scrape(
+    handle: str,
+    person_id: str | None = None,
+    source: str = "person_page",
+    force: bool = False,
+) -> dict[str, object]:
+    import json
+
+    from trr_backend.socials.socialblade.scraper import scrape_socialblade
+    from trr_backend.socials.socialblade.service import refresh_and_persist_socialblade
+
+    cookies = json.loads(os.getenv("SOCIALBLADE_COOKIES_JSON", "[]"))
+    if person_id:
+        return refresh_and_persist_socialblade(
+            person_id=person_id,
+            handle=handle,
+            scraper=lambda safe_handle: scrape_socialblade(safe_handle, cookies),
+            source=source,
+            force=force,
+        )
+    return scrape_socialblade(handle, cookies)

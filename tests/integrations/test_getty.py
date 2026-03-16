@@ -8,10 +8,10 @@ from trr_backend.integrations import getty
 def test_search_editorial_assets_reports_progress(monkeypatch) -> None:
     monkeypatch.setattr(
         getty,
-        "_search_detail_urls_for_phrase",
+        "_search_asset_candidates_for_phrase",
         lambda phrase, **kwargs: [
-            "https://www.gettyimages.com/detail/news-photo/example-one/1",
-            "https://www.gettyimages.com/detail/news-photo/example-two/2",
+            {"detail_url": "https://www.gettyimages.com/detail/news-photo/example-one/1"},
+            {"detail_url": "https://www.gettyimages.com/detail/news-photo/example-two/2"},
         ],
     )
     monkeypatch.setattr(
@@ -41,11 +41,11 @@ def test_search_editorial_assets_reports_progress(monkeypatch) -> None:
 def test_search_editorial_assets_fetches_detail_urls_in_batches(monkeypatch) -> None:
     monkeypatch.setattr(
         getty,
-        "_search_detail_urls_for_phrase",
+        "_search_asset_candidates_for_phrase",
         lambda phrase, **kwargs: [
-            "https://www.gettyimages.com/detail/news-photo/example-one/1",
-            "https://www.gettyimages.com/detail/news-photo/example-two/2",
-            "https://www.gettyimages.com/detail/news-photo/example-three/3",
+            {"detail_url": "https://www.gettyimages.com/detail/news-photo/example-one/1"},
+            {"detail_url": "https://www.gettyimages.com/detail/news-photo/example-two/2"},
+            {"detail_url": "https://www.gettyimages.com/detail/news-photo/example-three/3"},
         ],
     )
 
@@ -83,7 +83,7 @@ def test_search_editorial_assets_forwards_custom_query_params(monkeypatch) -> No
         captured.append({"phrase": phrase, "query_params": kwargs.get("query_params")})
         return []
 
-    monkeypatch.setattr(getty, "_search_detail_urls_for_phrase", _fake_search)
+    monkeypatch.setattr(getty, "_search_asset_candidates_for_phrase", _fake_search)
 
     results = getty.search_editorial_assets(
         "Mary Cosby",
@@ -93,6 +93,82 @@ def test_search_editorial_assets_forwards_custom_query_params(monkeypatch) -> No
 
     assert results == []
     assert captured == [{"phrase": "Mary Cosby", "query_params": {"artistexact": "bravo"}}]
+
+
+def test_extract_search_asset_candidates_reads_grouped_event_metadata() -> None:
+    payload = {
+        "searchItems": [
+            {
+                "landingUrl": "/detail/news-photo/example/2254325572",
+                "eventName": 'UT: BRAVO\'S "The Real Housewives of Salt Lake City" - Season 6',
+                "eventId": "event-1",
+                "eventUrlSlug": "rhoslc-season-6",
+                "title": "The Real Housewives of Salt Lake City - Season 6",
+                "caption": "Reunion -- Pictured: Mary Cosby",
+                "collapsedImageCount": 16,
+            }
+        ]
+    }
+    html = (
+        "<html><body>"
+        f"<script type=\"application/json\" data-component=\"Search\">{json.dumps(payload)}</script>"
+        "</body></html>"
+    )
+
+    candidates = getty._extract_search_asset_candidates(html)
+
+    assert candidates == [
+        {
+            "detail_url": "https://www.gettyimages.com/detail/news-photo/example/2254325572",
+            "event_name": 'UT: BRAVO\'S "The Real Housewives of Salt Lake City" - Season 6',
+            "event_id": "event-1",
+            "event_url_slug": "rhoslc-season-6",
+            "search_title": "The Real Housewives of Salt Lake City - Season 6",
+            "search_caption": "Reunion -- Pictured: Mary Cosby",
+            "grouped_image_count": 16,
+        }
+    ]
+
+
+def test_extract_search_asset_candidates_reads_prerender_search_payload_from_search_id_script() -> None:
+    payload = {
+        "search": {
+            "gallery": {
+                "assets": [
+                    {
+                        "landingUrl": (
+                            "/detail/news-photo/"
+                            "reunion-pictured-mary-cosby-whitney-rose-news-photo/2254325741"
+                        ),
+                        "assetId": "2254325741",
+                        "title": "The Real Housewives of Salt Lake City - Season 6",
+                        "caption": 'THE REAL HOUSEWIVES OF SALT LAKE CITY -- "Reunion" -- Pictured: Mary Cosby',
+                        "collapsedImageCount": 0,
+                    }
+                ]
+            }
+        }
+    }
+    html = (
+        "<html><body>"
+        f"<script id=\"Search_21955\" type=\"application/json\">{json.dumps(payload)}</script>"
+        "</body></html>"
+    )
+
+    candidates = getty._extract_search_asset_candidates(html)
+
+    assert candidates == [
+        {
+            "detail_url": "https://www.gettyimages.com/detail/news-photo/reunion-pictured-mary-cosby-whitney-rose-news-photo/2254325741",
+            "event_name": None,
+            "event_id": None,
+            "event_url_slug": None,
+            "search_title": "The Real Housewives of Salt Lake City - Season 6",
+            "search_caption": 'THE REAL HOUSEWIVES OF SALT LAKE CITY -- "Reunion" -- Pictured: Mary Cosby',
+            "grouped_image_count": 0,
+            "editorial_id": "2254325741",
+        }
+    ]
 
 
 def test_fetch_asset_detail_exposes_preview_image_url(monkeypatch) -> None:

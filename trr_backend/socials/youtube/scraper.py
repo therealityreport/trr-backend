@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -170,6 +170,12 @@ class YouTubeScraper:
     CHANNEL_VIDEOS_URL = "https://www.youtube.com/@{handle}/videos"
     CHANNEL_SHORTS_URL = "https://www.youtube.com/@{handle}/shorts"
     VIDEO_WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
+    PLAYER_RESPONSE_MARKERS = (
+        "ytInitialPlayerResponse =",
+        "var ytInitialPlayerResponse =",
+        "window['ytInitialPlayerResponse'] =",
+        'window["ytInitialPlayerResponse"] =',
+    )
 
     @staticmethod
     def _pick_largest_thumbnail_url(payload: Any) -> str | None:
@@ -361,6 +367,16 @@ class YouTubeScraper:
         re.compile(r'"(?:datePublished|uploadDate|publishDate)"\s*:\s*"([^"]+)"', re.IGNORECASE),
         re.compile(r'itemprop="(?:datePublished|uploadDate)"\s+content="([^"]+)"', re.IGNORECASE),
     )
+    PLAYER_MICROFORMAT_PATTERNS = (
+        re.compile(
+            r'"playerMicroformatRenderer"\s*:\s*\{.*?"(?:publishDate|uploadDate)"\s*:\s*"([^"]+)"',
+            re.IGNORECASE | re.DOTALL,
+        ),
+        re.compile(
+            r'"microformat"\s*:\s*\{.*?"(?:publishDate|uploadDate)"\s*:\s*"([^"]+)"',
+            re.IGNORECASE | re.DOTALL,
+        ),
+    )
     DATE_ONLY_PREFIX_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
     # Client context for API requests
@@ -398,6 +414,9 @@ class YouTubeScraper:
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
+        self._shorts_precise_publish_attempts = 0
+        self._shorts_precise_publish_successes = 0
+        self._shorts_precise_publish_failures = 0
 
     @staticmethod
     def _is_auth_related_failure(reason: str | None) -> bool:
@@ -678,6 +697,7 @@ class YouTubeScraper:
         return {
             "videoId": video_id,
             "title": {"simpleText": title},
+            "descriptionSnippet": {"runs": [{"text": title}]} if title else {},
             "viewCountText": {"simpleText": view_text},
             "thumbnail": {"thumbnails": [{"url": thumb_url}]} if thumb_url else {},
             "navigationEndpoint": {
@@ -823,6 +843,9 @@ class YouTubeScraper:
         renderer_url = self._extract_renderer_url(renderer)
         canonical_url = self._canonical_video_url(video_id=video_id, surface=surface, renderer_url=renderer_url)
         is_short = surface == "shorts" or "/shorts/" in canonical_url
+        if is_short:
+            description = description or title
+            title = ""
 
         return YouTubeVideo(
             video_id=video_id,
@@ -948,38 +971,183 @@ class YouTubeScraper:
         except ValueError:
             return 0
 
-    def _fetch_precise_publish_timestamp(self, video_id: str, delay: float = 2.0) -> int:
-        """Fetch exact upload date from watch-page metadata."""
-        cached = self._precise_publish_ts_cache.get(video_id)
-        if cached is not None:
-            return cached
-
-        self._rate_limit(delay)
-        url = self.VIDEO_WATCH_URL.format(video_id=video_id)
-        try:
-            response = self.session.get(
-                url,
-                headers=self._get_headers(),
-                timeout=self.REQUEST_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            logger.debug("Failed to fetch precise publish timestamp for %s: %s", video_id, e)
-            self._precise_publish_ts_cache[video_id] = 0
-            return 0
-
-        body = response.text or ""
+    def _extract_precise_publish_timestamp_from_html(self, body: str) -> int:
         ts = 0
         for pattern in self.PUBLISHED_DATE_PATTERNS:
             for match in pattern.finditer(body):
                 ts = self._parse_precise_publish_candidate(match.group(1))
                 if ts > 0:
-                    break
+                    return ts
+        for pattern in self.PLAYER_MICROFORMAT_PATTERNS:
+            for match in pattern.finditer(body):
+                ts = self._parse_precise_publish_candidate(match.group(1))
+                if ts > 0:
+                    return ts
+        return 0
+
+    def _fetch_precise_publish_timestamp(self, video_id: str, delay: float = 2.0) -> int:
+        """Fetch exact upload date from watch-page and Shorts-page metadata."""
+        cached = self._precise_publish_ts_cache.get(video_id)
+        if cached is not None:
+            return cached
+
+        ts = 0
+        for url in (
+            self.VIDEO_WATCH_URL.format(video_id=video_id),
+            f"https://www.youtube.com/shorts/{video_id}",
+        ):
+            self._rate_limit(delay)
+            try:
+                response = self.session.get(
+                    url,
+                    headers=self._get_headers(),
+                    timeout=self.REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                logger.debug("Failed to fetch precise publish timestamp for %s via %s: %s", video_id, url, e)
+                continue
+            ts = self._extract_precise_publish_timestamp_from_html(response.text or "")
             if ts > 0:
                 break
-
         self._precise_publish_ts_cache[video_id] = ts
         return ts
+
+    @staticmethod
+    def _extract_json_object_after_marker(text: str, marker: str) -> str | None:
+        marker_idx = text.find(marker)
+        if marker_idx < 0:
+            return None
+        start = text.find("{", marker_idx + len(marker))
+        if start < 0:
+            return None
+
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start, len(text)):
+            char = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if char == "\\":
+                    escaped = True
+                    continue
+                if char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                depth += 1
+                continue
+            if char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : idx + 1]
+        return None
+
+    @classmethod
+    def _extract_player_response_from_html(cls, html: str) -> dict[str, Any] | None:
+        for marker in cls.PLAYER_RESPONSE_MARKERS:
+            payload = cls._extract_json_object_after_marker(html, marker)
+            if not payload:
+                continue
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                return data
+        return None
+
+    def _build_caption_candidates_from_source(
+        self,
+        *,
+        source_name: str,
+        source_payload: dict[str, Any],
+        is_auto: bool,
+        preferred_languages: list[str],
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for language, tracks in source_payload.items():
+            if not isinstance(tracks, list):
+                continue
+            for track in tracks:
+                if not isinstance(track, dict):
+                    continue
+                url = str(track.get("url") or "").strip()
+                ext = str(track.get("ext") or "").strip().lower()
+                if not url:
+                    continue
+                if ext and ext not in {"json3", "srv3", "vtt", "ttml"}:
+                    continue
+                score = self._caption_track_score(
+                    language=str(language or ""),
+                    ext=ext or "",
+                    is_auto=is_auto,
+                    preferred_languages=preferred_languages,
+                )
+                candidates.append(
+                    {
+                        "url": url,
+                        "ext": ext or "vtt",
+                        "language": str(language or ""),
+                        "source": source_name,
+                        "score": score,
+                    }
+                )
+        return candidates
+
+    def _caption_candidates_from_player_response(
+        self,
+        player_response: dict[str, Any],
+        *,
+        preferred_languages: list[str],
+    ) -> list[dict[str, Any]]:
+        captions = player_response.get("captions")
+        if not isinstance(captions, dict):
+            return []
+        tracklist = captions.get("playerCaptionsTracklistRenderer")
+        if not isinstance(tracklist, dict):
+            return []
+        caption_tracks = tracklist.get("captionTracks")
+        if not isinstance(caption_tracks, list):
+            return []
+
+        candidates: list[dict[str, Any]] = []
+        for track in caption_tracks:
+            if not isinstance(track, dict):
+                continue
+            url = str(track.get("baseUrl") or track.get("url") or "").strip()
+            language = str(track.get("languageCode") or "").strip()
+            if not url:
+                continue
+            parsed = urlparse(url)
+            query = parse_qs(parsed.query)
+            ext = str((query.get("fmt") or query.get("format") or ["vtt"])[0] or "vtt").strip().lower()
+            if ext and ext not in {"json3", "srv3", "vtt", "ttml"}:
+                ext = "vtt"
+            is_auto = str(track.get("kind") or "").strip().lower() == "asr"
+            score = self._caption_track_score(
+                language=language,
+                ext=ext,
+                is_auto=is_auto,
+                preferred_languages=preferred_languages,
+            )
+            candidates.append(
+                {
+                    "url": url,
+                    "ext": ext,
+                    "language": language or None,
+                    "source": "auto_captions" if is_auto else "manual_captions",
+                    "score": score,
+                }
+            )
+        return candidates
 
     def _refine_video_publish_timestamp_if_needed(
         self,
@@ -998,14 +1166,21 @@ class YouTubeScraper:
         if not needs_refine:
             return current_in_range
 
+        is_short = bool(getattr(video, "is_short", False)) or self._video_surface(video) == "shorts"
         self._precise_publish_attempts += 1
+        if is_short:
+            self._shorts_precise_publish_attempts += 1
         precise_delay = min(max(float(config.delay_seconds or 0.0) * 0.25, 0.05), 0.35)
         precise_ts = self._fetch_precise_publish_timestamp(video.video_id, precise_delay)
         if precise_ts <= 0:
             self._precise_publish_failures += 1
+            if is_short:
+                self._shorts_precise_publish_failures += 1
             return current_in_range
 
         self._precise_publish_successes += 1
+        if is_short:
+            self._shorts_precise_publish_successes += 1
         if precise_ts != video.published_at:
             video.published_at = precise_ts
             video.date_time = datetime.fromtimestamp(precise_ts, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
@@ -1292,6 +1467,9 @@ class YouTubeScraper:
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
         self._precise_publish_failures = 0
+        self._shorts_precise_publish_attempts = 0
+        self._shorts_precise_publish_successes = 0
+        self._shorts_precise_publish_failures = 0
         surface_cap_override_applied = False
         effective_result_cap: int | None = None
 
@@ -1584,6 +1762,10 @@ class YouTubeScraper:
             "precise_publish_attempts": self._precise_publish_attempts,
             "precise_publish_successes": self._precise_publish_successes,
             "precise_publish_failures": self._precise_publish_failures,
+            "shorts_candidates_found": sum(1 for video in unique_videos if self._video_surface(video) == "shorts"),
+            "shorts_precise_publish_attempts": self._shorts_precise_publish_attempts,
+            "shorts_precise_publish_successes": self._shorts_precise_publish_successes,
+            "shorts_precise_publish_failures": self._shorts_precise_publish_failures,
             "canonical_handle": canonical_handle or handle,
             "canonical_channel_id": canonical_channel_id or None,
             "resolved_channel_title": resolved_channel_title,
@@ -1882,9 +2064,12 @@ class YouTubeScraper:
                 stats["window_candidate_items"] += 1
                 stats["in_range_hits"] += 1
             elif config.date_start or config.date_end:
-                # Unknown timestamps are increasingly common for dynamic renderers.
-                # Still allow keyword matching but track the count.
+                # For bounded Shorts windows, skip rows we cannot place into a
+                # concrete time period after exact-date recovery.
                 stats["timestamp_unknown"] += 1
+                if bool(getattr(video, "is_short", False)) or surface == "shorts":
+                    stats["shorts_undated_skipped"] = int(stats.get("shorts_undated_skipped") or 0) + 1
+                    continue
                 stats["window_candidate_items"] += 1
 
             combined_text = f"{video.title} {video.description}"
@@ -2183,100 +2368,93 @@ class YouTubeScraper:
                 "source": None,
                 "error": "missing_video_id",
             }
-        if not shutil.which("yt-dlp"):
-            return {
-                "text": "",
-                "segments": [],
-                "language": None,
-                "source": None,
-                "error": "yt_dlp_unavailable",
-            }
-
         languages = [str(item).strip() for item in (preferred_languages or ["en-US", "en"]) if str(item).strip()]
         if not languages:
             languages = ["en-US", "en"]
         watch_url = f"https://www.youtube.com/watch?v={normalized_video_id}"
-
-        try:
-            proc = subprocess.run(
-                [
-                    "yt-dlp",
-                    "--dump-single-json",
-                    "--no-playlist",
-                    "--skip-download",
-                    watch_url,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=max(10, int(self.YTDLP_SEARCH_TIMEOUT_SECONDS)),
-                check=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "text": "",
-                "segments": [],
-                "language": None,
-                "source": None,
-                "error": f"yt_dlp_exception:{exc.__class__.__name__}",
-            }
-
-        if proc.returncode != 0:
-            return {
-                "text": "",
-                "segments": [],
-                "language": None,
-                "source": None,
-                "error": "yt_dlp_failed",
-            }
-
-        try:
-            payload = json.loads(proc.stdout or "{}")
-        except json.JSONDecodeError:
-            return {
-                "text": "",
-                "segments": [],
-                "language": None,
-                "source": None,
-                "error": "yt_dlp_parse_failed",
-            }
-
-        subtitles = payload.get("subtitles") if isinstance(payload.get("subtitles"), dict) else {}
-        auto_captions = payload.get("automatic_captions") if isinstance(payload.get("automatic_captions"), dict) else {}
-
         candidates: list[dict[str, Any]] = []
-        for source_name, source_payload, is_auto in (
-            ("manual_captions", subtitles, False),
-            ("auto_captions", auto_captions, True),
-        ):
-            if not isinstance(source_payload, dict):
+        for page_url in (watch_url, f"https://www.youtube.com/shorts/{normalized_video_id}"):
+            try:
+                response = self.session.get(
+                    page_url,
+                    headers=self._get_headers(),
+                    timeout=self.REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+            except Exception:
                 continue
-            for language, tracks in source_payload.items():
-                if not isinstance(tracks, list):
+            player_response = self._extract_player_response_from_html(str(response.text or ""))
+            if not isinstance(player_response, dict):
+                continue
+            candidates = self._caption_candidates_from_player_response(
+                player_response,
+                preferred_languages=languages,
+            )
+            if candidates:
+                break
+
+        if not candidates and shutil.which("yt-dlp"):
+            try:
+                proc = subprocess.run(
+                    [
+                        "yt-dlp",
+                        "--dump-single-json",
+                        "--no-playlist",
+                        "--skip-download",
+                        watch_url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=max(10, int(self.YTDLP_SEARCH_TIMEOUT_SECONDS)),
+                    check=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "text": "",
+                    "segments": [],
+                    "language": None,
+                    "source": None,
+                    "error": f"yt_dlp_exception:{exc.__class__.__name__}",
+                }
+
+            if proc.returncode != 0:
+                return {
+                    "text": "",
+                    "segments": [],
+                    "language": None,
+                    "source": None,
+                    "error": "yt_dlp_failed",
+                }
+
+            try:
+                payload = json.loads(proc.stdout or "{}")
+            except json.JSONDecodeError:
+                return {
+                    "text": "",
+                    "segments": [],
+                    "language": None,
+                    "source": None,
+                    "error": "yt_dlp_parse_failed",
+                }
+
+            subtitles = payload.get("subtitles") if isinstance(payload.get("subtitles"), dict) else {}
+            auto_captions = (
+                payload.get("automatic_captions") if isinstance(payload.get("automatic_captions"), dict) else {}
+            )
+            for source_name, source_payload, is_auto in (
+                ("manual_captions", subtitles, False),
+                ("auto_captions", auto_captions, True),
+            ):
+                if not isinstance(source_payload, dict):
                     continue
-                for track in tracks:
-                    if not isinstance(track, dict):
-                        continue
-                    url = str(track.get("url") or "").strip()
-                    ext = str(track.get("ext") or "").strip().lower()
-                    if not url:
-                        continue
-                    if ext and ext not in {"json3", "srv3", "vtt", "ttml"}:
-                        continue
-                    score = self._caption_track_score(
-                        language=str(language or ""),
-                        ext=ext or "",
+                candidates.extend(
+                    self._build_caption_candidates_from_source(
+                        source_name=source_name,
+                        source_payload=source_payload,
                         is_auto=is_auto,
                         preferred_languages=languages,
                     )
-                    candidates.append(
-                        {
-                            "url": url,
-                            "ext": ext or "vtt",
-                            "language": str(language or ""),
-                            "source": source_name,
-                            "score": score,
-                        }
-                    )
+                )
         if not candidates:
             return {
                 "text": "",

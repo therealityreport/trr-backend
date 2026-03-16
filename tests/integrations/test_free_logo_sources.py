@@ -154,6 +154,108 @@ def test_extract_official_logo_candidates_filters_official_site_to_png_or_svg() 
     assert all(".webp" not in row.url.lower() and ".jpg" not in row.url.lower() for row in official_rows)
 
 
+def test_extract_official_logo_candidates_tries_fandom_home_page_for_community_logos() -> None:
+    root_url = "https://real-housewives.fandom.com"
+    home_page_url = "https://real-housewives.fandom.com/wiki/Home_Page"
+    brand_page_url = "https://www.fandom.com/brand/graphic-assets/logo.html"
+
+    def _fake_get(url: str, **_: object) -> _FakeResponse:
+        if url.rstrip("/") == root_url:
+            return _FakeResponse(url=root_url, text="<html><body>No logo here.</body></html>")
+        if url == home_page_url:
+            return _FakeResponse(
+                url=home_page_url,
+                text=(
+                    "<html><body>"
+                    '<a class="fandom-community-header__image" href="/wiki/Home_Page">'
+                    '<img src="https://static.wikia.nocookie.net/real-housewives/images/e/e6/Site-logo.png/revision/latest?cb=20220212235127" '
+                    'alt="The Real Housewives Wiki" data-test="fandom-community-header-community-logo" />'
+                    "</a>"
+                    "</body></html>"
+                ),
+            )
+        if url == brand_page_url:
+            return _FakeResponse(url=brand_page_url, text="<html><body>Brand assets</body></html>")
+        return _FakeResponse(status_code=404, url=url)
+
+    session = MagicMock()
+    session.get.side_effect = _fake_get
+
+    rows = mod.extract_official_logo_candidates(["https://real-housewives.fandom.com"], session=session)
+
+    assert rows
+    assert rows[0].source_provider == "official_site"
+    assert rows[0].discovered_from == home_page_url
+    assert "Site-logo.png" in rows[0].url
+
+
+def test_extract_official_logo_candidates_falls_back_to_standard_fandom_assets() -> None:
+    root_url = "https://real-housewives.fandom.com"
+    home_page_url = "https://real-housewives.fandom.com/wiki/Home_Page"
+    brand_page_url = "https://www.fandom.com/brand/graphic-assets/logo.html"
+
+    def _fake_get(url: str, **_: object) -> _FakeResponse:
+        if url.rstrip("/") == root_url:
+            return _FakeResponse(url=root_url, text="<html><body>No logo here.</body></html>")
+        if url == home_page_url:
+            return _FakeResponse(url=home_page_url, text="<html><body>No community logo here either.</body></html>")
+        if url == brand_page_url:
+            return _FakeResponse(url=brand_page_url, text="<html><body>Brand assets</body></html>")
+        return _FakeResponse(status_code=404, url=url)
+
+    session = MagicMock()
+    session.get.side_effect = _fake_get
+
+    rows = mod.extract_official_logo_candidates(["https://real-housewives.fandom.com"], session=session)
+    urls = {row.url for row in rows}
+    discovered_from_values = {row.discovered_from for row in rows}
+
+    assert mod.FANDOM_STANDARD_WORDMARK_URL in urls
+    assert mod.FANDOM_STANDARD_ICON_URL in urls
+    assert brand_page_url in discovered_from_values
+
+
+def test_extract_official_logo_candidates_uses_fandom_parse_api_when_html_is_blocked() -> None:
+    root_url = "https://real-housewives.fandom.com"
+    home_page_url = "https://real-housewives.fandom.com/wiki/Home_Page"
+    brand_page_url = "https://www.fandom.com/brand/graphic-assets/logo.html"
+    api_url = "https://real-housewives.fandom.com/api.php"
+
+    def _fake_get(url: str, **kwargs: object) -> _FakeResponse:
+        params = kwargs.get("params")
+        if url.rstrip("/") == root_url:
+            return _FakeResponse(status_code=403, url=root_url, text="blocked")
+        if url == home_page_url:
+            return _FakeResponse(status_code=403, url=home_page_url, text="blocked")
+        if url == api_url and params:
+            return _FakeResponse(
+                url=f"{api_url}?action=parse",
+                payload={
+                    "parse": {
+                        "headhtml": {
+                            "*": (
+                                "<html><head>"
+                                '<meta property="og:image" '
+                                'content="https://static.wikia.nocookie.net/real-housewives/images/e/e6/Site-logo.png/revision/latest?cb=20220212235127" />'
+                                "</head></html>"
+                            )
+                        }
+                    }
+                },
+            )
+        if url == brand_page_url:
+            return _FakeResponse(url=brand_page_url, text="<html><body>Brand assets</body></html>")
+        return _FakeResponse(status_code=404, url=url)
+
+    session = MagicMock()
+    session.get.side_effect = _fake_get
+
+    rows = mod.extract_official_logo_candidates(["https://real-housewives.fandom.com"], session=session)
+
+    assert any("Site-logo.png" in row.url for row in rows)
+    assert any(row.discovered_from in {root_url, home_page_url} for row in rows)
+
+
 def test_collect_free_logo_candidates_merges_logopedia_results() -> None:
     session = MagicMock()
     session.get.return_value = _FakeResponse(status_code=404, url="https://example.com")

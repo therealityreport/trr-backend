@@ -115,6 +115,8 @@ def expected_function_names() -> tuple[str, ...]:
         str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
         or "sweep_social_dispatch_queue",
         str(os.getenv("TRR_MODAL_VISION_FUNCTION") or "run_admin_vision").strip() or "run_admin_vision",
+        str(os.getenv("TRR_MODAL_SOCIALBLADE_FUNCTION") or "run_socialblade_scrape").strip()
+        or "run_socialblade_scrape",
         "heartbeat_remote_executors",
     )
 

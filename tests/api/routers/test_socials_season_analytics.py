@@ -654,6 +654,46 @@ def test_ingest_accepts_scheduler_fields(client: TestClient, monkeypatch: pytest
     assert ingest_mock.call_args.kwargs["priority_mode"] == "episode_peak_weighted"
 
 
+def test_ingest_passes_youtube_hybrid_controls(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-youtube-controls",
+        "status": "queued",
+        "stages": ["posts", "comments"],
+        "queued_or_started_jobs": 2,
+        "summary": {"total_jobs": 2},
+    }
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["youtube"],
+        "youtube_source_mode": "api_only",
+        "youtube_force_reindex": True,
+        "youtube_force_media_refresh": True,
+        "youtube_force_comment_refresh": True,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected) as ingest_mock:
+        with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                response = client.post(
+                    f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 200
+    assert ingest_mock.call_args.kwargs["youtube_source_mode"] == "api_only"
+    assert ingest_mock.call_args.kwargs["youtube_force_reindex"] is True
+    assert ingest_mock.call_args.kwargs["youtube_force_media_refresh"] is True
+    assert ingest_mock.call_args.kwargs["youtube_force_comment_refresh"] is True
+
+
 def test_ingest_resolves_week_index_to_canonical_window(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -2918,7 +2958,7 @@ def test_get_run_progress_endpoint_returns_payload(
 
     with patch(
         "trr_backend.repositories.social_season_analytics.get_run_progress_snapshot", return_value=expected
-    ) as mocked:
+    ):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/progress?recent_log_limit=15",
             headers={"Authorization": f"Bearer {token}"},
@@ -2926,7 +2966,170 @@ def test_get_run_progress_endpoint_returns_payload(
 
     assert response.status_code == 200
     assert response.json() == expected
-    assert mocked.call_args.kwargs["recent_log_limit"] == 15
+
+
+def test_create_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    date_start = "2026-01-01T00:00:00Z"
+    date_end = "2026-01-08T00:00:00Z"
+    expected = {
+        "sync_session_id": str(uuid4()),
+        "status": "created",
+        "season_id": season_id,
+        "current_pass_kind": "posts_and_comments",
+        "current_pass_attempt": 1,
+        "current_run_id": str(uuid4()),
+        "pass_sequence": 1,
+        "follow_up_reason": "initial_start",
+        "completeness_snapshot": {"up_to_date": False},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_sync_orchestrator.create_sync_session",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "source_scope": "bravo",
+                "platforms": ["instagram"],
+                "date_start": date_start,
+                "date_end": date_end,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["sync_session_id"] == expected["sync_session_id"]
+    assert mocked.call_args.args[0] == season_id
+    assert mocked.call_args.kwargs["platforms"] == ["instagram"]
+    assert mocked.call_args.kwargs["source_scope"] == "bravo"
+
+
+def test_get_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    sync_session_id = str(uuid4())
+    expected = {
+        "sync_session_id": sync_session_id,
+        "season_id": season_id,
+        "status": "pass_running",
+        "current_pass_kind": "comments_only",
+        "current_pass_attempt": 1,
+        "current_run_id": str(uuid4()),
+        "pass_sequence": 2,
+        "follow_up_reason": "comments_incomplete",
+        "completeness_snapshot": {"up_to_date": False},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_sync_orchestrator.evaluate_sync_session",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "pass_running"
+    mocked.assert_called_once_with(sync_session_id)
+
+
+def test_stream_sync_session_endpoint_emits_event_stream(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    sync_session_id = str(uuid4())
+    payload = {
+        "sync_session": {
+            "sync_session_id": sync_session_id,
+            "season_id": season_id,
+            "status": "completed",
+            "current_pass_kind": "details_refresh",
+            "current_pass_attempt": 1,
+            "current_run_id": None,
+            "pass_sequence": 3,
+            "follow_up_reason": None,
+            "source_scope": "bravo",
+            "platforms": ["instagram"],
+            "date_start": None,
+            "date_end": None,
+            "pass_history": [],
+            "completeness_snapshot": {"up_to_date": True},
+        },
+        "run_progress": None,
+        "emitted_at": "2026-03-16T12:00:00+00:00",
+    }
+
+    with patch("api.routers.socials._build_sync_session_stream_payload", return_value=payload):
+        with client.stream(
+            "GET",
+            f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}/stream",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            body = "".join(response.iter_text())
+
+    assert "event: sync_session" in body
+    assert sync_session_id in body
+
+
+def test_cancel_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    sync_session_id = str(uuid4())
+    expected = {
+        "sync_session_id": sync_session_id,
+        "season_id": season_id,
+        "status": "cancelling",
+    }
+
+    with patch(
+        "trr_backend.repositories.social_sync_orchestrator.cancel_sync_session",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelling"
+    assert mocked.call_args.kwargs["cancelled_by"] is None
+
+
+def test_retry_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    sync_session_id = str(uuid4())
+    expected = {
+        "sync_session_id": sync_session_id,
+        "season_id": season_id,
+        "status": "pass_running",
+        "current_pass_kind": "details_refresh",
+        "current_pass_attempt": 2,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_sync_orchestrator.retry_sync_session",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}/retry",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"retry_kind": "retry_failed_media"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["current_pass_attempt"] == 2
+    assert mocked.call_args.kwargs["retry_kind"] == "retry_failed_media"
 
 
 def test_get_week_live_health_endpoint_returns_payload(

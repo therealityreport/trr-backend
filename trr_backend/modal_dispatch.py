@@ -61,6 +61,10 @@ def modal_social_recovery_function_name() -> str:
     return str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
 
 
+def modal_socialblade_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_SOCIALBLADE_FUNCTION") or "run_socialblade_scrape").strip()
+
+
 def modal_app_name() -> str:
     return str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip()
 
@@ -81,6 +85,7 @@ def modal_dispatch_config() -> dict[str, str]:
         "reddit_refresh_function": modal_reddit_refresh_function_name(),
         "social_job_function": modal_social_job_function_name(),
         "social_recovery_function": modal_social_recovery_function_name(),
+        "socialblade_function": modal_socialblade_function_name(),
     }
 
 
@@ -139,7 +144,7 @@ def _spawn_named_modal_function(
     *,
     function_name: str,
     log_label: str,
-    kwargs: dict[str, str],
+    kwargs: dict[str, Any],
     dispatcher_name: str,
     supported_platforms: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -266,4 +271,59 @@ def dispatch_social_job(*, job_id: str) -> dict[str, Any]:
         kwargs={"job_id": job_id},
         dispatcher_name="social",
         supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
+    )
+
+
+def dispatch_socialblade_scrape_sync(*, handle: str) -> dict[str, Any]:
+    """Synchronous dispatch — calls Modal .remote() and blocks until result.
+
+    Unlike other dispatchers that use .spawn() (fire-and-forget), this uses
+    .remote() because the frontend waits synchronously for the scrape result.
+    """
+    function_name = modal_socialblade_function_name()
+    ready, reason = modal_dispatch_ready(function_name=function_name)
+    if not ready:
+        return {"error": f"Modal not ready: {reason}", "dispatched": False}
+
+    app_name = modal_app_name()
+    try:
+        import modal
+
+        fn = modal.Function.from_name(app_name, function_name)
+        result = fn.remote(handle=handle)
+        logger.info(
+            "SocialBlade scrape completed via Modal: app=%s function=%s handle=%s",
+            app_name,
+            function_name,
+            handle,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to dispatch SocialBlade scrape to Modal: app=%s function=%s handle=%s",
+            app_name,
+            function_name,
+            handle,
+        )
+        return {"error": str(exc), "dispatched": False}
+
+
+def dispatch_socialblade_scrape(
+    *,
+    person_id: str,
+    handle: str,
+    source: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Asynchronous SocialBlade dispatch for cast and season-level refreshes."""
+    return _spawn_named_modal_function(
+        function_name=modal_socialblade_function_name(),
+        log_label="socialblade refresh",
+        kwargs={
+            "person_id": person_id,
+            "handle": handle,
+            "source": source,
+            "force": force,
+        },
+        dispatcher_name="socialblade",
     )

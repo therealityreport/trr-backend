@@ -511,7 +511,7 @@ def _infer_logo_file_type(*, source_url: str, content_type: str | None) -> str |
 
     lowered_url = _normalize_text(source_url).lower()
     for extension in ("svg", "png", "webp", "jpg", "jpeg", "gif", "avif", "ico"):
-        if re.search(rf"\.{extension}(?:$|[?#])", lowered_url):
+        if re.search(rf"\.{extension}(?:$|[/?#])", lowered_url):
             return "jpg" if extension == "jpeg" else extension
     if lowered_url.startswith("data:image/svg+xml"):
         return "svg"
@@ -556,8 +556,9 @@ def _detect_logo_role(
     content_type: str | None,
     width: int | None,
     height: int | None,
+    context_hint: str | None = None,
 ) -> str:
-    lowered = _normalize_text(candidate_url).lower()
+    lowered = f"{_normalize_text(candidate_url)} {_normalize_text(context_hint)}".lower()
     ct = _normalize_text(content_type).lower()
     cue_wordmark = bool(re.search(r"(wordmark|logotype|full-logo|horizontal)", lowered))
     cue_icon = bool(re.search(r"(favicon|icon|symbol|mark|avatar)", lowered))
@@ -609,8 +610,7 @@ def _is_previewable_logo_url(source_url: str) -> bool:
     if parsed.scheme not in {"http", "https"}:
         return False
     lowered = text.lower()
-    path = _normalize_text(parsed.path).lower()
-    if any(path.endswith(ext) for ext in (".svg", ".png", ".webp", ".jpg", ".jpeg", ".avif", ".gif", ".ico")):
+    if re.search(r"\.(svg|png|webp|jpg|jpeg|avif|gif|ico)(?:$|[/?#])", lowered):
         return True
     if "special:filepath/" in lowered:
         return True
@@ -622,6 +622,13 @@ def _is_previewable_logo_url(source_url: str) -> bool:
 def _extract_image_dimensions(image_data: bytes) -> tuple[int | None, int | None]:
     try:
         from PIL import Image  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None, None
+    try:
+        with Image.open(io.BytesIO(image_data)) as image:
+            width = int(image.width) if image.width else None
+            height = int(image.height) if image.height else None
+            return width, height
     except Exception:  # noqa: BLE001
         return None, None
 
@@ -667,13 +674,6 @@ def _discover_role_sort_priority(
     else:
         shape_bucket = 0
     return role_bucket, shape_bucket
-    try:
-        with Image.open(io.BytesIO(image_data)) as image:
-            width = int(image.width) if image.width else None
-            height = int(image.height) if image.height else None
-            return width, height
-    except Exception:  # noqa: BLE001
-        return None, None
 
 
 def _filter_target_rows_by_query(rows: list[dict[str, Any]], q: str) -> list[dict[str, Any]]:
@@ -715,6 +715,31 @@ def _seed_logo_targets_from_entity_links(*, show_id: str | None = None) -> list[
     )
 
     buckets: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def ensure_bucket(
+        *,
+        target_type: str,
+        target_key: str,
+        target_label: str,
+        discovered_from: str,
+    ) -> dict[str, Any]:
+        key = (target_type, target_key)
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = {
+                "target_type": target_type,
+                "target_key": target_key,
+                "target_label": target_label,
+                "discovered_from": discovered_from,
+                "discovered_from_urls": [],
+                "show_ids": [],
+                "source_link_kinds": [],
+            }
+            buckets[key] = bucket
+        elif not bucket.get("discovered_from"):
+            bucket["discovered_from"] = discovered_from
+        return bucket
+
     for row in rows:
         source_url = _normalize_text(row.get("url"))
         if not source_url:
@@ -724,19 +749,12 @@ def _seed_logo_targets_from_entity_links(*, show_id: str | None = None) -> list[
             continue
         kind = _normalize_text(row.get("link_kind")).lower()
         target_type = "social" if kind in _SOCIAL_LINK_KINDS else "publication"
-        key = (target_type, host)
-        bucket = buckets.get(key)
-        if bucket is None:
-            bucket = {
-                "target_type": target_type,
-                "target_key": host,
-                "target_label": host,
-                "discovered_from": source_url,
-                "discovered_from_urls": [],
-                "show_ids": [],
-                "source_link_kinds": [],
-            }
-            buckets[key] = bucket
+        bucket = ensure_bucket(
+            target_type=target_type,
+            target_key=host,
+            target_label=host,
+            discovered_from=source_url,
+        )
         discovered_from_urls = bucket.setdefault("discovered_from_urls", [])
         if source_url not in discovered_from_urls and len(discovered_from_urls) < 20:
             discovered_from_urls.append(source_url)
@@ -749,8 +767,24 @@ def _seed_logo_targets_from_entity_links(*, show_id: str | None = None) -> list[
             kinds = bucket.setdefault("source_link_kinds", [])
             if kind not in kinds:
                 kinds.append(kind)
-        if not bucket.get("discovered_from"):
-            bucket["discovered_from"] = source_url
+
+        if target_type == "publication" and (host.endswith(".fandom.com") or host.endswith(".wikia.com")):
+            fallback_bucket = ensure_bucket(
+                target_type="publication",
+                target_key="fandom.com",
+                target_label="Fandom",
+                discovered_from="https://www.fandom.com/",
+            )
+            fallback_urls = fallback_bucket.setdefault("discovered_from_urls", [])
+            if "https://www.fandom.com/" not in fallback_urls and len(fallback_urls) < 20:
+                fallback_urls.append("https://www.fandom.com/")
+            if show_id_value:
+                fallback_show_ids = fallback_bucket.setdefault("show_ids", [])
+                if show_id_value not in fallback_show_ids:
+                    fallback_show_ids.append(show_id_value)
+            fallback_kinds = fallback_bucket.setdefault("source_link_kinds", [])
+            if "fandom_fallback" not in fallback_kinds:
+                fallback_kinds.append("fandom_fallback")
 
     out = list(buckets.values())
     out.sort(
@@ -1875,6 +1909,7 @@ def _discover_logo_candidates_by_source(payload: BrandLogosOptionDiscoverRequest
             content_type=content_type,
             width=width,
             height=height,
+            context_hint=candidate.context,
         )
         out.append(
             {

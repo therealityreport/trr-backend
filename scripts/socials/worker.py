@@ -26,6 +26,7 @@ from trr_backend.repositories.social_season_analytics import (
     recover_stale_running_jobs,
     update_worker_heartbeat,
 )
+from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.utils.env import load_env
 
@@ -519,9 +520,16 @@ def main() -> int:
             minimum=10,
             maximum=3600,
         )
+        sync_orchestrator_interval = _resolve_int_env(
+            "SOCIAL_SYNC_SESSION_TICK_INTERVAL_SEC",
+            30,
+            minimum=5,
+            maximum=3600,
+        )
         claimed_jobs: list[dict[str, object]] = []
         last_stale_recovery_at = 0.0
         last_summary_reconcile_at = 0.0
+        last_sync_orchestrator_at = 0.0
         while True:
             started = datetime.now(tz=UTC)
             now_mono = time.monotonic()
@@ -546,6 +554,17 @@ def main() -> int:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Run summary reconciliation pass failed: %s", exc)
                 last_summary_reconcile_at = now_mono
+            if now_mono - last_sync_orchestrator_at >= sync_orchestrator_interval:
+                try:
+                    orchestrated = tick_sync_orchestrator(limit=50)
+                    if int(orchestrated.get("evaluated_sessions") or 0) > 0:
+                        logger.debug(
+                            "Evaluated %d sync session(s)",
+                            int(orchestrated.get("evaluated_sessions") or 0),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Sync-session orchestration tick failed: %s", exc)
+                last_sync_orchestrator_at = now_mono
 
             if not claimed_jobs:
                 try:

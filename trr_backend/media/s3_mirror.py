@@ -172,26 +172,10 @@ class S3Config:
 HostedMediaStorageConfig = S3Config
 
 
-def _require_env(name: str) -> str:
-    value = (os.getenv(name) or "").strip()
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
-
-
-def _require_region() -> str:
-    region = (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "").strip()
-    if not region:
-        raise RuntimeError("Missing required environment variable: AWS_REGION (or AWS_DEFAULT_REGION)")
-    return region
-
-
 def _validate_public_base_url(value: str) -> str:
     base = (value or "").strip()
     if not base:
-        raise RuntimeError(
-            "Missing required environment variable: OBJECT_STORAGE_PUBLIC_BASE_URL (or AWS_CDN_BASE_URL)"
-        )
+        raise RuntimeError("Missing required environment variable: OBJECT_STORAGE_PUBLIC_BASE_URL")
     if not base.startswith("https://"):
         raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL must start with https://")
     if "dxxxx" in base.lower():
@@ -207,10 +191,6 @@ def _validate_public_base_url(value: str) -> str:
     if re.match(r"^[a-z0-9.-]+\.s3[.-][a-z0-9-]+\.amazonaws\.com$", host):
         raise RuntimeError("OBJECT_STORAGE_PUBLIC_BASE_URL must not be a direct S3 endpoint")
     return base.rstrip("/")
-
-
-def _validate_cdn_base_url(value: str) -> str:
-    return _validate_public_base_url(value)
 
 
 def _load_hosted_media_storage_config() -> HostedMediaStorageConfig:
@@ -247,9 +227,7 @@ def _build_boto3_session(config: S3Config) -> boto3.Session:
         try:
             return boto3.Session(profile_name=config.profile_name, region_name=config.region)
         except ProfileNotFound:
-            access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
-            secret_key = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
-            if access_key and secret_key:
+            if config.access_key_id and config.secret_access_key:
                 return boto3.Session(region_name=config.region)
             raise
     return boto3.Session(region_name=config.region)

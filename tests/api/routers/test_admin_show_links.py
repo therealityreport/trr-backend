@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.routers.admin_show_links as admin_show_links
+import trr_backend.integrations.fandom as fandom_integration
 from api.main import app
 from api.routers.admin_show_links import (
     _canonicalize_url,
@@ -1018,6 +1019,62 @@ def test_search_fandom_allpages_html_candidates_uses_from_query_prefix_and_extra
     assert "https://thetraitors.fandom.com/wiki/Alan_Cumming" in candidates
 
 
+def test_search_fandom_person_related_pages_filters_same_owner_results_and_paginates() -> None:
+    api_calls: list[str] = []
+
+    def _fetch_html(url: str, *, timeout: float = 20.0, headers=None):
+        api_calls.append(url)
+        if "api.php" in url and "sroffset=2" not in url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "query": {
+                            "search": [
+                                {"title": "Angie Katsanevas"},
+                                {"title": "Angie Katsanevas/Gallery"},
+                                {"title": "Angie Harrington"},
+                            ]
+                        },
+                        "continue": {"sroffset": 2},
+                    }
+                ),
+                None,
+            )
+        if "api.php" in url and "sroffset=2" in url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "query": {
+                            "search": [
+                                {"title": "Angie Katsanevas/Storylines"},
+                                {"title": "Angie Katsanevas/Connections"},
+                            ]
+                        }
+                    }
+                ),
+                None,
+            )
+        return (404, "", None)
+
+    with patch("trr_backend.integrations.fandom.fetch_html", side_effect=_fetch_html):
+        candidates = fandom_integration.search_fandom_person_related_pages(
+            "angie katsanevas",
+            community_domain="real-housewives.fandom.com",
+            owner_page_url="https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
+            max_results=10,
+        )
+
+    assert any("sroffset=2" in url for url in api_calls)
+    assert candidates == [
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Storylines",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
+    ]
+
+
 def test_classify_submitted_link_input_rejects_traitors_fandom_url_on_wrong_domain() -> None:
     show_id = str(uuid4())
     context = {
@@ -1042,6 +1099,88 @@ def test_classify_submitted_link_input_rejects_traitors_fandom_url_on_wrong_doma
     rows, error = _classify_submitted_link_input("https://real-housewives.fandom.com/wiki/The_Traitors", context)
     assert rows == []
     assert error == "Fandom link is for a different community."
+
+
+def test_add_show_links_expands_person_fandom_url_into_related_pages() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    person_record = {
+        "id": person_id,
+        "name": "Angie Katsanevas",
+        "name_norm": "angie katsanevas",
+        "imdb_id": None,
+        "tmdb_id": None,
+        "wikidata_id": None,
+        "fandom_name_norm": "angie katsanevas",
+    }
+    context = {
+        "show_id": show_id,
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_name_norm": "the real housewives of salt lake city",
+        "show_imdb_id": None,
+        "show_tmdb_id": None,
+        "show_wikidata_id": None,
+        "show_networks": ["bravo"],
+        "is_bravo_show": True,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {person_id: person_record},
+        "people_by_name": {"angie katsanevas": person_record},
+        "people_by_slug": {"angie katsanevas": person_record},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    with patch("api.routers.admin_show_links._show_exists", return_value=True):
+        with patch("api.routers.admin_show_links._load_show_link_classifier_context", return_value=context):
+            with patch(
+                "api.routers.admin_show_links._fetch_html_with_status",
+                return_value=(
+                    200,
+                    """
+                    <html>
+                      <head><title>Angie Katsanevas | Real Housewives Wiki | Fandom</title></head>
+                      <body><h1 class="page-header__title">Angie Katsanevas</h1></body>
+                    </html>
+                    """,
+                    "https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
+                    None,
+                ),
+            ):
+                with patch(
+                    "api.routers.admin_show_links.search_fandom_person_related_pages",
+                    return_value=[
+                        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
+                        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
+                        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Storylines",
+                        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
+                    ],
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links._upsert_link",
+                            side_effect=lambda *args, **kwargs: {"id": str(uuid4())},
+                        ):
+                            result = admin_show_links.add_show_links(
+                                UUID(show_id),
+                                admin_show_links.LinkBulkAddRequest(
+                                    inputs=["https://real-housewives.fandom.com/wiki/Angie_Katsanevas"]
+                                ),
+                                MagicMock(),
+                                {"email": "admin@example.com"},
+                            )
+
+    assert result["added"] == 4
+    assert {assignment["url"] for assignment in result["assignments"]} == {
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Storylines",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
+    }
 
 
 def test_classify_submitted_link_input_recognizes_tvdb_urls() -> None:
@@ -2008,9 +2147,15 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
                         links = _discover_people_links(show_id)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
-    assert len(fandom_links) == 1
-    assert fandom_links[0]["url"] == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
-    assert fandom_links[0]["metadata"]["site_title"] == "Real Housewives Wiki"
+    assert len(fandom_links) == 4
+    assert {str(link.get("url") or "") for link in fandom_links} == {
+        "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+        "https://real-housewives.fandom.com/wiki/Lisa_Barlow/Gallery",
+        "https://real-housewives.fandom.com/wiki/Lisa_Barlow/Storylines",
+        "https://real-housewives.fandom.com/wiki/Lisa_Barlow/Connections",
+    }
+    assert all("real-housewives.fandom.com" in str(link.get("url") or "") for link in fandom_links)
+    assert any(link.get("metadata", {}).get("site_title") == "Real Housewives Wiki" for link in fandom_links)
 
 
 def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_pages() -> None:
@@ -2048,7 +2193,7 @@ def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_
                         links = _discover_people_links(show_id)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
-    assert len(fandom_links) == 2
+    assert len(fandom_links) == 5
     assert any(link.get("url") == "https://real-housewives.fandom.com/wiki/Lisa_Barlow" for link in fandom_links)
     assert any(link.get("url") == "https://real-housewives.fandom.com/wiki/Lisa" for link in fandom_links)
 
@@ -2154,6 +2299,79 @@ def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_searc
     assert len(fandom_links) == 2
     assert any(link.get("url") == "https://thetraitors.fandom.com/wiki/Alan_Cumming" for link in fandom_links)
     assert any(link.get("url") == "https://thetraitorsuk.fandom.com/wiki/Alan_Cumming" for link in fandom_links)
+
+
+def test_discover_people_links_expands_matching_fandom_person_related_pages() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    show_fandom_urls = ["https://real-housewives.fandom.com/"]
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None},
+    ):
+        with patch(
+            "api.routers.admin_show_links.load_fandom_community_allowlist",
+            return_value=("real-housewives.fandom.com",),
+        ):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                def _fetch_all(query: str, params=None):
+                    if "FROM core.show_cast_role_assignments" in query:
+                        return []
+                    if "FROM core.v_show_cast sc" in query:
+                        return [
+                            {
+                                "id": person_id,
+                                "full_name": "Angie Katsanevas",
+                                "external_ids": {},
+                                "fandom_url": "",
+                                "cast_tmdb_imdb_id": None,
+                                "cast_tmdb_tmdb_id": None,
+                                "cast_tmdb_wikidata_id": None,
+                                "cast_tmdb_facebook_id": None,
+                                "cast_tmdb_instagram_id": None,
+                                "cast_tmdb_tiktok_id": None,
+                                "cast_tmdb_twitter_id": None,
+                                "cast_tmdb_youtube_id": None,
+                                "cast_tmdb_freebase_id": None,
+                                "cast_tmdb_freebase_mid": None,
+                            }
+                        ]
+                    if "FROM core.entity_links" in query:
+                        return []
+                    raise AssertionError(query)
+
+                fetch_all.side_effect = _fetch_all
+                with patch(
+                    "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                    return_value=["https://real-housewives.fandom.com/wiki/Angie_Katsanevas"],
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.search_fandom_person_related_pages",
+                        return_value=[
+                            "https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
+                            "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
+                            "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Storylines",
+                            "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
+                        ],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
+                        ):
+                            links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
+
+    fandom_urls = {
+        str(link.get("url") or "")
+        for link in links
+        if link.get("entity_type") == "person" and link.get("link_kind") == "fandom"
+    }
+    assert fandom_urls == {
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Storylines",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
+    }
 
 
 def test_score_fandom_candidate_url_rejects_weak_token_overlap_person_match() -> None:
@@ -3101,6 +3319,31 @@ def test_validated_person_knowledge_url_accepts_matching_fandom_person_page() ->
             expected_name="Lisa Barlow",
         )
     assert resolved == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
+
+
+def test_validated_person_knowledge_url_accepts_matching_fandom_person_subpage() -> None:
+    _validated_person_knowledge_url.cache_clear()
+    html = """
+    <html>
+      <head><title>Angie Katsanevas/Gallery | Real Housewives Wiki | Fandom</title></head>
+      <body><h1 class="page-header__title">Angie Katsanevas/Gallery</h1></body>
+    </html>
+    """
+    with patch(
+        "api.routers.admin_show_links._fetch_html_with_status",
+        return_value=(
+            200,
+            html,
+            "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
+            None,
+        ),
+    ):
+        resolved = _validated_person_knowledge_url(
+            "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
+            kind="fandom",
+            expected_name="Angie Katsanevas",
+        )
+    assert resolved == "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery"
 
 
 def test_validate_person_knowledge_url_rejects_wikidata_mismatched_person() -> None:

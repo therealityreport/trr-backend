@@ -166,7 +166,7 @@ def test_main_fails_fast_when_mirror_s3_preflight_fails(monkeypatch) -> None:
     monkeypatch.setattr(worker, "load_env", lambda: None)
 
     def _fail_preflight() -> None:
-        raise RuntimeError("Missing required environment variable: AWS_S3_BUCKET")
+        raise RuntimeError("Missing required environment variable: OBJECT_STORAGE_BUCKET")
 
     monkeypatch.setattr(worker, "ensure_media_mirror_s3_ready", _fail_preflight)
 

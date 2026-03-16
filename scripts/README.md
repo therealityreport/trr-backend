@@ -200,7 +200,18 @@ python scripts/shows/backfill_bravo_person_source_links.py \
 
 ### 9) Historical social hosted-media cleanup
 
-Use the canonical social media mirror backfill script for older posts that still need hosted-media repair, remirroring, or targeted cleanup:
+Use the canonical hosted-URL normalizer first when rows already have hosted assets but still point at a legacy public host:
+
+```bash
+PYTHONPATH=. python scripts/socials/repair_social_hosted_urls.py \
+  --platforms instagram,tiktok,youtube,twitter,facebook,threads \
+  --show-id <show-uuid> \
+  --season-number 6 \
+  --limit-per-platform 5000 \
+  --dry-run
+```
+
+Then use the media mirror backfill script for older posts that still need thumbnail/media/avatar repair, remirroring, or targeted cleanup:
 
 ```bash
 PYTHONPATH=. python scripts/socials/backfill_social_media_mirror_jobs.py \
@@ -211,33 +222,63 @@ PYTHONPATH=. python scripts/socials/backfill_social_media_mirror_jobs.py \
   --dry-run
 ```
 
-Target specific seasons, rows, or repair classes when you want a narrower cleanup pass:
+If historical Threads `media_mirror` jobs failed before Threads support landed, retire those obsolete failures first so queue snapshots stop counting them as current actionable errors:
+
+```bash
+PYTHONPATH=. python scripts/socials/retire_stale_threads_media_mirror_failures.py \
+  --season-id <season-uuid> \
+  --dry-run
+```
+
+Apply the retirement once the dry-run count looks correct:
+
+```bash
+PYTHONPATH=. python scripts/socials/retire_stale_threads_media_mirror_failures.py \
+  --season-id <season-uuid> \
+  --apply
+```
+
+Target specific shows, seasons, rows, repair classes, or cleanup modes when you want a narrower pass:
 
 ```bash
 PYTHONPATH=. python scripts/socials/backfill_social_media_mirror_jobs.py \
   --all-history \
   --platforms twitter \
+  --show-id <show-uuid> \
   --season-id <season-uuid> \
+  --season-number 6 \
   --post-id <post-uuid> \
   --source-id <platform-source-id> \
-  --repair-reasons twitter_video_thumbnail,legacy_host \
+  --repair-reasons twitter_video_thumbnail,legacy_hosted_url \
+  --mirror-only \
   --source-scope bravo
 ```
 
 Supported repair reasons:
-- `legacy_host`
+- `legacy_hosted_url`
 - `hosted_content`
 - `missing_hosted_thumbnail`
 - `missing_hosted_media`
+- `missing_source_avatar`
+- `missing_hosted_avatar`
 - `mirror_retry`
 - `non_video_hosted_media`
 - `source_quality`
+- `stale_media_metadata`
 - `twitter_video_thumbnail`
+
+Compatibility note:
+- `legacy_host` is still accepted as a CLI alias for `legacy_hosted_url`.
 
 Notes:
 - `--dry-run` reports eligible historical cleanup rows without enqueueing mirror jobs.
 - Without `--all-history`, the script preserves the default recent lookback window (`--weeks`, default `8`).
 - `--hosted-html-only` remains available as a narrow compatibility filter for page-wrapper cleanup.
+- Recommended Threads repair sequence when stale unsupported failures exist:
+  1. retire stale `mirror_platform_not_supported:threads` failures with `retire_stale_threads_media_mirror_failures.py`
+  2. rerun `backfill_social_media_mirror_jobs.py --platforms threads ...`
+  3. drain `scripts.socials.worker --stage media_mirror --platform threads`
+  4. rerun the Threads dry-run until `eligible` reaches zero or only current reproducible failures remain
 
 ### 10) Historical show/season/episode/cast image cleanup
 
@@ -293,6 +334,18 @@ See `scripts/media/README.md`:
 - `scripts/media/mirror_cast_photos_to_s3.py`
 - `scripts/media/mirror_media_assets_to_s3.py`
 - `scripts/media/rebuild_hosted_urls.py`
+
+Canonical hosted-URL rebuild for stale gallery hosts:
+
+```bash
+PYTHONPATH=. python scripts/media/rebuild_hosted_urls.py --table all --dry-run
+PYTHONPATH=. python scripts/media/rebuild_hosted_urls.py --table all
+```
+
+Notes:
+- Rewrites stale legacy hosted URLs in `media_assets`, `media_asset_variants`, `cast_photos`, and legacy image tables onto the current object-storage public base.
+- Also rewrites embedded metadata URLs, including `media-variants`, `cast-photo-variants`, and `face-crops` URLs consumed by app gallery/lightbox surfaces.
+- Follow with `scripts/media/repair_gallery_hosts.py --apply` only for rows that still fail reachability after the canonical rebuild.
 
 Bravo video thumbnail backfill:
 

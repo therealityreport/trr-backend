@@ -231,9 +231,9 @@ GROUP BY source;
 
 ```bash
 # S3 configuration (required for actual mirroring)
-AWS_S3_BUCKET=your-media-bucket
-AWS_CDN_BASE_URL=https://cdn.example.com
-AWS_REGION=us-east-1
+OBJECT_STORAGE_BUCKET=your-media-bucket
+OBJECT_STORAGE_PUBLIC_BASE_URL=https://cdn.example.com
+OBJECT_STORAGE_REGION=us-east-1
 
 # Domain allowlist (optional, has sensible defaults)
 MEDIA_MIRROR_ALLOWED_DOMAINS=image.tmdb.org,m.media-amazon.com,static.wikia.nocookie.net

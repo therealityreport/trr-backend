@@ -99,6 +99,8 @@ See `docs/architecture.md` for the full TMDb enrichment pipeline.
 - `social.tiktok_comments`: TikTok comments with reply support (parent_comment_id).
 - `social.youtube_videos`: YouTube videos (video_id unique key).
 - `social.youtube_comments`: YouTube comments with reply support (parent_comment_id).
+- `social.youtube_channel_sync_state`: Per-season/per-account YouTube discovery checkpoints, source mode, and diagnostics.
+- `social.youtube_video_sync_state`: Per-video freshness state for stats/comments/media resolution and mirror progress.
 - `social.twitter_tweets`: Twitter/X tweets including replies (tweet_id unique key, reply_to_tweet_id for threading).
 
 All scrape tables include:
@@ -114,7 +116,7 @@ Public read:
 - `core.shows`, `core.seasons`, `core.episodes`, `core.people`, `core.cast_memberships`, `core.episode_cast`
 - `surveys.surveys`, `surveys.questions`, `surveys.options`, `surveys.aggregates`
 - `social.threads`, `social.posts`, `social.reactions` (in-app discussion)
-- `social.scrape_jobs`, `social.instagram_posts`, `social.instagram_comments`, `social.tiktok_posts`, `social.tiktok_comments`, `social.youtube_videos`, `social.youtube_comments`, `social.twitter_tweets` (scraped content)
+- `social.scrape_jobs`, `social.instagram_posts`, `social.instagram_comments`, `social.tiktok_posts`, `social.tiktok_comments`, `social.youtube_videos`, `social.youtube_comments`, `social.youtube_channel_sync_state`, `social.youtube_video_sync_state`, `social.twitter_tweets` (scraped content)
 
 User-scoped read/write:
 

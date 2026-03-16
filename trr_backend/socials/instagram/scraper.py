@@ -103,6 +103,7 @@ class InstagramComment:
     parent_comment_id: str | None  # ID of parent comment if this is a reply
     reply_count: int
     replies: list["InstagramComment"] = field(default_factory=list)
+    media_urls: list[str] = field(default_factory=list)
     owner_profile_pic_url: str | None = None
     owner_is_verified: bool | None = None
 
@@ -1210,7 +1211,7 @@ class InstagramScraper:
             video_views_source=video_views_source,
             video_views_raw_candidates=video_views_raw_candidates,
             media_urls=media_urls,
-            thumbnail_url=media_urls[0] if media_urls else None,
+            thumbnail_url=self._extract_thumbnail_url(node, media_urls),
             hashtags=self._extract_hashtags(node, caption),
             mentions=mentions,
             collaborators=self._extract_collaborators(node),
@@ -1657,6 +1658,7 @@ class InstagramScraper:
             is_reply=is_reply,
             parent_comment_id=parent_id,
             reply_count=self._coerce_int(reply_count, 0),
+            media_urls=self._extract_comment_media_urls(data),
             owner_profile_pic_url=self._pick_best_profile_pic_url(
                 data.get("ownerProfilePicUrlHd"),
                 data.get("ownerProfilePicUrl"),
@@ -1686,83 +1688,166 @@ class InstagramScraper:
                 comment.reply_count = len(comment.replies)
         return comment
 
-    def _extract_media_urls(self, node: dict) -> list[str]:
-        """Extract all media URLs from a post."""
-        urls = []
+    def _extract_comment_media_urls(self, data: dict[str, Any]) -> list[str]:
+        """Extract media URLs from Instagram comment payloads when present."""
+        urls: list[str] = []
 
-        # Single image/video
-        if node.get("image_versions2"):
-            candidates = node["image_versions2"].get("candidates", [])
-            if candidates:
-                urls.append(candidates[0].get("url", ""))
+        def _append(candidate: Any) -> None:
+            value = str(candidate or "").strip()
+            if value and value.startswith(("http://", "https://")) and value not in urls:
+                urls.append(value)
 
-        if node.get("video_versions"):
-            versions = node.get("video_versions", [])
-            if versions:
-                urls.append(versions[0].get("url", ""))
+        explicit_media_urls = data.get("media_urls")
+        if isinstance(explicit_media_urls, list):
+            for candidate in explicit_media_urls:
+                _append(candidate)
 
-        # Carousel media
-        carousel = node.get("carousel_media") or []
-        for item in carousel:
-            if item.get("image_versions2"):
-                candidates = item["image_versions2"].get("candidates", [])
-                if candidates:
-                    urls.append(candidates[0].get("url", ""))
-            if item.get("video_versions"):
-                versions = item.get("video_versions", [])
-                if versions:
-                    urls.append(versions[0].get("url", ""))
+        def _collect_media_node(node: Any) -> None:
+            if isinstance(node, list):
+                for item in node:
+                    _collect_media_node(item)
+                return
+            if not isinstance(node, dict):
+                return
 
-        # GraphQL format
-        display_url = node.get("display_url")
-        if display_url and display_url not in urls:
-            urls.append(display_url)
-        actor_display_url = node.get("displayUrl")
-        if actor_display_url and actor_display_url not in urls:
-            urls.append(actor_display_url)
+            for candidate in self._extract_media_urls(node):
+                _append(candidate)
 
-        video_url = node.get("video_url")
-        if video_url and video_url not in urls:
-            urls.append(video_url)
-        actor_video_url = node.get("videoUrl")
-        if actor_video_url and actor_video_url not in urls:
-            urls.append(actor_video_url)
+            for key in (
+                "url",
+                "display_url",
+                "displayUrl",
+                "video_url",
+                "videoUrl",
+                "image_url",
+                "imageUrl",
+                "thumbnail_url",
+                "thumbnailUrl",
+            ):
+                _append(node.get(key))
 
-        # Sidecar (carousel) in GraphQL format
-        sidecar = node.get("edge_sidecar_to_children") or {}
-        for edge in sidecar.get("edges", []):
-            child = edge.get("node", {})
-            if child.get("display_url"):
-                urls.append(child["display_url"])
-            if child.get("video_url"):
-                urls.append(child["video_url"])
+            for nested_key in (
+                "media",
+                "media_versions",
+                "attachment",
+                "attachments",
+                "content",
+                "preview",
+                "image_versions2",
+                "video_versions",
+                "carousel_media",
+            ):
+                nested = node.get(nested_key)
+                if isinstance(nested, (dict, list)):
+                    _collect_media_node(nested)
+
+        for key in ("media", "attachment", "attachments", "content", "preview", "clip"):
+            nested = data.get(key)
+            if isinstance(nested, (dict, list)):
+                _collect_media_node(nested)
+
+        if isinstance(data.get("image_versions2"), dict) or isinstance(data.get("video_versions"), list):
+            _collect_media_node(data)
+
+        return self._dedupe_preserve_order(urls)
+
+    @staticmethod
+    def _first_valid_http_url(candidates: list[Any]) -> str | None:
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value.startswith(("http://", "https://")):
+                return value
+        return None
+
+    def _extract_primary_image_url(self, node: dict[str, Any]) -> str | None:
+        candidates: list[Any] = []
+
+        image_versions = node.get("image_versions2")
+        if isinstance(image_versions, dict):
+            versions = image_versions.get("candidates")
+            if isinstance(versions, list) and versions:
+                first = versions[0] if isinstance(versions[0], dict) else {}
+                candidates.append(first.get("url"))
+
+        candidates.extend([node.get("display_url"), node.get("displayUrl")])
 
         images = node.get("images")
         if isinstance(images, list):
             for image in images:
                 if isinstance(image, str):
-                    if image and image not in urls:
-                        urls.append(image)
+                    candidates.append(image)
                     continue
-                if not isinstance(image, dict):
+                if isinstance(image, dict):
+                    candidates.extend([image.get("url"), image.get("displayUrl"), image.get("display_url")])
+
+        return self._first_valid_http_url(candidates)
+
+    def _extract_primary_video_url(self, node: dict[str, Any]) -> str | None:
+        candidates: list[Any] = []
+
+        versions = node.get("video_versions")
+        if isinstance(versions, list) and versions:
+            first = versions[0] if isinstance(versions[0], dict) else {}
+            candidates.append(first.get("url"))
+
+        candidates.extend([node.get("video_url"), node.get("videoUrl")])
+        return self._first_valid_http_url(candidates)
+
+    def _extract_carousel_media_urls(self, node: dict[str, Any]) -> list[str]:
+        urls: list[str] = []
+
+        def _append(candidate: str | None) -> None:
+            if candidate and candidate not in urls:
+                urls.append(candidate)
+
+        carousel = node.get("carousel_media")
+        if isinstance(carousel, list):
+            for item in carousel:
+                if not isinstance(item, dict):
                     continue
-                candidate = image.get("url") or image.get("displayUrl") or image.get("display_url")
-                if candidate and candidate not in urls:
-                    urls.append(candidate)
+                _append(self._extract_primary_video_url(item) or self._extract_primary_image_url(item))
+
+        sidecar = node.get("edge_sidecar_to_children")
+        if isinstance(sidecar, dict):
+            edges = sidecar.get("edges")
+            if isinstance(edges, list):
+                for edge in edges:
+                    child = edge.get("node", {}) if isinstance(edge, dict) else {}
+                    if not isinstance(child, dict):
+                        continue
+                    _append(self._extract_primary_video_url(child) or self._extract_primary_image_url(child))
 
         child_posts = node.get("childPosts")
         if isinstance(child_posts, list):
             for child in child_posts:
                 if not isinstance(child, dict):
                     continue
-                candidate_display = child.get("displayUrl") or child.get("display_url")
-                candidate_video = child.get("videoUrl") or child.get("video_url")
-                if candidate_display and candidate_display not in urls:
-                    urls.append(candidate_display)
-                if candidate_video and candidate_video not in urls:
-                    urls.append(candidate_video)
+                _append(self._extract_primary_video_url(child) or self._extract_primary_image_url(child))
 
         return urls
+
+    def _extract_thumbnail_url(self, node: dict[str, Any], media_urls: list[str]) -> str | None:
+        thumbnail = self._extract_primary_image_url(node)
+        if thumbnail:
+            return thumbnail
+        return media_urls[0] if media_urls else None
+
+    def _extract_media_urls(self, node: dict) -> list[str]:
+        """Extract canonical media URLs from a post.
+
+        Single-image and single-video posts store one primary media URL.
+        Real carousel posts keep one primary media URL per slide.
+        """
+        post_type = self._determine_post_type(node)
+        if post_type == "carousel":
+            return self._extract_carousel_media_urls(node)
+
+        primary_video_url = self._extract_primary_video_url(node)
+        primary_image_url = self._extract_primary_image_url(node)
+        primary_url = primary_video_url if post_type in {"video", "reel"} else (primary_image_url or primary_video_url)
+        if not primary_url:
+            primary_url = primary_video_url or primary_image_url
+        return [primary_url] if primary_url else []
 
     def _emit_progress(
         self,

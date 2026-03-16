@@ -30,6 +30,9 @@ LOGOWINE_SEARCH_URL = "https://www.logo.wine/?s={query}"
 LOGOSEARCH_SEARCH_URL = "https://logosear.ch/search.html?q={query}"
 SIMPLE_ICONS_CDN_URL = "https://cdn.simpleicons.org/{slug}"
 SIMPLE_ICONS_SEARCH_URL = "https://simpleicons.org/?q={query}"
+FANDOM_BRAND_LOGO_PAGE_URL = "https://www.fandom.com/brand/graphic-assets/logo.html"
+FANDOM_STANDARD_WORDMARK_URL = "https://www.fandom.com/brand/images/Fandom_logo_2021_logotype_1.png"
+FANDOM_STANDARD_ICON_URL = "https://www.fandom.com/brand/images/Logo_transparent_1.png"
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 DEFAULT_READ_TIMEOUT_SECONDS = 15.0
 DEFAULT_RETRY_ATTEMPTS = 2
@@ -1029,6 +1032,116 @@ def _extract_brand_guideline_links(html: str, *, base_url: str, limit: int = 4) 
     return links
 
 
+def _is_fandom_community_host(host: str) -> bool:
+    normalized = _normalize_text(host).lower()
+    return bool(normalized) and (
+        normalized.endswith(".fandom.com")
+        or normalized.endswith(".wikia.com")
+        or normalized in {"fandom.com", "wikia.com"}
+    )
+
+
+def _build_official_entry_urls(host: str, path: str) -> list[str]:
+    normalized_host = _normalize_text(host).lower()
+    normalized_path = _normalize_text(path)
+    base_url = f"https://{normalized_host}"
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(url: str) -> None:
+        normalized_url = _normalize_text(url)
+        if not normalized_url or normalized_url in seen:
+            return
+        seen.add(normalized_url)
+        candidates.append(normalized_url)
+
+    if normalized_path and normalized_path != "/":
+        add(f"{base_url}{normalized_path.rstrip('/')}")
+    else:
+        add(base_url)
+
+    if _is_fandom_community_host(normalized_host):
+        add(f"{base_url}/wiki/Home_Page")
+        add(FANDOM_BRAND_LOGO_PAGE_URL)
+
+    return candidates
+
+
+def _fandom_brand_asset_candidates(*, discovered_from: str) -> list[FreeLogoCandidate]:
+    return [
+        FreeLogoCandidate(
+            url=FANDOM_STANDARD_WORDMARK_URL,
+            source_provider="official_site",
+            discovered_from=discovered_from,
+            context="fandom_brand_wordmark",
+        ),
+        FreeLogoCandidate(
+            url=FANDOM_STANDARD_ICON_URL,
+            source_provider="official_site",
+            discovered_from=discovered_from,
+            context="fandom_brand_icon",
+        ),
+    ]
+
+
+def _is_fandom_brand_asset_page(url: str) -> bool:
+    return _normalize_text(url).rstrip("/") == FANDOM_BRAND_LOGO_PAGE_URL.rstrip("/")
+
+
+def _extract_fandom_page_title(entry_url: str) -> str:
+    parsed = urlparse(entry_url)
+    path = _normalize_text(parsed.path)
+    if not path or path == "/":
+        return "Home_Page"
+    if path.startswith("/wiki/"):
+        title = path.split("/wiki/", 1)[1].strip("/")
+        return title or "Home_Page"
+    return "Home_Page"
+
+
+def _fetch_fandom_headhtml(
+    session: requests.Session,
+    *,
+    entry_url: str,
+    timeout_seconds: float,
+) -> tuple[str, str] | None:
+    parsed = urlparse(entry_url)
+    host = _normalize_text(parsed.netloc).lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host.endswith((".fandom.com", ".wikia.com")):
+        return None
+
+    response = None
+    try:
+        response = session.get(
+            f"https://{host}/api.php",
+            params={
+                "action": "parse",
+                "page": _extract_fandom_page_title(entry_url),
+                "prop": "headhtml",
+                "format": "json",
+            },
+            headers={"accept": "application/json", "user-agent": "TRR-Backend/1.0"},
+            timeout=(min(DEFAULT_CONNECT_TIMEOUT_SECONDS, timeout_seconds), timeout_seconds),
+        )
+    except requests.RequestException:
+        return None
+    if response is None or response.status_code >= 400:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    parse_payload = payload.get("parse") if isinstance(payload, dict) else None
+    headhtml = parse_payload.get("headhtml") if isinstance(parse_payload, dict) else None
+    html = headhtml.get("*") if isinstance(headhtml, dict) else None
+    if not isinstance(html, str) or not html.strip():
+        return None
+    return entry_url, html
+
+
 def _extract_inline_svg_data_urls(
     *,
     html: str,
@@ -1089,65 +1202,76 @@ def extract_official_logo_candidates(
             host = host[4:]
         if not host:
             continue
-        entry_url = f"https://{host}"
-        if path and path != "/":
-            entry_url = f"{entry_url}{path.rstrip('/')}"
-        if entry_url in checked:
-            continue
-        checked.add(entry_url)
-
-        response = _safe_get(session, entry_url, timeout_seconds=timeout_seconds)
-        if response is None or response.status_code >= 400 or not response.text:
-            continue
-        discovered_from = str(response.url or entry_url)
-        page_provider = (
-            "brand_guidelines"
-            if any(hint in discovered_from.casefold() for hint in _GUIDELINE_PATH_HINTS)
-            else "official_site"
-        )
-
-        candidates.extend(
-            _extract_inline_svg_data_urls(
-                html=response.text,
-                source_provider=page_provider,
-                discovered_from=discovered_from,
-                limit=limit,
-            )
-        )
-        if len(candidates) >= limit:
-            break
-
-        candidates.extend(
-            _extract_images_from_html(
-                response.text,
-                base_url=discovered_from,
-                source_provider=page_provider,
-                discovered_from=discovered_from,
-                limit=limit,
-                context_hint="homepage" if page_provider == "official_site" else "brand_guidelines",
-            )
-        )
-        if len(candidates) >= limit:
-            break
-
-        guideline_links = _extract_brand_guideline_links(response.text, base_url=discovered_from, limit=3)
-        for guideline_url in guideline_links:
-            guideline_host = _normalize_hostname_from_url(guideline_url)
-            if guideline_host and not _host_matches_target(guideline_host, host):
+        for entry_url in _build_official_entry_urls(host, path):
+            if entry_url in checked:
                 continue
-            guideline_response = _safe_get(session, guideline_url, timeout_seconds=timeout_seconds)
-            if guideline_response is None or guideline_response.status_code >= 400 or not guideline_response.text:
+            checked.add(entry_url)
+
+            if _is_fandom_brand_asset_page(entry_url):
+                candidates.extend(_fandom_brand_asset_candidates(discovered_from=entry_url))
+                if len(candidates) >= limit:
+                    break
                 continue
+
+            response = _safe_get(session, entry_url, timeout_seconds=timeout_seconds)
+            if response is None or response.status_code >= 400 or not response.text:
+                fandom_headhtml = _fetch_fandom_headhtml(session, entry_url=entry_url, timeout_seconds=timeout_seconds)
+                if fandom_headhtml is None:
+                    continue
+                discovered_from, html = fandom_headhtml
+            else:
+                discovered_from = str(response.url or entry_url)
+                html = response.text
+            page_provider = (
+                "brand_guidelines"
+                if any(hint in discovered_from.casefold() for hint in _GUIDELINE_PATH_HINTS)
+                else "official_site"
+            )
+
             candidates.extend(
-                _extract_images_from_html(
-                    guideline_response.text,
-                    base_url=str(guideline_response.url or guideline_url),
-                    source_provider="brand_guidelines",
-                    discovered_from=str(guideline_response.url or guideline_url),
+                _extract_inline_svg_data_urls(
+                    html=html,
+                    source_provider=page_provider,
+                    discovered_from=discovered_from,
                     limit=limit,
-                    context_hint="brand_guidelines",
                 )
             )
+            if len(candidates) >= limit:
+                break
+
+            candidates.extend(
+                _extract_images_from_html(
+                    html,
+                    base_url=discovered_from,
+                    source_provider=page_provider,
+                    discovered_from=discovered_from,
+                    limit=limit,
+                    context_hint="homepage" if page_provider == "official_site" else "brand_guidelines",
+                )
+            )
+            if len(candidates) >= limit:
+                break
+
+            guideline_links = _extract_brand_guideline_links(html, base_url=discovered_from, limit=3)
+            for guideline_url in guideline_links:
+                guideline_host = _normalize_hostname_from_url(guideline_url)
+                if guideline_host and not _host_matches_target(guideline_host, host):
+                    continue
+                guideline_response = _safe_get(session, guideline_url, timeout_seconds=timeout_seconds)
+                if guideline_response is None or guideline_response.status_code >= 400 or not guideline_response.text:
+                    continue
+                candidates.extend(
+                    _extract_images_from_html(
+                        guideline_response.text,
+                        base_url=str(guideline_response.url or guideline_url),
+                        source_provider="brand_guidelines",
+                        discovered_from=str(guideline_response.url or guideline_url),
+                        limit=limit,
+                        context_hint="brand_guidelines",
+                    )
+                )
+                if len(candidates) >= limit:
+                    break
             if len(candidates) >= limit:
                 break
         if len(candidates) >= limit:
