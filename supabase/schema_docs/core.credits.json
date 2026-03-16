@@ -1,0 +1,190 @@
+{
+  "schema": "core",
+  "table": "credits",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "credit_category",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "role",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "billing_order",
+      "data_type": "integer",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "metadata",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "credits_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    },
+    {
+      "constraint": "credits_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "credits_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX credits_person_id_idx ON core.credits USING btree (person_id)"
+    },
+    {
+      "name": "credits_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX credits_pkey ON core.credits USING btree (id)"
+    },
+    {
+      "name": "credits_show_id_category_idx",
+      "columns": [
+        "show_id",
+        "credit_category"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX credits_show_id_category_idx ON core.credits USING btree (show_id, credit_category)"
+    },
+    {
+      "name": "credits_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX credits_show_id_idx ON core.credits USING btree (show_id)"
+    },
+    {
+      "name": "credits_show_person_category_idx",
+      "columns": [
+        "show_id",
+        "person_id",
+        "credit_category"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX credits_show_person_category_idx ON core.credits USING btree (show_id, person_id, credit_category)"
+    },
+    {
+      "name": "credits_show_person_idx",
+      "columns": [
+        "show_id",
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX credits_show_person_idx ON core.credits USING btree (show_id, person_id)"
+    },
+    {
+      "name": "credits_source_type_idx",
+      "columns": [
+        "source_type"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX credits_source_type_idx ON core.credits USING btree (source_type)"
+    },
+    {
+      "name": "credits_unique_idx",
+      "columns": [
+        "show_id",
+        "person_id",
+        "credit_category",
+        "COALESCE(role",
+        "''::text)",
+        "source_type"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX credits_unique_idx ON core.credits USING btree (show_id, person_id, credit_category, COALESCE(role, ''::text), source_type)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "credit_category": "example",
+    "role": "example",
+    "billing_order": 0,
+    "source_type": "example",
+    "metadata": {},
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

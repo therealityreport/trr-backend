@@ -1,0 +1,130 @@
+{
+  "schema": "core",
+  "table": "sync_state",
+  "columns": [
+    {
+      "name": "table_name",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'in_progress'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "last_success_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "last_seen_most_recent_episode",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "last_error",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [],
+  "foreign_keys": [
+    {
+      "constraint": "sync_state_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "table_name",
+      "show_id"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "core_sync_state_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_sync_state_show_id_idx ON core.sync_state USING btree (show_id)"
+    },
+    {
+      "name": "core_sync_state_status_idx",
+      "columns": [
+        "status"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_sync_state_status_idx ON core.sync_state USING btree (status)"
+    },
+    {
+      "name": "core_sync_state_table_name_idx",
+      "columns": [
+        "table_name"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_sync_state_table_name_idx ON core.sync_state USING btree (table_name)"
+    },
+    {
+      "name": "sync_state_table_name_show_id_key",
+      "columns": [
+        "table_name",
+        "show_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX sync_state_table_name_show_id_key ON core.sync_state USING btree (table_name, show_id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "table_name": "example",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "status": "example",
+    "last_success_at": "1970-01-01T00:00:00Z",
+    "last_seen_most_recent_episode": "example",
+    "last_error": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

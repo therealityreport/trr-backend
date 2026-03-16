@@ -1,0 +1,242 @@
+{
+  "schema": "core",
+  "table": "media_uploads",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "uploader_user_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "entity_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "entity_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "kind",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "original_filename",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "content_type",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "expected_bytes",
+      "data_type": "bigint",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "caption",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "alt_text",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "make_primary",
+      "data_type": "boolean",
+      "is_nullable": "NO",
+      "default": "false",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'initiated'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "error",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "expires_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "(now() + '01:00:00'::interval)",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "s3_bucket",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "s3_temp_key",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "media_asset_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "media_link_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "media_uploads_media_asset_id_fkey",
+      "column": "media_asset_id",
+      "references": "core.media_assets.id"
+    },
+    {
+      "constraint": "media_uploads_media_link_id_fkey",
+      "column": "media_link_id",
+      "references": "core.media_links.id"
+    }
+  ],
+  "unique_constraints": [],
+  "indexes": [
+    {
+      "name": "media_uploads_entity_idx",
+      "columns": [
+        "entity_type",
+        "entity_id",
+        "kind"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_uploads_entity_idx ON core.media_uploads USING btree (entity_type, entity_id, kind)"
+    },
+    {
+      "name": "media_uploads_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX media_uploads_pkey ON core.media_uploads USING btree (id)"
+    },
+    {
+      "name": "media_uploads_status_idx",
+      "columns": [
+        "status",
+        "expires_at"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_uploads_status_idx ON core.media_uploads USING btree (status, expires_at)"
+    },
+    {
+      "name": "media_uploads_uploader_idx",
+      "columns": [
+        "uploader_user_id) WHERE (uploader_user_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX media_uploads_uploader_idx ON core.media_uploads USING btree (uploader_user_id) WHERE (uploader_user_id IS NOT NULL)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "uploader_user_id": "00000000-0000-0000-0000-000000000000",
+    "entity_type": "example",
+    "entity_id": "00000000-0000-0000-0000-000000000000",
+    "kind": "example",
+    "original_filename": "example",
+    "content_type": "example",
+    "expected_bytes": 0,
+    "caption": "example",
+    "alt_text": "example",
+    "make_primary": false,
+    "status": "example",
+    "error": "example",
+    "expires_at": "1970-01-01T00:00:00Z",
+    "s3_bucket": "example",
+    "s3_temp_key": "example",
+    "media_asset_id": "00000000-0000-0000-0000-000000000000",
+    "media_link_id": "00000000-0000-0000-0000-000000000000",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "schema": "core",
+  "table": "people_overrides",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "full_name_override",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "instagram_handle",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "external_ids_override",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "notes",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "tiktok_handle",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "twitter_handle",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "youtube_handle",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "people_overrides_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "person_id"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "idx_people_overrides_person_id",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_people_overrides_person_id ON core.people_overrides USING btree (person_id)"
+    },
+    {
+      "name": "people_overrides_person_id_key",
+      "columns": [
+        "person_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX people_overrides_person_id_key ON core.people_overrides USING btree (person_id)"
+    },
+    {
+      "name": "people_overrides_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX people_overrides_pkey ON core.people_overrides USING btree (id)"
+    }
+  ],
+  "rls_enabled": false,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "full_name_override": "example",
+    "instagram_handle": "example",
+    "external_ids_override": {},
+    "notes": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z",
+    "tiktok_handle": "example",
+    "twitter_handle": "example",
+    "youtube_handle": "example"
+  }
+}

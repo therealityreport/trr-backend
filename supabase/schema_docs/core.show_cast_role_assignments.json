@@ -1,0 +1,198 @@
+{
+  "schema": "core",
+  "table": "show_cast_role_assignments",
+  "columns": [
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "show_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "person_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "season_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "season_number",
+      "data_type": "integer",
+      "is_nullable": "NO",
+      "default": "0",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "role_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'manual'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "confidence",
+      "data_type": "numeric",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "metadata",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": "'{}'::jsonb",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_by",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_by",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [
+    "id"
+  ],
+  "foreign_keys": [
+    {
+      "constraint": "show_cast_role_assignments_person_id_fkey",
+      "column": "person_id",
+      "references": "core.people.id"
+    },
+    {
+      "constraint": "show_cast_role_assignments_role_id_fkey",
+      "column": "role_id",
+      "references": "core.show_role_catalog.id"
+    },
+    {
+      "constraint": "show_cast_role_assignments_season_id_fkey",
+      "column": "season_id",
+      "references": "core.seasons.id"
+    },
+    {
+      "constraint": "show_cast_role_assignments_show_id_fkey",
+      "column": "show_id",
+      "references": "core.shows.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "show_id",
+      "person_id",
+      "season_number",
+      "role_id"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "show_cast_role_assignments_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_cast_role_assignments_pkey ON core.show_cast_role_assignments USING btree (id)"
+    },
+    {
+      "name": "show_cast_role_assignments_role_idx",
+      "columns": [
+        "role_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX show_cast_role_assignments_role_idx ON core.show_cast_role_assignments USING btree (role_id)"
+    },
+    {
+      "name": "show_cast_role_assignments_show_person_idx",
+      "columns": [
+        "show_id",
+        "person_id",
+        "season_number"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX show_cast_role_assignments_show_person_idx ON core.show_cast_role_assignments USING btree (show_id, person_id, season_number)"
+    },
+    {
+      "name": "show_cast_role_assignments_unique",
+      "columns": [
+        "show_id",
+        "person_id",
+        "season_number",
+        "role_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_cast_role_assignments_unique ON core.show_cast_role_assignments USING btree (show_id, person_id, season_number, role_id)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "show_id": "00000000-0000-0000-0000-000000000000",
+    "person_id": "00000000-0000-0000-0000-000000000000",
+    "season_id": "00000000-0000-0000-0000-000000000000",
+    "season_number": 0,
+    "role_id": "00000000-0000-0000-0000-000000000000",
+    "source": "example",
+    "confidence": 0,
+    "metadata": {},
+    "created_by": "example",
+    "updated_by": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "schema": "core",
+  "table": "season_source_latest",
+  "columns": [
+    {
+      "name": "season_id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "source_id",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "variant",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'default'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetched_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "fetch_method",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "status",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": "'success'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "error",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "payload",
+      "data_type": "jsonb",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "payload_sha256",
+      "data_type": "text",
+      "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "created_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "is_nullable": "NO",
+      "default": "now()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    }
+  ],
+  "primary_key": [],
+  "foreign_keys": [
+    {
+      "constraint": "season_source_latest_season_id_fkey",
+      "column": "season_id",
+      "references": "core.seasons.id"
+    },
+    {
+      "constraint": "season_source_latest_source_id_fkey",
+      "column": "source_id",
+      "references": "core.sources.id"
+    }
+  ],
+  "unique_constraints": [
+    [
+      "season_id",
+      "source_id",
+      "variant"
+    ]
+  ],
+  "indexes": [
+    {
+      "name": "season_source_latest_season_id_source_id_variant_key",
+      "columns": [
+        "season_id",
+        "source_id",
+        "variant"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX season_source_latest_season_id_source_id_variant_key ON core.season_source_latest USING btree (season_id, source_id, variant)"
+    }
+  ],
+  "rls_enabled": true,
+  "example_row": {
+    "season_id": "00000000-0000-0000-0000-000000000000",
+    "source_id": "example",
+    "variant": "example",
+    "fetched_at": "1970-01-01T00:00:00Z",
+    "fetch_method": "example",
+    "status": "example",
+    "error": "example",
+    "payload": {},
+    "payload_sha256": "example",
+    "created_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z"
+  }
+}
