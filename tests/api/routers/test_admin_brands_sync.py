@@ -321,11 +321,13 @@ def test_discover_logo_candidates_filters_existing_without_dropping_nonmatching_
             url="https://cdn.example.com/instagram-wordmark.svg",
             source_provider="wikimedia_commons",
             discovered_from="https://commons.wikimedia.org/wiki/File:Instagram.svg",
+            context=None,
         ),
         SimpleNamespace(
             url="https://cdn.example.com/instagram-icon.png",
             source_provider="official_site",
             discovered_from="https://instagram.com",
+            context=None,
         ),
     ]
     existing_rows = [
@@ -418,6 +420,7 @@ def test_discover_logo_candidates_returns_total_count() -> None:
             url=f"https://cdn.example.com/asset-{index}.svg",
             source_provider="wikimedia_commons",
             discovered_from=f"https://commons.wikimedia.org/wiki/File:Asset_{index}.svg",
+            context=None,
         )
         for index in range(3)
     ]

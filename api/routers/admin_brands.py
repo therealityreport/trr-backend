@@ -1909,7 +1909,7 @@ def _discover_logo_candidates_by_source(payload: BrandLogosOptionDiscoverRequest
             content_type=content_type,
             width=width,
             height=height,
-            context_hint=candidate.context,
+            context_hint=getattr(candidate, "context", None),
         )
         out.append(
             {
