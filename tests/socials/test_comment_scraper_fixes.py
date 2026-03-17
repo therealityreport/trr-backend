@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import requests
 
-from trr_backend.socials.facebook.scraper import FacebookScraper
+from trr_backend.socials.facebook.scraper import FacebookScrapeConfig, FacebookScraper
 from trr_backend.socials.instagram.scraper import InstagramScraper
 from trr_backend.socials.instagram.scraper import ScrapeConfig as InstagramScrapeConfig
 from trr_backend.socials.threads.scraper import ThreadsScraper
@@ -476,6 +476,97 @@ def test_youtube_enrich_via_ytdlp_backfills_duration_when_missing(monkeypatch: p
     assert video.duration == "PT51S"
 
 
+def test_youtube_extract_shorts_like_count_from_button_bar_html() -> None:
+    scraper = YouTubeScraper()
+    html = """
+    <div id="button-bar">
+      <reel-action-bar-view-model>
+        <like-button-view-model>
+          <toggle-button-view-model>
+            <button-view-model>
+              <label>
+                <div>
+                  <span
+                    class="yt-core-attributed-string
+                    yt-core-attributed-string--white-space-pre-wrap
+                    yt-core-attributed-string--text-alignment-center
+                    yt-core-attributed-string--word-wrapping"
+                    role="text"
+                  >262</span>
+                </div>
+              </label>
+            </button-view-model>
+          </toggle-button-view-model>
+        </like-button-view-model>
+      </reel-action-bar-view-model>
+    </div>
+    """
+
+    assert scraper._extract_shorts_like_count_from_html(html) == 262  # noqa: SLF001
+
+
+def test_youtube_enrich_via_ytdlp_backfills_shorts_likes_from_html(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = YouTubeScraper()
+    video = YouTubeVideo(
+        video_id="qBSM51RWLAw",
+        title="And that's all in one season!",
+        description="#RHOSLC",
+        date_time="2025-08-28 14:28:26",
+        published_at=1756391306,
+        channel_id="",
+        channel_title="Bravo",
+        duration="",
+        duration_seconds=0,
+        views=44600,
+        likes=0,
+        comments=0,
+        url="https://www.youtube.com/shorts/qBSM51RWLAw",
+        thumbnail_url="https://example.com/thumb.jpg",
+        tags=[],
+        keywords_matched=["RHOSLC"],
+        is_short=True,
+        source_surface="shorts",
+    )
+    payload = {"duration": 51, "view_count": 44600, "comment_count": 70}
+    called_urls: list[str] = []
+    html = """
+    <div id="button-bar">
+      <reel-action-bar-view-model>
+        <like-button-view-model>
+          <toggle-button-view-model>
+            <button-view-model>
+              <label><div><span>262</span></div></label>
+            </button-view-model>
+          </toggle-button-view-model>
+        </like-button-view-model>
+      </reel-action-bar-view-model>
+    </div>
+    """
+
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _name: "/usr/local/bin/yt-dlp")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+    )
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+
+    def _fake_get(url: str, **kwargs: object) -> _FakeResponse:
+        del kwargs
+        called_urls.append(url)
+        return _FakeResponse(status_code=200, payload={}, text=html)
+
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+
+    scraper._enrich_videos_via_ytdlp([video], delay=0)  # noqa: SLF001
+
+    assert video.likes == 262
+    assert video.comments == 70
+    assert called_urls == ["https://www.youtube.com/shorts/qBSM51RWLAw"]
+
+
 def test_youtube_estimate_publish_date_parses_absolute_premiere_date() -> None:
     scraper = YouTubeScraper()
     ts = scraper._estimate_publish_date("Premiered Oct 3, 2025")  # noqa: SLF001
@@ -704,6 +795,89 @@ def test_facebook_extract_owner_avatar_url_prefers_owner_fields() -> None:
     assert avatar == "https://images.test/fb-avatar.jpg"
 
 
+def test_facebook_extract_post_urls_skips_page_level_photos_url() -> None:
+    scraper = FacebookScraper()
+
+    urls = scraper._extract_post_urls(  # noqa: SLF001
+        '<a href="https://www.facebook.com/Bravo/photos/">photos</a>',
+        handle="bravo",
+    )
+
+    assert urls == []
+
+
+def test_facebook_scrape_bounded_window_skips_undated_shell_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = FacebookScraper(cookies={"c_user": "1", "xs": "token"})
+    config = FacebookScrapeConfig(
+        page_handle="bravo",
+        date_start=datetime(2025, 9, 24, tzinfo=UTC),
+        date_end=datetime(2025, 10, 1, tzinfo=UTC),
+        include_reels=False,
+        include_photos=False,
+        max_pages=1,
+    )
+
+    monkeypatch.setattr(scraper, "_playwright_fallback_enabled", lambda: False)
+
+    def _fake_fetch_html(url: str, *, delay_seconds: float, referer: str | None = None) -> str:
+        del delay_seconds, referer
+        if url == "https://www.facebook.com/bravo":
+            return '<a href="https://www.facebook.com/Bravo/posts/pfbid123">candidate</a>'
+        return "<html><body>shell</body></html>"
+
+    monkeypatch.setattr(scraper, "_fetch_html", _fake_fetch_html)
+
+    posts = scraper.scrape(config)
+
+    assert posts == []
+    assert int(scraper.last_retrieval_meta.get("matched_posts") or 0) == 0
+
+
+def test_facebook_scrape_retries_shell_candidates_with_playwright(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = FacebookScraper(cookies={"c_user": "1", "xs": "token"})
+    config = FacebookScrapeConfig(
+        page_handle="bravo",
+        date_start=datetime(2025, 9, 24, tzinfo=UTC),
+        date_end=datetime(2025, 10, 1, tzinfo=UTC),
+        include_reels=False,
+        include_photos=False,
+        max_pages=1,
+    )
+    candidate_url = "https://www.facebook.com/Bravo/posts/pfbid123"
+    candidate_ts = int(datetime(2025, 9, 25, 1, 0, tzinfo=UTC).timestamp())
+    playwright_calls: list[str] = []
+
+    monkeypatch.setattr(scraper, "_playwright_fallback_enabled", lambda: True)
+    monkeypatch.setattr(scraper, "_scrape_feed_with_scroll", lambda handle, cfg: [(candidate_url, "feed")])
+
+    def _fake_fetch_html(url: str, *, delay_seconds: float, referer: str | None = None) -> str:
+        del delay_seconds, referer
+        return "<html><body>shell</body></html>"
+
+    def _fake_fetch_html_with_playwright(url: str, *, delay_seconds: float, referer: str | None = None) -> str:
+        del delay_seconds, referer
+        playwright_calls.append(url)
+        return (
+            '<meta property="og:url" content="https://www.facebook.com/Bravo/posts/123456" />'
+            '<meta property="og:title" content="Watch #RHOSLC tonight" />'
+            f'"creation_time":{candidate_ts}'
+            '"message":{"text":"Watch #RHOSLC tonight"}'
+        )
+
+    monkeypatch.setattr(scraper, "_fetch_html", _fake_fetch_html)
+    monkeypatch.setattr(scraper, "_fetch_html_with_playwright", _fake_fetch_html_with_playwright)
+
+    posts = scraper.scrape(config)
+
+    assert [post.post_id for post in posts] == ["123456"]
+    assert playwright_calls == [candidate_url]
+    assert int(scraper.last_retrieval_meta.get("matched_posts") or 0) == 1
+
+
 def test_threads_build_post_from_html_extracts_user_avatar() -> None:
     scraper = ThreadsScraper()
     html_text = """
@@ -771,6 +945,7 @@ def test_twitter_reply_fetch_retries_with_missing_feature_flags(monkeypatch: pyt
 
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", lambda **_kwargs: [])
 
     replies = scraper.fetch_tweet_replies("tweet-1", delay=0)
     assert replies == []
@@ -813,6 +988,7 @@ def test_twitter_reply_fetch_rediscover_hashes_after_404(monkeypatch: pytest.Mon
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
     monkeypatch.setattr(scraper, "_discover_graphql_hashes", _fake_discover)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", lambda **_kwargs: [])
 
     replies = scraper.fetch_tweet_replies("tweet-1", delay=0)
     assert replies == []
@@ -834,6 +1010,7 @@ def test_twitter_reply_fetch_sets_reason_on_logical_api_error(monkeypatch: pytes
 
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", lambda **_kwargs: [])
 
     replies = scraper.fetch_tweet_replies("tweet-1", delay=0)
 
@@ -1795,6 +1972,265 @@ def test_twitter_fetch_tweet_replies_respects_custom_search_and_twikit_page_limi
     assert replies == []
     assert search_pages == [17]
     assert twikit_pages == [9]
+
+
+def test_twitter_fetch_tweet_replies_combines_tweet_detail_and_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When TweetDetail succeeds, SearchTimeline is ALSO called and results are combined with dedup."""
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    scraper._detail_hash = "abc123"
+    scraper._search_hash = "def456"
+
+    # TweetDetail returns replies A and B
+    detail_payload = {
+        "data": {
+            "threaded_conversation_with_injections_v2": {
+                "instructions": [
+                    {
+                        "type": "TimelineAddEntries",
+                        "entries": [
+                            {
+                                "entryId": "conversationthread-A",
+                                "content": {
+                                    "items": [
+                                        {
+                                            "item": {
+                                                "itemContent": {
+                                                    "tweet_results": {
+                                                        "result": {
+                                                            "__typename": "Tweet",
+                                                            "rest_id": "A",
+                                                            "core": {
+                                                                "user_results": {
+                                                                    "result": {
+                                                                        "legacy": {
+                                                                            "screen_name": "userA",
+                                                                            "name": "User A",
+                                                                            "verified": False,
+                                                                        },
+                                                                        "is_blue_verified": False,
+                                                                    }
+                                                                }
+                                                            },
+                                                            "legacy": {
+                                                                "id_str": "A",
+                                                                "full_text": "reply A",
+                                                                "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+                                                                "favorite_count": 1,
+                                                                "retweet_count": 0,
+                                                                "reply_count": 0,
+                                                                "quote_count": 0,
+                                                                "in_reply_to_status_id_str": "root-1",
+                                                                "entities": {"hashtags": [], "user_mentions": []},
+                                                            },
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ],
+                                },
+                            },
+                            {
+                                "entryId": "conversationthread-B",
+                                "content": {
+                                    "items": [
+                                        {
+                                            "item": {
+                                                "itemContent": {
+                                                    "tweet_results": {
+                                                        "result": {
+                                                            "__typename": "Tweet",
+                                                            "rest_id": "B",
+                                                            "core": {
+                                                                "user_results": {
+                                                                    "result": {
+                                                                        "legacy": {
+                                                                            "screen_name": "userB",
+                                                                            "name": "User B",
+                                                                            "verified": False,
+                                                                        },
+                                                                        "is_blue_verified": False,
+                                                                    }
+                                                                }
+                                                            },
+                                                            "legacy": {
+                                                                "id_str": "B",
+                                                                "full_text": "reply B",
+                                                                "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+                                                                "favorite_count": 2,
+                                                                "retweet_count": 0,
+                                                                "reply_count": 0,
+                                                                "quote_count": 0,
+                                                                "in_reply_to_status_id_str": "root-1",
+                                                                "entities": {"hashtags": [], "user_mentions": []},
+                                                            },
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ],
+                                },
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+
+    def _fake_get(url: str, **_: object) -> _FakeResponse:
+        return _FakeResponse(status_code=200, payload=detail_payload)
+
+    # SearchTimeline returns B (overlap) and C (new)
+    search_reply_b = SimpleNamespace(tweet_id="B")
+    search_reply_c = SimpleNamespace(tweet_id="C")
+    search_called = []
+
+    def _fake_search(**kwargs):
+        search_called.append(True)
+        return [search_reply_b, search_reply_c]
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", _fake_search)
+
+    replies = scraper.fetch_tweet_replies("root-1", delay=0)
+
+    # SearchTimeline was called even though TweetDetail succeeded
+    assert len(search_called) == 1
+
+    # Combined and deduplicated: A from detail, B from detail (not duplicated), C from search
+    reply_ids = [r.tweet_id for r in replies]
+    assert "A" in reply_ids
+    assert "B" in reply_ids
+    assert "C" in reply_ids
+    assert len(reply_ids) == 3  # no duplicates
+
+
+def test_twitter_fetch_tweet_replies_preserves_detail_results_when_search_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When SearchTimeline raises an exception, TweetDetail results are preserved."""
+    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
+    scraper._detail_hash = "abc123"
+    scraper._search_hash = "def456"
+
+    detail_payload = {
+        "data": {
+            "threaded_conversation_with_injections_v2": {
+                "instructions": [
+                    {
+                        "type": "TimelineAddEntries",
+                        "entries": [
+                            {
+                                "entryId": "conversationthread-A",
+                                "content": {
+                                    "items": [
+                                        {
+                                            "item": {
+                                                "itemContent": {
+                                                    "tweet_results": {
+                                                        "result": {
+                                                            "__typename": "Tweet",
+                                                            "rest_id": "A",
+                                                            "core": {
+                                                                "user_results": {
+                                                                    "result": {
+                                                                        "legacy": {
+                                                                            "screen_name": "userA",
+                                                                            "name": "User A",
+                                                                            "verified": False,
+                                                                        },
+                                                                        "is_blue_verified": False,
+                                                                    }
+                                                                }
+                                                            },
+                                                            "legacy": {
+                                                                "id_str": "A",
+                                                                "full_text": "reply A",
+                                                                "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+                                                                "favorite_count": 1,
+                                                                "retweet_count": 0,
+                                                                "reply_count": 0,
+                                                                "quote_count": 0,
+                                                                "in_reply_to_status_id_str": "root-1",
+                                                                "entities": {"hashtags": [], "user_mentions": []},
+                                                            },
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ],
+                                },
+                            },
+                            {
+                                "entryId": "conversationthread-B",
+                                "content": {
+                                    "items": [
+                                        {
+                                            "item": {
+                                                "itemContent": {
+                                                    "tweet_results": {
+                                                        "result": {
+                                                            "__typename": "Tweet",
+                                                            "rest_id": "B",
+                                                            "core": {
+                                                                "user_results": {
+                                                                    "result": {
+                                                                        "legacy": {
+                                                                            "screen_name": "userB",
+                                                                            "name": "User B",
+                                                                            "verified": False,
+                                                                        },
+                                                                        "is_blue_verified": False,
+                                                                    }
+                                                                }
+                                                            },
+                                                            "legacy": {
+                                                                "id_str": "B",
+                                                                "full_text": "reply B",
+                                                                "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+                                                                "favorite_count": 2,
+                                                                "retweet_count": 0,
+                                                                "reply_count": 0,
+                                                                "quote_count": 0,
+                                                                "in_reply_to_status_id_str": "root-1",
+                                                                "entities": {"hashtags": [], "user_mentions": []},
+                                                            },
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ],
+                                },
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+
+    def _fake_get(url: str, **_: object) -> _FakeResponse:
+        return _FakeResponse(status_code=200, payload=detail_payload)
+
+    def _fake_search_raises(**kwargs):
+        raise RuntimeError("SearchTimeline unavailable")
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", _fake_search_raises)
+
+    replies = scraper.fetch_tweet_replies("root-1", delay=0)
+
+    # TweetDetail results preserved despite SearchTimeline failure
+    reply_ids = [r.tweet_id for r in replies]
+    assert "A" in reply_ids
+    assert "B" in reply_ids
+    assert len(reply_ids) == 2
 
 
 def test_twitter_fetch_tweet_quotes_passes_max_pages_to_search_fallback(
