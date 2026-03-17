@@ -893,7 +893,8 @@ _log = logging.getLogger(__name__)
 def _is_twitter_video_url(url: str) -> bool:
     """Return True if *url* is hosted on Twitter's video CDN."""
     try:
-        return "video.twimg.com" in urlparse(url).netloc
+        host = urlparse(url).hostname or ""
+        return host == "video.twimg.com" or host.endswith(".video.twimg.com")
     except Exception:  # noqa: BLE001
         return False
 
@@ -1065,13 +1066,25 @@ def mirror_url_to_s3(
                     "Retrying mirror with fresh yt-dlp URL for %s",
                     source_url,
                 )
-                return mirror_url_to_s3(
+                result = mirror_url_to_s3(
                     fresh_url,
                     s3_client=s3,
                     bucket=target_bucket,
                     max_bytes=max_bytes_limit,
                     tweet_url=None,  # prevent infinite recursion
                 )
+                if result.status == "mirrored":
+                    return MirrorResult(
+                        source_url=source_url,  # preserve original
+                        hosted_url=result.hosted_url,
+                        hosted_key=result.hosted_key,
+                        sha256=result.sha256,
+                        content_type=result.content_type,
+                        size_bytes=result.size_bytes,
+                        status=result.status,
+                        error=result.error,
+                    )
+                # If retry also failed, fall through to original error
         # -----------------------------------------------------------------
 
         return MirrorResult(
