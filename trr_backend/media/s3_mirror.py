@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import logging
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -883,12 +887,72 @@ class MirrorResult:
     error: str | None
 
 
+_log = logging.getLogger(__name__)
+
+
+def _is_twitter_video_url(url: str) -> bool:
+    """Return True if *url* is hosted on Twitter's video CDN."""
+    try:
+        return "video.twimg.com" in urlparse(url).netloc
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _resolve_twitter_video_via_ytdlp(tweet_url: str) -> str | None:
+    """Use yt-dlp to resolve a fresh direct video URL from *tweet_url*.
+
+    Returns the resolved URL string, or ``None`` on any failure.
+    """
+    if not shutil.which("yt-dlp"):
+        _log.debug("yt-dlp not found on PATH; skipping Twitter video fallback")
+        return None
+
+    cmd = [
+        "yt-dlp",
+        "--dump-single-json",
+        "--no-playlist",
+        "--skip-download",
+        "--format",
+        "best[ext=mp4]/best",
+        tweet_url,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("yt-dlp subprocess failed for %s: %s", tweet_url, exc)
+        return None
+
+    if proc.returncode != 0:
+        message = (proc.stderr or proc.stdout or "").strip()[:240]
+        _log.warning("yt-dlp exited %d for %s: %s", proc.returncode, tweet_url, message)
+        return None
+
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        _log.warning("yt-dlp JSON parse failed for %s: %s", tweet_url, exc)
+        return None
+
+    resolved = str(payload.get("url") or "").strip() or None
+    if resolved:
+        _log.info("yt-dlp resolved fresh video URL for %s", tweet_url)
+    return resolved
+
+
 def mirror_url_to_s3(
     url: str,
     *,
     s3_client=None,
     bucket: str | None = None,
     max_bytes: int = 50 * 1024 * 1024,
+    tweet_url: str | None = None,
 ) -> MirrorResult:
     source_url = str(url or "").strip()
     if not _is_http_url(source_url):
@@ -988,6 +1052,28 @@ def mirror_url_to_s3(
     except requests.exceptions.HTTPError as exc:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
         reason = f"http_{int(status_code)}" if status_code is not None else "http_error"
+
+        # -- yt-dlp fallback for expired Twitter video CDN URLs -----------
+        if (
+            status_code in (401, 403, 404)
+            and tweet_url
+            and _is_twitter_video_url(source_url)
+        ):
+            fresh_url = _resolve_twitter_video_via_ytdlp(tweet_url)
+            if fresh_url and fresh_url != source_url:
+                _log.info(
+                    "Retrying mirror with fresh yt-dlp URL for %s",
+                    source_url,
+                )
+                return mirror_url_to_s3(
+                    fresh_url,
+                    s3_client=s3,
+                    bucket=target_bucket,
+                    max_bytes=max_bytes_limit,
+                    tweet_url=None,  # prevent infinite recursion
+                )
+        # -----------------------------------------------------------------
+
         return MirrorResult(
             source_url=source_url,
             hosted_url=None,
@@ -1090,6 +1176,7 @@ def mirror_urls_to_s3(
     s3_client=None,
     bucket: str | None = None,
     max_bytes: int = 50 * 1024 * 1024,
+    tweet_url: str | None = None,
 ) -> list[MirrorResult]:
     results: list[MirrorResult] = []
     cache: dict[str, MirrorResult] = {}
@@ -1116,6 +1203,7 @@ def mirror_urls_to_s3(
                 s3_client=s3_client,
                 bucket=bucket,
                 max_bytes=max_bytes,
+                tweet_url=tweet_url,
             )
         except Exception as exc:
             result = MirrorResult(
