@@ -890,7 +890,7 @@ class MirrorResult:
 _log = logging.getLogger(__name__)
 
 
-def _is_twitter_video_url(url: str) -> bool:
+def is_twitter_video_url(url: str) -> bool:
     """Return True if *url* is hosted on Twitter's video CDN."""
     try:
         host = urlparse(url).hostname or ""
@@ -1058,7 +1058,7 @@ def mirror_url_to_s3(
         if (
             status_code in (401, 403, 404)
             and tweet_url
-            and _is_twitter_video_url(source_url)
+            and is_twitter_video_url(source_url)
         ):
             fresh_url = _resolve_twitter_video_via_ytdlp(tweet_url)
             if fresh_url and fresh_url != source_url:

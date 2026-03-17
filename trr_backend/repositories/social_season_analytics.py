@@ -9817,9 +9817,9 @@ def _mirror_platform_media_to_s3_result(
                         and normalized_platform == "twitter"
                         and reason in {"http_401_auth_or_expired", "http_403_auth_or_expired", "http_404_not_found"}
                     ):
-                        from trr_backend.media.s3_mirror import _is_twitter_video_url
+                        from trr_backend.media.s3_mirror import is_twitter_video_url
 
-                        if _is_twitter_video_url(source_url):
+                        if is_twitter_video_url(source_url):
                             try:
                                 temp_path, content_type = _download_with_ytdlp(tweet_url)
                                 used_ytdlp = True
