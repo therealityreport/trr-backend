@@ -1865,7 +1865,7 @@ class TwitterScraper:
         tweet_id: str,
         delay: float = 2.0,
         *,
-        search_max_pages: int = 8,
+        search_max_pages: int = 20,
         twikit_max_pages: int = 5,
     ) -> list[Tweet]:
         """Fetch replies to a specific tweet."""
@@ -2018,7 +2018,7 @@ class TwitterScraper:
 
         return replies
 
-    def _fetch_tweet_replies_via_search(self, *, tweet_id: str, delay: float, max_pages: int = 8) -> list[Tweet]:
+    def _fetch_tweet_replies_via_search(self, *, tweet_id: str, delay: float, max_pages: int = 20) -> list[Tweet]:
         """Fallback reply fetch using SearchTimeline conversation query."""
         self._ensure_auth()
         query = f"conversation_id:{tweet_id}"
