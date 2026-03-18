@@ -444,3 +444,59 @@ def test_scan_event_page_for_person_respects_limit(monkeypatch) -> None:
     )
 
     assert results["total_scanned"] == 50
+
+
+def test_search_grouped_events_full_scan_returns_multiple_matched_assets(monkeypatch) -> None:
+    """When full_scan_person_assets=True, search_grouped_events should
+    return all person-matching assets per event, not just one."""
+    monkeypatch.setattr(
+        getty,
+        "_search_asset_candidates_for_phrase",
+        lambda phrase, **kwargs: [
+            {
+                "detail_url": "https://www.gettyimages.com/photos/bravocon-2023?eventid=100",
+                "event_name": "BravoCon 2023",
+                "grouped_image_count": 50,
+            }
+        ],
+    )
+
+    monkeypatch.setattr(
+        getty,
+        "fetch_asset_detail",
+        lambda detail_url, **kwargs: {
+            "detail_url": detail_url,
+            "object_name": "OBJ_REP",
+            "editorial_id": "rep",
+            "caption": "Brandi Glanville at BravoCon",
+        },
+    )
+
+    monkeypatch.setattr(
+        getty,
+        "scan_event_page_for_person",
+        lambda event_url, *, person_name, **kwargs: {
+            "event_url": event_url,
+            "total_scanned": 50,
+            "person_image_count": 5,
+            "matched_assets": [
+                {"editorial_id": str(i), "object_name": f"OBJ_{i}", "caption": "Brandi Glanville"}
+                for i in range(1, 6)
+            ],
+            "representative_asset": {"editorial_id": "1", "object_name": "OBJ_1"},
+        },
+    )
+
+    results = getty.search_grouped_events(
+        "Brandi Glanville Bravo",
+        limit=10,
+        person_name="Brandi Glanville",
+        full_scan_person_assets=True,
+        source_query_scope="bravo",
+    )
+
+    assert len(results) == 1
+    event = results[0]
+    assert event["person_image_count"] == 5
+    assert len(event.get("matched_assets_list", [])) == 5
+    assert event["source_query_scope"] == "bravo"

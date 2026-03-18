@@ -156,6 +156,7 @@ def search_grouped_events(
     minimum_grouped_image_count: int | None = None,
     event_detail_sample_limit: int = DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT,
     source_query_scope: str | None = None,
+    full_scan_person_assets: bool = False,
 ) -> list[dict[str, Any]]:
     cleaned = str(phrase or "").strip()
     if not cleaned:
@@ -201,6 +202,23 @@ def search_grouped_events(
             grouped_event,
             source_query_scope=source_query_scope,
         )
+        if full_scan_person_assets and person_name:
+            scan_result = scan_event_page_for_person(
+                event_url,
+                person_name=person_name,
+                session=session,
+                progress_cb=progress_cb,
+            )
+            if scan_result and scan_result.get("matched_assets"):
+                merged["matched_assets_list"] = scan_result["matched_assets"]
+                merged["person_image_count"] = scan_result["person_image_count"]
+                merged["event_asset_count_scanned"] = scan_result["total_scanned"]
+                merged["matched_asset"] = scan_result["matched_assets"][0]
+                merged["representative_asset"] = scan_result["representative_asset"]
+            elif scan_result:
+                merged["matched_assets_list"] = []
+                merged["person_image_count"] = 0
+                merged["event_asset_count_scanned"] = scan_result["total_scanned"]
         if person_match_required and not merged.get("matched_asset"):
             if progress_cb:
                 progress_cb(
