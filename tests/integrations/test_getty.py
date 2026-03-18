@@ -595,7 +595,9 @@ def test_fetch_asset_detail_prefers_largest_image_url(monkeypatch) -> None:
 
     result = getty.fetch_asset_detail("https://www.gettyimages.com/detail/news-photo/test/123")
     assert result is not None
-    assert "2048x2048" in result["preview_image_url"], f"Expected largest URL, got: {result['preview_image_url']}"
+    assert "2048x2048" in result["preview_image_url"], (
+        f"Expected largest URL, got: {result['preview_image_url']}"
+    )
 
 
 def test_extract_best_image_urls_from_display_sizes() -> None:
