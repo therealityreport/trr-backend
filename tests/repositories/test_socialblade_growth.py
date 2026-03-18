@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from trr_backend.repositories.socialblade_growth import merge_chart_data
 
 
 def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_zeroes() -> None:
+    now = datetime.now(tz=UTC)
+    previous_day = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    current_day = now.strftime("%Y-%m-%d")
     existing = {
         "scraped_at": "2026-03-16T07:29:43Z",
         "stats_refreshed": True,
@@ -19,8 +24,8 @@ def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_
         "daily_channel_metrics_60day": {"row_count": 60},
         "daily_total_followers_chart": {
             "data": [
-                {"date": "2026-03-15", "followers": 475283},
-                {"date": "2026-03-16", "followers": 475378},
+                {"date": previous_day, "followers": 475283},
+                {"date": current_day, "followers": 475378},
             ]
         },
     }
@@ -39,8 +44,8 @@ def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_
         "daily_channel_metrics_60day": {"data": [], "row_count": 0},
         "daily_total_followers_chart": {
             "data": [
-                {"date": "2026-03-15", "followers": 475283},
-                {"date": "2026-03-16", "followers": 475372},
+                {"date": previous_day, "followers": 475283},
+                {"date": current_day, "followers": 475372},
             ]
         },
     }
@@ -53,6 +58,6 @@ def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_
     assert merged["rankings"] == existing["rankings"]
     assert merged["daily_channel_metrics_60day"] == existing["daily_channel_metrics_60day"]
     assert merged["daily_total_followers_chart"]["data"][-1] == {
-        "date": "2026-03-16",
+        "date": current_day,
         "followers": 475372,
     }

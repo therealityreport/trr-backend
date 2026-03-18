@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from threading import Thread
 from typing import Any, Literal
@@ -56,6 +57,9 @@ SYNC_RETRY_KIND_TO_PASS_KIND: dict[str, SyncPassKind] = {
     "retry_missing_avatars": "details_refresh",
     "retry_missing_comment_media": "details_refresh",
 }
+BOUNDED_DEPTH_PLATFORMS = {"tiktok", "facebook", "threads", "twitter"}
+DEFAULT_SYNC_MAX_COMMENTS_PER_POST = 5_000
+DEFAULT_SYNC_MAX_REPLIES_PER_POST = 1_000
 
 
 def _social_repo() -> Any:
@@ -156,7 +160,25 @@ def build_sync_profile(
     profile["avatar_required"] = True
     profile["sync_session_profile"] = "button_sync_v1"
     profile["season_id"] = season_id
-    if span_days <= 3:
+    single_platform = normalized_platforms[0] if len(normalized_platforms) == 1 else None
+    if single_platform in BOUNDED_DEPTH_PLATFORMS:
+        if int(profile.get("max_comments_per_post") or 0) <= 0:
+            profile["max_comments_per_post"] = DEFAULT_SYNC_MAX_COMMENTS_PER_POST
+        if int(profile.get("max_replies_per_post") or 0) <= 0:
+            profile["max_replies_per_post"] = DEFAULT_SYNC_MAX_REPLIES_PER_POST
+    if single_platform == "tiktok":
+        profile["runner_strategy"] = "single_runner"
+        profile["runner_count"] = 1
+        profile["window_shard_hours"] = 24
+    elif single_platform in {"facebook", "threads"}:
+        profile["runner_strategy"] = "single_runner"
+        profile["runner_count"] = 1
+        profile["window_shard_hours"] = 12
+    elif single_platform == "twitter" and span_days <= 14:
+        profile["runner_strategy"] = "adaptive_dual_runner"
+        profile["runner_count"] = 2
+        profile["window_shard_hours"] = 8
+    elif span_days <= 3:
         profile["runner_strategy"] = "single_runner"
         profile["runner_count"] = 1
         profile["window_shard_hours"] = 12
@@ -678,6 +700,289 @@ def _build_completeness_snapshot(
     return snapshot
 
 
+def _env_present_any(*names: str) -> bool:
+    return any(str(os.getenv(name) or "").strip() for name in names)
+
+
+def _infer_auth_mode(platform: str) -> tuple[str | None, str | None]:
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform == "tiktok":
+        if _env_present_any(
+            "SOCIAL_TIKTOK_COOKIES_JSON",
+            "SOCIAL_TIKTOK_COOKIES_FILE",
+            "TIKTOK_COOKIES_SESSIONID",
+            "TIKTOK_COOKIES_SID_TT",
+        ):
+            return "cookies", None
+        return "cookies", "tiktok_cookies_missing"
+    if normalized_platform == "facebook":
+        if _env_present_any(
+            "SOCIAL_FACEBOOK_COOKIES_JSON",
+            "SOCIAL_FACEBOOK_COOKIES_FILE",
+            "FACEBOOK_COOKIES_C_USER",
+            "FACEBOOK_COOKIES_XS",
+        ):
+            return "cookies", None
+        return "public", "facebook_public_fallback"
+    if normalized_platform == "threads":
+        if _env_present_any(
+            "SOCIAL_THREADS_COOKIES_JSON",
+            "SOCIAL_THREADS_COOKIES_FILE",
+            "THREADS_COOKIES_SESSIONID",
+            "THREADS_COOKIES_CSRFTOKEN",
+        ):
+            return "cookies", None
+        return "public", "threads_public_fallback"
+    if normalized_platform == "twitter":
+        if _env_present_any(
+            "SOCIAL_TWITTER_COOKIES_JSON",
+            "SOCIAL_TWITTER_COOKIES_FILE",
+            "TWITTER_COOKIES_AUTH_TOKEN",
+            "TWITTER_COOKIES_CT0",
+        ):
+            return "cookies", None
+        if _env_present_any("SOCIAL_TWITTER_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"):
+            return "bearer", None
+        if _env_present_any("TWIKIT_USERNAME", "TWIKIT_EMAIL") and _env_present_any("TWIKIT_PASSWORD"):
+            return "twikit", None
+        return "cookies_or_bearer_or_twikit", "twitter_auth_missing"
+    return None, None
+
+
+def _derive_execution_path(*, platform: str, auth_mode: str | None) -> str:
+    from trr_backend.socials.crawlee_runtime.config import should_use_crawlee
+
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform == "twitter" and auth_mode == "twikit":
+        return "twikit-assisted"
+    return "crawlee" if should_use_crawlee(normalized_platform) else "legacy"
+
+
+def _derive_source_mode(*, platform: str, sync_config: dict[str, Any]) -> str | None:
+    normalized_platform = str(platform or "").strip().lower()
+    accounts_override = list(sync_config.get("accounts_override") or [])
+    hashtags_override = list(sync_config.get("hashtags_override") or [])
+    keywords_override = list(sync_config.get("keywords_override") or [])
+    sound_ids = list(sync_config.get("sound_ids") or [])
+    if normalized_platform == "tiktok":
+        if sound_ids:
+            return "sound"
+        if hashtags_override:
+            return "hashtag"
+        if keywords_override:
+            return "keyword"
+        if accounts_override:
+            return "account"
+        return "week_targets"
+    if normalized_platform == "facebook":
+        if keywords_override:
+            return "mixed"
+        return "feed" if accounts_override else "mixed"
+    if normalized_platform == "threads":
+        if keywords_override:
+            return "post"
+        return "profile" if accounts_override else "mixed"
+    if normalized_platform == "twitter":
+        if keywords_override:
+            return "search"
+        return "profile" if accounts_override else "mixed"
+    return None
+
+
+def _coverage_dimension_payload(
+    dimension: str,
+    coverage: dict[str, Any] | None,
+    *,
+    platform: str,
+) -> dict[str, Any] | None:
+    if not isinstance(coverage, dict):
+        return None
+    by_platform = coverage.get("by_platform") if isinstance(coverage.get("by_platform"), dict) else {}
+    platform_slice = by_platform.get(platform) if isinstance(by_platform.get(platform), dict) else None
+    if platform_slice is not None:
+        payload = dict(platform_slice)
+    else:
+        payload = {}
+    if dimension == "comment_media" and not payload:
+        payload = {
+            "items_scanned": int(coverage.get("items_scanned") or 0),
+            "needs_mirror_count": int(coverage.get("needs_mirror_count") or 0),
+            "mirrored_count": int(coverage.get("mirrored_count") or 0),
+            "failed_count": int(coverage.get("failed_count") or 0),
+            "pending_count": int(coverage.get("pending_count") or 0),
+        }
+    if dimension == "avatars" and not payload:
+        payload = (
+            dict(by_platform.get(platform))
+            if isinstance(by_platform.get(platform), dict)
+            else {}
+        )
+    if dimension == "comments":
+        saved_comments = int(payload.get("saved_comments") or 0)
+        reported_comments = int(payload.get("reported_comments") or 0)
+        effective_reported_comments = max(saved_comments, reported_comments)
+        if effective_reported_comments > reported_comments:
+            payload["reported_comments_raw"] = reported_comments
+            payload["reported_comments"] = effective_reported_comments
+        comment_sync_status = (
+            dict(payload.get("comment_sync_status"))
+            if isinstance(payload.get("comment_sync_status"), dict)
+            else {}
+        )
+        if comment_sync_status:
+            expected_count = int(comment_sync_status.get("expected_count") or 0)
+            fetched_count = int(comment_sync_status.get("fetched_count") or 0)
+            upserted_count = int(comment_sync_status.get("upserted_count") or 0)
+            effective_expected_count = max(expected_count, fetched_count, upserted_count)
+            if effective_expected_count > expected_count:
+                comment_sync_status["expected_count_raw"] = expected_count
+                comment_sync_status["expected_count"] = effective_expected_count
+                payload["comment_sync_status"] = comment_sync_status
+    payload["up_to_date"] = bool(payload.get("up_to_date", coverage.get("up_to_date")))
+    return payload
+
+
+def _build_coverage_by_dimension(snapshot: dict[str, Any]) -> dict[str, Any]:
+    comments_coverage = dict(snapshot.get("comments_coverage") or {})
+    total_saved_comments = int(comments_coverage.get("total_saved_comments") or 0)
+    total_reported_comments = int(comments_coverage.get("total_reported_comments") or 0)
+    effective_total_reported_comments = max(total_saved_comments, total_reported_comments)
+    if effective_total_reported_comments > total_reported_comments:
+        comments_coverage["total_reported_comments_raw"] = total_reported_comments
+        comments_coverage["total_reported_comments"] = effective_total_reported_comments
+    total_comment_sync_status = (
+        dict(comments_coverage.get("comment_sync_status"))
+        if isinstance(comments_coverage.get("comment_sync_status"), dict)
+        else {}
+    )
+    if total_comment_sync_status:
+        expected_count = int(total_comment_sync_status.get("expected_count") or 0)
+        fetched_count = int(total_comment_sync_status.get("fetched_count") or 0)
+        upserted_count = int(total_comment_sync_status.get("upserted_count") or 0)
+        effective_expected_count = max(expected_count, fetched_count, upserted_count)
+        if effective_expected_count > expected_count:
+            total_comment_sync_status["expected_count_raw"] = expected_count
+            total_comment_sync_status["expected_count"] = effective_expected_count
+            comments_coverage["comment_sync_status"] = total_comment_sync_status
+    return {
+        "comments": comments_coverage,
+        "media": dict(snapshot.get("asset_coverage") or {}),
+        "comment_media": dict(snapshot.get("comment_media_coverage") or {}),
+        "avatars": dict(snapshot.get("avatar_coverage") or {}),
+    }
+
+
+def _build_follow_up_breakdown(snapshot: dict[str, Any]) -> dict[str, int]:
+    return {
+        "comments": int(snapshot.get("comment_target_count") or snapshot.get("targeted_anchor_count") or 0),
+        "media": int(snapshot.get("detail_target_count") or snapshot.get("missing_asset_count") or 0),
+        "avatars": int(snapshot.get("avatar_target_count") or snapshot.get("missing_avatar_count") or 0),
+        "comment_media": int(
+            snapshot.get("comment_media_target_count") or snapshot.get("missing_comment_media_count") or 0
+        ),
+    }
+
+
+def _queue_wait_state(worker_health: dict[str, Any] | None) -> str:
+    if not isinstance(worker_health, dict):
+        return "unknown"
+    if not bool(worker_health.get("queue_enabled")):
+        return "queue_disabled"
+    if not bool(worker_health.get("healthy")) and int(worker_health.get("healthy_workers") or 0) <= 0:
+        return "waiting_for_workers"
+    oldest_queued_age_seconds = int(worker_health.get("oldest_queued_age_seconds") or 0)
+    if oldest_queued_age_seconds >= 300:
+        return "backlogged"
+    return "ready"
+
+
+def _infer_worker_version(worker_health: dict[str, Any] | None, *, platform: str) -> str | None:
+    if not isinstance(worker_health, dict):
+        return None
+    for worker in worker_health.get("workers") or []:
+        if not isinstance(worker, dict):
+            continue
+        supported_platforms = [str(value or "").strip().lower() for value in worker.get("supported_platforms") or []]
+        if supported_platforms and platform not in supported_platforms:
+            continue
+        metadata = worker.get("metadata") if isinstance(worker.get("metadata"), dict) else {}
+        for key in ("worker_version", "image_version", "release_version", "git_sha"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return value
+    return None
+
+
+def _build_platform_diagnostics(
+    *,
+    platforms: list[str],
+    sync_config: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    social_repo = _social_repo()
+    worker_health = social_repo.get_worker_health() if hasattr(social_repo, "get_worker_health") else None
+    queue_enabled = bool(social_repo.is_queue_enabled()) if hasattr(social_repo, "is_queue_enabled") else False
+    queue_state = _queue_wait_state(worker_health)
+    coverage_by_dimension = _build_coverage_by_dimension(snapshot)
+    follow_up_breakdown = _build_follow_up_breakdown(snapshot)
+    diagnostics: dict[str, Any] = {}
+    for platform in platforms:
+        auth_mode, auth_status_reason = _infer_auth_mode(platform)
+        execution_path = _derive_execution_path(platform=platform, auth_mode=auth_mode)
+        warnings: list[str] = []
+        if platform in {"tiktok", "instagram"}:
+            warnings.append("remote_only")
+        if platform == "tiktok" and not bool(sync_config.get("fetch_replies", True)):
+            warnings.append("replies_skipped_by_profile")
+        if platform in {"facebook", "threads"} and auth_status_reason:
+            warnings.append("degraded_public_mode")
+        queue_cap = (
+            social_repo._modal_dispatch_platform_cap("posts", platform)  # noqa: SLF001
+            if hasattr(social_repo, "_modal_dispatch_platform_cap")
+            else None
+        )
+        diagnostics[platform] = {
+            "platform": platform,
+            "auth_mode": auth_mode,
+            "auth_status_reason": auth_status_reason,
+            "execution_path": execution_path,
+            "queue_cap": queue_cap,
+            "queue_wait_state": queue_state,
+            "queue_age_seconds": (
+                int(worker_health.get("oldest_queued_age_seconds") or 0)
+                if isinstance(worker_health, dict)
+                else None
+            ),
+            "queue_enabled": queue_enabled,
+            "worker_required": platform in {"instagram", "tiktok"},
+            "remote_only": platform in {"instagram", "tiktok"},
+            "source_mode": _derive_source_mode(platform=platform, sync_config=sync_config),
+            "coverage_by_dimension": {
+                dimension: _coverage_dimension_payload(dimension, coverage, platform=platform)
+                for dimension, coverage in coverage_by_dimension.items()
+            },
+            "follow_up_breakdown": dict(follow_up_breakdown),
+            "worker_version": _infer_worker_version(worker_health, platform=platform),
+            "warnings": warnings,
+        }
+    return diagnostics, worker_health
+
+
+def _aggregate_platform_field(platform_diagnostics: dict[str, Any], field: str) -> Any:
+    values = []
+    for payload in platform_diagnostics.values():
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get(field)
+        if value in (None, "", []):
+            continue
+        values.append(value)
+    if not values:
+        return None
+    first = values[0]
+    return first if all(value == first for value in values) else "mixed"
+
+
 def _build_missing_detail_target_groups(
     *,
     season_id: str,
@@ -1015,6 +1320,17 @@ def _build_missing_comment_targets(
               ) cc on cc.root_source_id = p.tweet_id
             """
             params = [season_id, season_id, date_start, date_end] + ([account_handles] if account_handles else [])
+        elif platform == "threads":
+            expected_expr = "coalesce(p.replies_count, 0) + coalesce(p.quotes, 0)"
+            comment_count_sql = f"""
+              left join (
+                select post_id as join_post_id, count(*)::int as saved_comments
+                from social.{comment_table}
+                where season_id = %s::uuid
+                group by 1
+              ) cc on cc.join_post_id = p.id
+            """
+            params = [season_id, season_id, date_start, date_end] + ([account_handles] if account_handles else [])
         else:
             expected_expr = "coalesce(p.comments_count, 0)"
             join_key = "video_id" if platform == "youtube" else "post_id"
@@ -1256,18 +1572,27 @@ def _start_sync_pass(
 def _serialize_sync_session(row: dict[str, Any]) -> dict[str, Any]:
     current_run_id = str(row.get("current_run_id") or "").strip() or None
     completeness_snapshot = dict(row.get("completeness_snapshot") or {})
+    sync_config = dict(row.get("sync_config") or {})
+    platforms = _normalize_platforms(row.get("platforms"))
     next_pass_kind = _next_pass_kind_from_snapshot(completeness_snapshot)
     display_status, status_reason = _display_status_for_sync_session(
         status=str(row.get("status") or ""),
         snapshot=completeness_snapshot,
         next_pass_kind=next_pass_kind,
     )
+    platform_diagnostics, worker_health = _build_platform_diagnostics(
+        platforms=platforms,
+        sync_config=sync_config,
+        snapshot=completeness_snapshot,
+    )
+    coverage_by_dimension = _build_coverage_by_dimension(completeness_snapshot)
+    follow_up_breakdown = _build_follow_up_breakdown(completeness_snapshot)
     payload = {
         "sync_session_id": str(row.get("id") or ""),
         "season_id": str(row.get("season_id") or ""),
         "show_id": str(row.get("show_id") or ""),
         "source_scope": str(row.get("source_scope") or ""),
-        "platforms": _normalize_platforms(row.get("platforms")),
+        "platforms": platforms,
         "date_start": _iso(_coerce_dt(row.get("date_start"))),
         "date_end": _iso(_coerce_dt(row.get("date_end"))),
         "status": str(row.get("status") or ""),
@@ -1283,7 +1608,17 @@ def _serialize_sync_session(row: dict[str, Any]) -> dict[str, Any]:
         "next_pass_kind": next_pass_kind,
         "expected_after_current_pass": _expected_after_current_pass(str(row.get("current_pass_kind") or "")),
         "completeness_snapshot": completeness_snapshot,
-        "sync_config": dict(row.get("sync_config") or {}),
+        "sync_config": sync_config,
+        "platform_diagnostics": platform_diagnostics,
+        "coverage_by_dimension": coverage_by_dimension,
+        "follow_up_breakdown": follow_up_breakdown,
+        "auth_mode": _aggregate_platform_field(platform_diagnostics, "auth_mode"),
+        "execution_path": _aggregate_platform_field(platform_diagnostics, "execution_path"),
+        "queue_cap": _aggregate_platform_field(platform_diagnostics, "queue_cap"),
+        "queue_wait_state": _queue_wait_state(worker_health),
+        "source_mode": _aggregate_platform_field(platform_diagnostics, "source_mode"),
+        "worker_version": _aggregate_platform_field(platform_diagnostics, "worker_version"),
+        "worker_health": worker_health,
         "created_at": _iso(_coerce_dt(row.get("created_at"))),
         "started_at": _iso(_coerce_dt(row.get("started_at"))),
         "completed_at": _iso(_coerce_dt(row.get("completed_at"))),

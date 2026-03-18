@@ -18,9 +18,7 @@ from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from trr_backend.job_plane import (
-    canonical_execution_mode,
     execution_metadata,
-    execution_owner_label,
     is_remote_job_plane_enabled,
 )
 from trr_backend.modal_dispatch import dispatch_admin_operation, modal_execution_metadata, supports_admin_operation
@@ -40,6 +38,56 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=_OPERATION_WORKERS, thread_name_prefi
 _FUTURES: dict[str, Future[Any]] = {}
 _FUTURES_LOCK = Lock()
 _LAST_PURGE_MONOTONIC = 0.0
+_LOCAL_RUNTIME_MARKERS = frozenset({"local", "dev", "development", "test"})
+_LOCAL_ADMIN_OPERATION_TYPES = frozenset({"admin_person_refresh_images", "admin_person_reprocess_images"})
+
+
+def _env_truthy(name: str) -> bool:
+    raw = str(os.getenv(name) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _is_local_or_dev_runtime() -> bool:
+    runtime_markers = [
+        os.getenv("APP_ENV"),
+        os.getenv("ENV"),
+        os.getenv("ENVIRONMENT"),
+        os.getenv("TRR_ENV"),
+        os.getenv("TRR_ENVIRONMENT"),
+        os.getenv("WORKSPACE_DEV_MODE"),
+    ]
+    normalized = {str(value or "").strip().lower() for value in runtime_markers if str(value or "").strip()}
+    if normalized & (_LOCAL_RUNTIME_MARKERS | {"cloud"}):
+        return True
+    return _env_truthy("TRR_LOCAL_DEV")
+
+
+def _header_truthy(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+def _local_execution_metadata() -> dict[str, str | bool]:
+    return {
+        "execution_mode_canonical": "local",
+        "execution_owner": "local_api",
+        "execution_backend_canonical": "local",
+        "remote_job_plane_enforced": False,
+    }
+
+
+def _prefer_local_execution_for_request(request: Request | None, *, operation_type: str) -> bool:
+    if request is None or not _is_local_or_dev_runtime():
+        return False
+
+    if _header_truthy(request.headers.get("x-trr-prefer-local-execution")):
+        return True
+
+    normalized_operation_type = str(operation_type or "").strip().lower()
+    if normalized_operation_type in _LOCAL_ADMIN_OPERATION_TYPES:
+        return True
+
+    return False
 
 
 def _to_json_payload(raw: Any) -> dict[str, Any]:
@@ -342,6 +390,22 @@ async def operation_stream_generator(
             return
 
         if admin_operations.operation_is_terminal(str(operation.get("status") or "")):
+            final_events = admin_operations.normalize_operation_events(
+                admin_operations.stream_events_after_seq(operation_id, after_seq=next_seq, limit=500)
+            )
+            for event in final_events:
+                seq = int(event.get("event_seq") or 0)
+                event_payload = _to_json_payload(event.get("event_payload"))
+                payload = _ensure_operation_payload(
+                    operation_id,
+                    event_payload,
+                    request_id=str(event_payload.get("request_id") or "") or None,
+                )
+                if seq > 0:
+                    payload["event_seq"] = seq
+                    next_seq = seq
+                event_type = str(event.get("event_type") or "message")
+                yield _sse_chunk(event_type, payload)
             return
 
         if request is not None:
@@ -572,27 +636,30 @@ def start_operation_for_stream(
     if not operation_id:
         raise RuntimeError("Failed to create admin operation")
 
-    remote_mode = is_remote_job_plane_enabled()
+    prefer_local_execution = _prefer_local_execution_for_request(request, operation_type=operation_type)
+    runtime_execution_metadata = _local_execution_metadata() if prefer_local_execution else execution_metadata()
+    remote_mode = is_remote_job_plane_enabled() and not prefer_local_execution
     modal_supported = supports_admin_operation(operation_type)
     modal_dispatched = False
     logger.info(
         (
             "Admin operation create_or_attach: operation_type=%s "
             "operation_id=%s attached=%s execution_owner=%s execution_mode=%s "
-            "client_session_id=%s client_workflow_id=%s request_id=%s"
+            "client_session_id=%s client_workflow_id=%s request_id=%s prefer_local_execution=%s"
         ),
         operation_type,
         operation_id,
         attached,
-        execution_owner_label(),
-        canonical_execution_mode(),
+        runtime_execution_metadata["execution_owner"],
+        runtime_execution_metadata["execution_mode_canonical"],
         client_session_id,
         client_workflow_id,
         request_id,
+        prefer_local_execution,
     )
 
     if not attached:
-        if modal_supported:
+        if modal_supported and not prefer_local_execution:
             modal_dispatched = dispatch_admin_operation(operation_id=operation_id, operation_type=operation_type)
         if modal_dispatched:
             logger.info("Queued admin operation for Modal ownership: operation_id=%s", operation_id)
@@ -607,7 +674,7 @@ def start_operation_for_stream(
     if not refreshed:
         raise RuntimeError("Operation created but could not be loaded")
 
-    current_execution_metadata = modal_execution_metadata() if modal_dispatched else execution_metadata()
+    current_execution_metadata = modal_execution_metadata() if modal_dispatched else runtime_execution_metadata
 
     # Emit immediate envelope so clients can persist operation_id/event_seq before progress arrives.
     admin_operations.append_operation_event(

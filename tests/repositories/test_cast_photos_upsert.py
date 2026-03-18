@@ -134,6 +134,8 @@ def test_upsert_cast_photos_uses_canonical_rpc() -> None:
 
     assert client._rpc_calls
     assert client._rpc_calls[0][0] == "upsert_cast_photos_by_canonical"
+    payload = client._rpc_calls[0][1]["rows"][0]
+    assert payload["image_url_canonical"] == "https://static.wikia.nocookie.net/real-housewives/images/abc.jpg"
 
 
 def test_upsert_cast_photos_requires_source_image_id() -> None:
@@ -157,12 +159,31 @@ def test_upsert_cast_photos_requires_canonical_url() -> None:
         imdb_person_id="nm11883948",
         source="fandom",
         source_image_id="",
-        url="https://static.wikia.nocookie.net/real-housewives/images/abc.jpg",
-        url_path="/real-housewives/images/abc.jpg",
+        url="",
+        url_path="",
     )
 
     with pytest.raises(CastPhotoRepositoryError):
         upsert_cast_photos(client, [bad_row], dedupe_on="image_url_canonical")
+
+
+def test_upsert_cast_photos_normalizes_canonical_payload_from_image_url() -> None:
+    client = _FakeClient()
+    row = CastPhotoUpsert(
+        person_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        imdb_person_id="nm11883948",
+        source="fandom",
+        source_image_id="fandom-gallery-abc123",
+        url="https://static.wikia.nocookie.net/Real-Housewives/images/AbC.jpg?cb=123",
+        url_path="/Real-Housewives/images/AbC.jpg?cb=123",
+        image_url="https://static.wikia.nocookie.net/Real-Housewives/images/AbC.jpg?cb=123",
+        image_url_canonical="https://static.wikia.nocookie.net/Real-Housewives/images/AbC.jpg?cb=123",
+    )
+
+    upsert_cast_photos(client, [row], dedupe_on="image_url_canonical")
+
+    payload = client._rpc_calls[0][1]["rows"][0]
+    assert payload["image_url_canonical"] == "https://static.wikia.nocookie.net/real-housewives/images/abc.jpg"
 
 
 def test_upsert_cast_photos_serializes_nested_metadata() -> None:

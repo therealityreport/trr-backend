@@ -290,7 +290,6 @@ def update_asset_content_type(
 
     metadata_in = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     metadata_out = dict(metadata_in)
-    metadata_out["fandom_section_tag"] = content_type
     metadata_out["content_type"] = content_type
 
     update_payload: dict[str, object] = {
@@ -320,7 +319,7 @@ def update_asset_content_type(
             for link in links_response.data or []:
                 context_in = link.get("context") if isinstance(link.get("context"), dict) else {}
                 context_out = dict(context_in)
-                context_out["fandom_section_tag"] = content_type
+                context_out["content_type"] = content_type
                 context_out["context_type"] = context_type_value
                 try:
                     db.schema("core").table("media_links").update({"context": context_out, "updated_at": now_iso}).eq(

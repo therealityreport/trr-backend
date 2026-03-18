@@ -1120,14 +1120,27 @@ def list_cast_with_roles(
           c.season_numbers,
           c.latest_season,
           c.roles,
-          cp.display_url AS photo_url
+          cp.display_url AS photo_url,
+          COALESCE(po.full_name_override, c.person_name) AS display_name,
+          COALESCE(
+              NULLIF(po.instagram_handle, ''),
+              ct.instagram_id,
+              p.external_ids->>'instagram_id',
+              p.external_ids->>'instagram'
+          ) AS instagram_handle,
+          po.tiktok_handle,
+          po.twitter_handle,
+          po.youtube_handle
         FROM core.v_show_cast_roles_enriched c
+        LEFT JOIN core.people p ON p.id = c.person_id
+        LEFT JOIN core.people_overrides po ON po.person_id = c.person_id
+        LEFT JOIN core.cast_tmdb ct ON ct.person_id = c.person_id
         LEFT JOIN LATERAL (
           SELECT
-            COALESCE(p.hosted_url, p.image_url, p.url, p.thumb_url) AS display_url
-          FROM core.cast_photos p
-          WHERE p.person_id = c.person_id
-          ORDER BY p.gallery_index ASC NULLS LAST
+            COALESCE(ph.hosted_url, ph.image_url, ph.url, ph.thumb_url) AS display_url
+          FROM core.cast_photos ph
+          WHERE ph.person_id = c.person_id
+          ORDER BY ph.gallery_index ASC NULLS LAST
           LIMIT 1
         ) cp ON true
         WHERE c.show_id = %s

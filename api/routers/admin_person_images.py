@@ -18,7 +18,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from threading import Lock
@@ -127,10 +127,9 @@ class RefreshImagesRequest(BaseModel):
         description="Sources to fetch from. Default: all",
     )
     limit_per_source: int = Field(
-        default=50,
+        default=10_000,
         ge=1,
-        le=1000,
-        description="Max images per source",
+        description="Max images per source (default: 10000, effectively unlimited)",
     )
     skip_mirror: bool = Field(
         default=False,
@@ -229,6 +228,10 @@ class RefreshImagesResponse(BaseModel):
     getty_candidates_total: int = 0
     getty_matched_total: int = 0
     getty_unmatched_total: int = 0
+    shared_nbcumv_total: int = 0
+    shared_nbcumv_imported: int = 0
+    nbcumv_only_total: int = 0
+    nbcumv_only_imported: int = 0
     getty_only_imported: int = 0
     getty_snapshot_saved: bool = False
     photos_pruned: int
@@ -397,6 +400,100 @@ def _get_show_name(db: SupabaseAdminClient, show_id: UUID | None) -> str | None:
         return None
     name = response.data[0].get("name")
     return str(name).strip() if isinstance(name, str) and name.strip() else None
+
+
+def _load_person_credit_show_names(
+    db: SupabaseAdminClient,
+    person_id: str,
+) -> list[str]:
+    normalized_person_id = str(person_id or "").strip()
+    if not normalized_person_id:
+        return []
+
+    try:
+        response = (
+            db.schema("core")
+            .table("credits")
+            .select("show_id,billing_order")
+            .eq("person_id", normalized_person_id)
+            .limit(5000)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Person credit show lookup failed person_id=%s error=%s", normalized_person_id, exc)
+        return []
+    if hasattr(response, "error") and response.error:
+        logger.debug("Person credit show lookup error person_id=%s error=%s", normalized_person_id, response.error)
+        return []
+
+    rows = response.data if isinstance(getattr(response, "data", None), list) else []
+    if not rows:
+        return []
+
+    ranked_show_ids: dict[str, tuple[int, int]] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        show_id = str(row.get("show_id") or "").strip()
+        if not show_id:
+            continue
+        billing_order = row.get("billing_order")
+        if isinstance(billing_order, int):
+            billing_rank = billing_order
+        elif isinstance(billing_order, str) and billing_order.strip().isdigit():
+            billing_rank = int(billing_order.strip())
+        else:
+            billing_rank = 10_000
+        next_rank = (billing_rank, index)
+        current_rank = ranked_show_ids.get(show_id)
+        if current_rank is None or next_rank < current_rank:
+            ranked_show_ids[show_id] = next_rank
+    if not ranked_show_ids:
+        return []
+
+    ordered_show_ids = sorted(ranked_show_ids, key=lambda sid: ranked_show_ids.get(sid, (10_000, 10_000)))
+    show_name_by_id: dict[str, str] = {}
+    for chunk in _chunked(ordered_show_ids, 200):
+        try:
+            shows_response = db.schema("core").table("shows").select("id,name").in_("id", chunk).execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Credited show names lookup failed person_id=%s error=%s", normalized_person_id, exc)
+            return []
+        if hasattr(shows_response, "error") and shows_response.error:
+            logger.debug(
+                "Credited show names lookup error person_id=%s error=%s",
+                normalized_person_id,
+                shows_response.error,
+            )
+            return []
+        for show_row in shows_response.data or []:
+            if not isinstance(show_row, dict):
+                continue
+            show_id = str(show_row.get("id") or "").strip()
+            show_name = str(show_row.get("name") or "").strip()
+            if show_id and show_name:
+                show_name_by_id[show_id] = show_name
+
+    ordered_names = [
+        show_name_by_id[show_id]
+        for show_id in ordered_show_ids
+        if show_id in show_name_by_id and show_name_by_id[show_id]
+    ]
+    if not ordered_names:
+        return []
+
+    deduped_names: list[str] = []
+    seen_names: set[str] = set()
+    for show_name in ordered_names:
+        normalized_name = show_name.strip().lower()
+        if not normalized_name or normalized_name in seen_names:
+            continue
+        seen_names.add(normalized_name)
+        deduped_names.append(show_name)
+
+    primary_names = [show_name for show_name in deduped_names if not _is_wwhl_show_name(show_name)]
+    wwhl_names = [show_name for show_name in deduped_names if _is_wwhl_show_name(show_name)]
+    return primary_names + wwhl_names
 
 
 def _normalize_scope_ids(values: list[str] | None) -> list[str] | None:
@@ -609,7 +706,7 @@ def _apply_show_source_policy(
         return sources, False
 
     blocked = {"fandom", "fandom-gallery"}
-    filtered_sources = [source for source in sources if source not in blocked]
+    filtered_sources: list[SourceType] = [source for source in sources if source not in blocked]
     fandom_skipped = len(filtered_sources) != len(sources)
     return filtered_sources, fandom_skipped
 
@@ -667,9 +764,7 @@ def _resolve_gallery_bucket_metadata(
     resolved_asset_show: dict[str, Any] | None,
     show_lookup_by_alias: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    event_group_title = (
-        str(asset.get("getty_event_group_title") or asset.get("event_name") or "").strip() or None
-    )
+    event_group_title = str(asset.get("getty_event_group_title") or asset.get("event_name") or "").strip() or None
     title = str(asset.get("search_title") or asset.get("title") or "").strip() or None
     caption = str(asset.get("caption") or asset.get("search_caption") or "").strip() or None
 
@@ -757,10 +852,17 @@ def _import_nbcumv_person_media(
     limit: int,
     progress_cb: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
-    from api.routers.admin_nbcumv import NbcumvImportItem, _ensure_sources, _import_single_item
+    from api.routers.admin_nbcumv import (
+        NbcumvImportItem,
+        _ensure_sources,
+        _import_single_item,
+    )
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
-    from trr_backend.repositories.cast_photos import upsert_cast_photos
+    from trr_backend.repositories.cast_photos import (
+        update_cast_photo_hosted_fields,
+        upsert_cast_photos,
+    )
 
     def _summarize_getty_asset(
         asset: dict[str, Any],
@@ -795,12 +897,20 @@ def _import_nbcumv_person_media(
         "getty_candidates_total": 0,
         "getty_matched_total": 0,
         "getty_unmatched_total": 0,
+        "shared_nbcumv_total": 0,
+        "shared_nbcumv_imported": 0,
+        "nbcumv_only_total": 0,
+        "nbcumv_only_imported": 0,
         "getty_only_imported": 0,
         "getty_snapshot_saved": False,
+        "getty_bravo_events": [],
+        "getty_broad_events": [],
+        "summary_message": None,
     }
     normalized_person_name = str(person_name or "").strip()
     if not normalized_person_name:
         return result
+    nbcumv_access_error: str | None = None
 
     def _normalize_show_title_key(value: str | None) -> str:
         text = str(value or "").strip().lower()
@@ -874,6 +984,223 @@ def _import_nbcumv_person_media(
                     return int(match.group(1)), int(match.group(2))
         return None, None
 
+    def _getty_people_count(asset: dict[str, Any]) -> int | None:
+        raw_value = asset.get("people_count")
+        if isinstance(raw_value, int) and raw_value >= 0:
+            return raw_value
+        if isinstance(raw_value, str) and raw_value.strip().isdigit():
+            return int(raw_value.strip())
+        return None
+
+    def _filename_nup_set_prefix(filename: str | None) -> str | None:
+        cleaned = re.sub(r"\.[A-Z0-9]+$", "", str(filename or "").strip().upper())
+        if not cleaned:
+            return None
+        match = re.match(r"^(NUP_\d+)_", cleaned)
+        if not match:
+            return None
+        return match.group(1)
+
+    def _normalize_nup_match_key(filename: str | None) -> str:
+        stem = re.sub(r"\.[A-Z0-9]+$", "", str(filename or "").strip().upper())
+        if not stem:
+            return ""
+        parts = stem.split("_")
+        if len(parts) != 3 or parts[0] != "NUP":
+            return stem
+        frame = parts[2]
+        if frame.isdigit():
+            frame = str(int(frame))
+        return f"{parts[0]}_{parts[1]}_{frame}"
+
+    def _match_nbcumv_image_candidates(
+        candidates: list[dict[str, Any]],
+        *,
+        filename: str,
+        allow_nup_set_fallback: bool = False,
+    ) -> dict[str, Any] | None:
+        normalized_filename = str(filename or "").strip().lower()
+        normalized_nup_key = _normalize_nup_match_key(filename)
+        if not normalized_filename:
+            return None
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_filename = str(candidate.get("lbx_filename") or "").strip().lower()
+            if candidate_filename == normalized_filename:
+                return candidate
+            if normalized_nup_key and _normalize_nup_match_key(candidate.get("lbx_filename")) == normalized_nup_key:
+                return candidate
+        if not allow_nup_set_fallback:
+            return None
+        requested_prefix = _filename_nup_set_prefix(filename)
+        if not requested_prefix:
+            return None
+        matching_prefix_candidates = [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and _filename_nup_set_prefix(candidate.get("lbx_filename")) == requested_prefix
+        ]
+        if len(matching_prefix_candidates) == 1:
+            return matching_prefix_candidates[0]
+        return None
+
+    def _coerce_getty_asset_search_dates(asset: dict[str, Any]) -> list[str]:
+        raw_values = (
+            asset.get("date_created"),
+            asset.get("event_date"),
+            asset.get("upload_date"),
+            asset.get("date_created_display"),
+            asset.get("upload_date_display"),
+        )
+        parsed_dates: list[str] = []
+        seen_dates: set[str] = set()
+        for raw_value in raw_values:
+            text = str(raw_value or "").strip()
+            if not text:
+                continue
+            candidate_date: str | None = None
+            iso_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+            if iso_match:
+                candidate_date = iso_match.group(1)
+            else:
+                for format_string in ("%B %d, %Y", "%b %d, %Y"):
+                    try:
+                        candidate_date = datetime.strptime(text, format_string).date().isoformat()
+                        break
+                    except ValueError:
+                        continue
+            if candidate_date and candidate_date not in seen_dates:
+                seen_dates.add(candidate_date)
+                parsed_dates.append(candidate_date)
+        return parsed_dates
+
+    def _find_nbcumv_image_from_getty_fallbacks(
+        asset: dict[str, Any],
+        *,
+        filename: str,
+        resolved_asset_show: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        show_id_value = str((resolved_asset_show or {}).get("id") or "").strip()
+        if not show_id_value:
+            return None
+        search_dates = _coerce_getty_asset_search_dates(asset)
+        allow_nup_set_fallback = bool(normalized_person_name)
+        for search_date in search_dates:
+            for filter_kwargs, label in (
+                (
+                    {"created_start": search_date, "created_end": search_date},
+                    f"created date {search_date}",
+                ),
+                (
+                    {"live_date_start": search_date, "live_date_end": search_date},
+                    f"live date {search_date}",
+                ),
+            ):
+                candidate_images = _safe_nbcumv_call(
+                    [],
+                    f"NUP fallback search for '{filename}' using {label}",
+                    nbcumv_integration.search_images,
+                    nbcumv_integration.SearchFilters(
+                        show_id=show_id_value,
+                        limit=100,
+                        **filter_kwargs,
+                    ),
+                )
+                matched_candidate = _match_nbcumv_image_candidates(
+                    candidate_images,
+                    filename=filename,
+                    allow_nup_set_fallback=allow_nup_set_fallback,
+                )
+                if isinstance(matched_candidate, dict):
+                    return matched_candidate
+        if normalized_person_name:
+            caption_candidates = _safe_nbcumv_call(
+                [],
+                f"NUP fallback caption search for '{filename}'",
+                nbcumv_integration.search_images,
+                nbcumv_integration.SearchFilters(
+                    show_id=show_id_value,
+                    search_caption=normalized_person_name,
+                    limit=100,
+                ),
+            )
+            matched_candidate = _match_nbcumv_image_candidates(
+                caption_candidates,
+                filename=filename,
+                allow_nup_set_fallback=allow_nup_set_fallback,
+            )
+            if isinstance(matched_candidate, dict):
+                return matched_candidate
+        return None
+
+    def _build_event_asset_candidate(event: dict[str, Any]) -> dict[str, Any] | None:
+        asset = event.get("matched_asset") or event.get("representative_asset")
+        if not isinstance(asset, dict):
+            return None
+        merged = dict(asset)
+        merged["event_name"] = str(event.get("event_name") or merged.get("event_name") or "").strip() or None
+        merged["event_id"] = str(event.get("event_id") or merged.get("event_id") or "").strip() or None
+        merged["event_url_slug"] = (
+            str(event.get("event_url_slug") or merged.get("event_url_slug") or "").strip() or None
+        )
+        merged["event_url"] = str(event.get("event_url") or "").strip() or None
+        merged["event_date"] = str(event.get("event_date") or merged.get("event_date") or "").strip() or None
+        merged["grouped_image_count"] = event.get("grouped_image_count")
+        merged["source_query_scope"] = str(event.get("source_query_scope") or "").strip() or None
+        merged["event_asset_count_scanned"] = event.get("event_asset_count_scanned")
+        merged["asset_samples"] = event.get("asset_samples")
+        return merged
+
+    def _build_event_inventory_entry(
+        *,
+        event: dict[str, Any],
+        bucket_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        event_asset = _build_event_asset_candidate(event)
+        detail_url = None
+        editorial_id = None
+        object_name = None
+        people_count = None
+        if isinstance(event_asset, dict):
+            detail_url = str(event_asset.get("detail_url") or "").strip() or None
+            editorial_id = str(event_asset.get("editorial_id") or "").strip() or None
+            object_name = str(event_asset.get("object_name") or "").strip() or None
+            people_count = _getty_people_count(event_asset)
+        return {
+            "source_query_scope": str(event.get("source_query_scope") or "").strip() or None,
+            "event_name": str(event.get("event_name") or "").strip() or None,
+            "event_url": str(event.get("event_url") or "").strip() or None,
+            "event_id": str(event.get("event_id") or "").strip() or None,
+            "event_url_slug": str(event.get("event_url_slug") or "").strip() or None,
+            "event_date": str(event.get("event_date") or "").strip() or None,
+            "grouped_image_count": event.get("grouped_image_count"),
+            "bucket_type": bucket_metadata.get("bucket_type"),
+            "bucket_key": bucket_metadata.get("bucket_key"),
+            "bucket_label": bucket_metadata.get("bucket_label"),
+            "representative_detail_url": detail_url,
+            "representative_editorial_id": editorial_id,
+            "representative_object_name": object_name,
+            "representative_people_count": people_count,
+            "person_match_confirmed": bool(event.get("matched_asset")),
+            "event_asset_count_scanned": event.get("event_asset_count_scanned"),
+            "asset_samples": event.get("asset_samples") if isinstance(event.get("asset_samples"), list) else [],
+            "resolution": None,
+        }
+
+    def _mark_event_inventory_resolution(
+        inventory_by_editorial_id: dict[str, list[dict[str, Any]]],
+        asset: dict[str, Any],
+        *,
+        resolution: str,
+    ) -> None:
+        editorial_id = str(asset.get("editorial_id") or "").strip()
+        if not editorial_id:
+            return
+        for entry in inventory_by_editorial_id.get(editorial_id, []):
+            entry["resolution"] = resolution
+
     def _build_getty_cast_photo_row(
         asset: dict[str, Any],
         *,
@@ -892,6 +1219,7 @@ def _import_nbcumv_person_media(
             if isinstance(entry, dict) and str(entry.get("text") or "").strip()
         ]
         object_name = str(asset.get("object_name") or "").strip() or None
+        people_count = _getty_people_count(asset)
         metadata: dict[str, Any] = {
             "getty": asset,
             "getty_only_fallback": True,
@@ -901,11 +1229,50 @@ def _import_nbcumv_person_media(
             "original_source_page_url": detail_url,
             "original_source_label": "Getty",
             "crosswalk_reason": crosswalk_reason,
+            "source_resolution": "getty_watermark_fallback",
+            "getty_details": dict(asset.get("details") or {}) if isinstance(asset.get("details"), dict) else {},
+            "getty_tags": (
+                list(asset.get("keyword_texts") or []) if isinstance(asset.get("keyword_texts"), list) else []
+            ),
+            "getty_event_title": str(asset.get("event_name") or "").strip() or None,
+            "getty_event_url": str(asset.get("event_url") or "").strip() or None,
+            "getty_event_id": str(asset.get("event_id") or "").strip() or None,
+            "getty_event_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            "getty_event_date": str(asset.get("event_date") or "").strip() or None,
+            "grouped_image_count": asset.get("grouped_image_count"),
+            "source_query_scope": str(asset.get("source_query_scope") or "").strip() or None,
         }
         if object_name:
             metadata["object_name"] = object_name
         if asset_show_name:
             metadata["show_name"] = asset_show_name
+        if people_count is not None:
+            metadata["people_count"] = people_count
+            metadata["people_count_source"] = "auto"
+        if people:
+            metadata["people_names"] = people
+
+        # Season from Getty tags
+        season_number = None
+        for tag in metadata.get("getty_tags") or []:
+            tag_match = re.search(r"\bSeason\s+(\d+)\b", str(tag), re.IGNORECASE)
+            if tag_match:
+                season_number = int(tag_match.group(1))
+                break
+        if season_number is not None:
+            metadata["season_number"] = season_number
+
+        # Episode from caption
+        caption_text = str(asset.get("caption") or "").strip()
+        ep_match = re.search(r"Episode\s+(\d+)", caption_text, re.IGNORECASE)
+        if ep_match:
+            metadata["episode_number"] = int(ep_match.group(1))
+
+        # Created date (frontend reads created_at)
+        date_created = str(asset.get("date_created") or "").strip()
+        if date_created:
+            metadata["created_at"] = date_created
+
         return {
             "person_id": person_id,
             "source": _GETTY_SOURCE_ID,
@@ -919,6 +1286,7 @@ def _import_nbcumv_person_media(
             "caption": str(asset.get("caption") or "").strip() or None,
             "width": width,
             "height": height,
+            "season": season_number,
             "people_names": people or None,
             "title_names": [asset_show_name] if asset_show_name else None,
             "file_name": object_name,
@@ -951,32 +1319,87 @@ def _import_nbcumv_person_media(
             return
         progress_cb(max(0, int(current)), max(0, int(total)), str(message or "").strip())
 
+    def _is_nbcumv_access_error(exc: Exception) -> bool:
+        message = str(exc or "").strip().lower()
+        if not message:
+            return False
+        return "nbcumv graphql" in message or "unauthorized" in message or "401" in message
+
+    def _record_nbcumv_access_error(context: str, exc: Exception) -> None:
+        nonlocal nbcumv_access_error
+        message = str(exc or "").strip() or exc.__class__.__name__
+        if nbcumv_access_error == message:
+            return
+        nbcumv_access_error = message
+        logger.warning("NBCUMV unavailable during %s for person_id=%s: %s", context, person_id, message)
+        result["errors"].append(f"NBCUMV unavailable during {context}: {message}")
+        _emit_progress(0, 0, f"NBCUMV unavailable during {context}. Continuing with Getty-only fallback.")
+
+    def _safe_nbcumv_call(default: Any, context: str, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        if nbcumv_access_error:
+            return default
+        try:
+            return func(*args, **kwargs)
+        except RuntimeError as exc:
+            if not _is_nbcumv_access_error(exc):
+                raise
+            _record_nbcumv_access_error(context, exc)
+            return default
+
     resolved_show_name = str(show_name or _get_show_name(db, show_id) or "").strip()
     result["show_title"] = resolved_show_name or None
-    search_phrase = normalized_person_name
-    _emit_progress(0, 0, f"Searching Getty for '{normalized_person_name}' on Getty (Bravo)...")
+
+    def _resolve_requested_nbcumv_show() -> dict[str, Any] | None:
+        if not resolved_show_name:
+            return None
+        return _safe_nbcumv_call(
+            None,
+            f"show resolution for '{resolved_show_name}'",
+            nbcumv_integration.resolve_show_by_title,
+            resolved_show_name,
+        )
+
+    bravo_search_phrase = f"{normalized_person_name} Bravo".strip()
+    search_phrase = bravo_search_phrase
+    _emit_progress(0, 0, f"Searching Getty for '{bravo_search_phrase}'...")
     getty_assets = getty_integration.search_editorial_assets(
-        search_phrase,
+        bravo_search_phrase,
         limit=max(1, int(limit)),
         progress_cb=_emit_progress,
-        query_params={"artistexact": "bravo"},
     )
     if not getty_assets:
-        fallback_phrase = f"{normalized_person_name} Bravo"
-        _emit_progress(0, 0, f"No Getty results for '{normalized_person_name}'. Retrying with '{fallback_phrase}'...")
+        fallback_phrase = normalized_person_name
+        _emit_progress(0, 0, f"No Getty results for '{bravo_search_phrase}'. Retrying with '{fallback_phrase}'...")
         getty_assets = getty_integration.search_editorial_assets(
             fallback_phrase,
             limit=max(1, int(limit)),
             progress_cb=_emit_progress,
-            query_params={"artistexact": "bravo"},
+            query_params={"sort": "best"},
         )
         search_phrase = fallback_phrase
     result["getty_candidates_total"] = len(getty_assets)
-    if not getty_assets:
-        return result
+
+    bravo_grouped_phrase = f"{normalized_person_name} Bravo".strip()
+    _emit_progress(0, 0, f"Collecting Getty grouped events for '{bravo_grouped_phrase}'...")
+    bravo_grouped_events = getty_integration.search_grouped_events(
+        bravo_grouped_phrase,
+        limit=max(1, int(limit)),
+        person_name=normalized_person_name,
+        source_query_scope="bravo",
+    )
+    _emit_progress(0, 0, f"Collecting Getty grouped events for '{normalized_person_name}'...")
+    broad_grouped_events = getty_integration.search_grouped_events(
+        normalized_person_name,
+        limit=max(1, int(limit)),
+        person_name=normalized_person_name,
+        person_match_required=True,
+        minimum_grouped_image_count=2,
+        query_params={"sort": "best"},
+        source_query_scope="broad",
+    )
 
     _ensure_sources(db)
-    matched_assets: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    matched_assets: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]] = []
     matched_summaries: list[dict[str, Any]] = []
     unmatched_assets: list[dict[str, Any]] = []
     filtered_out_assets: list[dict[str, Any]] = []
@@ -986,13 +1409,76 @@ def _import_nbcumv_person_media(
     resolved_getty_show_cache: dict[str, dict[str, Any] | None] = {}
     show_image_indexes: dict[str, dict[str, dict[str, Any]]] = {}
     _, show_lookup_by_alias, _ = _build_show_lookup_maps(db)
+    requested_nbcumv_show = _resolve_requested_nbcumv_show()
+    event_inventory_by_editorial_id: dict[str, list[dict[str, Any]]] = {}
+
+    def _resolve_direct_nbcumv_shows() -> list[dict[str, Any]]:
+        if isinstance(requested_nbcumv_show, dict):
+            requested_show_id = str(requested_nbcumv_show.get("id") or "").strip()
+            requested_show_title = str(requested_nbcumv_show.get("title") or "").strip()
+            if requested_show_id:
+                result["nbcumv_show_id"] = requested_show_id
+            if requested_show_title and not result.get("show_title"):
+                result["show_title"] = requested_show_title
+            return [requested_nbcumv_show]
+        if resolved_show_name:
+            return []
+
+        resolved_shows: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        candidate_show_names = list(_load_person_credit_show_names(db, person_id))
+        for discovered_show_title in _safe_nbcumv_call(
+            [],
+            f"CloudSearch show discovery for '{normalized_person_name}'",
+            nbcumv_integration.discover_person_show_titles,
+            normalized_person_name,
+            limit=max(25, int(limit)),
+        ):
+            cleaned_show_title = str(discovered_show_title or "").strip()
+            if cleaned_show_title:
+                candidate_show_names.append(cleaned_show_title)
+
+        for credited_show_name in candidate_show_names:
+            resolved_show = _safe_nbcumv_call(
+                None,
+                f"credited show resolution for '{credited_show_name}'",
+                nbcumv_integration.resolve_show_by_title,
+                credited_show_name,
+            )
+            if not isinstance(resolved_show, dict):
+                continue
+            resolved_show_id = str(resolved_show.get("id") or "").strip()
+            resolved_show_title = (
+                str(resolved_show.get("title") or resolved_show.get("name") or "").strip() or credited_show_name
+            )
+            dedupe_key = resolved_show_id or _normalize_show_title_key(resolved_show_title)
+            if not dedupe_key or dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            normalized_show_row = dict(resolved_show)
+            if resolved_show_title:
+                normalized_show_row.setdefault("title", resolved_show_title)
+            resolved_shows.append(normalized_show_row)
+        if len(resolved_shows) == 1:
+            only_show_id = str(resolved_shows[0].get("id") or "").strip()
+            only_show_title = str(resolved_shows[0].get("title") or "").strip()
+            if only_show_id:
+                result["nbcumv_show_id"] = only_show_id
+            if only_show_title and not result.get("show_title"):
+                result["show_title"] = only_show_title
+        return resolved_shows
 
     def _resolve_asset_show(asset: dict[str, Any]) -> dict[str, Any] | None:
         for candidate in _candidate_show_titles_from_getty(asset):
             if candidate in resolved_getty_show_cache:
                 show = resolved_getty_show_cache[candidate]
             else:
-                show = nbcumv_integration.resolve_show_by_title(candidate)
+                show = _safe_nbcumv_call(
+                    None,
+                    f"Getty show resolution for '{candidate}'",
+                    nbcumv_integration.resolve_show_by_title,
+                    candidate,
+                )
                 resolved_getty_show_cache[candidate] = show
             if show:
                 return show
@@ -1001,8 +1487,209 @@ def _import_nbcumv_person_media(
     def _lookup_show_index(show_id_value: str) -> dict[str, dict[str, Any]]:
         normalized_id = str(show_id_value or "").strip()
         if normalized_id not in show_image_indexes:
-            show_image_indexes[normalized_id] = nbcumv_integration.build_show_image_index(normalized_id)
+            show_image_indexes[normalized_id] = _safe_nbcumv_call(
+                {},
+                f"show image index for '{normalized_id}'",
+                nbcumv_integration.build_show_image_index,
+                normalized_id,
+            )
         return show_image_indexes[normalized_id]
+
+    def _build_direct_nbcumv_bucket_metadata(
+        image: dict[str, Any],
+        *,
+        requested_show: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        image_show_title = str(image.get("lbx_showTitle") or "").strip() or None
+        image_headline = str(image.get("lbx_headline") or image.get("headline") or "").strip() or None
+        requested_show_id = str((requested_show or {}).get("id") or "").strip()
+        resolved_show_row = None
+        for candidate in (
+            image_show_title,
+            image_headline,
+            str((requested_show or {}).get("title") or "").strip() or None,
+            resolved_show_name or None,
+        ):
+            resolved_show_row = _find_show_row_by_text_fragment(show_lookup_by_alias, candidate)
+            if resolved_show_row:
+                break
+        if resolved_show_row is None and requested_show_id and isinstance(requested_show, dict):
+            resolved_show_row = requested_show
+        synthetic_asset = {
+            "title": image_headline
+            or image_show_title
+            or str((requested_show or {}).get("title") or "").strip()
+            or resolved_show_name,
+            "caption": str(image.get("lbx_caption") or "").strip() or None,
+            "event_name": image_headline,
+        }
+        bucket_metadata = _resolve_gallery_bucket_metadata(
+            asset=synthetic_asset,
+            resolved_asset_show=resolved_show_row,
+            show_lookup_by_alias=show_lookup_by_alias,
+        )
+        grouped_image_count = image.get("grouped_image_count")
+        if isinstance(grouped_image_count, int) and grouped_image_count > 0:
+            bucket_metadata["grouped_image_count"] = grouped_image_count
+        elif isinstance(grouped_image_count, str) and grouped_image_count.strip().isdigit():
+            bucket_metadata["grouped_image_count"] = int(grouped_image_count.strip())
+        return bucket_metadata
+
+    def _run_direct_nbcumv_caption_search(
+        requested_shows: list[dict[str, Any]],
+        *,
+        getty_candidates_present: bool,
+    ) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]]:
+        if nbcumv_access_error:
+            if not getty_candidates_present:
+                result["summary_message"] = (
+                    f"No Getty candidates found and NBCUMV is unavailable for '{normalized_person_name}'."
+                )
+            return []
+
+        valid_requested_shows = [
+            show for show in requested_shows if isinstance(show, dict) and str(show.get("id") or "").strip()
+        ]
+        explicit_show_context = bool(str(show_id or "").strip() or resolved_show_name)
+        search_targets: list[dict[str, Any]] = []
+        if valid_requested_shows:
+            search_targets.extend(valid_requested_shows)
+        if not explicit_show_context:
+            search_targets.append({"id": None, "title": "All NBCUMV"})
+
+        if not search_targets:
+            if resolved_show_name and not getty_candidates_present:
+                result["summary_message"] = (
+                    f"No Getty candidates found and NBCUMV direct search could not resolve show '{resolved_show_name}'."
+                )
+            elif not getty_candidates_present:
+                result["summary_message"] = (
+                    "No Getty candidates found and NBCUMV direct search "
+                    f"requires show context or credited shows for '{normalized_person_name}'."
+                )
+            return []
+
+        if len(search_targets) == 1 and str(search_targets[0].get("id") or "").strip():
+            only_show_title = str(search_targets[0].get("title") or "").strip() or resolved_show_name
+            _emit_progress(
+                0,
+                0,
+                (
+                    (
+                        f"No Getty candidates found. Searching NBCUMV directly for '{normalized_person_name}' "
+                        f"in '{only_show_title}'..."
+                    )
+                    if not getty_candidates_present
+                    else (
+                        f"Supplementing Getty matches with NBCUMV caption search for '{normalized_person_name}' "
+                        f"in '{only_show_title}'..."
+                    )
+                ),
+            )
+        elif len(search_targets) == 1:
+            _emit_progress(
+                0,
+                0,
+                (
+                    f"No Getty candidates found. Searching all NBCUMV directly for '{normalized_person_name}'..."
+                    if not getty_candidates_present
+                    else (
+                        "Supplementing Getty matches with an all-NBCUMV caption search "
+                        f"for '{normalized_person_name}'..."
+                    )
+                ),
+            )
+        else:
+            _emit_progress(
+                0,
+                0,
+                (
+                    (
+                        f"No Getty candidates found. Searching NBCUMV directly for '{normalized_person_name}' "
+                        f"across {len(search_targets)} search scopes..."
+                    )
+                    if not getty_candidates_present
+                    else (
+                        f"Supplementing Getty matches with NBCUMV caption search for '{normalized_person_name}' "
+                        f"across {len(search_targets)} search scopes..."
+                    )
+                ),
+            )
+
+        matched_direct_images: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]] = []
+        seen_direct_keys: set[str] = set()
+        attempted_show_titles: list[str] = []
+
+        for show_index, requested_show in enumerate(search_targets, start=1):
+            requested_show_id = str(requested_show.get("id") or "").strip()
+            requested_show_title = str(requested_show.get("title") or "").strip() or resolved_show_name
+            if requested_show_title:
+                attempted_show_titles.append(requested_show_title)
+            _emit_progress(
+                show_index - 1,
+                len(search_targets),
+                (
+                    f"Searching NBCUMV caption matches in "
+                    f"'{requested_show_title or requested_show_id or 'All NBCUMV'}' "
+                    f"({show_index}/{len(search_targets)})..."
+                ),
+            )
+            if requested_show_id:
+                direct_images = _safe_nbcumv_call(
+                    [],
+                    f"direct show catalog search in '{requested_show_title or requested_show_id}'",
+                    nbcumv_integration.search_person_show_catalog,
+                    normalized_person_name,
+                    show_id=requested_show_id,
+                    limit=max(1, int(limit)),
+                )
+            else:
+                direct_images = _safe_nbcumv_call(
+                    [],
+                    f"direct person search in '{requested_show_title or requested_show_id}'",
+                    nbcumv_integration.search_person_images,
+                    normalized_person_name,
+                    show_id=None,
+                    limit=max(1, int(limit)),
+                )
+            for image in direct_images:
+                dedupe_key = str(image.get("lbx_id") or "").strip() or str(image.get("lbx_filename") or "").strip()
+                if dedupe_key and dedupe_key in seen_direct_keys:
+                    continue
+                if dedupe_key:
+                    seen_direct_keys.add(dedupe_key)
+                lbx_id = str(image.get("lbx_id") or "").strip()
+                if lbx_id and lbx_id in seen_lbx_ids:
+                    continue
+                filename = str(image.get("lbx_filename") or "").strip()
+                if not filename:
+                    result["failed"] += 1
+                    result["errors"].append("NBCUMV direct search returned an image without a filename.")
+                    continue
+                if lbx_id:
+                    seen_lbx_ids.add(lbx_id)
+                bucket_metadata = _build_direct_nbcumv_bucket_metadata(image, requested_show=requested_show)
+                bucket_metadata = dict(bucket_metadata)
+                bucket_metadata["source_resolution"] = "nbcumv_only"
+                matched_direct_images.append(({}, image, bucket_metadata, "nbcumv_only"))
+                _emit_progress(
+                    len(matched_direct_images),
+                    max(len(matched_direct_images), len(search_targets)),
+                    f"Queued NBCUMV direct match {len(matched_direct_images)}: {filename}",
+                )
+
+        if not matched_direct_images:
+            if not getty_candidates_present:
+                attempted_label = ", ".join(attempted_show_titles[:3])
+                if len(attempted_show_titles) > 3:
+                    attempted_label = f"{attempted_label}, +{len(attempted_show_titles) - 3} more"
+                result["summary_message"] = (
+                    "No Getty candidates found and NBCUMV direct search returned no caption matches"
+                    + (f" across {attempted_label}." if attempted_label else ".")
+                )
+                _emit_progress(0, 0, result["summary_message"])
+            return []
+        return matched_direct_images
 
     scoped_assets: list[tuple[dict[str, Any], dict[str, Any] | None, str | None, dict[str, Any]]] = []
     if normalized_show:
@@ -1021,17 +1708,12 @@ def _import_nbcumv_person_media(
                 )
                 for candidate in show_candidates
             )
-            resolved_show_match = (
-                bool(resolved_asset_show_title)
-                and (
-                    normalized_show in _normalize_show_title_key(resolved_asset_show_title)
-                    or _normalize_show_title_key(resolved_asset_show_title) in normalized_show
-                )
+            resolved_show_match = bool(resolved_asset_show_title) and (
+                normalized_show in _normalize_show_title_key(resolved_asset_show_title)
+                or _normalize_show_title_key(resolved_asset_show_title) in normalized_show
             )
             if not candidate_match and not resolved_show_match:
-                filtered_out_assets.append(
-                    _summarize_getty_asset(asset, reason="requested_show_mismatch")
-                )
+                filtered_out_assets.append(_summarize_getty_asset(asset, reason="requested_show_mismatch"))
                 continue
         bucket_metadata = _resolve_gallery_bucket_metadata(
             asset=asset,
@@ -1040,11 +1722,74 @@ def _import_nbcumv_person_media(
         )
         scoped_assets.append((asset, resolved_asset_show, resolved_asset_show_title or None, bucket_metadata))
 
-    result["getty_candidates_total"] = len(scoped_assets)
-    match_total = len(scoped_assets)
+    broad_event_assets: list[tuple[dict[str, Any], dict[str, Any] | None, str | None, dict[str, Any]]] = []
+    seen_editorial_ids = {
+        str(asset.get("editorial_id") or "").strip()
+        for asset, _, _, _ in scoped_assets
+        if str(asset.get("editorial_id") or "").strip()
+    }
+
+    def _capture_grouped_event_inventory(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        captured: list[dict[str, Any]] = []
+        for event in events:
+            event_asset = _build_event_asset_candidate(event)
+            synthetic_asset = event_asset or {
+                "title": event.get("event_name"),
+                "caption": None,
+                "event_name": event.get("event_name"),
+            }
+            resolved_event_show = _resolve_asset_show(synthetic_asset) if isinstance(synthetic_asset, dict) else None
+            resolved_event_show_title = (
+                str(resolved_event_show.get("title") or "").strip() if isinstance(resolved_event_show, dict) else ""
+            )
+            bucket_metadata = _resolve_gallery_bucket_metadata(
+                asset=synthetic_asset if isinstance(synthetic_asset, dict) else {},
+                resolved_asset_show=resolved_event_show,
+                show_lookup_by_alias=show_lookup_by_alias,
+            )
+            inventory_entry = _build_event_inventory_entry(event=event, bucket_metadata=bucket_metadata)
+            editorial_id = str(inventory_entry.get("representative_editorial_id") or "").strip()
+            if editorial_id:
+                event_inventory_by_editorial_id.setdefault(editorial_id, []).append(inventory_entry)
+            captured.append(inventory_entry)
+            if (
+                bucket_metadata.get("bucket_type") == "event"
+                and isinstance(event_asset, dict)
+                and editorial_id
+                and editorial_id not in seen_editorial_ids
+            ):
+                broad_event_assets.append(
+                    (
+                        event_asset,
+                        resolved_event_show,
+                        resolved_event_show_title or None,
+                        bucket_metadata,
+                    )
+                )
+                seen_editorial_ids.add(editorial_id)
+        return captured
+
+    result["getty_bravo_events"] = _capture_grouped_event_inventory(bravo_grouped_events)
+    result["getty_broad_events"] = _capture_grouped_event_inventory(broad_grouped_events)
+
+    combined_assets = scoped_assets + broad_event_assets
+    result["getty_candidates_total"] = len(combined_assets)
+    if not combined_assets:
+        direct_nbcumv_shows = _resolve_direct_nbcumv_shows()
+        direct_matches = _run_direct_nbcumv_caption_search(
+            direct_nbcumv_shows,
+            getty_candidates_present=False,
+        )
+        matched_assets.extend(direct_matches)
+        if direct_matches:
+            result["summary_message"] = (
+                f"NBCUMV direct caption search queued {len(matched_assets)} match"
+                f"{'es' if len(matched_assets) != 1 else ''}."
+            )
+    match_total = len(combined_assets)
     _emit_progress(0, match_total, f"Matching {match_total} Getty assets against NBCUMV...")
     for match_index, (asset, resolved_asset_show, resolved_asset_show_title, bucket_metadata) in enumerate(
-        scoped_assets,
+        combined_assets,
         start=1,
     ):
         filename = str(asset.get("object_name") or "").strip()
@@ -1055,6 +1800,7 @@ def _import_nbcumv_person_media(
         )
         if not filename:
             unmatched_assets.append(_summarize_getty_asset(asset, reason="missing_object_name"))
+            _mark_event_inventory_resolution(event_inventory_by_editorial_id, asset, resolution="missing_object_name")
             continue
         image = None
         if isinstance(resolved_asset_show, dict):
@@ -1062,7 +1808,18 @@ def _import_nbcumv_person_media(
             if show_id_value:
                 image = _lookup_show_index(show_id_value).get(filename.lower())
         if not isinstance(image, dict):
-            image = nbcumv_integration.fetch_image_by_identity(filename=filename)
+            image = _safe_nbcumv_call(
+                None,
+                f"identity lookup for '{filename}'",
+                nbcumv_integration.fetch_image_by_identity,
+                filename=filename,
+            )
+        if not isinstance(image, dict):
+            image = _find_nbcumv_image_from_getty_fallbacks(
+                asset,
+                filename=filename,
+                resolved_asset_show=resolved_asset_show,
+            )
         if not isinstance(image, dict):
             unmatched_assets.append(_summarize_getty_asset(asset, reason="no_nbcumv_match"))
             getty_row = _build_getty_cast_photo_row(
@@ -1073,19 +1830,22 @@ def _import_nbcumv_person_media(
                     or resolved_show_name
                     or None
                 ),
-                crosswalk_reason="no_nbcumv_match",
+                crosswalk_reason="nbcumv_unavailable" if nbcumv_access_error else "no_nbcumv_match",
             )
             if getty_row is not None:
                 metadata = getty_row.get("metadata")
                 if isinstance(metadata, dict):
                     metadata["gallery_bucket"] = dict(bucket_metadata)
                     metadata.update(dict(bucket_metadata))
-                if (
-                    bucket_metadata.get("bucket_type") == "show"
-                    and bucket_metadata.get("resolved_show_name")
-                ):
+                    metadata["source_resolution"] = "getty_watermark_fallback"
+                if bucket_metadata.get("bucket_type") == "show" and bucket_metadata.get("resolved_show_name"):
                     getty_row["title_names"] = [str(bucket_metadata["resolved_show_name"])]
                 getty_only_rows.append(getty_row)
+                _mark_event_inventory_resolution(
+                    event_inventory_by_editorial_id,
+                    asset,
+                    resolution="getty_watermark_fallback",
+                )
             _emit_progress(
                 match_index,
                 match_total,
@@ -1118,13 +1878,28 @@ def _import_nbcumv_person_media(
             _emit_progress(match_index, match_total, f"Skipped duplicate or invalid NBCUMV asset for {filename}.")
             continue
         seen_lbx_ids.add(lbx_id)
-        matched_assets.append((asset, image, dict(bucket_metadata)))
+        _mark_event_inventory_resolution(event_inventory_by_editorial_id, asset, resolution="nbcumv_matched")
+        matched_bucket_metadata = dict(bucket_metadata)
+        matched_bucket_metadata["source_resolution"] = "nbcumv_preferred_shared"
+        matched_assets.append((asset, image, matched_bucket_metadata, "nbcumv_preferred_shared"))
         matched_summaries.append(_summarize_getty_asset(asset, reason="matched", image=image))
         _emit_progress(match_index, match_total, f"Matched NBCUMV asset {len(matched_assets)}: {filename}")
 
+    if combined_assets:
+        direct_nbcumv_matches = _run_direct_nbcumv_caption_search(
+            _resolve_direct_nbcumv_shows(),
+            getty_candidates_present=True,
+        )
+        if direct_nbcumv_matches:
+            matched_assets.extend(direct_nbcumv_matches)
+
+    shared_nbcumv_total = sum(1 for *_rest, resolution in matched_assets if resolution == "nbcumv_preferred_shared")
+    nbcumv_only_total = sum(1 for *_rest, resolution in matched_assets if resolution == "nbcumv_only")
     result["fetched"] = len(matched_assets)
-    result["getty_matched_total"] = len(matched_assets)
+    result["getty_matched_total"] = shared_nbcumv_total
     result["getty_unmatched_total"] = len(unmatched_assets)
+    result["shared_nbcumv_total"] = shared_nbcumv_total
+    result["nbcumv_only_total"] = nbcumv_only_total
     snapshot_payload = {
         "person_id": person_id,
         "person_name": normalized_person_name,
@@ -1134,26 +1909,31 @@ def _import_nbcumv_person_media(
             "show_id": str(show_id) if show_id else None,
             "show_name": resolved_show_name or None,
         },
-        "candidate_count": len(scoped_assets),
+        "candidate_count": len(combined_assets),
         "raw_candidate_count": len(getty_assets),
-        "matched_count": len(matched_assets),
+        "matched_count": shared_nbcumv_total,
+        "shared_nbcumv_total": shared_nbcumv_total,
+        "nbcumv_only_total": nbcumv_only_total,
         "unmatched_count": len(unmatched_assets),
         "filtered_out_count": len(filtered_out_assets),
+        "bravo_events": result["getty_bravo_events"],
+        "broad_events": result["getty_broad_events"],
         "matched": matched_summaries,
         "unmatched": unmatched_assets,
         "filtered_out": filtered_out_assets,
     }
-    try:
-        _persist_person_getty_snapshot(
-            db,
-            person_id=person_id,
-            payload=snapshot_payload,
-            status="success",
-        )
-        result["getty_snapshot_saved"] = True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to persist Getty person snapshot for %s: %s", person_id, exc)
-        result["errors"].append(f"Getty snapshot persistence failed: {exc}")
+    if getty_assets or bravo_grouped_events or broad_grouped_events:
+        try:
+            _persist_person_getty_snapshot(
+                db,
+                person_id=person_id,
+                payload=snapshot_payload,
+                status="success",
+            )
+            result["getty_snapshot_saved"] = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist Getty person snapshot for %s: %s", person_id, exc)
+            result["errors"].append(f"Getty snapshot persistence failed: {exc}")
 
     if getty_only_rows:
         editorial_ids = [
@@ -1164,10 +1944,28 @@ def _import_nbcumv_person_media(
         existing_getty_ids = _fetch_existing_getty_source_ids(editorial_ids)
         _emit_progress(0, len(getty_only_rows), f"Importing {len(getty_only_rows)} Getty-only fallback photos...")
         upserted_rows = upsert_cast_photos(db, getty_only_rows, dedupe_on="source_image_id")
+        source_rows_by_image_id = {
+            str(row.get("source_image_id") or "").strip(): row
+            for row in getty_only_rows
+            if str(row.get("source_image_id") or "").strip()
+        }
+        for upserted_row in upserted_rows:
+            row_id = str(upserted_row.get("id") or "").strip()
+            source_image_id = str(upserted_row.get("source_image_id") or "").strip()
+            source_row = source_rows_by_image_id.get(source_image_id)
+            preview_url = str((source_row or {}).get("url") or "").strip()
+            if not row_id or not preview_url:
+                continue
+            try:
+                update_cast_photo_hosted_fields(
+                    db,
+                    row_id,
+                    {"hosted_url": preview_url, "hosted_content_type": "image/jpeg"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to set Getty fallback hosted fields for %s: %s", row_id, exc)
         result["getty_only_imported"] = sum(
-            1
-            for row in upserted_rows
-            if str(row.get("source_image_id") or "").strip() not in existing_getty_ids
+            1 for row in upserted_rows if str(row.get("source_image_id") or "").strip() not in existing_getty_ids
         )
         result["skipped"] += max(0, len(upserted_rows) - int(result["getty_only_imported"]))
         imported_getty_count = int(result["getty_only_imported"])
@@ -1175,19 +1973,20 @@ def _import_nbcumv_person_media(
         _emit_progress(
             len(getty_only_rows),
             len(getty_only_rows),
-            (
-                "Imported Getty-only fallback photos "
-                f"({imported_getty_count} new, {existing_getty_count} existing)."
-            ),
+            (f"Imported Getty-only fallback photos ({imported_getty_count} new, {existing_getty_count} existing)."),
         )
 
     if not matched_assets and not getty_only_rows:
+        if result["summary_message"] is None and nbcumv_access_error:
+            result["summary_message"] = (
+                f"NBCUMV unavailable for '{normalized_person_name}' and no Getty fallback rows were importable."
+            )
         return result
 
     total = len(matched_assets)
     if total > 0:
         _emit_progress(0, total, f"Importing {total} NBCUMV assets...")
-    for index, (asset, image, bucket_metadata) in enumerate(matched_assets, start=1):
+    for index, (asset, image, bucket_metadata, source_resolution) in enumerate(matched_assets, start=1):
         filename = str(image.get("lbx_filename") or "").strip()
         lbx_id = str(image.get("lbx_id") or "").strip()
         _emit_progress(index - 1, total, f"Importing NBCUMV {index}/{total}: {filename or lbx_id}")
@@ -1195,6 +1994,8 @@ def _import_nbcumv_person_media(
             result["failed"] += 1
             result["errors"].append("NBCUMV item missing lbx_id or filename.")
             continue
+        item_bucket_metadata = dict(bucket_metadata)
+        item_bucket_metadata["source_resolution"] = source_resolution
         try:
             import_result = _import_single_item(
                 db=db,
@@ -1206,7 +2007,7 @@ def _import_nbcumv_person_media(
                     show_ids=[value for value in image.get("showIds") or [] if isinstance(value, str)],
                     link_show_ids=[show_id] if show_id else [],
                     getty_detail_url=str(asset.get("detail_url") or "").strip() or None,
-                    gallery_bucket=dict(bucket_metadata),
+                    gallery_bucket=item_bucket_metadata,
                     person_ids=[UUID(person_id)],
                 ),
                 assign_people=True,
@@ -1228,8 +2029,28 @@ def _import_nbcumv_person_media(
             result["skipped"] += 1
         else:
             result["imported"] += 1
+            if source_resolution == "nbcumv_preferred_shared":
+                result["shared_nbcumv_imported"] += 1
+            elif source_resolution == "nbcumv_only":
+                result["nbcumv_only_imported"] += 1
         _emit_progress(index, total, f"Imported NBCUMV {index}/{total}: {filename or lbx_id}")
     result["fetched"] = len(matched_assets) + len(getty_only_rows)
+    if result["summary_message"] is None:
+        total_candidate_count = max(
+            int(result.get("getty_candidates_total") or 0),
+            len(matched_assets) + int(result.get("skipped") or 0) + int(result.get("failed") or 0),
+        )
+        summary_prefix = (
+            "Getty complete with NBCUMV unavailable: " if nbcumv_access_error else "Getty/NBCUMV complete: "
+        )
+        result["summary_message"] = (
+            summary_prefix
+            + f"{int(result.get('shared_nbcumv_imported') or 0)} shared via NBCUMV, "
+            f"{int(result.get('nbcumv_only_imported') or 0)} NBCUMV-only, "
+            f"{int(result.get('getty_only_imported') or 0)} Getty-only, "
+            f"{int(result.get('skipped') or 0)} skipped, {int(result.get('failed') or 0)} failed"
+            + (f" across {total_candidate_count} candidates." if total_candidate_count > 0 else ".")
+        )
     return result
 
 
@@ -1717,7 +2538,7 @@ def _is_http_url(value: str | None) -> bool:
 
 
 def _is_wikia_static_url(value: str | None) -> bool:
-    if not _is_http_url(value):
+    if not isinstance(value, str) or not _is_http_url(value):
         return False
     return "static.wikia.nocookie.net" in value.lower()
 
@@ -1931,11 +2752,11 @@ def _resolve_runtime_person_reference_pools(
                 if isinstance(used_raw, list):
                     references = [entry for entry in used_raw if isinstance(entry, dict)]
                 if references:
-                    references = sync_owner_tagging_reference_usage(
+                    references = cast(list[dict[str, Any]], sync_owner_tagging_reference_usage(
                         db,
                         person_id,
                         used_references=references,
-                    )
+                    ))
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Failed to resolve runtime tagging references person_id=%s error=%s",
@@ -2632,14 +3453,15 @@ def _build_detection_boxes(
     if not person_boxes:
         return [], diagnostics
 
-    person_boxes = sorted(
-        person_boxes,
-        key=lambda box: (
-            -(box.get("confidence") if isinstance(box.get("confidence"), (int, float)) else 0.0),
+    def _person_box_sort_key(box: dict[str, Any]) -> tuple[float, float, float]:
+        conf = box.get("confidence")
+        return (
+            -(conf if isinstance(conf, (int, float)) else 0.0),
             float(box.get("x") or 0.0),
             float(box.get("y") or 0.0),
-        ),
-    )
+        )
+
+    person_boxes = sorted(person_boxes, key=_person_box_sort_key)
 
     tagged_people = _build_tagged_people(tagged_people_ids, tagged_people_names)
     deterministic_assignments: dict[int, dict[str, str | None]] = {}
@@ -2798,12 +3620,15 @@ def _build_media_link_autocount_urls(row: dict[str, Any]) -> list[str]:
     source = str(row.get("source") or "").lower()
     hosted_url = row.get("hosted_url")
     source_url = row.get("source_url")
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    raw_metadata = row.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    page_url_val = metadata.get("page_url")
+    source_page_url_val = metadata.get("source_page_url")
     source_page_url = (
-        metadata.get("page_url")
-        if isinstance(metadata.get("page_url"), str)
-        else metadata.get("source_page_url")
-        if isinstance(metadata.get("source_page_url"), str)
+        page_url_val
+        if isinstance(page_url_val, str)
+        else source_page_url_val
+        if isinstance(source_page_url_val, str)
         else None
     )
 
@@ -2969,6 +3794,9 @@ def _owner_face_crop_payload(
         ),
     )
     # Prefer square_crop_bbox from vision API (includes proper padding)
+    cx = 0.5
+    cy = 0.5
+    target_span = 0.5
     scb = best.get("square_crop_bbox")
     if isinstance(scb, list) and len(scb) >= 4:
         try:
@@ -3051,7 +3879,7 @@ def _recenter_person_gallery_images(
                 if isinstance(name_raw, str) and name_raw.strip():
                     resolved_owner_name = name_raw.strip()
 
-        resolved_owner_reference_images = (
+        resolved_owner_reference_images: list[dict[str, object]] = (
             [entry for entry in owner_reference_images if isinstance(entry, dict)]
             if isinstance(owner_reference_images, list)
             else []
@@ -3344,9 +4172,17 @@ def _mirror_person_media_assets(
 ) -> tuple[int, int]:
     from trr_backend.media.s3_mirror import mirror_media_asset_row
     from trr_backend.repositories.media_assets import (
+        update_asset_with_hosted_fields,
         update_asset_with_mirror_result,
         update_ingest_status,
     )
+
+    def _is_duplicate_media_asset_hash_error(exc: Exception) -> bool:
+        message = str(exc)
+        return (
+            "media_assets_source_hosted_sha_uq" in message
+            or "media_assets_sha256_unique" in message
+        )
 
     rows = _fetch_person_media_link_rows(db, person_id)
     assets_by_id: dict[str, dict[str, Any]] = {}
@@ -3420,27 +4256,56 @@ def _mirror_person_media_assets(
                             )
                         else:
                             completed_at = str(patch.get("hosted_at") or datetime.now(UTC).isoformat())
-                            update_asset_with_mirror_result(
-                                db,
-                                asset_id=asset_id,
-                                sha256=str(patch.get("sha256") or patch.get("hosted_sha256") or ""),
-                                hosted_bucket=str(patch.get("hosted_bucket") or ""),
-                                hosted_key=str(patch.get("hosted_key") or ""),
-                                hosted_url=str(patch.get("hosted_url") or ""),
-                                hosted_bytes=int(patch.get("hosted_bytes") or 0),
-                                hosted_content_type=(
-                                    str(patch.get("hosted_content_type"))
-                                    if patch.get("hosted_content_type") is not None
-                                    else None
-                                ),
-                                hosted_etag=(
-                                    str(patch.get("hosted_etag")) if patch.get("hosted_etag") is not None else None
-                                ),
-                                width=int(patch.get("width")) if patch.get("width") is not None else None,
-                                height=int(patch.get("height")) if patch.get("height") is not None else None,
-                                completed_at=completed_at,
-                                metadata=patch.get("metadata") if isinstance(patch.get("metadata"), dict) else None,
-                            )
+                            try:
+                                update_asset_with_mirror_result(
+                                    db,
+                                    asset_id=asset_id,
+                                    sha256=str(patch.get("sha256") or patch.get("hosted_sha256") or ""),
+                                    hosted_bucket=str(patch.get("hosted_bucket") or ""),
+                                    hosted_key=str(patch.get("hosted_key") or ""),
+                                    hosted_url=str(patch.get("hosted_url") or ""),
+                                    hosted_bytes=int(patch.get("hosted_bytes") or 0),
+                                    hosted_content_type=(
+                                        str(_ct) if (_ct := patch.get("hosted_content_type")) is not None else None
+                                    ),
+                                    hosted_etag=(
+                                        str(_et) if (_et := patch.get("hosted_etag")) is not None else None
+                                    ),
+                                    width=int(_w) if (_w := patch.get("width")) is not None else None,
+                                    height=int(_h) if (_h := patch.get("height")) is not None else None,
+                                    completed_at=completed_at,
+                                    metadata=_m if isinstance((_m := patch.get("metadata")), dict) else None,
+                                )
+                            except Exception as exc:
+                                if not _is_duplicate_media_asset_hash_error(exc):
+                                    raise
+                                logger.info(
+                                    "Mirror dedupe fallback for media asset %s after duplicate hash conflict: %s",
+                                    asset_id,
+                                    exc,
+                                )
+                                update_asset_with_hosted_fields(
+                                    db,
+                                    asset_id=asset_id,
+                                    hosted_bucket=str(patch.get("hosted_bucket") or ""),
+                                    hosted_key=str(patch.get("hosted_key") or ""),
+                                    hosted_url=str(patch.get("hosted_url") or ""),
+                                    hosted_bytes=int(patch.get("hosted_bytes") or 0),
+                                    hosted_content_type=(
+                                        str(_ct2)
+                                        if (_ct2 := patch.get("hosted_content_type")) is not None
+                                        else None
+                                    ),
+                                    hosted_etag=(
+                                        str(_et2)
+                                        if (_et2 := patch.get("hosted_etag")) is not None
+                                        else None
+                                    ),
+                                    width=int(_w2) if (_w2 := patch.get("width")) is not None else None,
+                                    height=int(_h2) if (_h2 := patch.get("height")) is not None else None,
+                                    completed_at=completed_at,
+                                    metadata=_m2 if isinstance((_m2 := patch.get("metadata")), dict) else None,
+                                )
                         mirrored += 1
                     else:
                         update_ingest_status(
@@ -3772,8 +4637,9 @@ def _auto_count_cast_photos(
                     diagnostics_local["auto_detect_success_rows"] += 1
                     if not allow_identity_assignment:
                         diagnostics_local["auto_identity_skipped_non_trr_show"] += 1
-                    if owner_reference_sync_cb and isinstance(getattr(result, "reference_profile", None), dict):
-                        used_refs = result.reference_profile.get("used")
+                    ref_profile = getattr(result, "reference_profile", None)
+                    if owner_reference_sync_cb and isinstance(ref_profile, dict):
+                        used_refs = ref_profile.get("used")
                         if isinstance(used_refs, list):
                             owner_reference_sync_cb([entry for entry in used_refs if isinstance(entry, dict)])
                             owner_reference_sync_cb = None
@@ -3813,7 +4679,7 @@ def _auto_count_cast_photos(
                                 entity_kind="cast_photo",
                                 entity_id=item["photo_id"],
                                 image_url=selected_image_url,
-                                face_boxes=face_boxes,
+                                face_boxes=cast(list[Mapping[str, Any]], face_boxes),
                                 size=256,
                             )
                             if face_crops:
@@ -4145,8 +5011,9 @@ def _auto_count_media_links(
                     diagnostics_local["auto_detect_success_rows"] += 1
                     if not allow_identity_assignment:
                         diagnostics_local["auto_identity_skipped_non_trr_show"] += 1
-                    if owner_reference_sync_cb and isinstance(getattr(result, "reference_profile", None), dict):
-                        used_refs = result.reference_profile.get("used")
+                    ref_profile = getattr(result, "reference_profile", None)
+                    if owner_reference_sync_cb and isinstance(ref_profile, dict):
+                        used_refs = ref_profile.get("used")
                         if isinstance(used_refs, list):
                             owner_reference_sync_cb([entry for entry in used_refs if isinstance(entry, dict)])
                             owner_reference_sync_cb = None
@@ -4181,7 +5048,7 @@ def _auto_count_media_links(
                                 entity_kind="media_asset",
                                 entity_id=media_asset_id,
                                 image_url=selected_image_url,
-                                face_boxes=face_boxes,
+                                face_boxes=cast(list[Mapping[str, Any]], face_boxes),
                                 size=256,
                             )
                             if face_crops:
@@ -4526,8 +5393,8 @@ def _resize_person_gallery_images(
     )
 
 
-def _chunked(values: list[str], size: int = 100) -> list[list[str]]:
-    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
 
 
 _REAL_HOUSEWIVES_SHORT_CODE_BY_LOCATION: dict[str, str] = {
@@ -6771,6 +7638,10 @@ def refresh_person_images(
     getty_candidates_total = 0
     getty_matched_total = 0
     getty_unmatched_total = 0
+    shared_nbcumv_total = 0
+    shared_nbcumv_imported = 0
+    nbcumv_only_total = 0
+    nbcumv_only_imported = 0
     getty_only_imported = 0
     getty_snapshot_saved = False
     if "nbcumv" in sources:
@@ -6791,6 +7662,10 @@ def refresh_person_images(
             getty_candidates_total = int(nbcumv_result.get("getty_candidates_total") or 0)
             getty_matched_total = int(nbcumv_result.get("getty_matched_total") or 0)
             getty_unmatched_total = int(nbcumv_result.get("getty_unmatched_total") or 0)
+            shared_nbcumv_total = int(nbcumv_result.get("shared_nbcumv_total") or 0)
+            shared_nbcumv_imported = int(nbcumv_result.get("shared_nbcumv_imported") or 0)
+            nbcumv_only_total = int(nbcumv_result.get("nbcumv_only_total") or 0)
+            nbcumv_only_imported = int(nbcumv_result.get("nbcumv_only_imported") or 0)
             getty_only_imported = int(nbcumv_result.get("getty_only_imported") or 0)
             getty_snapshot_saved = bool(nbcumv_result.get("getty_snapshot_saved"))
             errors.extend(
@@ -7038,6 +7913,10 @@ def refresh_person_images(
         getty_candidates_total=getty_candidates_total,
         getty_matched_total=getty_matched_total,
         getty_unmatched_total=getty_unmatched_total,
+        shared_nbcumv_total=shared_nbcumv_total,
+        shared_nbcumv_imported=shared_nbcumv_imported,
+        nbcumv_only_total=nbcumv_only_total,
+        nbcumv_only_imported=nbcumv_only_imported,
         getty_only_imported=getty_only_imported,
         getty_snapshot_saved=getty_snapshot_saved,
         photos_pruned=photos_pruned,
@@ -7152,6 +8031,10 @@ async def refresh_person_images_stream(
         getty_candidates_total = 0
         getty_matched_total = 0
         getty_unmatched_total = 0
+        shared_nbcumv_total = 0
+        shared_nbcumv_imported = 0
+        nbcumv_only_total = 0
+        nbcumv_only_imported = 0
         getty_only_imported = 0
         getty_snapshot_saved = False
         auto_counts_succeeded = 0
@@ -7211,10 +8094,7 @@ async def refresh_person_images_stream(
 
         def source_progress_snapshot() -> dict[str, dict[str, Any]]:
             with source_progress_lock:
-                snapshot = {
-                    key: dict(value)
-                    for key, value in source_progress.items()
-                }
+                snapshot = {key: dict(value) for key, value in source_progress.items()}
             return _ordered_source_progress_snapshot(snapshot)
 
         def build_live_counts() -> dict[str, int]:
@@ -8069,8 +8949,13 @@ async def refresh_person_images_stream(
                 getty_candidates_total = int(nbcumv_result.get("getty_candidates_total") or 0)
                 getty_matched_total = int(nbcumv_result.get("getty_matched_total") or 0)
                 getty_unmatched_total = int(nbcumv_result.get("getty_unmatched_total") or 0)
+                shared_nbcumv_total = int(nbcumv_result.get("shared_nbcumv_total") or 0)
+                shared_nbcumv_imported = int(nbcumv_result.get("shared_nbcumv_imported") or 0)
+                nbcumv_only_total = int(nbcumv_result.get("nbcumv_only_total") or 0)
+                nbcumv_only_imported = int(nbcumv_result.get("nbcumv_only_imported") or 0)
                 getty_only_imported = int(nbcumv_result.get("getty_only_imported") or 0)
                 getty_snapshot_saved = bool(nbcumv_result.get("getty_snapshot_saved"))
+                nbcumv_summary_message = str(nbcumv_result.get("summary_message") or "").strip()
                 errors.extend(
                     [
                         str(error)
@@ -8144,28 +9029,51 @@ async def refresh_person_images_stream(
                     {
                         "stage": "nbcumv_import",
                         "message": (
-                            f"{str(nbcumv_snapshot.get('message') or 'NBCUMV import complete')}. "
-                            f"Summary: {nbcumv_assets_imported} imported, "
-                            f"{nbcumv_assets_skipped} skipped, "
-                            f"{getty_only_imported} Getty-only, {nbcumv_failed} failed)."
+                            nbcumv_summary_message
+                            or (
+                                f"{str(nbcumv_snapshot.get('message') or 'NBCUMV import complete')}. "
+                                f"Summary: {shared_nbcumv_imported} shared via NBCUMV, "
+                                f"{nbcumv_only_imported} NBCUMV-only, "
+                                f"{getty_only_imported} Getty-only, {nbcumv_assets_skipped} skipped, "
+                                f"{nbcumv_failed} failed."
+                            )
                         ),
-                        "current": max(nbcumv_photos_fetched, int(nbcumv_snapshot.get("current") or 0)),
-                        "total": max(nbcumv_photos_fetched, int(nbcumv_snapshot.get("total") or 0)),
+                        "current": max(
+                            int(nbcumv_snapshot.get("current") or 0),
+                            nbcumv_photos_fetched + nbcumv_assets_skipped + nbcumv_failed,
+                            getty_candidates_total,
+                        ),
+                        "total": max(
+                            int(nbcumv_snapshot.get("total") or 0),
+                            nbcumv_photos_fetched + nbcumv_assets_skipped + nbcumv_failed,
+                            getty_candidates_total,
+                        ),
                     }
                 )
                 update_source_progress(
                     "nbcumv",
                     status="failed" if nbcumv_failed > 0 else "completed",
-                    discovered_total=getty_candidates_total,
-                    scraped_current=getty_candidates_total,
+                    discovered_total=max(
+                        int(nbcumv_snapshot.get("total") or 0),
+                        nbcumv_photos_fetched + nbcumv_assets_skipped + nbcumv_failed,
+                        getty_candidates_total,
+                    ),
+                    scraped_current=max(
+                        int(nbcumv_snapshot.get("current") or 0),
+                        nbcumv_photos_fetched + nbcumv_assets_skipped + nbcumv_failed,
+                        getty_candidates_total,
+                    ),
                     saved_current=nbcumv_assets_imported + getty_only_imported,
                     failed_current=nbcumv_failed,
                     skipped_current=nbcumv_assets_skipped,
                     remaining=0,
                     message=(
-                        f"Getty/NBCUMV complete: {nbcumv_assets_imported} imported, "
-                        f"{getty_only_imported} Getty-only, {nbcumv_assets_skipped} skipped, "
-                        f"{nbcumv_failed} failed."
+                        nbcumv_summary_message
+                        or (
+                            f"Getty/NBCUMV complete: {shared_nbcumv_imported} shared via NBCUMV, "
+                            f"{nbcumv_only_imported} NBCUMV-only, {getty_only_imported} Getty-only, "
+                            f"{nbcumv_assets_skipped} skipped, {nbcumv_failed} failed."
+                        )
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -9333,6 +10241,10 @@ async def refresh_person_images_stream(
             "getty_candidates_total": getty_candidates_total,
             "getty_matched_total": getty_matched_total,
             "getty_unmatched_total": getty_unmatched_total,
+            "shared_nbcumv_total": shared_nbcumv_total,
+            "shared_nbcumv_imported": shared_nbcumv_imported,
+            "nbcumv_only_total": nbcumv_only_total,
+            "nbcumv_only_imported": nbcumv_only_imported,
             "getty_only_imported": getty_only_imported,
             "getty_snapshot_saved": getty_snapshot_saved,
             "photos_pruned": photos_pruned,

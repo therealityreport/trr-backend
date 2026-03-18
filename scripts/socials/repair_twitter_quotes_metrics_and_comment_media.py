@@ -56,7 +56,7 @@ def _load_root_rows(
     tweet_id: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    where_clauses = ["t.is_reply = false"]
+    where_clauses = ["t.is_reply = false", "coalesce(t.is_quote, false) = false"]
     params: list[Any] = []
     if season_id:
         where_clauses.append("t.season_id = %s::uuid")

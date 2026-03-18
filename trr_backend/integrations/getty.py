@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 from requests import Session
@@ -20,9 +20,41 @@ BASE_URL = "https://www.gettyimages.com"
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_DETAIL_CANDIDATES = 6
 DEFAULT_SEARCH_PAGE_SIZE = 60
-MAX_SEARCH_PAGES = 10
+MAX_SEARCH_PAGES = 50
 DEFAULT_DETAIL_BATCH_SIZE = 25
 DEFAULT_DETAIL_MAX_WORKERS = 8
+DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT = 6
+
+_DETAIL_SECTION_STOP_MARKERS = {
+    "More images from this event",
+    "Similar images",
+    "Related searches",
+}
+_DETAIL_FIELD_LABELS = {
+    "Restrictions:": "restrictions",
+    "Credit:": "credit_display",
+    "Editorial #:": "editorial_number",
+    "Collection:": "collection_display",
+    "Date created:": "date_created_display",
+    "Upload date:": "upload_date_display",
+    "License type:": "license_type_display",
+    "Release info:": "release_info",
+    "Source:": "source_display",
+    "Object name:": "object_name_display",
+    "Max file size:": "max_file_size",
+}
+_PEOPLE_COUNT_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -112,6 +144,94 @@ def search_editorial_assets(
     return results
 
 
+def search_grouped_events(
+    phrase: str,
+    *,
+    limit: int = 50,
+    session: Session | None = None,
+    progress_cb: GettyProgressCallback | None = None,
+    query_params: dict[str, str] | None = None,
+    person_name: str | None = None,
+    person_match_required: bool = False,
+    minimum_grouped_image_count: int | None = None,
+    event_detail_sample_limit: int = DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT,
+    source_query_scope: str | None = None,
+) -> list[dict[str, Any]]:
+    cleaned = str(phrase or "").strip()
+    if not cleaned:
+        return []
+
+    grouped_query_params = dict(query_params or {})
+    grouped_query_params["groupbyevent"] = "true"
+    candidates = _search_asset_candidates_for_phrase(
+        cleaned,
+        limit=limit,
+        session=session,
+        query_params=grouped_query_params,
+    )
+    total = min(len(candidates), max(0, int(limit)))
+    if progress_cb:
+        progress_cb(0, total, f"Getty grouped-event search found {total} candidate event pages.")
+
+    results: list[dict[str, Any]] = []
+    seen_event_urls: set[str] = set()
+    minimum_image_count = max(0, int(minimum_grouped_image_count or 0))
+
+    for index, candidate in enumerate(candidates[:total], start=1):
+        event_url = str(candidate.get("detail_url") or "").strip()
+        if not event_url or event_url in seen_event_urls:
+            continue
+        seen_event_urls.add(event_url)
+        if progress_cb:
+            progress_cb(index - 1, total, f"Fetching Getty event {index}/{total}: {event_url}")
+        detail = fetch_asset_detail(event_url, session=session)
+        representative_asset = _merge_search_candidate_with_detail(candidate, detail) if detail else dict(candidate)
+        matched_asset = None
+        if person_name and _asset_matches_person(representative_asset, person_name):
+            matched_asset = representative_asset
+        grouped_event = {
+            "event_url": event_url,
+            "event_asset_count_scanned": 1 if representative_asset else 0,
+            "representative_asset": representative_asset,
+            "matched_asset": matched_asset,
+            "asset_samples": [_summarize_grouped_event_asset(representative_asset)] if representative_asset else [],
+        }
+        merged = _merge_grouped_event_candidate_with_page(
+            candidate,
+            grouped_event,
+            source_query_scope=source_query_scope,
+        )
+        if person_match_required and not merged.get("matched_asset"):
+            if progress_cb:
+                progress_cb(
+                    index,
+                    total,
+                    f"Skipped Getty event {index}/{total}: no match for {person_name or 'person'}",
+                )
+            continue
+        grouped_image_count = merged.get("grouped_image_count")
+        try:
+            parsed_grouped_image_count = int(grouped_image_count)
+        except (TypeError, ValueError):
+            parsed_grouped_image_count = 0
+        if minimum_image_count and parsed_grouped_image_count < minimum_image_count:
+            if progress_cb:
+                progress_cb(
+                    index,
+                    total,
+                    (
+                        f"Skipped Getty event {index}/{total}: grouped image count "
+                        f"{parsed_grouped_image_count} below minimum {minimum_image_count}"
+                    ),
+                )
+            continue
+        results.append(merged)
+        if progress_cb:
+            event_name = str(merged.get("event_name") or merged.get("search_title") or event_url)
+            progress_cb(index, total, f"Fetched Getty event {index}/{total}: {event_name}")
+    return results
+
+
 def _merge_grouped_event_metadata(
     phrase: str,
     candidates: list[dict[str, Any]],
@@ -156,15 +276,34 @@ def _merge_grouped_event_metadata(
         editorial_id = str(candidate.get("editorial_id") or "").strip()
         object_name = str(candidate.get("object_name") or "").strip().casefold()
         grouped_candidate = (
-            by_detail_url.get(detail_url)
-            or by_editorial_id.get(editorial_id)
-            or by_object_name.get(object_name)
+            by_detail_url.get(detail_url) or by_editorial_id.get(editorial_id) or by_object_name.get(object_name)
         )
         if grouped_candidate:
             merged_candidates.append(_merge_search_candidate_with_detail(grouped_candidate, candidate))
         else:
             merged_candidates.append(candidate)
     return merged_candidates
+
+
+def _merge_grouped_event_candidate_with_page(
+    candidate: dict[str, Any],
+    grouped_event: dict[str, Any] | None,
+    *,
+    source_query_scope: str | None = None,
+) -> dict[str, Any]:
+    merged = dict(candidate)
+    if isinstance(grouped_event, dict):
+        merged.update(grouped_event)
+    event_url = str(candidate.get("detail_url") or "").strip()
+    if event_url:
+        merged["event_url"] = event_url
+    if source_query_scope:
+        merged["source_query_scope"] = source_query_scope
+    if "representative_asset" not in merged:
+        merged["representative_asset"] = None
+    if "matched_asset" not in merged:
+        merged["matched_asset"] = None
+    return merged
 
 
 def _merge_search_candidate_with_detail(candidate: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
@@ -178,6 +317,8 @@ def _merge_search_candidate_with_detail(candidate: dict[str, Any], detail: dict[
         merged["event_id"] = candidate.get("event_id")
     if "event_url_slug" not in merged and candidate.get("event_url_slug"):
         merged["event_url_slug"] = candidate.get("event_url_slug")
+    if "event_date" not in merged and candidate.get("event_date"):
+        merged["event_date"] = candidate.get("event_date")
     if "search_title" not in merged and candidate.get("search_title"):
         merged["search_title"] = candidate.get("search_title")
     if "search_caption" not in merged and candidate.get("search_caption"):
@@ -210,6 +351,145 @@ def _build_search_url(
     if page and page > 1:
         params["page"] = str(page)
     return f"{BASE_URL}/search/2/image?{urlencode(params)}"
+
+
+def fetch_grouped_event_page(
+    event_url: str,
+    *,
+    session: Session | None = None,
+    person_name: str | None = None,
+    detail_limit: int = DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT,
+) -> dict[str, Any] | None:
+    cleaned_url = str(event_url or "").strip()
+    if not cleaned_url:
+        return None
+    client = _session(session)
+    try:
+        response = client.get(cleaned_url, headers=_DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except RequestException as exc:
+        logger.warning("Getty grouped event fetch failed for %s: %s", cleaned_url, exc)
+        return None
+
+    event_candidates = _extract_search_asset_candidates(response.text)
+    representative_asset: dict[str, Any] | None = None
+    matched_asset: dict[str, Any] | None = None
+    scanned_assets: list[dict[str, Any]] = []
+    safe_limit = max(1, int(detail_limit or DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT))
+
+    for candidate in event_candidates[:safe_limit]:
+        detail_url = str(candidate.get("detail_url") or "").strip()
+        if not detail_url:
+            continue
+        detail = fetch_asset_detail(detail_url, session=client)
+        if not detail:
+            continue
+        merged_asset = _merge_search_candidate_with_detail(candidate, detail)
+        scanned_assets.append(_summarize_grouped_event_asset(merged_asset))
+        if representative_asset is None:
+            representative_asset = merged_asset
+        if person_name and matched_asset is None and _asset_matches_person(merged_asset, person_name):
+            matched_asset = merged_asset
+
+    return {
+        "event_url": cleaned_url,
+        "event_asset_count_scanned": len(scanned_assets),
+        "representative_asset": matched_asset or representative_asset,
+        "matched_asset": matched_asset,
+        "asset_samples": scanned_assets,
+    }
+
+
+DEFAULT_EVENT_SCAN_LIMIT = 200
+
+
+def _parse_event_url(event_url: str) -> tuple[str, dict[str, str]]:
+    """Extract a search phrase and query params from a Getty event page URL.
+
+    Event URLs look like:
+        https://www.gettyimages.com/photos/bravocon-2023?eventid=99999
+
+    Returns (phrase, query_params) suitable for ``_search_asset_candidates_for_phrase``.
+    """
+    parsed = urlparse(event_url)
+    path_parts = [p for p in parsed.path.strip("/").split("/") if p]
+    phrase = path_parts[-1].replace("-", " ") if path_parts else ""
+    qs = parse_qs(parsed.query)
+    query_params: dict[str, str] = {}
+    for key, values in qs.items():
+        cleaned_key = str(key).strip().lower()
+        if cleaned_key and values:
+            query_params[cleaned_key] = str(values[0]).strip()
+    return phrase, query_params
+
+
+def scan_event_page_for_person(
+    event_url: str,
+    *,
+    person_name: str,
+    session: Session | None = None,
+    scan_limit: int = DEFAULT_EVENT_SCAN_LIMIT,
+    progress_cb: GettyProgressCallback | None = None,
+) -> dict[str, Any] | None:
+    """Paginate through a Getty event page and return ALL assets matching the person.
+
+    Unlike ``fetch_grouped_event_page()`` which returns one representative,
+    this scans up to *scan_limit* assets and returns every person match.
+    """
+    cleaned_url = str(event_url or "").strip()
+    normalized_person = _normalize_name(person_name)
+    if not cleaned_url or not normalized_person:
+        return None
+
+    phrase, query_params = _parse_event_url(cleaned_url)
+    if not phrase:
+        return None
+
+    all_candidates = _search_asset_candidates_for_phrase(
+        phrase,
+        limit=max(1, int(scan_limit)),
+        session=session,
+        query_params=query_params,
+    )
+    if not all_candidates:
+        return {
+            "event_url": cleaned_url,
+            "total_scanned": 0,
+            "person_image_count": 0,
+            "matched_assets": [],
+            "representative_asset": None,
+        }
+
+    safe_limit = max(1, int(scan_limit))
+    candidates_to_scan = all_candidates[:safe_limit]
+    total = len(candidates_to_scan)
+
+    matched_assets: list[dict[str, Any]] = []
+    all_scanned: list[dict[str, Any]] = []
+
+    for index, candidate in enumerate(candidates_to_scan, start=1):
+        detail_url = str(candidate.get("detail_url") or "").strip()
+        if not detail_url:
+            continue
+        if progress_cb:
+            progress_cb(index - 1, total, f"Scanning event asset {index}/{total}: {detail_url}")
+        detail = fetch_asset_detail(detail_url, session=session)
+        if not detail:
+            continue
+        merged = _merge_search_candidate_with_detail(candidate, detail)
+        all_scanned.append(merged)
+        if _asset_matches_person(merged, person_name):
+            matched_assets.append(merged)
+        if progress_cb:
+            progress_cb(index, total, f"Scanned {index}/{total}, {len(matched_assets)} matches so far")
+
+    return {
+        "event_url": cleaned_url,
+        "total_scanned": len(all_scanned),
+        "person_image_count": len(matched_assets),
+        "matched_assets": matched_assets,
+        "representative_asset": matched_assets[0] if matched_assets else (all_scanned[0] if all_scanned else None),
+    }
 
 
 def _search_detail_urls(object_name: str, *, session: Session | None = None) -> list[str]:
@@ -383,6 +663,16 @@ def _extract_search_asset_candidates_from_payload(payload: dict[str, Any]) -> li
             "event_name": str(asset.get("eventName") or "").strip() or None,
             "event_id": str(asset.get("eventId") or "").strip() or None,
             "event_url_slug": str(asset.get("eventUrlSlug") or "").strip() or None,
+            "event_date": (
+                str(
+                    asset.get("eventDate")
+                    or asset.get("eventDateDisplay")
+                    or asset.get("eventDateText")
+                    or asset.get("displayDate")
+                    or ""
+                ).strip()
+                or None
+            ),
             "search_title": str(asset.get("title") or asset.get("shortTitle") or "").strip() or None,
             "search_caption": str(asset.get("caption") or "").strip() or None,
             "grouped_image_count": asset.get("collapsedImageCount"),
@@ -411,6 +701,9 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
     asset_json = _extract_asset_detail_json(soup)
     object_name = _extract_object_name(html, asset_json)
     editorial_id = _extract_editorial_id(detail_url, asset_json)
+    detail_fields = _extract_detail_section_fields(soup)
+    keyword_texts = _extract_keyword_texts(asset_json)
+    people_count = _infer_people_count(keyword_texts)
 
     result: dict[str, Any] = {
         "detail_url": detail_url,
@@ -418,17 +711,33 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
         "object_name": object_name,
         "asset": asset_json,
         "people": _extract_specific_people(asset_json),
+        "details": detail_fields,
     }
     result["title"] = _first_present(asset_json, "title", "headline")
     result["caption"] = _first_present(asset_json, "caption", "caption_plain")
-    result["credit"] = _first_present(asset_json, "credit", "creditLine")
-    result["collection"] = _first_present(asset_json, "collection", "collectionName")
-    result["license_type"] = _first_present(asset_json, "licenseType", "license_type")
-    result["date_created"] = _first_present(asset_json, "dateCreated", "date_created")
-    result["upload_date"] = _first_present(asset_json, "uploadDate", "upload_date")
+    result["credit"] = detail_fields.get("credit_display") or _first_present(asset_json, "credit", "creditLine")
+    result["collection"] = detail_fields.get("collection_display") or _first_present(
+        asset_json, "collection", "collectionName"
+    )
+    result["license_type"] = detail_fields.get("license_type_display") or _first_present(
+        asset_json, "licenseType", "license_type"
+    )
+    result["date_created"] = detail_fields.get("date_created_display") or _first_present(
+        asset_json, "dateCreated", "date_created"
+    )
+    result["upload_date"] = detail_fields.get("upload_date_display") or _first_present(
+        asset_json, "uploadDate", "upload_date"
+    )
     result["event_name"] = _first_present(asset_json, "eventName", "event_name")
     result["event_id"] = _first_present(asset_json, "eventId", "event_id")
     result["event_url_slug"] = _first_present(asset_json, "eventUrlSlug", "event_url_slug")
+    result["event_date"] = _first_present(
+        asset_json,
+        "eventDate",
+        "event_date",
+        "dateCreated",
+        "date_created",
+    )
     result["getty_event_group_title"] = result["event_name"]
     result["thumb_url"] = _first_present(asset_json, "thumbUrl")
     result["comp_url"] = _first_present(asset_json, "compUrl")
@@ -443,6 +752,15 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
         "thumbUrl",
     )
     result["keywords"] = asset_json.get("keywords") if isinstance(asset_json.get("keywords"), list) else []
+    result["keyword_texts"] = keyword_texts
+    result["restrictions"] = detail_fields.get("restrictions")
+    result["release_info"] = detail_fields.get("release_info")
+    result["source"] = detail_fields.get("source_display") or _first_present(asset_json, "source")
+    result["max_file_size"] = detail_fields.get("max_file_size")
+    result["editorial_number"] = detail_fields.get("editorial_number") or editorial_id
+    result["object_name_display"] = detail_fields.get("object_name_display") or object_name
+    result["people_count"] = people_count
+    result["people_count_source"] = "auto" if people_count is not None else None
     return result
 
 
@@ -502,6 +820,100 @@ def _extract_specific_people(asset_json: dict[str, Any]) -> list[dict[str, Any]]
             }
         )
     return people
+
+
+def _extract_detail_section_fields(soup: BeautifulSoup) -> dict[str, str]:
+    strings = [value.strip() for value in soup.stripped_strings if value and value.strip()]
+    results: dict[str, str] = {}
+    for index, value in enumerate(strings):
+        field_name = _DETAIL_FIELD_LABELS.get(value)
+        if not field_name:
+            continue
+        collected: list[str] = []
+        cursor = index + 1
+        while cursor < len(strings):
+            current = strings[cursor]
+            if current in _DETAIL_FIELD_LABELS or current in _DETAIL_SECTION_STOP_MARKERS:
+                break
+            collected.append(current)
+            cursor += 1
+        cleaned = " ".join(part.strip() for part in collected if part.strip()).strip()
+        if cleaned:
+            results[field_name] = cleaned
+    return results
+
+
+def _extract_keyword_texts(asset_json: dict[str, Any]) -> list[str]:
+    keywords = asset_json.get("keywords")
+    if not isinstance(keywords, list):
+        return []
+    results: list[str] = []
+    for entry in keywords:
+        if isinstance(entry, dict):
+            text = str(entry.get("text") or "").strip()
+        else:
+            text = str(entry or "").strip()
+        if text:
+            results.append(text)
+    return results
+
+
+def _infer_people_count(keyword_texts: list[str]) -> int | None:
+    for raw_value in keyword_texts:
+        lowered = str(raw_value or "").strip().lower()
+        if not lowered:
+            continue
+        word_match = re.fullmatch(r"([a-z]+)\s+(?:people|person)", lowered)
+        if word_match:
+            return _PEOPLE_COUNT_WORDS.get(word_match.group(1))
+        number_match = re.fullmatch(r"(\d+)\s+(?:people|person)", lowered)
+        if number_match:
+            return int(number_match.group(1))
+    return None
+
+
+def _normalize_name(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
+def _asset_matches_person(asset: dict[str, Any], person_name: str) -> bool:
+    normalized_person = _normalize_name(person_name)
+    if not normalized_person:
+        return False
+    searchable_values = [
+        asset.get("caption"),
+        asset.get("title"),
+        asset.get("search_caption"),
+        asset.get("search_title"),
+        asset.get("event_name"),
+    ]
+    for value in searchable_values:
+        if normalized_person and normalized_person in _normalize_name(str(value or "")):
+            return True
+
+    for person in asset.get("people") or []:
+        if not isinstance(person, dict):
+            continue
+        if normalized_person == _normalize_name(str(person.get("text") or "")):
+            return True
+
+    for keyword in _extract_keyword_texts(asset.get("asset") if isinstance(asset.get("asset"), dict) else {}):
+        if normalized_person == _normalize_name(keyword) or normalized_person in _normalize_name(keyword):
+            return True
+    return False
+
+
+def _summarize_grouped_event_asset(asset: dict[str, Any]) -> dict[str, Any]:
+    preview_url = (
+        str(asset.get("preview_image_url") or asset.get("comp_url") or asset.get("thumb_url") or "").strip() or None
+    )
+    return {
+        "detail_url": str(asset.get("detail_url") or "").strip() or None,
+        "editorial_id": str(asset.get("editorial_id") or "").strip() or None,
+        "object_name": str(asset.get("object_name") or "").strip() or None,
+        "caption": str(asset.get("caption") or "").strip() or None,
+        "preview_image_url": preview_url,
+    }
 
 
 def _first_present(payload: dict[str, Any], *keys: str) -> Any:

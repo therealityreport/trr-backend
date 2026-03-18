@@ -150,13 +150,25 @@ def _serialize_row(row: Mapping[str, Any] | CastPhotoUpsert) -> dict[str, Any]:
     return cleaned
 
 
+def _normalize_cast_photo_canonical_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.split("?", 1)[0].strip().lower()
+    return normalized or None
+
+
 def _build_upsert_metadata_key(row: Mapping[str, Any], *, dedupe_on: str) -> tuple[str, str, str] | None:
     person_id = str(row.get("person_id") or "").strip()
     source = str(row.get("source") or "").strip().lower() or "imdb"
     if dedupe_on == "source_image_id":
         key_value = str(row.get("source_image_id") or "").strip()
     else:
-        key_value = str(row.get("image_url_canonical") or "").strip().lower()
+        key_value = (
+            _normalize_cast_photo_canonical_url(
+                row.get("image_url_canonical") or row.get("image_url") or row.get("url")
+            )
+            or ""
+        )
     if not person_id or not key_value:
         return None
     return (person_id, source, key_value)
@@ -221,6 +233,12 @@ def upsert_cast_photos(
         raise CastPhotoRepositoryError(f"Unsupported cast photo dedupe key: {dedupe_on}")
 
     for row in payload:
+        if dedupe_on == "image_url_canonical":
+            normalized_canonical = _normalize_cast_photo_canonical_url(
+                row.get("image_url_canonical") or row.get("image_url") or row.get("url")
+            )
+            if normalized_canonical:
+                row["image_url_canonical"] = normalized_canonical
         if dedupe_on == "source_image_id" and row.get("source") == "imdb" and not row.get("source_image_id"):
             raise CastPhotoRepositoryError("source_image_id is required for IMDb cast photo upserts.")
         if dedupe_on == "image_url_canonical" and not row.get("image_url_canonical"):

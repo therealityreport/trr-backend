@@ -28,7 +28,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from api.auth import AdminUser
 from trr_backend.job_plane import (
@@ -1653,6 +1653,22 @@ class FacebookScrapeRequest(BaseModel):
     max_pages: int | None = Field(default=1, ge=1, le=100, description="Maximum discovery pages")
 
 
+class FacebookMediaProvenanceResponse(BaseModel):
+    platform: str
+    matched_by: str
+    fallback_used: bool
+
+
+class FacebookShareResponse(BaseModel):
+    sharer_name: str
+    profile_url: str | None = None
+    post_url: str | None = None
+    caption_snippet: str | None = None
+    posted_at: str | None = None
+    privacy_label: str | None = None
+    media_preview_urls: list[str] = Field(default_factory=list)
+
+
 class FacebookPostResponse(BaseModel):
     post_id: str
     post_type: str
@@ -1670,6 +1686,65 @@ class FacebookPostResponse(BaseModel):
         default_factory=dict,
         description="Per-reaction breakdown (Like, Love, Haha, etc.)",
     )
+    share_details: list[FacebookShareResponse] = Field(default_factory=list)
+    media_provenance: FacebookMediaProvenanceResponse | None = None
+
+
+def _facebook_post_response(post: Any) -> FacebookPostResponse:
+    raw_media_provenance = getattr(post, "media_provenance", None)
+    if hasattr(raw_media_provenance, "to_dict"):
+        media_provenance = dict(raw_media_provenance.to_dict() or {})
+    elif isinstance(raw_media_provenance, dict):
+        media_provenance = dict(raw_media_provenance or {})
+    else:
+        media_provenance = {}
+    share_details = []
+    for share in getattr(post, "share_details", []) or []:
+        posted_at = getattr(share, "posted_at", None)
+        share_details.append(
+            FacebookShareResponse(
+                sharer_name=str(getattr(share, "sharer_name", "") or ""),
+                profile_url=str(getattr(share, "profile_url", "") or "") or None,
+                post_url=str(getattr(share, "post_url", "") or "") or None,
+                caption_snippet=str(getattr(share, "caption_snippet", "") or "") or None,
+                posted_at=(
+                    datetime.fromtimestamp(int(posted_at), tz=UTC).isoformat() if posted_at is not None else None
+                ),
+                privacy_label=str(getattr(share, "privacy_label", "") or "") or None,
+                media_preview_urls=[
+                    str(url) for url in (getattr(share, "media_preview_urls", []) or []) if str(url).strip()
+                ],
+            )
+        )
+    return FacebookPostResponse(
+        post_id=str(getattr(post, "post_id", "") or ""),
+        post_type=str(getattr(post, "post_type", "feed") or "feed"),
+        username=str(getattr(post, "username", "") or ""),
+        caption=str(getattr(post, "caption", "") or ""),
+        likes=int(getattr(post, "likes", 0) or 0),
+        comments=int(getattr(post, "comments", 0) or 0),
+        shares=int(getattr(post, "shares", 0) or 0),
+        views=int(getattr(post, "views", 0) or 0),
+        url=str(getattr(post, "url", "") or ""),
+        thumbnail_url=str(getattr(post, "thumbnail_url", "") or "") or None,
+        media_urls=[str(url) for url in (getattr(post, "media_urls", []) or []) if str(url)],
+        posted_at=(
+            datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat()
+            if getattr(post, "posted_at", None) is not None
+            else None
+        ),
+        reactions=dict(getattr(post, "reactions", {}) or {}),
+        share_details=share_details,
+        media_provenance=(
+            FacebookMediaProvenanceResponse(
+                platform=str(media_provenance.get("platform") or "facebook"),
+                matched_by=str(media_provenance.get("matched_by") or "native"),
+                fallback_used=bool(media_provenance.get("fallback_used", False)),
+            )
+            if media_provenance
+            else None
+        ),
+    )
 
 
 class FacebookScrapeResponse(BaseModel):
@@ -1678,6 +1753,41 @@ class FacebookScrapeResponse(BaseModel):
     posts_found: int
     posts: list[FacebookPostResponse]
     filters_applied: dict
+    retrieval_meta: dict | None = None
+    error: str | None = None
+
+
+class FacebookSearchPostsRequest(BaseModel):
+    search_url: str | None = Field(default=None, description="Direct Facebook search URL")
+    profile_url: str | None = Field(default=None, description="Facebook profile/page URL used to build search URL")
+    query: str = Field(..., description="Search query such as a hashtag or phrase")
+    date_start: datetime | None = Field(default=None, description="Optional start date for filtering")
+    date_end: datetime | None = Field(default=None, description="Optional end date for filtering")
+    max_posts: int = Field(default=25, ge=1, le=100, description="Maximum posts to return")
+    include_share_details: bool = Field(default=False, description="Also fetch people who shared the post")
+    include_comments: bool = Field(default=False, description="Also fetch visible comments for each post")
+    max_comments: int = Field(default=100, ge=0, le=1000, description="Max comments per post")
+    max_shares: int = Field(default=100, ge=0, le=500, description="Max share-detail rows per post")
+    allow_cross_platform_media_fallback: bool = Field(
+        default=True,
+        description="Allow strict Instagram media fallback when Facebook media is unavailable",
+    )
+    delay_seconds: float = Field(default=1.25, ge=0.25, le=10.0, description="Delay between requests")
+
+    @model_validator(mode="after")
+    def validate_search_source(self) -> FacebookSearchPostsRequest:
+        if not str(self.query or "").strip():
+            raise ValueError("query is required")
+        if not str(self.search_url or "").strip() and not str(self.profile_url or "").strip():
+            raise ValueError("search_url or profile_url is required")
+        return self
+
+
+class FacebookSearchPostsResponse(BaseModel):
+    success: bool
+    query: str
+    posts_found: int
+    posts: list[FacebookPostResponse]
     retrieval_meta: dict | None = None
     error: str | None = None
 
@@ -1722,28 +1832,7 @@ async def scrape_facebook(
             success=True,
             page_handle=request.page_handle,
             posts_found=len(filtered),
-            posts=[
-                FacebookPostResponse(
-                    post_id=str(getattr(post, "post_id", "") or ""),
-                    post_type=str(getattr(post, "post_type", "feed") or "feed"),
-                    username=str(getattr(post, "username", "") or ""),
-                    caption=str(getattr(post, "caption", "") or ""),
-                    likes=int(getattr(post, "likes", 0) or 0),
-                    comments=int(getattr(post, "comments", 0) or 0),
-                    shares=int(getattr(post, "shares", 0) or 0),
-                    views=int(getattr(post, "views", 0) or 0),
-                    url=str(getattr(post, "url", "") or ""),
-                    thumbnail_url=str(getattr(post, "thumbnail_url", "") or "") or None,
-                    media_urls=[str(url) for url in (getattr(post, "media_urls", []) or []) if str(url)],
-                    posted_at=(
-                        datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat()
-                        if post.posted_at is not None
-                        else None
-                    ),
-                    reactions=dict(getattr(post, "reactions", {}) or {}),
-                )
-                for post in filtered
-            ],
+            posts=[_facebook_post_response(post) for post in filtered],
             filters_applied={
                 "hashtags": request.hashtags,
                 "keywords": request.keywords,
@@ -1762,6 +1851,55 @@ async def scrape_facebook(
             posts_found=0,
             posts=[],
             filters_applied={},
+            error=str(exc),
+        )
+
+
+@router.post("/facebook/search-posts", response_model=FacebookSearchPostsResponse)
+async def search_facebook_posts(
+    request: FacebookSearchPostsRequest,
+    user: AdminUser,
+) -> FacebookSearchPostsResponse:
+    from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
+    from trr_backend.socials.facebook import FacebookScraper, FacebookSearchConfig
+
+    logger.info("Facebook search requested by %s for query=%s", user.get("email"), request.query)
+    try:
+        scraper = FacebookScraper(
+            cookies=_load_social_auth_or_503(platform="facebook", surface="search_posts", loader=_load_facebook_cookies)
+        )
+        config = FacebookSearchConfig(
+            search_url=request.search_url,
+            profile_url=request.profile_url,
+            query=request.query,
+            date_start=request.date_start,
+            date_end=request.date_end,
+            max_posts=request.max_posts,
+            include_share_details=request.include_share_details,
+            include_comments=request.include_comments,
+            max_comments=request.max_comments,
+            max_shares=request.max_shares,
+            allow_cross_platform_media_fallback=request.allow_cross_platform_media_fallback,
+            delay_seconds=request.delay_seconds,
+        )
+        posts = scraper.search_posts(config)
+        return FacebookSearchPostsResponse(
+            success=True,
+            query=request.query,
+            posts_found=len(posts),
+            posts=[_facebook_post_response(post) for post in posts],
+            retrieval_meta=dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Facebook search failed: %s", exc, exc_info=True)
+        return FacebookSearchPostsResponse(
+            success=False,
+            query=request.query,
+            posts_found=0,
+            posts=[],
+            retrieval_meta=None,
             error=str(exc),
         )
 
@@ -1798,6 +1936,12 @@ class FacebookPostScrapeRequest(BaseModel):
     post_url: str = Field(..., description="Facebook post/video/reel URL (supports /share/v/ short links)")
     fetch_comments: bool = Field(default=True, description="Also extract comments from the page")
     max_comments: int = Field(default=100, ge=0, le=1000, description="Max comments to extract")
+    fetch_shares: bool = Field(default=False, description="Also extract people who shared the post")
+    max_shares: int = Field(default=100, ge=0, le=500, description="Max share-detail rows to extract")
+    allow_cross_platform_media_fallback: bool = Field(
+        default=True,
+        description="Allow strict Instagram media fallback when Facebook media is unavailable",
+    )
 
 
 class FacebookCommentResponse(BaseModel):
@@ -1815,6 +1959,7 @@ class FacebookPostScrapeResponse(BaseModel):
     post: FacebookPostResponse | None = None
     comments: list[FacebookCommentResponse] = Field(default_factory=list)
     comments_found: int = 0
+    shares_found: int = 0
     error: str | None = None
 
 
@@ -1835,27 +1980,14 @@ async def scrape_facebook_post(
             request.post_url,
             fetch_comment_list=request.fetch_comments,
             max_comments=request.max_comments,
+            fetch_share_list=request.fetch_shares,
+            max_shares=request.max_shares,
+            allow_cross_platform_media_fallback=request.allow_cross_platform_media_fallback,
         )
         if post is None:
             return FacebookPostScrapeResponse(success=False, error="Failed to fetch post")
 
-        post_resp = FacebookPostResponse(
-            post_id=str(post.post_id or ""),
-            post_type=str(post.post_type or "feed"),
-            username=str(post.username or ""),
-            caption=str(post.caption or ""),
-            likes=post.likes,
-            comments=post.comments,
-            shares=post.shares,
-            views=post.views,
-            url=str(post.url or ""),
-            thumbnail_url=post.thumbnail_url or None,
-            media_urls=[str(u) for u in (post.media_urls or []) if str(u)],
-            posted_at=(
-                datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat() if post.posted_at is not None else None
-            ),
-            reactions=dict(post.reactions or {}),
-        )
+        post_resp = _facebook_post_response(post)
         comment_resps = [
             FacebookCommentResponse(
                 comment_id=c.comment_id,
@@ -1873,6 +2005,7 @@ async def scrape_facebook_post(
             post=post_resp,
             comments=comment_resps,
             comments_found=len(comment_resps),
+            shares_found=len(getattr(post, "share_details", []) or []),
         )
     except HTTPException:
         raise
@@ -2175,6 +2308,36 @@ class SocialAccountProfileHashtagInput(BaseModel):
 
 class SocialAccountProfileHashtagsPutRequest(BaseModel):
     hashtags: list[SocialAccountProfileHashtagInput] = Field(default_factory=list)
+
+
+class CatalogBackfillRequest(BaseModel):
+    source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
+    date_start: datetime | None = None
+    date_end: datetime | None = None
+    backfill_scope: Literal["full_history", "bounded_window"] = Field(default="full_history")
+    allow_inline_dev_fallback: bool = Field(default=False)
+
+
+class CatalogSyncRecentRequest(BaseModel):
+    source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
+    lookback_days: int = Field(default=1, ge=1, le=30)
+    allow_inline_dev_fallback: bool = Field(default=False)
+
+
+class CatalogReviewResolveRequest(BaseModel):
+    resolution_action: Literal["assign_show", "assign_season", "mark_non_show"]
+    show_id: UUID | None = None
+    season_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_resolution(self) -> CatalogReviewResolveRequest:
+        if self.resolution_action in {"assign_show", "assign_season"} and self.show_id is None:
+            raise ValueError("show_id is required when assigning a show hashtag")
+        if self.resolution_action == "assign_show":
+            self.season_id = None
+        if self.resolution_action == "assign_season" and self.season_id is None:
+            raise ValueError("season_id is required when assigning a season hashtag")
+        return self
 
 
 class PostCommentRefreshRequest(BaseModel):
@@ -2725,10 +2888,63 @@ async def create_season_sync_session(
     _: BackgroundTasks,
     user: AdminUser = None,
 ) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        SocialWorkerUnavailableError,
+        assert_worker_available_when_queue_enabled,
+        is_queue_enabled,
+    )
     from trr_backend.repositories.social_sync_orchestrator import create_sync_session
 
     sid = str(season_id)
     try:
+        queue_enabled = is_queue_enabled()
+        remote_plane_enforced = is_remote_job_plane_enabled()
+        if queue_enabled:
+            try:
+                assert_worker_available_when_queue_enabled()
+            except SocialWorkerUnavailableError as exc:
+                worker_health_detail = jsonable_encoder(exc.worker_health) if exc.worker_health is not None else None
+                requested_platforms = {
+                    str(platform or "").strip().lower()
+                    for platform in (payload.platforms or [])
+                    if str(platform or "").strip()
+                }
+                remote_only_requested = bool(requested_platforms & {"instagram", "tiktok"})
+                if remote_plane_enforced:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
+                            "message": (
+                                "Social sync-session kickoff requires healthy remote workers because "
+                                "remote-worker ownership is enforced."
+                            ),
+                            "execution_mode": canonical_execution_mode(),
+                            "execution_owner": execution_owner_label(),
+                            "worker_health": worker_health_detail,
+                        },
+                    ) from exc
+                if remote_only_requested:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
+                            "message": "This sync-session is remote-only for Instagram/TikTok.",
+                            "execution_mode": canonical_execution_mode(),
+                            "execution_owner": execution_owner_label(),
+                            "worker_health": worker_health_detail,
+                        },
+                    ) from exc
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "SOCIAL_WORKER_UNAVAILABLE",
+                        "message": "No healthy social ingest worker heartbeat detected for sync-session kickoff.",
+                        "execution_mode": canonical_execution_mode(),
+                        "execution_owner": execution_owner_label(),
+                        "worker_health": worker_health_detail,
+                    },
+                ) from exc
         resolved_date_start, resolved_date_end, _ = _resolve_ingest_window(
             season_id=sid,
             source_scope=payload.source_scope,
@@ -2770,10 +2986,11 @@ def _build_sync_session_stream_payload(sync_session_id: str) -> dict[str, Any]:
     from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
 
     sync_session = evaluate_sync_session(sync_session_id)
+    season_id = str(sync_session.get("season_id") or "").strip()
     current_run_id = str(sync_session.get("current_run_id") or "").strip()
     run_progress = (
-        social_repo.get_run_progress_snapshot(current_run_id, recent_log_limit=20)
-        if current_run_id
+        social_repo.get_run_progress_snapshot(season_id, current_run_id, recent_log_limit=20)
+        if season_id and current_run_id
         else None
     )
     return {
@@ -3096,6 +3313,31 @@ def get_social_account_profile_posts_route(
         raise _lookup_error_to_not_found(exc) from exc
 
 
+@router.get("/profiles/{platform}/{account_handle}/catalog/posts")
+def get_social_account_catalog_posts_route(
+    platform: str,
+    account_handle: str,
+    page: int = Query(default=1, ge=1, le=10_000),
+    page_size: int = Query(default=25, ge=1, le=100),
+    assignment_status: Literal["assigned", "unassigned", "ambiguous", "needs_review"] | None = Query(default=None),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_posts
+
+    try:
+        return get_social_account_catalog_posts(
+            platform=platform,
+            account_handle=account_handle,
+            page=page,
+            page_size=page_size,
+            assignment_status=assignment_status,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
 @router.get("/profiles/{platform}/{account_handle}/hashtags")
 def get_social_account_profile_hashtags_route(
     platform: str,
@@ -3133,6 +3375,22 @@ def get_social_account_profile_hashtags_route(
         raise _lookup_error_to_not_found(exc) from exc
 
 
+@router.get("/profiles/{platform}/{account_handle}/catalog/review-queue")
+def get_social_account_catalog_review_queue_route(
+    platform: str,
+    account_handle: str,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_review_queue
+
+    try:
+        return get_social_account_catalog_review_queue(platform=platform, account_handle=account_handle)
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
 @router.put("/profiles/{platform}/{account_handle}/hashtags")
 def put_social_account_profile_hashtags_route(
     platform: str,
@@ -3147,6 +3405,216 @@ def put_social_account_profile_hashtags_route(
             platform=platform,
             account_handle=account_handle,
             hashtags=[item.model_dump() for item in payload.hashtags],
+            updated_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return response
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/backfill")
+async def post_social_account_catalog_backfill_route(
+    platform: str,
+    account_handle: str,
+    payload: CatalogBackfillRequest,
+    background_tasks: BackgroundTasks,
+    user: AdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        SocialIngestValidationError,
+        SocialWorkerUnavailableError,
+        assert_worker_available_when_queue_enabled,
+        is_queue_enabled,
+        start_social_account_catalog_backfill,
+    )
+
+    queue_enabled = is_queue_enabled()
+    remote_plane_enforced = is_remote_job_plane_enabled()
+    used_inline_fallback = False
+    if queue_enabled:
+        try:
+            assert_worker_available_when_queue_enabled()
+        except SocialWorkerUnavailableError as exc:
+            if payload.allow_inline_dev_fallback and _is_local_or_dev_runtime() and not remote_plane_enforced:
+                queue_enabled = False
+                used_inline_fallback = True
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": (
+                            "SOCIAL_REMOTE_JOB_PLANE_ENFORCED" if remote_plane_enforced else "SOCIAL_WORKER_UNAVAILABLE"
+                        ),
+                        "message": (
+                            "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
+                            "reporting heartbeats."
+                            if remote_plane_enforced
+                            else str(exc)
+                        ),
+                        "execution_mode": canonical_execution_mode(),
+                        "execution_owner": execution_owner_label(),
+                        "worker_health": exc.worker_health,
+                    },
+                ) from exc
+    elif remote_plane_enforced:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
+                "message": "Social ingest remote-worker ownership is enforced.",
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+            },
+        )
+    else:
+        used_inline_fallback = bool(payload.allow_inline_dev_fallback)
+
+    try:
+        result = start_social_account_catalog_backfill(
+            platform=platform,
+            account_handle=account_handle,
+            source_scope=payload.source_scope,
+            date_start=payload.date_start if payload.backfill_scope == "bounded_window" else payload.date_start,
+            date_end=payload.date_end if payload.backfill_scope == "bounded_window" else payload.date_end,
+            initiated_by=(user or {}).get("email"),
+            inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
+        )
+        _clear_account_profile_caches()
+    except SocialIngestValidationError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+    run_id = str(result.get("run_id") or "").strip()
+    if not queue_enabled and run_id:
+        _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
+    execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
+        queue_enabled=queue_enabled,
+        used_inline_fallback=used_inline_fallback,
+    )
+    return {
+        **result,
+        "status": "queued" if queue_enabled else "started",
+        "execution_mode": execution_mode,
+        "execution_mode_canonical": execution_mode_canonical,
+        "execution_mode_legacy": execution_mode_legacy,
+        "deprecations": [_social_execution_mode_deprecation_payload()],
+    }
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/sync-recent")
+async def post_social_account_catalog_sync_recent_route(
+    platform: str,
+    account_handle: str,
+    payload: CatalogSyncRecentRequest,
+    background_tasks: BackgroundTasks,
+    user: AdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        SocialIngestValidationError,
+        SocialWorkerUnavailableError,
+        assert_worker_available_when_queue_enabled,
+        is_queue_enabled,
+        sync_recent_social_account_catalog,
+    )
+
+    queue_enabled = is_queue_enabled()
+    remote_plane_enforced = is_remote_job_plane_enabled()
+    used_inline_fallback = False
+    if queue_enabled:
+        try:
+            assert_worker_available_when_queue_enabled()
+        except SocialWorkerUnavailableError as exc:
+            if payload.allow_inline_dev_fallback and _is_local_or_dev_runtime() and not remote_plane_enforced:
+                queue_enabled = False
+                used_inline_fallback = True
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": (
+                            "SOCIAL_REMOTE_JOB_PLANE_ENFORCED" if remote_plane_enforced else "SOCIAL_WORKER_UNAVAILABLE"
+                        ),
+                        "message": (
+                            "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
+                            "reporting heartbeats."
+                            if remote_plane_enforced
+                            else str(exc)
+                        ),
+                        "execution_mode": canonical_execution_mode(),
+                        "execution_owner": execution_owner_label(),
+                        "worker_health": exc.worker_health,
+                    },
+                ) from exc
+    elif remote_plane_enforced:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
+                "message": "Social ingest remote-worker ownership is enforced.",
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+            },
+        )
+    else:
+        used_inline_fallback = bool(payload.allow_inline_dev_fallback)
+
+    try:
+        result = sync_recent_social_account_catalog(
+            platform=platform,
+            account_handle=account_handle,
+            source_scope=payload.source_scope,
+            lookback_days=payload.lookback_days,
+            initiated_by=(user or {}).get("email"),
+            inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
+        )
+        _clear_account_profile_caches()
+    except SocialIngestValidationError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+    run_id = str(result.get("run_id") or "").strip()
+    if not queue_enabled and run_id:
+        _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
+    execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
+        queue_enabled=queue_enabled,
+        used_inline_fallback=used_inline_fallback,
+    )
+    return {
+        **result,
+        "status": "queued" if queue_enabled else "started",
+        "execution_mode": execution_mode,
+        "execution_mode_canonical": execution_mode_canonical,
+        "execution_mode_legacy": execution_mode_legacy,
+        "deprecations": [_social_execution_mode_deprecation_payload()],
+    }
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/review-queue/{item_id}/resolve")
+def post_social_account_catalog_review_queue_resolve_route(
+    platform: str,
+    account_handle: str,
+    item_id: UUID,
+    payload: CatalogReviewResolveRequest,
+    user: AdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import resolve_social_account_catalog_review_queue_item
+
+    del platform, account_handle
+    try:
+        response = resolve_social_account_catalog_review_queue_item(
+            item_id=str(item_id),
+            resolution_action=payload.resolution_action,
+            show_id=str(payload.show_id) if payload.show_id else None,
+            season_id=str(payload.season_id) if payload.season_id else None,
             updated_by=(user or {}).get("email"),
         )
         _clear_account_profile_caches()

@@ -230,3 +230,15 @@ def test_threads_scrape_retries_profile_fetch_without_cookies_on_authenticated_4
     assert posts == []
     assert calls == [None, {}]
     assert scraper.last_retrieval_meta["profile_fetch_mode"] == "anonymous_fallback"
+
+
+def test_build_post_from_html_uses_deterministic_fallback_post_id() -> None:
+    scraper = ThreadsScraper(cookies={"csrftoken": "token"})
+    url = "https://www.threads.com/@bravotv"
+    html = "<html><head><meta property='og:title' content='Fallback'></head></html>"
+
+    first = scraper._build_post_from_html(url=url, html_text=html, username="bravotv")  # noqa: SLF001
+    second = scraper._build_post_from_html(url=url, html_text=html, username="bravotv")  # noqa: SLF001
+
+    assert first.post_id == second.post_id
+    assert first.post_id.startswith("bravotv-")

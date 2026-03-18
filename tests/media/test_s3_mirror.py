@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import types
 from dataclasses import dataclass
@@ -912,3 +913,146 @@ def test_prune_orphaned_cast_photo_objects_dry_run(monkeypatch: pytest.MonkeyPat
     assert "images/people/nm123/photos/fandom/orphan.jpg" in orphaned
     # Should NOT have called delete_objects due to dry_run
     fake_s3.delete_objects.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# yt-dlp Twitter video fallback tests
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_url_to_s3_falls_back_to_ytdlp_for_twitter_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a Twitter video URL returns 403, mirror_url_to_s3 should fall back
+    to yt-dlp to resolve a fresh video URL from the tweet page, then retry."""
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+
+    expired_url = "https://video.twimg.com/ext_tw_video/12345/pu/vid/old.mp4?tag=12&token=expired"
+    fresh_url = "https://video.twimg.com/ext_tw_video/12345/pu/vid/fresh.mp4?tag=12&token=new"
+    tweet_url = "https://x.com/user/status/9999"
+
+    call_count = 0
+
+    class _FakeResponse403:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            import requests as _req
+
+            resp = _req.models.Response()
+            resp.status_code = 403
+            raise _req.exceptions.HTTPError(response=resp)
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            return iter([])
+
+    class _FakeResponseOK:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            yield b"fresh-video-bytes"
+
+    def _fake_get(*args, **kwargs):  # noqa: ANN001, ARG005
+        nonlocal call_count
+        call_count += 1
+        url = args[0] if args else kwargs.get("url", "")
+        if url == expired_url:
+            return _FakeResponse403()
+        return _FakeResponseOK()
+
+    monkeypatch.setattr(s3_mirror.requests, "get", _fake_get)
+    monkeypatch.setattr(s3_mirror, "_head_object", lambda *_args, **_kwargs: None)
+    upload_mock = MagicMock(return_value=("etag-fresh", 17))
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
+
+    # Mock shutil.which to report yt-dlp as available
+    monkeypatch.setattr(s3_mirror.shutil, "which", lambda cmd: "/usr/local/bin/yt-dlp" if cmd == "yt-dlp" else None)
+
+    # Mock subprocess.run to return a fresh URL from yt-dlp
+    ytdlp_payload = json.dumps({"url": fresh_url})
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.stdout = ytdlp_payload
+    fake_proc.stderr = ""
+    subprocess_calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd, **kwargs):  # noqa: ANN001, ARG005
+        subprocess_calls.append(cmd)
+        return fake_proc
+
+    monkeypatch.setattr(s3_mirror.subprocess, "run", _fake_subprocess_run)
+
+    result = s3_mirror.mirror_url_to_s3(
+        expired_url,
+        s3_client=MagicMock(),
+        bucket="bucket",
+        tweet_url=tweet_url,
+    )
+
+    assert result.status == "mirrored"
+    assert result.error is None
+    assert result.hosted_url is not None and result.hosted_url.startswith("https://cdn.example.com/media/")
+    # yt-dlp should have been called exactly once
+    assert len(subprocess_calls) == 1
+    assert "yt-dlp" in subprocess_calls[0][0]
+    assert tweet_url in subprocess_calls[0]
+    upload_mock.assert_called_once()
+
+
+def test_mirror_url_to_s3_no_ytdlp_fallback_without_tweet_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When tweet_url is not provided, a 403 on a Twitter video URL should
+    NOT trigger yt-dlp fallback — backward compatibility."""
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+
+    expired_url = "https://video.twimg.com/ext_tw_video/12345/pu/vid/old.mp4?tag=12&token=expired"
+
+    class _FakeResponse403:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            import requests as _req
+
+            resp = _req.models.Response()
+            resp.status_code = 403
+            raise _req.exceptions.HTTPError(response=resp)
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            return iter([])
+
+    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse403())  # noqa: ARG005
+
+    result = s3_mirror.mirror_url_to_s3(
+        expired_url,
+        s3_client=MagicMock(),
+        bucket="bucket",
+        # No tweet_url — should NOT attempt yt-dlp
+    )
+
+    assert result.status == "failed"
+    assert result.error == "http_403"

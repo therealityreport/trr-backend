@@ -163,7 +163,7 @@ def test_content_type_updates_cast_photo_context_type(client, monkeypatch):
     assert body["context_type"] == "confessional"
     update_payload = mock_db.schema.return_value.table.return_value.update.call_args.args[0]
     assert update_payload["context_type"] == "confessional"
-    assert update_payload["metadata"]["fandom_section_tag"] == "CONFESSIONAL"
+    assert update_payload["metadata"]["content_type"] == "CONFESSIONAL"
 
 
 def test_content_type_rejects_unsupported_value(client, monkeypatch):

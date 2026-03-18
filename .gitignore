@@ -116,6 +116,7 @@ scripts/socials/**/twitter_cookies.json
 scripts/socials/**/tiktok_cookies.json
 scripts/socials/**/facebook_cookies.json
 scripts/socials/**/threads_cookies.json
+scripts/socials/**/socialblade_cookies.json
 data/tiktok_cookies_netscape.txt
 scripts/socials/**/output/
 scripts/socials/**/*.csv

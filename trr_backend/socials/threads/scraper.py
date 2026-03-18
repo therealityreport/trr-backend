@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
@@ -772,7 +773,11 @@ class ThreadsScraper:
         if not post_id:
             parsed = urlparse(og_url)
             pieces = [piece for piece in parsed.path.split("/") if piece]
-            post_id = pieces[-1] if pieces else f"{username}-{abs(hash(url))}"
+            if pieces and not pieces[-1].startswith("@"):
+                post_id = pieces[-1]
+            else:
+                digest = hashlib.sha1(str(url or "").encode("utf-8")).hexdigest()[:16]
+                post_id = f"{username}-{digest}"
 
         title = self._first_group(_OG_TITLE_RE, html_text)
         desc = self._first_group(_OG_DESC_RE, html_text)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -16,10 +17,14 @@ from trr_backend.media.s3_mirror import (
     get_s3_client,
     mirror_media_asset_row,
 )
+from trr_backend.integrations.picdetective import search_by_image_url
 from trr_backend.repositories.media_assets import (
     update_asset_with_mirror_result,
     update_ingest_status,
 )
+from trr_backend.scraping.url_image_scraper import download_and_hash_image, scrape_url_for_images
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin-media-assets"])
 
@@ -78,6 +83,29 @@ class DetectTextOverlayResponse(BaseModel):
     text_overlay_detected_at: str | None = None
     text_overlay_prompt_version: str | None = None
     text_overlay_error_code: str | None = None
+
+
+class ReverseImageSearchResponse(BaseModel):
+    asset_id: str
+    candidates: list[dict]
+    search_url: str
+
+
+class ReplaceFromUrlRequest(BaseModel):
+    page_url: str
+    source_domain: str
+    expected_width: int | None = None
+    expected_height: int | None = None
+
+
+class ReplaceFromUrlResponse(BaseModel):
+    asset_id: str
+    status: str
+    new_source: str
+    new_source_url: str
+    new_hosted_url: str | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 @router.post("/media-assets/{asset_id}/mirror", response_model=MirrorMediaAssetResponse)
@@ -373,4 +401,181 @@ def detect_text_overlay_media_asset(
         text_overlay_detected_at=result.detected_at,
         text_overlay_prompt_version=result.prompt_version,
         text_overlay_error_code=result.reason_code,
+    )
+
+
+@router.post(
+    "/media-assets/{asset_id}/reverse-image-search",
+    response_model=ReverseImageSearchResponse,
+)
+def reverse_image_search(
+    asset_id: UUID,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> ReverseImageSearchResponse:
+    asset_id_str = str(asset_id)
+    response = (
+        db.schema("core")
+        .table("media_assets")
+        .select("id, source, source_url, metadata")
+        .eq("id", asset_id_str)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Media asset not found")
+
+    row = response.data[0]
+    if str(row.get("source") or "").strip().lower() != "getty":
+        raise HTTPException(status_code=400, detail="Only Getty assets support reverse image search")
+
+    source_url = str(row.get("source_url") or "").strip()
+    if not source_url:
+        raise HTTPException(status_code=409, detail="Media asset has no source_url")
+
+    candidates = search_by_image_url(source_url, min_width=1080, limit=5)
+    return ReverseImageSearchResponse(
+        asset_id=asset_id_str,
+        candidates=[
+            {
+                "title": c.title,
+                "source_domain": c.source_domain,
+                "page_url": c.page_url,
+                "thumbnail_b64": c.thumbnail_b64,
+                "width": c.width,
+                "height": c.height,
+            }
+            for c in candidates
+        ],
+        search_url=source_url,
+    )
+
+
+@router.post(
+    "/media-assets/{asset_id}/replace-from-url",
+    response_model=ReplaceFromUrlResponse,
+)
+def replace_from_url(
+    asset_id: UUID,
+    payload: ReplaceFromUrlRequest,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> ReplaceFromUrlResponse:
+    asset_id_str = str(asset_id)
+    response = (
+        db.schema("core")
+        .table("media_assets")
+        .select("id, source, source_url, hosted_url, hosted_key, metadata")
+        .eq("id", asset_id_str)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Media asset not found")
+
+    row = response.data[0]
+    if str(row.get("source") or "").strip().lower() != "getty":
+        raise HTTPException(status_code=400, detail="Only Getty assets can be replaced via reverse search")
+
+    # Scrape the page for the largest image
+    try:
+        scrape_result = scrape_url_for_images(payload.page_url, min_width=800)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to scrape page: {exc}") from exc
+
+    if not scrape_result.images:
+        raise HTTPException(status_code=422, detail="No suitable images found on the page")
+
+    best = max(scrape_result.images, key=lambda img: (img.width or 0) * (img.height or 0))
+    if best.width and best.width < 1080:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Best image found is only {best.width}x{best.height}, below 1080px minimum",
+        )
+
+    # Download and hash (returns tuple: bytes, sha256, content_type)
+    try:
+        image_data, sha256, content_type = download_and_hash_image(best.best_url, referer=payload.page_url)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to download image: {exc}") from exc
+
+    if not image_data:
+        raise HTTPException(status_code=502, detail="Downloaded image was empty")
+
+    # Upload to S3
+    s3_client = get_s3_client()
+    bucket = get_s3_bucket()
+    s3_key = f"media-assets/{asset_id_str}/replaced.jpg"
+
+    try:
+        s3_client.put_object(
+            Bucket=bucket,
+            Key=s3_key,
+            Body=image_data,
+            ContentType=content_type,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to upload to S3: {exc}") from exc
+
+    from trr_backend.media.s3_mirror import build_hosted_url
+
+    hosted_url = build_hosted_url(s3_key)
+
+    # Preserve Getty metadata, update source
+    existing_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    getty_metadata = {
+        k: v for k, v in existing_metadata.items()
+        if k in (
+            "getty", "getty_details", "getty_tags", "getty_event_title", "getty_event_url",
+            "object_name", "editorial_number", "people", "resolved_people", "unmatched_people",
+            "tagged_people", "people_count", "people_names", "published_at", "show_name",
+            "season_number", "episode_number", "episode_title", "content_type",
+        )
+    }
+    new_metadata = {
+        **getty_metadata,
+        "original_source": "getty",
+        "original_source_url": str(row.get("source_url") or ""),
+        "replaced_from": {
+            "url": payload.page_url,
+            "domain": payload.source_domain,
+            "width": best.width,
+            "height": best.height,
+            "replaced_at": datetime.now(UTC).isoformat(),
+        },
+    }
+
+    # Update the media asset record
+    update_payload = {
+        "source": payload.source_domain,
+        "source_url": payload.page_url,
+        "hosted_url": hosted_url,
+        "hosted_key": s3_key,
+        "hosted_bucket": bucket,
+        "hosted_sha256": sha256,
+        "hosted_bytes": len(image_data),
+        "hosted_content_type": content_type,
+        "width": best.width,
+        "height": best.height,
+        "sha256": sha256,
+        "metadata": new_metadata,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+    db.schema("core").table("media_assets").update(update_payload).eq("id", asset_id_str).execute()
+
+    # Regenerate variants
+    try:
+        generate_media_asset_variants(db, asset_id_str)
+    except Exception as exc:
+        logger.warning("Variant generation failed after replace for %s: %s", asset_id_str, exc)
+
+    return ReplaceFromUrlResponse(
+        asset_id=asset_id_str,
+        status="replaced",
+        new_source=payload.source_domain,
+        new_source_url=payload.page_url,
+        new_hosted_url=hosted_url,
+        width=best.width,
+        height=best.height,
     )

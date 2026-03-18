@@ -1,27 +1,12 @@
-"""SocialBlade Instagram scraper using Playwright.
-
-Usage (standalone):
-    python -m trr_backend.socials.socialblade.scraper <handle>
-
-Outputs JSON to stdout. Requires ``playwright install chromium`` to have been run.
-
-Steps:
-1. Navigate to the SocialBlade user page
-2. Click "Refresh Stats"
-3. Extract profile stats and rankings from the DOM
-4. Set chart dropdowns to Daily / Total (HeadlessUI listboxes)
-5. Extract ECharts follower data via React fiber traversal
-6. Switch table to 60 days and extract table data
-7. Return combined dict
-"""
+"""SocialBlade Instagram scraper using Playwright."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import sys
-import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,218 +18,166 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# HeadlessUI dropdown helper
-# ---------------------------------------------------------------------------
-
-def _select_headlessui_option(page: Any, button_id: str, option_text: str) -> bool:
-    """Open a HeadlessUI listbox button and click the target option.
-
-    HeadlessUI listboxes don't respond to JS-dispatched events — we must use
-    real mouse clicks at the element's screen coordinates.
-    """
-    # Scroll button into view
-    btn_info = page.evaluate(f"""(() => {{
-        const btn = document.getElementById("{button_id}");
-        if (!btn) return null;
-        btn.scrollIntoView({{ block: "center" }});
-        return {{ text: btn.textContent.trim() }};
-    }})()""")
-    if not btn_info:
-        return False
-
-    page.wait_for_timeout(300)
-
-    # Click button to open dropdown
-    pos = page.evaluate(f"""(() => {{
-        const btn = document.getElementById("{button_id}");
-        const r = btn.getBoundingClientRect();
-        return {{ x: r.x + r.width / 2, y: r.y + r.height / 2 }};
-    }})()""")
-    page.mouse.click(pos["x"], pos["y"])
-    page.wait_for_timeout(500)
-
-    # Verify expanded
-    expanded = page.evaluate(
-        f'document.getElementById("{button_id}")?.getAttribute("aria-expanded")'
-    )
-    if expanded != "true":
-        _log(f"  Dropdown {button_id} did not open")
-        return False
-
-    # Find the correct listbox via aria-controls
-    controls_id = page.evaluate(
-        f'document.getElementById("{button_id}")?.getAttribute("aria-controls")'
-    )
-
-    listbox_selector = f'document.getElementById("{controls_id}") || ' if controls_id else ""
-    option_pos = page.evaluate(f"""(() => {{
-        const listbox = {listbox_selector}document.querySelector("[role=listbox]");
-        if (!listbox) return null;
-        const opts = [...listbox.querySelectorAll("[role=option]")];
-        const target = opts.find(o => o.textContent.trim() === "{option_text}");
-        if (!target) return null;
-        const r = target.getBoundingClientRect();
-        return {{ x: r.x + r.width / 2, y: r.y + r.height / 2 }};
-    }})()""")
-
-    if not option_pos:
-        _log(f'  Option "{option_text}" not found')
-        return False
-
-    page.mouse.click(option_pos["x"], option_pos["y"])
-    page.wait_for_timeout(500)
-    _log(f"  Set {button_id} → {option_text}")
-    return True
-
-
-# ---------------------------------------------------------------------------
-# JS extraction expressions (ported verbatim from scrape-socialblade.mjs)
-# ---------------------------------------------------------------------------
-
-_JS_EXTRACT_PROFILE_STATS = """(() => {
-    const h2s = [...document.querySelectorAll("h2")];
-    const h4s = [...document.querySelectorAll("h4")];
-    const pairs = [];
-    for (const h2 of h2s) {
-        const rect = h2.getBoundingClientRect();
-        const nearbyH4 = h4s.find(h4 => {
-            const h4r = h4.getBoundingClientRect();
-            return Math.abs(h4r.x - rect.x) < 50 && h4r.y > rect.y && h4r.y - rect.y < 80;
-        });
-        if (nearbyH4) {
-            pairs.push({ value: h2.textContent.trim(), label: nearbyH4.textContent.trim(), y: rect.y });
-        }
-    }
-    return pairs;
-})()"""
-
-_JS_EXTRACT_GRADE = """(() => {
-    const els = [...document.querySelectorAll("span, div")];
-    const gradeEl = els.find(e =>
-        /^[A-F][+-]?$/.test(e.textContent.trim()) &&
-        e.getBoundingClientRect().height > 30 &&
-        e.getBoundingClientRect().height < 80
-    );
-    return gradeEl ? gradeEl.textContent.trim() : "";
-})()"""
-
-_JS_SCROLL_TO_CHARTS = """(() => {
-    const spans = [...document.querySelectorAll("span")];
-    const header = spans.find(s => s.textContent.trim() === "Detailed Charts");
-    if (header) header.scrollIntoView({ block: "start" });
-    return !!header;
-})()"""
-
-_JS_FIND_DROPDOWNS = """(() => {
-    const buttons = [...document.querySelectorAll('button[id^="headlessui-listbox-button"]')];
-    return buttons.map(b => ({ id: b.id, text: b.textContent.trim() }));
-})()"""
-
-_JS_EXTRACT_CHART_DATA = """(() => {
-    const charts = document.querySelectorAll("[_echarts_instance_]");
-    let bestChart = null;
-    let bestCount = 0;
-    for (const chart of charts) {
-        const key = Object.keys(chart).find(k => k.startsWith("__reactFiber"));
-        if (!key) continue;
-        let fiber = chart[key];
-        for (let i = 0; i < 20 && fiber; i++) {
-            const props = fiber.memoizedProps;
-            if (props?.option?.series?.[0]?.data) {
-                const data = props.option.series[0].data;
-                if (data.length > bestCount) {
-                    bestCount = data.length;
-                    bestChart = {
-                        data,
-                        categories: props.option.xAxis?.[0]?.data || props.option.xAxis?.data,
-                    };
-                }
-                break;
-            }
-            fiber = fiber.return;
-        }
-    }
-    if (!bestChart) return null;
-    return {
-        total_data_points: bestChart.data.length,
-        date_range: {
-            from: bestChart.categories?.[0] || null,
-            to: bestChart.categories?.[bestChart.categories.length - 1] || null,
-        },
-        data: bestChart.categories
-            ? bestChart.categories.map((date, i) => ({ date, followers: bestChart.data[i] }))
-            : bestChart.data.map((v, i) => ({ date: String(i), followers: v })),
-    };
-})()"""
-
 _JS_EXTRACT_TABLE = """(() => {
     const table = document.querySelector("table");
     if (!table) return null;
     const rows = [...table.querySelectorAll("tr")];
-    const headers = [...rows[0].querySelectorAll("th")].map(th => th.textContent.trim());
     const datePattern = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\\d{4}-\\d{2}-\\d{2}$/;
+    const headers = [
+        "Date",
+        "Followers Delta",
+        "Followers Total",
+        "Following Delta",
+        "Following Total",
+        "Media Count Delta",
+        "Media Count Total",
+    ];
     const data = rows.slice(1)
-        .map(row => {
-            const cells = [...row.querySelectorAll("td")];
-            const obj = {};
-            headers.forEach((h, i) => { obj[h] = cells[i]?.textContent?.trim() || ""; });
-            return obj;
-        })
-        .filter(row => datePattern.test(row[headers[0]] || ""));
-    return { period: "Last 60 Days", row_count: data.length, headers, data };
+        .map(row => [...row.querySelectorAll("td")].map(td => td.textContent.trim()))
+        .filter(cells => cells.length >= 7 && datePattern.test(cells[0]))
+        .map(cells => ({
+            "Date": cells[0],
+            "Followers Delta": cells[1],
+            "Followers Total": cells[2],
+            "Following Delta": cells[3],
+            "Following Total": cells[4],
+            "Media Count Delta": cells[5],
+            "Media Count Total": cells[6],
+        }));
+    return { headers, data };
 })()"""
 
 
-# ---------------------------------------------------------------------------
-# Profile stats parser
-# ---------------------------------------------------------------------------
+_ACCESS_DENIED_PATTERNS = (
+    "access denied",
+    "error reference number: 1020",
+    "social blade access denied",
+)
+_DATE_PREFIX_PATTERN = re.compile(r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(\d{4}-\d{2}-\d{2})$")
 
-def _parse_profile_stats(
-    pairs: list[dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, str]]:
-    """Parse H2/H4 label-value pairs into stats and rankings dicts."""
+
+def _parse_int(value: str) -> int:
+    return int(re.sub(r"[^0-9-]", "", value) or "0")
+
+
+def _parse_float(value: str) -> float:
+    return float(re.sub(r"[^0-9.\-]", "", value) or "0")
+
+
+def _normalize_body_lines(body_text: str) -> list[str]:
+    return [line.strip() for line in body_text.splitlines() if line.strip()]
+
+
+def _find_line_after(lines: list[str], label: str) -> str:
+    normalized = label.strip().lower()
+    for index, line in enumerate(lines):
+        if line.strip().lower() != normalized:
+            continue
+        if index + 1 < len(lines):
+            return lines[index + 1].strip()
+        break
+    return ""
+
+
+def _find_line_before(lines: list[str], label: str) -> str:
+    normalized = label.strip().lower()
+    for index, line in enumerate(lines):
+        if line.strip().lower() != normalized:
+            continue
+        if index > 0:
+            return lines[index - 1].strip()
+        break
+    return ""
+
+
+def _extract_body_text(page: Any) -> str:
+    try:
+        return page.locator("body").inner_text(timeout=2_000)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _page_access_denied(body_text: str) -> bool:
+    normalized = body_text.lower()
+    return any(marker in normalized for marker in _ACCESS_DENIED_PATTERNS)
+
+
+def _extract_profile_stats_from_body_text(body_text: str) -> tuple[dict[str, Any], dict[str, str]]:
+    lines = _normalize_body_lines(body_text)
     stats: dict[str, Any] = {
-        "followers": 0,
-        "following": 0,
-        "media_count": 0,
-        "engagement_rate": "0%",
-        "average_likes": 0,
-        "average_comments": 0,
+        "followers": _parse_int(_find_line_after(lines, "Followers")),
+        "following": _parse_int(_find_line_after(lines, "Following")),
+        "media_count": _parse_int(_find_line_after(lines, "Media Count")),
+        "engagement_rate": _find_line_after(lines, "Engagement Rate") or "0%",
+        "average_likes": _parse_float(_find_line_after(lines, "Average Likes")),
+        "average_comments": _parse_float(_find_line_after(lines, "Average Comments")),
     }
     rankings: dict[str, str] = {
-        "sb_rank": "",
-        "followers_rank": "",
-        "engagement_rate_rank": "",
         "grade": "",
+        "sb_rank": _find_line_before(lines, "SB Rank") or _find_line_after(lines, "SB Rank"),
+        "followers_rank": _find_line_before(lines, "Followers Rank") or _find_line_after(lines, "Followers Rank"),
+        "engagement_rate_rank": (
+            _find_line_before(lines, "Engagement Rate Rank")
+            or _find_line_after(lines, "Engagement Rate Rank")
+        ),
     }
 
-    import re
-
-    for pair in pairs:
-        label = pair.get("label", "").lower()
-        val = pair.get("value", "")
-
-        if "sb rank" in label:
-            rankings["sb_rank"] = val
-        elif "followers rank" in label:
-            rankings["followers_rank"] = val
-        elif "engagement" in label and "rank" in label:
-            rankings["engagement_rate_rank"] = val
-        elif label == "followers":
-            stats["followers"] = int(re.sub(r"[^0-9]", "", val) or "0")
-        elif label == "following":
-            stats["following"] = int(re.sub(r"[^0-9]", "", val) or "0")
-        elif "media" in label or "posts" in label:
-            stats["media_count"] = int(re.sub(r"[^0-9]", "", val) or "0")
-        elif "engagement" in label:
-            stats["engagement_rate"] = val
-        elif "avg" in label and "like" in label:
-            stats["average_likes"] = float(re.sub(r"[^0-9.]", "", val) or "0")
-        elif "avg" in label and "comment" in label:
-            stats["average_comments"] = float(re.sub(r"[^0-9.]", "", val) or "0")
+    grade_value = _find_line_before(lines, "Grade")
+    if re.fullmatch(r"[A-F][+-]?", grade_value):
+        rankings["grade"] = grade_value
 
     return stats, rankings
+
+
+def _normalize_table_data(table_data: dict[str, Any] | None, body_text: str) -> dict[str, Any]:
+    headers = [
+        "Date",
+        "Followers Delta",
+        "Followers Total",
+        "Following Delta",
+        "Following Total",
+        "Media Count Delta",
+        "Media Count Total",
+    ]
+    rows = list((table_data or {}).get("data") or [])
+    lines = _normalize_body_lines(body_text)
+    period = _find_line_after(lines, "Daily Channel Metrics") or "Last 14 Days"
+    return {
+        "period": period,
+        "row_count": len(rows),
+        "headers": headers,
+        "data": rows,
+    }
+
+
+def _followers_chart_from_table(metrics: dict[str, Any]) -> dict[str, Any] | None:
+    chart_points: list[dict[str, Any]] = []
+    for row in metrics.get("data") or []:
+        raw_date = str(row.get("Date") or "").strip()
+        raw_total = str(row.get("Followers Total") or "").strip()
+        if not raw_date or not raw_total:
+            continue
+        match = _DATE_PREFIX_PATTERN.match(raw_date)
+        if not match:
+            continue
+        chart_points.append(
+            {
+                "date": match.group(1),
+                "followers": _parse_int(raw_total),
+            }
+        )
+    if not chart_points:
+        return None
+    return {
+        "frequency": "daily",
+        "metric": "total_followers",
+        "total_data_points": len(chart_points),
+        "date_range": {
+            "from": chart_points[0]["date"],
+            "to": chart_points[-1]["date"],
+        },
+        "data": chart_points,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +198,11 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
     from playwright.sync_api import sync_playwright
 
     from trr_backend.socials.browser_cookie_refresh import launch_browser
+    from trr_backend.socials.socialblade.auth import (
+        SOCIALBLADE_STEALTH_INIT_SCRIPT,
+        SOCIALBLADE_STEALTH_USER_AGENT,
+        normalize_socialblade_cookies,
+    )
 
     sb_url = f"https://socialblade.com/instagram/user/{handle}"
     _log(f"Scraping SocialBlade for @{handle}")
@@ -272,162 +210,69 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
     with sync_playwright() as pw:
         browser = launch_browser(pw, headless=True)
         try:
-            context = browser.new_context(viewport={"width": 1440, "height": 1200})
+            context = browser.new_context(
+                viewport={"width": 1440, "height": 1600},
+                user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
+            context.add_init_script(SOCIALBLADE_STEALTH_INIT_SCRIPT)
 
             # Inject SocialBlade cookies if provided
-            if cookies:
-                context.add_cookies(cookies)
-                _log(f"Injected {len(cookies)} cookies")
+            normalized_cookies = normalize_socialblade_cookies(cookies)
+            if normalized_cookies:
+                context.add_cookies(normalized_cookies)
+                _log(f"Injected {len(normalized_cookies)} cookies")
 
             page = context.new_page()
 
-            # 1. Navigate to SocialBlade user page
             page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(4_000)
             _log(f"Navigated to {sb_url}")
 
-            # Check if we need to login
-            is_logged_in = page.evaluate("""(() => {
-                const logoutLink = document.querySelector('a[href="/logout"]');
-                const loginLink = document.querySelector('a[href="/login"]');
-                return !!logoutLink || !loginLink;
-            })()""")
+            body_text = _extract_body_text(page)
+            if _page_access_denied(body_text):
+                raise RuntimeError("SocialBlade blocked by Cloudflare (1020 access denied)")
 
-            if not is_logged_in:
-                _log("Not logged in — attempting login")
-                _do_login(page, context)
-                # Navigate back to user page after login
-                page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(3000)
-
-            # 2. Click "Refresh Stats"
-            _log("Clicking Refresh Stats...")
-            refresh_clicked = page.evaluate("""(() => {
-                const btns = [...document.querySelectorAll("button")];
-                const btn = btns.find(b => b.textContent.trim().toLowerCase().includes("refresh"));
-                if (!btn) return false;
-                btn.click();
-                return true;
-            })()""")
-            if refresh_clicked:
-                _log("Refresh Stats clicked, waiting for update...")
-                page.wait_for_timeout(5000)
-            else:
-                _log("Refresh Stats button not found (may have been recently refreshed)")
-
-            # 3. Extract profile stats
             _log("Extracting profile stats and rankings...")
-            profile_pairs = page.evaluate(_JS_EXTRACT_PROFILE_STATS)
-            stats, rankings = _parse_profile_stats(profile_pairs or [])
-
-            grade = page.evaluate(_JS_EXTRACT_GRADE)
-            if grade:
-                rankings["grade"] = grade
-
+            stats, rankings = _extract_profile_stats_from_body_text(body_text)
             _log(f"Stats: {stats['followers']} followers, SB Rank: {rankings['sb_rank']}")
 
-            # 4. Set chart dropdowns to Daily / Total
-            _log("Setting chart dropdowns to Daily / Total...")
-            page.evaluate(_JS_SCROLL_TO_CHARTS)
-            page.wait_for_timeout(500)
+            raw_table_data = page.evaluate(_JS_EXTRACT_TABLE)
+            metrics = _normalize_table_data(raw_table_data, body_text)
+            _log(f"Table: {metrics['row_count']} rows ({metrics['period']})")
 
-            dropdown_ids = page.evaluate(_JS_FIND_DROPDOWNS)
-            _log(f"Found {len(dropdown_ids or [])} HeadlessUI listbox buttons")
-
-            if dropdown_ids and len(dropdown_ids) >= 1:
-                if "Daily" not in dropdown_ids[0].get("text", ""):
-                    _log(f"Setting frequency: {dropdown_ids[0]['text']} → Daily")
-                    _select_headlessui_option(page, dropdown_ids[0]["id"], "Daily")
-                    page.wait_for_timeout(2000)
-                else:
-                    _log("Frequency already set to Daily")
-
-            if dropdown_ids and len(dropdown_ids) >= 2:
-                if "Total" not in dropdown_ids[1].get("text", ""):
-                    _log(f"Setting metric: {dropdown_ids[1]['text']} → Total")
-                    _select_headlessui_option(page, dropdown_ids[1]["id"], "Total")
-                    page.wait_for_timeout(3000)
-                else:
-                    _log("Metric already set to Total")
-
-            # 5. Extract ECharts chart data via React fiber
-            _log("Extracting chart data via React fiber...")
-            chart_data = page.evaluate(_JS_EXTRACT_CHART_DATA)
-
+            chart_data = _followers_chart_from_table(metrics)
             if chart_data:
                 _log(
-                    f"Chart data: {chart_data['total_data_points']} points, "
+                    f"Follower history: {chart_data['total_data_points']} points, "
                     f"{chart_data['date_range']['from']} → {chart_data['date_range']['to']}"
                 )
             else:
-                _log("WARNING: Could not extract chart data")
+                _log("WARNING: Could not derive follower history from daily metrics table")
 
-            # 6. Extract 60-day table
-            _log("Switching table to 60 days...")
-            table_btn = page.evaluate("""(() => {
-                const btns = [...document.querySelectorAll("button")];
-                const btn = btns.find(b => b.textContent.trim().startsWith("Last "));
-                if (!btn) return null;
-                btn.scrollIntoView({ block: "center" });
-                return { text: btn.textContent.trim() };
-            })()""")
-            page.wait_for_timeout(300)
+            stats_refreshed = bool(
+                stats["followers"] > 0
+                and stats["following"] >= 0
+                and metrics["row_count"] > 0
+            )
+            if not stats_refreshed:
+                raise RuntimeError("SocialBlade scrape returned incomplete profile stats or table data")
 
-            if table_btn and "60" not in table_btn.get("text", ""):
-                btn_pos = page.evaluate("""(() => {
-                    const btns = [...document.querySelectorAll("button")];
-                    const btn = btns.find(b => b.textContent.trim().startsWith("Last "));
-                    const r = btn.getBoundingClientRect();
-                    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-                })()""")
-                page.mouse.click(btn_pos["x"], btn_pos["y"])
-                page.wait_for_timeout(500)
-
-                opt_pos = page.evaluate("""(() => {
-                    const menus = document.querySelectorAll("div.absolute");
-                    for (const menu of menus) {
-                        const r = menu.getBoundingClientRect();
-                        if (r.height > 100 && r.width > 100 && r.width < 300) {
-                            const items = [...menu.children];
-                            const target = items.find(i => i.textContent.trim() === "Last 60 Days");
-                            if (target) {
-                                const tr = target.getBoundingClientRect();
-                                return { x: tr.x + tr.width / 2, y: tr.y + tr.height / 2 };
-                            }
-                        }
-                    }
-                    return null;
-                })()""")
-                if opt_pos:
-                    page.mouse.click(opt_pos["x"], opt_pos["y"])
-                    page.wait_for_timeout(3000)
-
-            table_data = page.evaluate(_JS_EXTRACT_TABLE)
-            _log(f"Table: {table_data.get('row_count', 0) if table_data else 0} rows")
-
-            # 7. Build result
             result: dict[str, Any] = {
                 "username": handle,
                 "platform": "instagram",
                 "scraped_at": datetime.now(tz=UTC).isoformat(),
-                "stats_refreshed": bool(refresh_clicked),
+                "stats_refreshed": stats_refreshed,
                 "profile_stats": stats,
                 "rankings": rankings,
-                "daily_channel_metrics_60day": table_data or {
-                    "period": "Last 60 Days",
+                "daily_channel_metrics_60day": metrics or {
+                    "period": "Last 14 Days",
                     "row_count": 0,
                     "headers": [],
                     "data": [],
                 },
-                "daily_total_followers_chart": (
-                    {
-                        "frequency": "daily",
-                        "metric": "total_followers",
-                        **chart_data,
-                    }
-                    if chart_data
-                    else None
-                ),
+                "daily_total_followers_chart": chart_data,
             }
 
             _log("Scrape complete")
@@ -496,11 +341,14 @@ if __name__ == "__main__":
         sys.exit(1)
 
     target_handle = sys.argv[1]
+    from trr_backend.socials.socialblade.auth import load_socialblade_cookies_from_sources
+
+    cookie_list: list[dict[str, Any]] | dict[str, str]
     cookies_json = os.environ.get("SOCIALBLADE_COOKIES_JSON", "[]")
     try:
         cookie_list = json.loads(cookies_json)
     except json.JSONDecodeError:
-        cookie_list = []
+        cookie_list = load_socialblade_cookies_from_sources()
 
     result = scrape_socialblade(target_handle, cookie_list)
     print(json.dumps(result))

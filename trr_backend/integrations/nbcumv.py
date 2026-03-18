@@ -18,18 +18,24 @@ from requests.exceptions import RequestException
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_APPSYNC_API_KEY = "da2-rmy4cbtcevfwrdadqabta7ezl4"
 APPSYNC_URL = os.environ.get(
     "NBCUMV_APPSYNC_URL",
     "https://bfg5dqxssngazhtsf6uo7bzdvm.appsync-api.us-west-2.amazonaws.com/graphql",
 )
-APPSYNC_API_KEY = os.environ.get("NBCUMV_APPSYNC_API_KEY", "")
+APPSYNC_API_KEY = os.environ.get("NBCUMV_APPSYNC_API_KEY", DEFAULT_APPSYNC_API_KEY)
 BATCH_DOWNLOAD_URL = os.environ.get(
     "NBCUMV_BATCH_DOWNLOAD_URL",
     "https://or1ukny4rd.execute-api.us-west-2.amazonaws.com/v1",
 )
+CLOUDSEARCH_URL = os.environ.get(
+    "NBCUMV_CLOUDSEARCH_URL",
+    "https://jrh818qk4k.execute-api.us-west-2.amazonaws.com/v1/",
+)
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_PAGE_SIZE = 100
 MAX_FALLBACK_SCAN_PAGES = 100
+CLOUDSEARCH_PAGE_SIZE = 100
 
 _IMAGE_FIELDS = """
 id
@@ -121,6 +127,71 @@ def _filename_key(value: str | None) -> str:
     return str(value or "").strip().lower()
 
 
+def _filename_stem(value: str | None) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    return re.sub(r"\.[a-z0-9]+$", "", cleaned, flags=re.IGNORECASE)
+
+
+def _normalize_nup_identifier(value: str | None) -> str:
+    stem = _filename_stem(value).upper()
+    if not stem:
+        return ""
+    parts = stem.split("_")
+    if len(parts) != 3 or parts[0] != "NUP":
+        return stem
+    frame = parts[2]
+    if frame.isdigit():
+        frame = str(int(frame))
+    return f"{parts[0]}_{parts[1]}_{frame}"
+
+
+def _nup_set_prefix(value: str | None) -> str | None:
+    normalized = _normalize_nup_identifier(value)
+    if not normalized:
+        return None
+    parts = normalized.split("_")
+    if len(parts) != 3 or parts[0] != "NUP":
+        return None
+    return f"{parts[0]}_{parts[1]}"
+
+
+def _filenames_match(left: str | None, right: str | None) -> bool:
+    left_cleaned = str(left or "").strip()
+    right_cleaned = str(right or "").strip()
+    if not left_cleaned or not right_cleaned:
+        return False
+    if _filename_key(left_cleaned) == _filename_key(right_cleaned):
+        return True
+    if _filename_key(_filename_stem(left_cleaned)) == _filename_key(_filename_stem(right_cleaned)):
+        return True
+    left_nup = _normalize_nup_identifier(left_cleaned)
+    right_nup = _normalize_nup_identifier(right_cleaned)
+    return bool(left_nup and right_nup and left_nup == right_nup)
+
+
+def _cloudsearch_query_candidates(filename: str | None) -> list[str]:
+    cleaned = str(filename or "").strip()
+    if not cleaned:
+        return []
+    stem = _filename_stem(cleaned)
+    raw_candidates = [cleaned]
+    if stem and stem.casefold() != cleaned.casefold():
+        raw_candidates.append(stem)
+    if stem and "." not in cleaned:
+        raw_candidates.extend([f"{stem}.JPG", f"{stem}.jpg"])
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate in raw_candidates:
+        normalized = candidate.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(candidate)
+    return candidates
+
+
 def _session(session: Session | None = None) -> Session:
     return session or Session()
 
@@ -150,6 +221,35 @@ def _graphql_request(query: str, *, session: Session | None = None) -> dict[str,
     if not isinstance(data, dict):
         raise RuntimeError("NBCUMV GraphQL response was missing data")
     return data
+
+
+def _cloudsearch_request(
+    query: str,
+    *,
+    size: int = CLOUDSEARCH_PAGE_SIZE,
+    start: int = 0,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    client = _session(session)
+    try:
+        response = client.get(
+            CLOUDSEARCH_URL,
+            params={
+                "q": query,
+                "size": max(1, min(CLOUDSEARCH_PAGE_SIZE, int(size or CLOUDSEARCH_PAGE_SIZE))),
+                "start": max(0, int(start or 0)),
+                "return": "_all_fields",
+            },
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except RequestException as exc:
+        raise RuntimeError(f"NBCUMV CloudSearch request failed: {exc}") from exc
+
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("NBCUMV CloudSearch response was malformed")
+    return payload
 
 
 def _json_graphql(value: Any) -> str:
@@ -202,6 +302,171 @@ def _iso_day_end(day: str) -> str:
     if "T" in value:
         return value
     return f"{value}T23:59:59.999Z"
+
+
+def _cloudsearch_field_strings(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    cleaned = str(value or "").strip()
+    return [cleaned] if cleaned else []
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    if isinstance(value, int) and value >= 0:
+        return value
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = int(cleaned)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _cloudsearch_hit_to_image(hit: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(hit, dict):
+        return None
+    fields = hit.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    if str(fields.get("type") or "").strip().lower() != "image":
+        return None
+    filename = str(fields.get("title") or "").strip()
+    lbx_id = str(fields.get("item_number") or "").strip()
+    if not filename or not lbx_id:
+        return None
+    show_ids = _cloudsearch_field_strings(fields.get("show_ids"))
+    show_titles = _cloudsearch_field_strings(fields.get("shows"))
+    return {
+        "id": str(fields.get("id") or hit.get("id") or "").strip() or None,
+        "lbx_id": lbx_id,
+        "lbx_filename": filename,
+        "created": str(fields.get("created") or "").strip() or None,
+        "liveDate": str(fields.get("live_date") or "").strip() or None,
+        "location": str(fields.get("thumbnail") or "").strip() or None,
+        "lbx_fileSize": _parse_optional_int(fields.get("filesize")),
+        "lbx_caption": str(fields.get("description") or "").strip() or None,
+        "lbx_headline": str(fields.get("headline") or "").strip() or None,
+        "lbx_showTitle": show_titles[0] if show_titles else None,
+        "showIds": show_ids,
+        "showTitles": show_titles,
+        "cloudsearch_fields": fields,
+        "cloudsearch_hit_id": str(hit.get("id") or "").strip() or None,
+    }
+
+
+def _annotate_grouped_image_counts(images: list[dict[str, Any]], *, person_match_source: str) -> list[dict[str, Any]]:
+    counts_by_nup_set: dict[str, int] = {}
+    for image in images:
+        prefix = _nup_set_prefix(image.get("lbx_filename"))
+        if not prefix:
+            continue
+        counts_by_nup_set[prefix] = counts_by_nup_set.get(prefix, 0) + 1
+    for image in images:
+        prefix = _nup_set_prefix(image.get("lbx_filename"))
+        if prefix:
+            image["nup_set"] = prefix
+            image["grouped_image_count"] = counts_by_nup_set.get(prefix, 1)
+        image["person_match_source"] = person_match_source
+    return images
+
+
+def search_person_images(
+    person_name: str,
+    *,
+    show_id: str | None = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+    session: Session | None = None,
+) -> list[dict[str, Any]]:
+    normalized_person_name = str(person_name or "").strip()
+    if not normalized_person_name:
+        return []
+    capped_limit = max(1, int(limit or DEFAULT_PAGE_SIZE))
+    query = json.dumps(normalized_person_name)
+    collected: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    start = 0
+    total_found: int | None = None
+
+    while len(collected) < capped_limit:
+        payload = _cloudsearch_request(
+            query,
+            size=min(CLOUDSEARCH_PAGE_SIZE, capped_limit - len(collected)),
+            start=start,
+            session=session,
+        )
+        hits = payload.get("hits")
+        if not isinstance(hits, dict):
+            break
+        total_found = _parse_optional_int(hits.get("found"))
+        raw_hits = hits.get("hit") or []
+        if not isinstance(raw_hits, list) or not raw_hits:
+            break
+        for hit in raw_hits:
+            image = _cloudsearch_hit_to_image(hit)
+            if image is None:
+                continue
+            if show_id:
+                show_ids = [str(item).strip() for item in image.get("showIds") or [] if str(item).strip()]
+                if str(show_id).strip() not in show_ids:
+                    continue
+            dedupe_key = str(image.get("lbx_id") or "").strip() or str(image.get("lbx_filename") or "").strip()
+            if dedupe_key and dedupe_key in seen_keys:
+                continue
+            if dedupe_key:
+                seen_keys.add(dedupe_key)
+            collected.append(image)
+            if len(collected) >= capped_limit:
+                break
+        start += len(raw_hits)
+        if total_found is not None and start >= total_found:
+            break
+
+    return _annotate_grouped_image_counts(collected[:capped_limit], person_match_source="cloudsearch")
+
+
+def discover_person_show_titles(
+    person_name: str,
+    *,
+    limit: int = DEFAULT_PAGE_SIZE,
+    session: Session | None = None,
+) -> list[str]:
+    discovered_titles: list[str] = []
+    seen_titles: set[str] = set()
+    for image in search_person_images(person_name, limit=max(1, int(limit or DEFAULT_PAGE_SIZE)), session=session):
+        title = str(image.get("lbx_showTitle") or "").strip()
+        if not title:
+            continue
+        normalized_title = _normalize_title(title)
+        if not normalized_title or normalized_title in seen_titles:
+            continue
+        seen_titles.add(normalized_title)
+        discovered_titles.append(title)
+    return discovered_titles
+
+
+def search_person_show_catalog(
+    person_name: str,
+    *,
+    show_id: str,
+    limit: int = DEFAULT_PAGE_SIZE,
+    session: Session | None = None,
+) -> list[dict[str, Any]]:
+    normalized_person_name = str(person_name or "").strip()
+    normalized_show_id = str(show_id or "").strip()
+    if not normalized_person_name or not normalized_show_id:
+        return []
+
+    capped_limit = max(1, int(limit or DEFAULT_PAGE_SIZE))
+    matches: list[dict[str, Any]] = []
+    for image in list_show_images(normalized_show_id, session=session):
+        if not _caption_matches(image, normalized_person_name):
+            continue
+        matches.append(dict(image))
+        if len(matches) >= capped_limit:
+            break
+    return _annotate_grouped_image_counts(matches, person_match_source="show_catalog")
 
 
 def search_images(filters: SearchFilters, *, session: Session | None = None) -> list[dict[str, Any]]:
@@ -362,7 +627,14 @@ def find_show_image_by_filename(
     key = _filename_key(filename)
     if not key:
         return None
-    return build_show_image_index(show_id, session=session).get(key)
+    index = build_show_image_index(show_id, session=session)
+    direct = index.get(key)
+    if direct is not None:
+        return direct
+    for candidate in index.values():
+        if _filenames_match(candidate.get("lbx_filename"), filename):
+            return candidate
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -446,6 +718,39 @@ def _scan_for_lbx_id(lbx_id: str, *, session: Session | None = None) -> dict[str
     return None
 
 
+def _search_cloudsearch_images_by_filename(
+    filename: str,
+    *,
+    show_id: str | None = None,
+    session: Session | None = None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for query in _cloudsearch_query_candidates(filename):
+        payload = _cloudsearch_request(query, size=10, start=0, session=session)
+        hits = payload.get("hits")
+        if not isinstance(hits, dict):
+            continue
+        raw_hits = hits.get("hit") or []
+        if not isinstance(raw_hits, list):
+            continue
+        for hit in raw_hits:
+            image = _cloudsearch_hit_to_image(hit)
+            if image is None:
+                continue
+            if show_id:
+                show_ids = [str(item).strip() for item in image.get("showIds") or [] if str(item).strip()]
+                if str(show_id).strip() not in show_ids:
+                    continue
+            dedupe_key = str(image.get("lbx_id") or "").strip() or str(image.get("lbx_filename") or "").strip()
+            if dedupe_key and dedupe_key in seen_keys:
+                continue
+            if dedupe_key:
+                seen_keys.add(dedupe_key)
+            candidates.append(image)
+    return candidates
+
+
 def fetch_image_by_identity(
     *,
     filename: str | None = None,
@@ -461,6 +766,14 @@ def fetch_image_by_identity(
         items = search_images(SearchFilters(filename=filename, limit=1), session=session)
         if items:
             return items[0]
+        cloudsearch_candidates = _search_cloudsearch_images_by_filename(
+            str(filename),
+            show_id=show_id,
+            session=session,
+        )
+        for candidate in cloudsearch_candidates:
+            if _filenames_match(candidate.get("lbx_filename"), filename):
+                return candidate
     if lbx_id:
         return _scan_for_lbx_id(str(lbx_id).strip(), session=session)
     return None

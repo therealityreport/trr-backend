@@ -256,6 +256,7 @@ def _normalize_string_list(values: Any) -> list[str]:
 
 def _build_run_config_hash(payload: dict[str, Any]) -> str:
     canonical_payload = {
+        "mode": str(payload.get("mode") or "sync_posts").strip().lower() or "sync_posts",
         "coverage_mode": _normalize_coverage_mode(payload.get("coverage_mode")),
         "max_pages": _coerce_int(payload.get("max_pages"), default=0, minimum=0, maximum=10_000),
         "max_backfill_queries": _coerce_int(
@@ -365,6 +366,21 @@ def _collect_partial_failures(
                 "reason": str(query_diag.get("error") or "incomplete_query"),
                 "query": str(query_diag.get("query") or "").strip() or None,
                 "label": str(query_diag.get("flair") or "").strip() or None,
+            }
+        )
+
+    detail_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+    for detail_error in detail_errors:
+        if not isinstance(detail_error, dict):
+            continue
+        reason = str(detail_error.get("error") or detail_error.get("reason") or "").strip()
+        if not reason:
+            continue
+        failures.append(
+            {
+                "phase": str(detail_error.get("phase") or "details"),
+                "reason": reason,
+                "reddit_post_id": str(detail_error.get("reddit_post_id") or "").strip() or None,
             }
         )
 
@@ -917,6 +933,7 @@ def _fetch_sample_sorts(
 ) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     rows: list[dict[str, Any]] = []
     diagnostics = {"successful_sorts": [], "failed_sorts": [], "rate_limited_sorts": []}
+    first_error: RedditRefreshError | None = None
 
     for sort in sort_modes:
         try:
@@ -934,6 +951,8 @@ def _fetch_sample_sorts(
             )
             diagnostics["successful_sorts"].append(sort)
         except RedditRefreshError as exc:
+            if first_error is None:
+                first_error = exc
             diagnostics["failed_sorts"].append(sort)
             if exc.status == 429:
                 diagnostics["rate_limited_sorts"].append(sort)
@@ -943,6 +962,8 @@ def _fetch_sample_sorts(
                 sort,
                 exc.status,
             )
+    if not diagnostics["successful_sorts"]:
+        raise first_error or RedditRefreshError("Failed to fetch subreddit threads", status=502)
     return rows, diagnostics
 
 
@@ -3128,6 +3149,235 @@ def _merge_discovery_pass_results(results: list[dict[str, Any]]) -> dict[str, An
     return final
 
 
+def _run_detail_sync_phase(
+    *,
+    community_id: str,
+    season_id: str,
+    period_key: str,
+    force_rescrape: bool,
+    progress: dict[str, Any],
+    apply_progress: Callable[..., None],
+) -> dict[str, Any]:
+    from trr_backend.media.s3_mirror import mirror_reddit_media  # lazy import
+
+    has_detail_scraped_at = _column_exists("social", "reddit_posts", "detail_scraped_at")
+    detail_filter = ""
+    if has_detail_scraped_at and not force_rescrape:
+        detail_filter = "and rp.detail_scraped_at is null"
+
+    with pg.db_connection() as conn:
+        with pg.db_cursor(conn=conn) as cur:
+            cur.execute(
+                f"""
+                select rp.reddit_post_id,
+                       rp.url,
+                       rp.raw_payload
+                from social.reddit_period_post_matches rpm
+                join social.reddit_posts rp
+                  on rp.reddit_post_id = rpm.reddit_post_id
+                where rpm.community_id = %s
+                  and rpm.season_id = %s
+                  and rpm.period_key = %s
+                  {detail_filter}
+                order by rp.posted_at desc nulls last
+                """,
+                [community_id, season_id, period_key],
+            )
+            target_posts = cur.fetchall() or []
+
+    apply_progress(
+        {
+            "stage": "syncing_details",
+            "detail_posts_total": len(target_posts),
+            "detail_posts_done": 0,
+            "comments_upserted": 0,
+            "media_queued": 0,
+            "media_mirrored": 0,
+        },
+        force=True,
+    )
+
+    detail_posts_done = 0
+    comments_upserted = 0
+    media_queued = 0
+    media_mirrored = 0
+    detail_errors: list[dict[str, str]] = []
+    media_url_pattern = re.compile(
+        r'https?://[^\s\)"\]>]+\.(?:jpg|jpeg|png|gif|webp|mp4)(?:\?[^\s\)"\]>]*)?',
+        re.IGNORECASE,
+    )
+
+    def _process_single_detail_post(
+        post_row: dict[str, Any],
+        *,
+        has_detail_scraped_at_value: bool,
+        media_re: re.Pattern[str],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "comments_upserted": 0,
+            "media_queued": 0,
+            "media_mirrored": 0,
+            "error": None,
+            "reddit_post_id": None,
+            "skipped": False,
+        }
+
+        pid = str(post_row.get("reddit_post_id") or "").strip()
+        result["reddit_post_id"] = pid
+        if not pid:
+            result["skipped"] = True
+            return result
+
+        try:
+            comments = _fetch_post_comments_tree(pid)
+
+            for comment in comments:
+                raw = comment.get("raw_payload") or {}
+                comment["author_flair_text"] = raw.get("author_flair_text")
+                comment["is_submitter"] = raw.get("is_submitter", False)
+                comment["controversiality"] = raw.get("controversiality", 0)
+                comment["ups"] = raw.get("ups")
+                comment["downs"] = raw.get("downs", 0)
+                comment["gildings"] = raw.get("gildings", {})
+                comment["body_html"] = raw.get("body_html")
+
+            if comments:
+                with pg.db_connection() as conn:
+                    result["comments_upserted"] = _upsert_comments(comments, conn=conn)
+
+            post_raw = post_row.get("raw_payload") if isinstance(post_row.get("raw_payload"), dict) else {}
+            media_urls: list[tuple[str, str]] = []
+
+            post_url = str(post_raw.get("url") or post_row.get("url") or "").strip()
+            if post_url and re.search(r"\.(jpg|jpeg|png|gif|webp|mp4)(\?|$)", post_url, re.IGNORECASE):
+                media_urls.append((post_url, "video" if post_url.lower().endswith(".mp4") else "image"))
+
+            thumb = str(post_raw.get("thumbnail") or "").strip()
+            if thumb and thumb.lower() not in {"self", "default", "nsfw", "spoiler", ""} and thumb.startswith("http"):
+                media_urls.append((thumb, "thumbnail"))
+
+            preview = post_raw.get("preview")
+            if isinstance(preview, dict):
+                for image in preview.get("images") or []:
+                    if not isinstance(image, dict):
+                        continue
+                    source = image.get("source")
+                    if isinstance(source, dict) and source.get("url"):
+                        media_urls.append((str(source["url"]).replace("&amp;", "&"), "image"))
+
+            media_metadata = post_raw.get("media_metadata") or {}
+            if isinstance(media_metadata, dict):
+                for meta in media_metadata.values():
+                    if not isinstance(meta, dict):
+                        continue
+                    source_url = meta.get("s", {}).get("u") if isinstance(meta.get("s"), dict) else None
+                    if source_url:
+                        media_urls.append((str(source_url).replace("&amp;", "&"), "image"))
+
+            for comment in comments:
+                for text in (str(comment.get("body") or ""), str(comment.get("body_html") or "")):
+                    for match in media_re.findall(text):
+                        media_urls.append((match, "image"))
+
+            unique_media: list[tuple[str, str]] = []
+            seen_urls: set[str] = set()
+            for url, media_type in media_urls:
+                normalized_url = str(url or "").strip()
+                if not normalized_url or normalized_url in seen_urls:
+                    continue
+                seen_urls.add(normalized_url)
+                unique_media.append((normalized_url, media_type))
+            result["media_queued"] = len(unique_media)
+
+            def _mirror_single(url_mtype: tuple[str, str]) -> tuple[str, bool, Exception | None]:
+                source_url, media_type = url_mtype
+                try:
+                    mirrored = mirror_reddit_media(
+                        source_url=source_url,
+                        reddit_post_id=pid,
+                        reddit_comment_id=None,
+                        media_type=media_type,
+                    )
+                    return source_url, isinstance(mirrored, dict) and mirrored.get("status") == "mirrored", None
+                except Exception as exc:  # noqa: BLE001
+                    return source_url, False, exc
+
+            media_workers = min(8, len(unique_media)) if unique_media else 1
+            if unique_media:
+                with ThreadPoolExecutor(max_workers=media_workers, thread_name_prefix="media") as media_pool:
+                    for completed_url, mirrored_ok, mirror_exc in media_pool.map(_mirror_single, unique_media):
+                        if mirror_exc:
+                            logger.warning(
+                                "[sync_details_media_mirror_failed] post_id=%s url=%s error=%s",
+                                pid,
+                                completed_url,
+                                mirror_exc,
+                            )
+                        elif mirrored_ok:
+                            result["media_mirrored"] += 1
+
+            if has_detail_scraped_at_value:
+                with pg.db_connection() as conn:
+                    with pg.db_cursor(conn=conn) as cur:
+                        cur.execute(
+                            """
+                            update social.reddit_posts
+                            set detail_scraped_at = now(),
+                                updated_at = now()
+                            where reddit_post_id = %s
+                            """,
+                            [pid],
+                        )
+        except Exception as post_exc:  # noqa: BLE001
+            logger.warning("[sync_details_post_failed] post_id=%s error=%s", pid, post_exc)
+            result["error"] = {
+                "phase": "details",
+                "reddit_post_id": pid,
+                "error": f"{post_exc.__class__.__name__}: {post_exc}",
+            }
+
+        return result
+
+    detail_workers = min(4, len(target_posts)) if target_posts else 1
+    with ThreadPoolExecutor(max_workers=detail_workers, thread_name_prefix="detail") as pool:
+        futures = {
+            pool.submit(
+                _process_single_detail_post,
+                row,
+                has_detail_scraped_at_value=has_detail_scraped_at,
+                media_re=media_url_pattern,
+            ): row
+            for row in target_posts
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            comments_upserted += result["comments_upserted"]
+            media_queued += result["media_queued"]
+            media_mirrored += result["media_mirrored"]
+            if result.get("error"):
+                detail_errors.append(result["error"])
+            detail_posts_done += 1
+            apply_progress(
+                {
+                    "detail_posts_done": detail_posts_done,
+                    "comments_upserted": comments_upserted,
+                    "media_queued": media_queued,
+                    "media_mirrored": media_mirrored,
+                }
+            )
+
+    return {
+        "status": "completed" if not detail_errors else "partial",
+        "detail_posts_total": len(target_posts),
+        "detail_posts_done": detail_posts_done,
+        "comments_upserted": comments_upserted,
+        "media_queued": media_queued,
+        "media_mirrored": media_mirrored,
+        "errors": detail_errors[:50],
+        "error_count": len(detail_errors),
+    }
+
+
 def execute_refresh_run(
     run_id: str,
     *,
@@ -3195,278 +3445,38 @@ def execute_refresh_run(
     try:
         run_mode = str(request_payload.get("mode") or "sync_posts").strip()
         if run_mode == "sync_details":
-            # Sprint 4: deep detail scraping — fetch full comment trees,
-            # enhanced metadata, and queue media mirroring for matched posts.
-            from trr_backend.media.s3_mirror import mirror_reddit_media  # lazy import
-
             community_id = str(run.get("community_id") or "").strip()
             season_id = str(run.get("season_id") or "").strip()
             period_key = str(run.get("period_key") or "").strip()
             force_rescrape = bool(request_payload.get("force_rescrape"))
-
-            # ── 1. Find target posts ──────────────────────────────────────
-            has_detail_scraped_at = _column_exists("social", "reddit_posts", "detail_scraped_at")
-            detail_filter = ""
-            if has_detail_scraped_at and not force_rescrape:
-                detail_filter = "and rp.detail_scraped_at is null"
-
-            with pg.db_connection() as conn:
-                with pg.db_cursor(conn=conn) as cur:
-                    cur.execute(
-                        f"""
-                        select rp.reddit_post_id,
-                               rp.url,
-                               rp.raw_payload
-                        from social.reddit_period_post_matches rpm
-                        join social.reddit_posts rp
-                          on rp.reddit_post_id = rpm.reddit_post_id
-                        where rpm.community_id = %s
-                          and rpm.season_id = %s
-                          and rpm.period_key = %s
-                          {detail_filter}
-                        order by rp.posted_at desc nulls last
-                        """,
-                        [community_id, season_id, period_key],
-                    )
-                    target_posts = cur.fetchall() or []
-
-            apply_progress(
-                {
-                    "stage": "syncing_details",
-                    "detail_posts_total": len(target_posts),
-                    "detail_posts_done": 0,
-                    "comments_upserted": 0,
-                    "media_queued": 0,
-                    "media_mirrored": 0,
-                },
-                force=True,
+            detail_result = _run_detail_sync_phase(
+                community_id=community_id,
+                season_id=season_id,
+                period_key=period_key,
+                force_rescrape=force_rescrape,
+                progress=progress,
+                apply_progress=apply_progress,
             )
-
-            detail_posts_done = 0
-            comments_upserted = 0
-            media_queued = 0
-            media_mirrored = 0
-            detail_errors: list[dict[str, str]] = []
-
-            # ── 2. Process each post (parallelised) ─────────────────────
-            # Compile media-URL regex once, shared across all workers.
-            _media_url_pattern = re.compile(
-                r'https?://[^\s\)"\]>]+\.(?:jpg|jpeg|png|gif|webp|mp4)(?:\?[^\s\)"\]>]*)?',
-                re.IGNORECASE,
-            )
-
-            def _process_single_detail_post(
-                post_row: dict[str, Any],
-                *,
-                _mirror_reddit_media: Callable[..., Any],
-                _has_detail_scraped_at: bool,
-                _media_re: re.Pattern[str],
-            ) -> dict[str, Any]:
-                """Process one post's comments + media inside a worker thread.
-
-                Returns a result dict with counters and optional error info.
-                Each worker obtains its own DB connections from the pool.
-                """
-                result: dict[str, Any] = {
-                    "comments_upserted": 0,
-                    "media_queued": 0,
-                    "media_mirrored": 0,
-                    "error": None,
-                    "reddit_post_id": None,
-                    "skipped": False,
-                }
-
-                pid = str(post_row.get("reddit_post_id") or "").strip()
-                result["reddit_post_id"] = pid
-                if not pid:
-                    result["skipped"] = True
-                    return result
-
-                try:
-                    # 2a. Fetch full comment tree
-                    comments = _fetch_post_comments_tree(pid)
-
-                    # 2b. Enhance comments with extra fields from raw_payload
-                    for comment in comments:
-                        raw = comment.get("raw_payload") or {}
-                        comment["author_flair_text"] = raw.get("author_flair_text")
-                        comment["is_submitter"] = raw.get("is_submitter", False)
-                        comment["controversiality"] = raw.get("controversiality", 0)
-                        comment["ups"] = raw.get("ups")
-                        comment["downs"] = raw.get("downs", 0)
-                        comment["gildings"] = raw.get("gildings", {})
-                        comment["body_html"] = raw.get("body_html")
-
-                    # 2c. Upsert enhanced comments
-                    if comments:
-                        with pg.db_connection() as conn:
-                            result["comments_upserted"] = _upsert_comments(comments, conn=conn)
-
-                    # 2d. Extract media URLs from post
-                    post_raw = post_row.get("raw_payload") if isinstance(post_row.get("raw_payload"), dict) else {}
-                    media_urls: list[tuple[str, str]] = []  # (url, media_type)
-
-                    # Post URL — images/videos
-                    post_url = str(post_raw.get("url") or post_row.get("url") or "").strip()
-                    if post_url and re.search(r"\.(jpg|jpeg|png|gif|webp|mp4)(\?|$)", post_url, re.IGNORECASE):
-                        mtype = "video" if post_url.lower().endswith(".mp4") else "image"
-                        media_urls.append((post_url, mtype))
-
-                    # Thumbnail
-                    thumb = str(post_raw.get("thumbnail") or "").strip()
-                    _skip_thumbs = {"self", "default", "nsfw", "spoiler", ""}
-                    if thumb and thumb.lower() not in _skip_thumbs and thumb.startswith("http"):
-                        media_urls.append((thumb, "thumbnail"))
-
-                    # Preview images
-                    preview = post_raw.get("preview")
-                    if isinstance(preview, dict):
-                        for img in preview.get("images") or []:
-                            if isinstance(img, dict):
-                                source = img.get("source")
-                                if isinstance(source, dict) and source.get("url"):
-                                    media_urls.append((str(source["url"]).replace("&amp;", "&"), "image"))
-
-                    # Media metadata (galleries)
-                    media_metadata = post_raw.get("media_metadata") or {}
-                    if isinstance(media_metadata, dict):
-                        for _key, meta in media_metadata.items():
-                            if not isinstance(meta, dict):
-                                continue
-                            s_url = meta.get("s", {}).get("u") if isinstance(meta.get("s"), dict) else None
-                            if s_url:
-                                media_urls.append((str(s_url).replace("&amp;", "&"), "image"))
-
-                    # Extract media URLs from comments
-                    for comment in comments:
-                        body = str(comment.get("body") or "")
-                        body_html = str(comment.get("body_html") or "")
-                        for text in (body, body_html):
-                            for match in _media_re.findall(text):
-                                media_urls.append((match, "image"))
-
-                    # 2e. Mirror media (parallel within worker)
-                    seen_urls: set[str] = set()
-                    unique_media: list[tuple[str, str]] = []
-                    for url, mtype in media_urls:
-                        url_clean = str(url or "").strip()
-                        if not url_clean or url_clean in seen_urls:
-                            continue
-                        seen_urls.add(url_clean)
-                        unique_media.append((url_clean, mtype))
-                    result["media_queued"] = len(unique_media)
-
-                    def _mirror_single(url_mtype: tuple[str, str]) -> tuple[str, bool, Exception | None]:
-                        u, mt = url_mtype
-                        try:
-                            r = _mirror_reddit_media(
-                                source_url=u,
-                                reddit_post_id=pid,
-                                reddit_comment_id=None,
-                                media_type=mt,
-                            )
-                            ok = isinstance(r, dict) and r.get("status") == "mirrored"
-                            return u, ok, None
-                        except Exception as exc:  # noqa: BLE001
-                            return u, False, exc
-
-                    media_workers = min(8, len(unique_media)) if unique_media else 1
-                    if unique_media:
-                        with ThreadPoolExecutor(max_workers=media_workers, thread_name_prefix="media") as media_pool:
-                            for url_done, ok, mirror_exc in media_pool.map(_mirror_single, unique_media):
-                                if mirror_exc:
-                                    logger.warning(
-                                        "[sync_details_media_mirror_failed] post_id=%s url=%s error=%s",
-                                        pid,
-                                        url_done,
-                                        mirror_exc,
-                                    )
-                                elif ok:
-                                    result["media_mirrored"] += 1
-
-                    # 2f. Update detail_scraped_at
-                    if _has_detail_scraped_at:
-                        with pg.db_connection() as conn:
-                            with pg.db_cursor(conn=conn) as cur:
-                                cur.execute(
-                                    """
-                                    update social.reddit_posts
-                                    set detail_scraped_at = now(),
-                                        updated_at = now()
-                                    where reddit_post_id = %s
-                                    """,
-                                    [pid],
-                                )
-
-                except Exception as post_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[sync_details_post_failed] post_id=%s error=%s",
-                        pid,
-                        post_exc,
-                    )
-                    result["error"] = {
-                        "reddit_post_id": pid,
-                        "error": f"{post_exc.__class__.__name__}: {post_exc}",
-                    }
-
-                return result
-
-            # Submit all posts to the thread pool
-            detail_workers = min(4, len(target_posts)) if target_posts else 1
-            with ThreadPoolExecutor(max_workers=detail_workers, thread_name_prefix="detail") as pool:
-                futures = {
-                    pool.submit(
-                        _process_single_detail_post,
-                        row,
-                        _mirror_reddit_media=mirror_reddit_media,
-                        _has_detail_scraped_at=has_detail_scraped_at,
-                        _media_re=_media_url_pattern,
-                    ): row
-                    for row in target_posts
-                }
-                for future in as_completed(futures):
-                    result = future.result()
-
-                    # Aggregate counters
-                    comments_upserted += result["comments_upserted"]
-                    media_queued += result["media_queued"]
-                    media_mirrored += result["media_mirrored"]
-
-                    if result.get("error"):
-                        detail_errors.append(result["error"])
-
-                    detail_posts_done += 1
-                    # Progress written from main thread (safe for DB writes)
-                    apply_progress(
-                        {
-                            "detail_posts_done": detail_posts_done,
-                            "comments_upserted": comments_upserted,
-                            "media_queued": media_queued,
-                            "media_mirrored": media_mirrored,
-                        }
-                    )
-
-            # ── 3. Finalize ───────────────────────────────────────────────
             apply_progress({"stage": "finalizing"}, force=True)
 
-            status = "completed" if not detail_errors else "partial"
+            status = str(detail_result.get("status") or "completed")
             terminal_summary = _build_terminal_summary(
                 mode="sync_details",
                 status=status,
                 progress={**progress, "stage": "finalizing"},
-                error_count=len(detail_errors),
+                error_count=_safe_int(detail_result.get("error_count")),
                 force_rescrape=force_rescrape,
             )
             diagnostics = {
                 "mode": "sync_details",
                 "force_rescrape": force_rescrape,
-                "detail_posts_total": len(target_posts),
-                "detail_posts_done": detail_posts_done,
-                "comments_upserted": comments_upserted,
-                "media_queued": media_queued,
-                "media_mirrored": media_mirrored,
-                "errors": detail_errors[:50],  # cap to avoid oversized diagnostics
-                "error_count": len(detail_errors),
+                "detail_posts_total": _safe_int(detail_result.get("detail_posts_total")),
+                "detail_posts_done": _safe_int(detail_result.get("detail_posts_done")),
+                "comments_upserted": _safe_int(detail_result.get("comments_upserted")),
+                "media_queued": _safe_int(detail_result.get("media_queued")),
+                "media_mirrored": _safe_int(detail_result.get("media_mirrored")),
+                "errors": detail_result.get("errors") or [],
+                "error_count": _safe_int(detail_result.get("error_count")),
                 "terminal_summary": terminal_summary,
                 "lifecycle": {
                     "worker_id": str(worker_id or "").strip() or None,
@@ -3487,16 +3497,20 @@ def execute_refresh_run(
                 ),
                 run_id[:8],
                 status,
-                detail_posts_done,
-                len(detail_errors),
+                _safe_int(detail_result.get("detail_posts_done")),
+                _safe_int(detail_result.get("error_count")),
             )
 
             _update_run(
                 run_id,
                 status=status,
                 diagnostics=diagnostics,
-                total_rows=len(target_posts),
-                matched_rows=detail_posts_done - len(detail_errors),
+                total_rows=_safe_int(detail_result.get("detail_posts_total")),
+                matched_rows=max(
+                    0,
+                    _safe_int(detail_result.get("detail_posts_done"))
+                    - _safe_int(detail_result.get("error_count")),
+                ),
                 set_completed=True,
                 claim_token=claim_token,
                 release_claim=True,
@@ -3612,7 +3626,8 @@ def execute_refresh_run(
 
         comment_errors = 0
         comments_upserted = 0
-        fetch_comments = bool(request_payload.get("fetch_comments"))
+        run_full_sync = run_mode == "sync_full"
+        fetch_comments = bool(request_payload.get("fetch_comments")) and not run_full_sync
         comment_delta_only = bool(request_payload.get("comment_delta_only", True))
         preserve_existing_assignments = bool(request_payload.get("preserve_existing_assignments", True))
         comment_posts_cap = _env_int(
@@ -3725,8 +3740,6 @@ def execute_refresh_run(
                 comments_upserted += _upsert_comments(pending_comment_rows, conn=conn)
             apply_progress({"comments_rows_upserted": comments_upserted})
 
-        apply_progress({"stage": "finalizing"}, force=True)
-
         search_backfill = result.get("search_backfill") if isinstance(result.get("search_backfill"), dict) else None
         seed_urls = result.get("seed_urls") if isinstance(result.get("seed_urls"), dict) else None
         incomplete_listing, incomplete_backfill = _is_result_incomplete(result)
@@ -3737,17 +3750,36 @@ def execute_refresh_run(
         listing_incomplete_non_fatal = (
             coverage_mode == "max_coverage" and incomplete_listing and not incomplete_backfill and bool(search_backfill)
         )
-        status = (
+        discovery_status = (
             "partial"
             if (incomplete_backfill or (incomplete_listing and not listing_incomplete_non_fatal))
+            else "completed"
+        )
+        detail_result: dict[str, Any] | None = None
+        if run_full_sync:
+            detail_result = _run_detail_sync_phase(
+                community_id=str(run.get("community_id") or "").strip(),
+                season_id=str(run.get("season_id") or "").strip(),
+                period_key=str(run.get("period_key") or "").strip(),
+                force_rescrape=bool(request_payload.get("force_rescrape")),
+                progress=progress,
+                apply_progress=apply_progress,
+            )
+        apply_progress({"stage": "finalizing"}, force=True)
+        status = (
+            "partial"
+            if discovery_status == "partial" or str((detail_result or {}).get("status") or "completed") == "partial"
             else "completed"
         )
         final_completeness = {
             "listing_complete": not incomplete_listing,
             "backfill_complete": not incomplete_backfill,
         }
+        detail_errors = (detail_result or {}).get("errors") if isinstance((detail_result or {}).get("errors"), list) else []
+        error_count = comment_errors + len(detail_errors)
 
         diagnostics = {
+            "mode": "sync_full" if run_full_sync else "sync_posts",
             "coverage_mode": coverage_mode,
             "passes_run": len(pass_results),
             "passes": pass_summaries,
@@ -3778,16 +3810,25 @@ def execute_refresh_run(
                 "upserted_rows": comments_upserted,
                 "errors": comment_errors,
             },
+            "force_rescrape": bool(request_payload.get("force_rescrape")),
+            "detail_posts_total": _safe_int((detail_result or {}).get("detail_posts_total")),
+            "detail_posts_done": _safe_int((detail_result or {}).get("detail_posts_done")),
+            "comments_upserted": _safe_int((detail_result or {}).get("comments_upserted")),
+            "media_queued": _safe_int((detail_result or {}).get("media_queued")),
+            "media_mirrored": _safe_int((detail_result or {}).get("media_mirrored")),
+            "errors": detail_errors,
+            "error_count": error_count,
             "status_resolution": (
                 "listing_incomplete_backfill_complete_max_coverage"
                 if listing_incomplete_non_fatal
                 else "strict_completeness"
             ),
             "terminal_summary": _build_terminal_summary(
-                mode="sync_posts",
+                mode="sync_full" if run_full_sync else "sync_posts",
                 status=status,
                 progress={**progress, "stage": "finalizing"},
-                error_count=comment_errors,
+                error_count=error_count,
+                force_rescrape=bool(request_payload.get("force_rescrape")) if run_full_sync else None,
             ),
             "lifecycle": {
                 "worker_id": str(worker_id or "").strip() or None,
@@ -3803,11 +3844,12 @@ def execute_refresh_run(
         }
 
         logger.info(
-            "[reddit_refresh_execute_complete] run_id=%s mode=sync_posts status=%s rows_matched=%s comment_errors=%s",
+            "[reddit_refresh_execute_complete] run_id=%s mode=%s status=%s rows_matched=%s error_count=%s",
             run_id[:8],
+            "sync_full" if run_full_sync else "sync_posts",
             status,
             int(result.get("totals", {}).get("matched_rows") or 0),
-            comment_errors,
+            error_count,
         )
 
         _update_run(

@@ -10,6 +10,45 @@ import pytest
 from trr_backend import modal_jobs
 
 
+class _FakeImage:
+    def __init__(self) -> None:
+        self.operations: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    @classmethod
+    def debian_slim(cls, **kwargs):
+        image = cls()
+        image.operations.append(("debian_slim", (), dict(kwargs)))
+        return image
+
+    def pip_install_from_requirements(self, *args, **kwargs):
+        self.operations.append(("pip_install_from_requirements", args, dict(kwargs)))
+        return self
+
+    def add_local_python_source(self, *args, **kwargs):
+        self.operations.append(("add_local_python_source", args, dict(kwargs)))
+        return self
+
+    def add_local_file(self, *args, **kwargs):
+        self.operations.append(("add_local_file", args, dict(kwargs)))
+        return self
+
+    def add_local_dir(self, *args, **kwargs):
+        self.operations.append(("add_local_dir", args, dict(kwargs)))
+        return self
+
+    def apt_install(self, *args, **kwargs):
+        self.operations.append(("apt_install", args, dict(kwargs)))
+        return self
+
+    def run_commands(self, *args, **kwargs):
+        self.operations.append(("run_commands", args, dict(kwargs)))
+        return self
+
+
+def _ops_for(image: _FakeImage, name: str) -> list[tuple[object, ...]]:
+    return [args for op_name, args, _kwargs in image.operations if op_name == name]
+
+
 def test_resolve_modal_secrets_uses_named_secrets_when_both_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,3 +198,36 @@ def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> 
     finally:
         monkeypatch.delenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", raising=False)
         importlib.reload(modal_jobs)
+
+
+def test_build_social_image_base_includes_shared_script_payloads() -> None:
+    image = modal_jobs._build_social_image_base(image_factory=_FakeImage)
+
+    added_files = {
+        args[0]: kwargs["remote_path"]
+        for op_name, args, kwargs in image.operations
+        if op_name == "add_local_file"
+    }
+    added_dirs = {
+        args[0]: kwargs["remote_path"]
+        for op_name, args, kwargs in image.operations
+        if op_name == "add_local_dir"
+    }
+
+    assert _ops_for(image, "add_local_python_source") == [("api", "trr_backend")]
+    assert added_files == dict(modal_jobs._SOCIAL_IMAGE_LOCAL_FILES)
+    assert added_dirs == dict(modal_jobs._SOCIAL_IMAGE_LOCAL_DIRS)
+    assert _ops_for(image, "apt_install") == []
+    assert _ops_for(image, "run_commands") == []
+
+
+def test_build_social_image_base_adds_browser_runtime_when_requested() -> None:
+    image = modal_jobs._build_social_image_base(include_browser_runtime=True, image_factory=_FakeImage)
+
+    assert _ops_for(image, "apt_install") == [modal_jobs._SOCIAL_BROWSER_APT_PACKAGES]
+    assert _ops_for(image, "run_commands") == [modal_jobs._SOCIAL_BROWSER_SETUP_COMMANDS]
+
+
+def test_run_social_job_uses_browser_capable_image_binding() -> None:
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_job"] is modal_jobs._browser_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"] is modal_jobs._browser_image

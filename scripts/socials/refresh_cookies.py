@@ -66,6 +66,12 @@ def _threads_cookie_path() -> Path:
     )
 
 
+def _socialblade_cookie_path() -> Path:
+    from trr_backend.socials.socialblade.auth import socialblade_cookie_file_path
+
+    return socialblade_cookie_file_path()
+
+
 PLATFORM_HANDLERS: dict[str, PlatformHandlers] = {
     "instagram": PlatformHandlers(
         platform="instagram",
@@ -111,6 +117,27 @@ PLATFORM_HANDLERS: dict[str, PlatformHandlers] = {
         refresh=social_repo._refresh_threads_cookies,  # noqa: SLF001
         cookie_file=_threads_cookie_path,
         headless_env="SOCIAL_THREADS_COOKIE_REFRESH_HEADLESS",
+    ),
+    "socialblade": PlatformHandlers(
+        platform="socialblade",
+        load=lambda: __import__(
+            "trr_backend.socials.socialblade.auth",
+            fromlist=["load_socialblade_cookies"],
+        ).load_socialblade_cookies(),
+        load_from_sources=lambda: __import__(
+            "trr_backend.socials.socialblade.auth",
+            fromlist=["load_socialblade_cookies_from_sources"],
+        ).load_socialblade_cookies_from_sources(),
+        validate=lambda cookies: __import__(
+            "trr_backend.socials.socialblade.auth",
+            fromlist=["validate_socialblade_cookie_health"],
+        ).validate_socialblade_cookie_health(cookies),
+        refresh=lambda reason: __import__(
+            "trr_backend.socials.socialblade.auth",
+            fromlist=["refresh_socialblade_cookies"],
+        ).refresh_socialblade_cookies(reason),
+        cookie_file=_socialblade_cookie_path,
+        headless_env="SOCIALBLADE_COOKIE_REFRESH_HEADLESS",
     ),
 }
 

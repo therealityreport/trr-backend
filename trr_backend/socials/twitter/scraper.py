@@ -147,10 +147,16 @@ def mirror_tweet_media(tweets: list[Tweet]) -> dict[str, list[str]]:
                 mirrored_by_tweet_id[str(tweet.tweet_id)] = []
                 continue
 
+            _tweet_url = (
+                f"https://x.com/i/status/{tweet.tweet_id}"
+                if tweet.tweet_id
+                else None
+            )
             results = mirror_urls_to_s3(
                 source_urls,
                 s3_client=s3_client,
                 bucket=bucket,
+                tweet_url=_tweet_url,
             )
             hosted_urls: list[str] = []
             seen_hosted_urls: set[str] = set()
@@ -1859,7 +1865,7 @@ class TwitterScraper:
         tweet_id: str,
         delay: float = 2.0,
         *,
-        search_max_pages: int = 8,
+        search_max_pages: int = 20,
         twikit_max_pages: int = 5,
     ) -> list[Tweet]:
         """Fetch replies to a specific tweet."""
@@ -1980,24 +1986,39 @@ class TwitterScraper:
                         if tweet and tweet.tweet_id != tweet_id:
                             replies.append(tweet)
 
-        if not replies and self.last_reply_fetch_reason:
-            fallback_replies = self._fetch_tweet_replies_via_search(
+        # Always supplement with SearchTimeline results for better coverage
+        seen_ids = {r.tweet_id for r in replies}
+        try:
+            search_replies = self._fetch_tweet_replies_via_search(
                 tweet_id=tweet_id,
                 delay=delay,
                 max_pages=search_max_pages,
             )
-            if not fallback_replies and self._twikit_credentials:
-                fallback_replies = self._fetch_tweet_replies_via_twikit(
+            for sr in search_replies:
+                if sr.tweet_id not in seen_ids:
+                    seen_ids.add(sr.tweet_id)
+                    replies.append(sr)
+        except Exception:
+            pass  # SearchTimeline supplement is best-effort
+
+        # Twikit as final supplement if still no results
+        if not replies and self._twikit_credentials:
+            try:
+                twikit_replies = self._fetch_tweet_replies_via_twikit(
                     tweet_id=tweet_id,
                     max_pages=twikit_max_pages,
                     delay=max(delay, 0.2),
                 )
-            if fallback_replies:
-                self.last_reply_fetch_reason = None
-            return fallback_replies
+                for tr in twikit_replies:
+                    if tr.tweet_id not in seen_ids:
+                        seen_ids.add(tr.tweet_id)
+                        replies.append(tr)
+            except Exception:
+                pass
+
         return replies
 
-    def _fetch_tweet_replies_via_search(self, *, tweet_id: str, delay: float, max_pages: int = 8) -> list[Tweet]:
+    def _fetch_tweet_replies_via_search(self, *, tweet_id: str, delay: float, max_pages: int = 20) -> list[Tweet]:
         """Fallback reply fetch using SearchTimeline conversation query."""
         self._ensure_auth()
         query = f"conversation_id:{tweet_id}"

@@ -9,6 +9,7 @@ from uuid import uuid4
 import jwt
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from api.main import app
 from trr_backend.pipeline import admin_operations as pipeline_admin_operations
@@ -391,6 +392,123 @@ def test_start_operation_local_mode_dispatches_supported_show_refresh_to_modal(
     )
     assert response["execution_owner"] == "remote_worker"
     assert response["execution_mode_canonical"] == "remote"
+
+
+def test_start_operation_request_can_prefer_local_execution_in_dev(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("APP_ENV", "development")
+    operation_id = str(uuid4())
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/admin/person/person-1/refresh-images/stream",
+            "headers": [(b"x-trr-prefer-local-execution", b"1")],
+        }
+    )
+
+    with patch(
+        "trr_backend.repositories.admin_operations.create_or_attach_operation",
+        return_value=(
+            {"id": operation_id, "status": "pending", "operation_type": "admin_person_refresh_images"},
+            False,
+        ),
+    ):
+        with patch(
+            "trr_backend.repositories.admin_operations.get_operation",
+            return_value={"id": operation_id, "status": "pending"},
+        ):
+            with patch(
+                "trr_backend.repositories.admin_operations.append_operation_event",
+                return_value={
+                    "operation_id": operation_id,
+                    "event_seq": 1,
+                    "event_type": "operation",
+                    "event_payload": {},
+                },
+            ):
+                with patch("trr_backend.pipeline.admin_operations.ensure_operation_execution") as ensure_mock:
+                    with patch(
+                        "trr_backend.pipeline.admin_operations.dispatch_admin_operation",
+                        return_value=True,
+                    ) as dispatch_mock:
+                        response = pipeline_admin_operations.start_operation_for_stream(
+                            operation_type="admin_person_refresh_images",
+                            producer=lambda: [],
+                            request_payload={"person_id": str(uuid4())},
+                            initiated_by="admin-local-override",
+                            request=request,
+                        )
+
+    ensure_mock.assert_called_once()
+    dispatch_mock.assert_not_called()
+    assert response["execution_owner"] == "local_api"
+    assert response["execution_mode_canonical"] == "local"
+    assert response["execution_backend_canonical"] == "local"
+
+
+def test_start_operation_loopback_person_refresh_prefers_local_execution_in_dev(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("WORKSPACE_DEV_MODE", "cloud")
+    operation_id = str(uuid4())
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/admin/person/person-1/refresh-images/stream",
+            "headers": [],
+            "client": ("127.0.0.1", 54321),
+        }
+    )
+
+    with patch(
+        "trr_backend.repositories.admin_operations.create_or_attach_operation",
+        return_value=(
+            {"id": operation_id, "status": "pending", "operation_type": "admin_person_refresh_images"},
+            False,
+        ),
+    ):
+        with patch(
+            "trr_backend.repositories.admin_operations.get_operation",
+            return_value={"id": operation_id, "status": "pending"},
+        ):
+            with patch(
+                "trr_backend.repositories.admin_operations.append_operation_event",
+                return_value={
+                    "operation_id": operation_id,
+                    "event_seq": 1,
+                    "event_type": "operation",
+                    "event_payload": {},
+                },
+            ):
+                with patch("trr_backend.pipeline.admin_operations.ensure_operation_execution") as ensure_mock:
+                    with patch(
+                        "trr_backend.pipeline.admin_operations.dispatch_admin_operation",
+                        return_value=True,
+                    ) as dispatch_mock:
+                        response = pipeline_admin_operations.start_operation_for_stream(
+                            operation_type="admin_person_refresh_images",
+                            producer=lambda: [],
+                            request_payload={"person_id": str(uuid4())},
+                            initiated_by="admin-loopback-override",
+                            request=request,
+                        )
+
+    ensure_mock.assert_called_once()
+    dispatch_mock.assert_not_called()
+    assert response["execution_owner"] == "local_api"
+    assert response["execution_mode_canonical"] == "local"
+    assert response["execution_backend_canonical"] == "local"
 
 
 def test_claim_and_execute_operation_claims_specific_operation() -> None:
