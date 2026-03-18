@@ -56,6 +56,15 @@ _GETTY_PERSON_GALLERY_VARIANT = "person_gallery_nbcumv_crosswalk"
 # Valid sources for person images
 SourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"]
 ALL_SOURCES: list[SourceType] = ["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"]
+ReprocessSourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery", "getty", "nbcumv"]
+ALL_REPROCESS_SOURCES: list[ReprocessSourceType] = [
+    "imdb",
+    "tmdb",
+    "fandom",
+    "fandom-gallery",
+    "getty",
+    "nbcumv",
+]
 SourceProgressStatus = Literal["pending", "running", "completed", "skipped", "failed"]
 SOURCE_PROGRESS_KEY_ORDER = ("imdb", "tmdb", "fandom", "fandom_gallery", "getty_nbcumv")
 TEXT_OVERLAY_FAILURE_REASONS = (
@@ -320,7 +329,7 @@ class ReprocessImagesRequest(BaseModel):
     run_id_text: bool = Field(default=True, description="Run text overlay detection stage.")
     run_crop: bool = Field(default=True, description="Run centering/cropping stage.")
     run_resize: bool = Field(default=True, description="Run resize/variant generation stage.")
-    sources: list[SourceType] | None = Field(
+    sources: list[ReprocessSourceType] | None = Field(
         default=None,
         description="Optional source filter for cast-photo stages.",
     )
@@ -1247,6 +1256,7 @@ def _import_nbcumv_person_media(
             "getty_event_id": str(asset.get("event_id") or "").strip() or None,
             "getty_event_slug": str(asset.get("event_url_slug") or "").strip() or None,
             "getty_event_date": str(asset.get("event_date") or "").strip() or None,
+            "getty_date_created": str(asset.get("date_created") or "").strip() or None,
             "grouped_image_count": asset.get("grouped_image_count"),
             "person_image_count": asset.get("person_image_count"),
             "source_query_scope": str(asset.get("source_query_scope") or "").strip() or None,
@@ -1404,7 +1414,7 @@ def _import_nbcumv_person_media(
         person_name=normalized_person_name,
         person_match_required=True,
         minimum_grouped_image_count=2,
-        query_params={"sort": "best"},
+        query_params={"sort": "best", "numberofpeople": "one,two"},
         source_query_scope="broad",
     )
 
@@ -1910,6 +1920,7 @@ def _import_nbcumv_person_media(
         matched_bucket_metadata["source_resolution"] = "nbcumv_preferred_shared"
         matched_bucket_metadata["source_query_scope"] = str(asset.get("source_query_scope") or "").strip() or None
         matched_bucket_metadata["person_image_count"] = asset.get("person_image_count")
+        matched_bucket_metadata["getty_date_created"] = str(asset.get("date_created") or "").strip() or None
         matched_assets.append((asset, image, matched_bucket_metadata, "nbcumv_preferred_shared"))
         matched_summaries.append(_summarize_getty_asset(asset, reason="matched", image=image))
         _emit_progress(match_index, match_total, f"Matched NBCUMV asset {len(matched_assets)}: {filename}")
@@ -10854,7 +10865,7 @@ async def reprocess_person_images_stream(
             yield error_event(stage="setup", error="Person not found")
             return
 
-        sources: list[SourceType] = list(request.sources or ALL_SOURCES)
+        sources: list[ReprocessSourceType] = list(request.sources or ALL_REPROCESS_SOURCES)
         target_cast_photo_ids = _normalize_scope_ids(request.target_cast_photo_ids)
         target_media_link_ids = _normalize_scope_ids(request.target_media_link_ids)
         scope_active = request.target_cast_photo_ids is not None or request.target_media_link_ids is not None
@@ -11381,7 +11392,7 @@ async def reprocess_person_images_stream(
                         .table("cast_photos")
                         .select("id, metadata, source")
                         .eq("person_id", person_id_str)
-                        .in_("source", [s for s in sources if s in ALL_SOURCES])
+                        .in_("source", [s for s in sources if s in ALL_REPROCESS_SOURCES])
                         .execute()
                         .data
                         or []
