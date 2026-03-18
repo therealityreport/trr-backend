@@ -522,3 +522,48 @@ def test_extract_detail_section_fields_stops_at_tag_cloud() -> None:
     fields = getty._extract_detail_section_fields(soup)
     object_name = fields.get("object_name_display", "")
     assert object_name == "NUP_162086_1491.jpg", f"Got polluted object_name: {object_name!r}"
+
+
+def test_fetch_asset_detail_prefers_largest_image_url(monkeypatch) -> None:
+    """preview_image_url should prefer downloadableCompUrl over compUrl."""
+    from unittest.mock import MagicMock
+
+    asset_json = {
+        "thumbUrl": "https://media.gettyimages.com/id/123/thumb.jpg?s=170x170",
+        "compUrl": "https://media.gettyimages.com/id/123/comp.jpg?s=594x594",
+        "downloadableCompUrl": "https://media.gettyimages.com/id/123/download.jpg?s=2048x2048",
+        "title": "Test Image",
+        "id": "123",
+    }
+    html = f'<html><script data-component="AssetDetail">{json.dumps({"asset": asset_json})}</script></html>'
+    mock_response = MagicMock()
+    mock_response.text = html
+    mock_response.raise_for_status = MagicMock()
+
+    def mock_get(url, **kwargs):
+        return mock_response
+
+    monkeypatch.setattr(getty, "_session", lambda s=None: MagicMock(get=mock_get))
+
+    result = getty.fetch_asset_detail("https://www.gettyimages.com/detail/news-photo/test/123")
+    assert result is not None
+    assert "2048x2048" in result["preview_image_url"], (
+        f"Expected largest URL, got: {result['preview_image_url']}"
+    )
+
+
+def test_extract_best_image_urls_from_display_sizes() -> None:
+    """_extract_best_image_urls should pick up URLs from displaySizes when top-level keys are missing."""
+    asset_json = {
+        "thumbUrl": "https://media.gettyimages.com/thumb.jpg",
+        "displaySizes": [
+            {"name": "high_res_comp", "uri": "https://media.gettyimages.com/highres.jpg"},
+            {"name": "comp", "uri": "https://media.gettyimages.com/comp.jpg"},
+            {"name": "preview", "uri": "https://media.gettyimages.com/preview.jpg"},
+        ],
+    }
+    urls = getty._extract_best_image_urls(asset_json)
+    assert urls["highResCompUrl"] == "https://media.gettyimages.com/highres.jpg"
+    assert urls["compUrl"] == "https://media.gettyimages.com/comp.jpg"
+    assert urls["downloadableCompUrl"] == "https://media.gettyimages.com/preview.jpg"
+    assert urls["thumbUrl"] == "https://media.gettyimages.com/thumb.jpg"
