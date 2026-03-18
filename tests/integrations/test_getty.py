@@ -528,7 +528,8 @@ def test_search_grouped_events_full_scan_returns_multiple_matched_assets(monkeyp
             "total_scanned": 50,
             "person_image_count": 5,
             "matched_assets": [
-                {"editorial_id": str(i), "object_name": f"OBJ_{i}", "caption": "Brandi Glanville"} for i in range(1, 6)
+                {"editorial_id": str(i), "object_name": f"OBJ_{i}", "caption": "Brandi Glanville"}
+                for i in range(1, 6)
             ],
             "representative_asset": {"editorial_id": "1", "object_name": "OBJ_1"},
         },
