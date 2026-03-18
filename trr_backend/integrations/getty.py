@@ -29,6 +29,18 @@ _DETAIL_SECTION_STOP_MARKERS = {
     "More images from this event",
     "Similar images",
     "Related searches",
+    "CONTENT",
+    "SOLUTIONS",
+    "TOOLS & SERVICES",
+    "COMPANY",
+    "Royalty-free",
+    "Creative Video",
+    "Editorial",
+    "Archive",
+    "Custom Content",
+    "Creative Collections",
+    "Contributor support",
+    "Apply to be a contributor",
 }
 _DETAIL_FIELD_LABELS = {
     "Restrictions:": "restrictions",
@@ -857,6 +869,10 @@ def _extract_detail_section_fields(soup: BeautifulSoup) -> dict[str, str]:
             cursor += 1
         cleaned = " ".join(part.strip() for part in collected if part.strip()).strip()
         if cleaned:
+            if field_name == "object_name_display" and " " in cleaned:
+                first_token = cleaned.split()[0]
+                if re.search(r"\.\w{2,4}$", first_token):
+                    cleaned = first_token
             results[field_name] = cleaned
     return results
 

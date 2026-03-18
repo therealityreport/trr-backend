@@ -500,3 +500,25 @@ def test_search_grouped_events_full_scan_returns_multiple_matched_assets(monkeyp
     assert event["person_image_count"] == 5
     assert len(event.get("matched_assets_list", [])) == 5
     assert event["source_query_scope"] == "bravo"
+
+
+def test_extract_detail_section_fields_stops_at_tag_cloud() -> None:
+    """Object name should not include tag cloud text or footer content."""
+    from bs4 import BeautifulSoup
+
+    html = """
+    <html><body>
+    <div>Object name:</div>
+    <div>NUP_162086_1491.jpg</div>
+    <div>Brandi Glanville Photos</div>
+    <div>2010-2019 Photos</div>
+    <div>Arguing Photos</div>
+    <div>CONTENT</div>
+    <div>Royalty-free</div>
+    <div>Creative Video</div>
+    </body></html>
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    fields = getty._extract_detail_section_fields(soup)
+    object_name = fields.get("object_name_display", "")
+    assert object_name == "NUP_162086_1491.jpg", f"Got polluted object_name: {object_name!r}"
