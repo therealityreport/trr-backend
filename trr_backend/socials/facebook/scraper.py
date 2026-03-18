@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import json
@@ -12,7 +13,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse, urlunparse, unquote
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -24,6 +25,7 @@ _REEL_URL_RE = re.compile(r"https://(?:www\.)?facebook\.com/reel/([0-9]+)", re.I
 _PAGE_REELS_URL_RE = re.compile(r"https://(?:www\.)?facebook\.com/([^/?#]+)/reels/?", re.IGNORECASE)
 _PAGE_PHOTOS_URL_RE = re.compile(r"https://(?:www\.)?facebook\.com/([^/?#]+)/photos/?", re.IGNORECASE)
 _PAGE_POST_URL_RE = re.compile(r"https://(?:www\.)?facebook\.com/([^/?#]+)/posts/([A-Za-z0-9._-]+)", re.IGNORECASE)
+_GROUP_POST_URL_RE = re.compile(r"https://(?:www\.)?facebook\.com/groups/([0-9]+)/posts/([0-9]+)", re.IGNORECASE)
 _POST_ID_RE = re.compile(r'"post_id":"?([0-9]{6,})"?')
 _OG_URL_RE = re.compile(r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)
 _OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -39,6 +41,10 @@ _PUBLISHED_TIME_RE = re.compile(
 _RELATIVE_REEL_HREF_RE = re.compile(r'href=["\'](/reel/([0-9]+)[^"\']*)["\']', re.IGNORECASE)
 _RELATIVE_VIDEO_HREF_RE = re.compile(
     r'href=["\'](/[^"\']+/videos/([0-9]+)[^"\']*)["\']',
+    re.IGNORECASE,
+)
+_RELATIVE_GROUP_POST_HREF_RE = re.compile(
+    r'href=["\'](/groups/[0-9]+/posts/[0-9]+[^"\']*)["\']',
     re.IGNORECASE,
 )
 _SHARE_URL_RE = re.compile(
@@ -93,6 +99,10 @@ _FB_PERMALINK_URL_RE = re.compile(r'"permalink_url":"((?:[^"\\]|\\.)*)"')
 # Facebook rarely includes <meta article:published_time>, but almost always
 # embeds "creation_time":<epoch> in inline script JSON for the primary post.
 _FB_CREATION_TIME_RE = re.compile(r'"creation_time"\s*:\s*(\d{10})')
+_FB_DURATION_MS_RE = re.compile(r'"(?:playable_duration_in_ms|playable_duration_ms|video_duration_ms)"\s*:\s*([0-9]{2,})')
+_FB_DURATION_SECONDS_RE = re.compile(
+    r'"(?:duration_in_sec|duration_seconds|playable_duration(?:_in_seconds)?)"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
+)
 _FB_OWNER_PAGE_NAME_RE = re.compile(r'"owner_as_page":\{[^}]*"name":"((?:[^"\\]|\\.)*)"')
 _FB_OWNER_PROFILE_PICTURE_URI_RE = re.compile(
     r'"(?:owner_as_page|owner)":\{[^{}]*?"profile_picture":\{[^{}]*?"uri":"((?:[^"\\]|\\.)*)"',
@@ -103,6 +113,40 @@ _FB_PROFILE_PICTURE_URI_RE = re.compile(
 _FB_OWNER_PROFILE_PIC_URL_RE = re.compile(
     r'"(?:owner_as_page|owner)":\{[^{}]*?"(?:profile_pic_url|profilePicUrl|profile_image_url)":"((?:[^"\\]|\\.)*)"',
 )
+_FB_INSTAGRAM_URL_RE = re.compile(
+    r"https?://(?:l\.facebook\.com/l\.php\?(?:[^\"' >]*[?&](?:u|url)=)?|www\.)?instagram\.com/(?:p|reel|tv)/[A-Za-z0-9_-]+/?(?:\?[^\"' >]*)?",
+    re.IGNORECASE,
+)
+_FB_INSTAGRAM_EMBEDDED_URL_RE = re.compile(
+    r"https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/[A-Za-z0-9_-]+/?(?:\?[^\"' >]*)?",
+    re.IGNORECASE,
+)
+_FB_SHARE_COUNT_TEXT_RE = re.compile(r"^\s*\d[\d,.KMBkmb]*\s+shares?\s*$")
+_FB_PROFILE_NAME_BLOCK_RE = re.compile(r'data-ad-rendering-role="profile_name"', re.IGNORECASE)
+_FB_STORY_MESSAGE_RE = re.compile(
+    r'data-ad-rendering-role="story_message"[^>]*>(.*?)</div>',
+    re.IGNORECASE | re.DOTALL,
+)
+_FB_PROFILE_LINK_TEXT_RE = re.compile(
+    r'href="([^"]+)"[^>]*>\s*(?:<[^>]+>)*\s*([^<][^<]{1,200}?)\s*(?:</[^>]+>)*\s*</a>',
+    re.IGNORECASE | re.DOTALL,
+)
+_FB_PRIVACY_LABEL_RE = re.compile(r"<title>(Shared with [^<]+)</title>", re.IGNORECASE)
+_FB_IMAGE_SRC_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.IGNORECASE)
+_FB_POST_URL_IN_SEGMENT_RE = re.compile(
+    r'href="([^"]*(?:/posts/|/groups/[0-9]+/posts/|/reel/|/videos/)[^"]*)"',
+    re.IGNORECASE,
+)
+
+
+def _strip_tags(value: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", value or "")
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_caption_for_match(value: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(str(value or "")).strip()).casefold()
 
 
 @dataclass
@@ -127,12 +171,69 @@ class FacebookScrapeConfig:
 
     def in_date_window(self, value: datetime | None) -> bool:
         if value is None:
-            return True
+            return self.date_start is None and self.date_end is None
         if self.date_start and value < self.date_start:
             return False
         if self.date_end and value > self.date_end:
             return False
         return True
+
+
+@dataclass
+class FacebookSearchConfig:
+    query: str
+    search_url: str | None = None
+    profile_url: str | None = None
+    date_start: datetime | None = None
+    date_end: datetime | None = None
+    max_posts: int = 25
+    include_share_details: bool = False
+    include_comments: bool = False
+    max_comments: int = 100
+    max_shares: int = 100
+    allow_cross_platform_media_fallback: bool = True
+    delay_seconds: float = 1.25
+    max_scroll_iterations: int = 25
+
+    @property
+    def normalized_query(self) -> str:
+        return str(self.query or "").strip()
+
+    def in_date_window(self, value: datetime | None) -> bool:
+        if value is None:
+            return self.date_start is None and self.date_end is None
+        if self.date_start and value < self.date_start:
+            return False
+        if self.date_end and value > self.date_end:
+            return False
+        return True
+
+
+@dataclass
+class FacebookShare:
+    sharer_name: str
+    profile_url: str | None = None
+    post_url: str | None = None
+    caption_snippet: str | None = None
+    posted_at: int | None = None
+    privacy_label: str | None = None
+    media_preview_urls: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class FacebookMediaProvenance:
+    platform: str = "facebook"
+    matched_by: str = "native"
+    fallback_used: bool = False
+    source_url: str | None = None
+    candidate_urls: list[str] = field(default_factory=list)
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def _canonicalize_facebook_post_url(url: str) -> str:
@@ -191,6 +292,7 @@ class FacebookPost:
     media_urls: list[str]
     thumbnail_url: str | None
     user_avatar_url: str | None = None
+    duration_seconds: float | None = None
     likes: int = 0
     comments: int = 0
     shares: int = 0
@@ -198,6 +300,8 @@ class FacebookPost:
     posted_at: int | None = None
     url: str = ""
     reactions: dict[str, int] = field(default_factory=dict)
+    share_details: list[FacebookShare] = field(default_factory=list)
+    media_provenance: FacebookMediaProvenance = field(default_factory=FacebookMediaProvenance)
     raw_data: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -266,6 +370,38 @@ class FacebookScraper:
             time.sleep(delay_seconds)
         self._request_count += 1
 
+    def _playwright_cookie_list(self) -> list[dict[str, Any]]:
+        cookies: list[dict[str, Any]] = []
+        for name, value in (self.cookies or {}).items():
+            key = str(name or "").strip()
+            if not key:
+                continue
+            cookies.append(
+                {
+                    "name": key,
+                    "value": str(value or ""),
+                    "domain": ".facebook.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": False,
+                }
+            )
+        return cookies
+
+    def _new_playwright_context(self, playwright: Any, *, referer: str | None = None) -> Any:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=self._headers(referer=referer).get("user-agent", ""),
+            locale="en-US",
+        )
+        cookies = self._playwright_cookie_list()
+        if cookies:
+            try:
+                context.add_cookies(cookies)
+            except Exception:  # noqa: BLE001
+                logger.debug("[facebook] failed to load cookies into playwright context", exc_info=True)
+        return browser, context
+
     def _fetch_html(self, url: str, *, delay_seconds: float, referer: str | None = None) -> str:
         self._rate_limit(delay_seconds)
         try:
@@ -297,11 +433,7 @@ class FacebookScraper:
             raise RuntimeError("Playwright fallback requested but playwright is unavailable") from exc
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=self._headers(referer=referer).get("user-agent", ""),
-                locale="en-US",
-            )
+            browser, context = self._new_playwright_context(playwright, referer=referer)
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45_000)
             if delay_seconds > 0:
@@ -313,6 +445,376 @@ class FacebookScraper:
             html_text = page.content() or ""
             browser.close()
             return html_text
+
+    @staticmethod
+    def _build_search_filters_param(date_start: datetime | None, date_end: datetime | None) -> str | None:
+        if date_start is None and date_end is None:
+            return None
+        start = date_start or date_end
+        end = date_end or date_start
+        if start is None or end is None:
+            return None
+        inner = {
+            "start_year": start.strftime("%Y"),
+            "start_month": start.strftime("%Y-%-m"),
+            "end_year": end.strftime("%Y"),
+            "end_month": end.strftime("%Y-%-m"),
+            "start_day": start.strftime("%Y-%-m-%-d"),
+            "end_day": end.strftime("%Y-%-m-%-d"),
+        }
+        outer = {
+            "rp_creation_time:0": json.dumps(
+                {"name": "creation_time", "args": json.dumps(inner, separators=(",", ":"))},
+                separators=(",", ":"),
+            )
+        }
+        return base64.b64encode(json.dumps(outer, separators=(",", ":")).encode("utf-8")).decode("ascii")
+
+    @staticmethod
+    def _build_search_url(config: FacebookSearchConfig) -> str:
+        query = quote(config.normalized_query)
+        if config.search_url:
+            parsed = urlparse(config.search_url)
+            params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            params["q"] = config.normalized_query
+            filters = FacebookScraper._build_search_filters_param(config.date_start, config.date_end)
+            if filters:
+                params["filters"] = filters
+            return urlunparse(parsed._replace(query=urlencode(params)))
+
+        base = str(config.profile_url or "").rstrip("/")
+        if not base:
+            raise ValueError("profile_url or search_url is required")
+        if not base.endswith("/search"):
+            if not base.endswith("/search/"):
+                base = f"{base}/search"
+        params = {"q": config.normalized_query}
+        filters = FacebookScraper._build_search_filters_param(config.date_start, config.date_end)
+        if filters:
+            params["filters"] = filters
+        return f"{base}?{urlencode(params)}"
+
+    @staticmethod
+    def _normalize_url_candidate(url: str) -> str:
+        raw = html.unescape(str(url or "").strip())
+        if not raw:
+            return ""
+        if raw.startswith("/"):
+            return f"https://www.facebook.com{raw}"
+        return raw
+
+    @staticmethod
+    def _extract_instagram_candidate_urls(text: str) -> list[str]:
+        candidates: list[str] = []
+        for match in _FB_INSTAGRAM_EMBEDDED_URL_RE.finditer(text or ""):
+            url = str(match.group(0) or "").strip()
+            if url:
+                candidates.append(url.split("&fbclid=", 1)[0])
+        for match in re.finditer(r"https?://l\.facebook\.com/l\.php\?[^\"' >]+", text or "", re.IGNORECASE):
+            raw = html.unescape(str(match.group(0) or ""))
+            parsed = urlparse(raw)
+            query = parse_qs(parsed.query)
+            target = ""
+            for key in ("u", "url"):
+                if query.get(key):
+                    target = unquote(str(query[key][0] or ""))
+                    break
+            if _FB_INSTAGRAM_EMBEDDED_URL_RE.search(target):
+                candidates.append(target.split("&fbclid=", 1)[0])
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = candidate.rstrip("/")
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(candidate)
+        return deduped
+
+    @staticmethod
+    def _extract_duration_seconds(html_text: str) -> float | None:
+        if ms_match := _FB_DURATION_MS_RE.search(html_text):
+            try:
+                return round(int(ms_match.group(1)) / 1000.0, 3)
+            except ValueError:
+                return None
+        if sec_match := _FB_DURATION_SECONDS_RE.search(html_text):
+            try:
+                return round(float(sec_match.group(1)), 3)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _post_types_match(facebook_post_type: str, instagram_media_type: str | None) -> bool:
+        fb = str(facebook_post_type or "").strip().lower()
+        ig = str(instagram_media_type or "").strip().lower()
+        if not fb or not ig:
+            return False
+        if fb == ig:
+            return True
+        if fb == "reel" and ig in {"video", "reel"}:
+            return True
+        if fb == "photo" and ig in {"image", "photo"}:
+            return True
+        if fb == "feed" and ig in {"image", "photo", "video"}:
+            return True
+        return False
+
+    @staticmethod
+    def _same_calendar_day(first_epoch: int | None, second_dt: datetime | None) -> bool:
+        if first_epoch is None or second_dt is None:
+            return False
+        first_dt = datetime.fromtimestamp(int(first_epoch), tz=UTC)
+        second_utc = second_dt.astimezone(UTC) if second_dt.tzinfo else second_dt.replace(tzinfo=UTC)
+        return first_dt.date() == second_utc.date()
+
+    @staticmethod
+    def _extract_share_details_from_html(dialog_html: str, *, max_shares: int) -> list[FacebookShare]:
+        shares: list[FacebookShare] = []
+        segments = _FB_PROFILE_NAME_BLOCK_RE.split(dialog_html or "")
+        for segment in segments[1:]:
+            if len(shares) >= max_shares:
+                break
+            links = _FB_PROFILE_LINK_TEXT_RE.findall(segment)
+            if not links:
+                continue
+            profile_url: str | None = None
+            sharer_name = ""
+            for href, text in links:
+                normalized_href = FacebookScraper._normalize_url_candidate(href)
+                cleaned_text = _strip_tags(text)
+                if "facebook.com" in normalized_href and cleaned_text and not sharer_name:
+                    profile_url = normalized_href
+                    sharer_name = cleaned_text
+                    break
+            if not sharer_name:
+                continue
+            post_url = None
+            if post_match := _FB_POST_URL_IN_SEGMENT_RE.search(segment):
+                post_url = FacebookScraper._normalize_url_candidate(post_match.group(1))
+            caption = None
+            if msg_match := _FB_STORY_MESSAGE_RE.search(segment):
+                caption = _strip_tags(msg_match.group(1)) or None
+            privacy = None
+            if privacy_match := _FB_PRIVACY_LABEL_RE.search(segment):
+                privacy = _strip_tags(privacy_match.group(1)) or None
+            preview_urls = []
+            for img_url in _FB_IMAGE_SRC_RE.findall(segment):
+                if "scontent" in img_url or "fbcdn" in img_url:
+                    preview_urls.append(html.unescape(img_url))
+            deduped_previews: list[str] = []
+            seen_preview: set[str] = set()
+            for url in preview_urls:
+                if url in seen_preview:
+                    continue
+                seen_preview.add(url)
+                deduped_previews.append(url)
+            shares.append(
+                FacebookShare(
+                    sharer_name=sharer_name,
+                    profile_url=profile_url,
+                    post_url=post_url,
+                    caption_snippet=caption,
+                    posted_at=None,
+                    privacy_label=privacy,
+                    media_preview_urls=deduped_previews[:4],
+                )
+            )
+        return shares
+
+    def _resolve_cross_platform_media_fallback(
+        self,
+        *,
+        post: FacebookPost,
+        html_text: str,
+        allow_fallback: bool,
+    ) -> None:
+        if not allow_fallback or post.media_urls:
+            return
+        candidates = self._extract_instagram_candidate_urls(html_text)
+        if not candidates:
+            return
+        attempts: list[dict[str, Any]] = []
+        try:
+            from trr_backend.socials.instagram import InstagramScraper, resolve_instagram_media
+        except Exception:  # noqa: BLE001
+            return
+
+        ig_scraper = InstagramScraper()
+        normalized_caption = _normalize_caption_for_match(post.caption)
+        for candidate in candidates:
+            try:
+                resolution = resolve_instagram_media(
+                    candidate,
+                    session=ig_scraper.session,
+                    timeout=ig_scraper.request_timeout,
+                    headers=ig_scraper._get_headers(candidate),
+                    cookies=ig_scraper.cookies,
+                    fetch_post_info=ig_scraper.fetch_post_info,
+                )
+            except Exception as exc:  # noqa: BLE001
+                attempts.append({"candidate_url": candidate, "matched": False, "reason": f"resolution_failed:{exc}"})
+                continue
+            media_item = getattr(resolution, "metadata", None)
+            caption = ""
+            if media_item is not None and hasattr(media_item, "raw_media"):
+                caption = ig_scraper._extract_caption(getattr(media_item, "raw_media", {}) or {})
+            caption_match = normalized_caption and _normalize_caption_for_match(caption) == normalized_caption
+            day_match = self._same_calendar_day(post.posted_at, getattr(media_item, "taken_at", None))
+            type_match = self._post_types_match(post.post_type, getattr(resolution, "media_type", None))
+            duration_match = False
+            duration_seconds = getattr(media_item, "duration_seconds", None)
+            if post.duration_seconds is not None and duration_seconds is not None:
+                try:
+                    duration_match = abs(float(post.duration_seconds) - float(duration_seconds)) <= 2.0
+                except (TypeError, ValueError):
+                    duration_match = False
+            attempts.append(
+                {
+                    "candidate_url": candidate,
+                    "matched": bool(caption_match and day_match and (type_match or duration_match)),
+                    "caption_match": caption_match,
+                    "same_day": day_match,
+                    "type_match": type_match,
+                    "duration_match": duration_match,
+                    "resolution_source": getattr(resolution, "source", None),
+                }
+            )
+            if not (caption_match and day_match and (type_match or duration_match)):
+                continue
+            if resolution.media_urls:
+                post.media_urls = list(resolution.media_urls)
+            if not post.thumbnail_url:
+                post.thumbnail_url = resolution.thumbnail_url
+            post.media_provenance = FacebookMediaProvenance(
+                platform="instagram",
+                matched_by="caption+same_day+type_or_duration",
+                fallback_used=True,
+                source_url=candidate,
+                candidate_urls=candidates,
+                attempts=attempts + list(getattr(resolution, "attempts", []) or []),
+            )
+            post.raw_data["media_provenance"] = post.media_provenance.to_dict()
+            return
+        if attempts:
+            post.media_provenance = FacebookMediaProvenance(
+                platform="facebook",
+                matched_by="native_unavailable",
+                fallback_used=False,
+                source_url=post.url,
+                candidate_urls=candidates,
+                attempts=attempts,
+            )
+            post.raw_data["media_provenance"] = post.media_provenance.to_dict()
+
+    def _discover_search_post_urls(self, config: FacebookSearchConfig) -> list[str]:
+        if not self._playwright_fallback_enabled():
+            raise RuntimeError("Playwright is required for Facebook search scraping")
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("Playwright unavailable for Facebook search scraping") from exc
+
+        search_url = self._build_search_url(config)
+        discovered: list[str] = []
+        seen: set[str] = set()
+
+        with sync_playwright() as playwright:
+            browser, context = self._new_playwright_context(playwright, referer=config.profile_url or search_url)
+            page = context.new_page()
+            try:
+                page.goto(search_url, wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(max(750, int(config.delay_seconds * 1000)))
+                stagnant_cycles = 0
+                for _ in range(max(1, config.max_scroll_iterations)):
+                    html_text = page.content() or ""
+                    candidates = self._extract_post_urls(html_text, handle="")
+                    new_count = 0
+                    for candidate_url, _kind in candidates:
+                        normalized = self._normalize_url_candidate(candidate_url)
+                        if not normalized or normalized in seen:
+                            continue
+                        seen.add(normalized)
+                        discovered.append(normalized)
+                        new_count += 1
+                        if len(discovered) >= max(1, config.max_posts):
+                            break
+                    if len(discovered) >= max(1, config.max_posts):
+                        break
+                    if new_count == 0:
+                        stagnant_cycles += 1
+                        if stagnant_cycles >= 3:
+                            break
+                    else:
+                        stagnant_cycles = 0
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(max(750, int(config.delay_seconds * 1000)))
+            finally:
+                context.close()
+                browser.close()
+
+        self.last_retrieval_meta = {
+            "source": "facebook_search",
+            "search_url": search_url,
+            "posts_discovered": len(discovered),
+            "cookies_supplied": bool(self.cookies),
+        }
+        return discovered[: max(1, config.max_posts)]
+
+    def _scrape_share_details(self, post_url: str, *, max_shares: int, delay_seconds: float) -> list[FacebookShare]:
+        if max_shares <= 0 or not self._playwright_fallback_enabled():
+            return []
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright
+        except Exception:  # noqa: BLE001
+            return []
+
+        with sync_playwright() as playwright:
+            browser, context = self._new_playwright_context(playwright, referer=post_url)
+            page = context.new_page()
+            try:
+                page.goto(post_url, wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(max(750, int(delay_seconds * 1000)))
+                share_locator = page.locator('[role="button"], [role="link"]').filter(has_text=re.compile(r"\bshares?\b", re.I))
+                if share_locator.count() == 0:
+                    return []
+                share_locator.first.click(timeout=5_000)
+                dialog = page.locator('[role="dialog"][aria-label="People who shared this"]')
+                dialog.wait_for(timeout=5_000)
+                stable_cycles = 0
+                prior_count = -1
+                collected: list[FacebookShare] = []
+                for _ in range(15):
+                    dialog_html = dialog.inner_html(timeout=5_000)
+                    collected = self._extract_share_details_from_html(dialog_html, max_shares=max_shares)
+                    if len(collected) >= max_shares:
+                        break
+                    if len(collected) == prior_count:
+                        stable_cycles += 1
+                        if stable_cycles >= 3:
+                            break
+                    else:
+                        stable_cycles = 0
+                    prior_count = len(collected)
+                    page.evaluate(
+                        """() => {
+                            const dialog = document.querySelector('[role="dialog"][aria-label="People who shared this"]');
+                            if (!dialog) return;
+                            const candidates = Array.from(dialog.querySelectorAll('div'))
+                              .filter((el) => el.scrollHeight > el.clientHeight + 20);
+                            const target = candidates.sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+                            if (target) target.scrollTop = target.scrollHeight;
+                        }"""
+                    )
+                    page.wait_for_timeout(max(500, int(delay_seconds * 1000)))
+                return collected[:max_shares]
+            except PlaywrightTimeoutError:
+                return []
+            finally:
+                context.close()
+                browser.close()
 
     def _scrape_feed_with_scroll(
         self,
@@ -330,11 +832,7 @@ class FacebookScraper:
         seen: set[str] = set()
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=self._headers().get("user-agent", ""),
-                locale="en-US",
-            )
+            browser, context = self._new_playwright_context(playwright)
             page = context.new_page()
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=45_000)
@@ -378,6 +876,21 @@ class FacebookScraper:
 
         logger.info("[facebook] scroll scrape discovered %d post URLs for %s", len(all_post_urls), handle)
         return all_post_urls
+
+    @staticmethod
+    def _has_primary_post_signals(html_text: str) -> bool:
+        if not html_text:
+            return False
+        return bool(
+            _OG_TITLE_RE.search(html_text)
+            or _OG_DESC_RE.search(html_text)
+            or _PUBLISHED_TIME_RE.search(html_text)
+            or _FB_CREATION_TIME_RE.search(html_text)
+            or _FB_MESSAGE_TEXT_RE.search(html_text)
+            or _FB_FEEDBACK_BLOCK_RE.search(html_text)
+            or FacebookScraper._FB_OWNER_PAGE_NAME_RE.search(html_text)
+            or FacebookScraper._FB_OWNER_NAME_RE.search(html_text)
+        )
 
     @staticmethod
     def _first_group(pattern: re.Pattern[str], text: str) -> str:
@@ -514,12 +1027,12 @@ class FacebookScraper:
                 continue
             seen.add(source)
             pairs.append((source, "feed"))
-        for match in _PAGE_PHOTOS_URL_RE.finditer(page_html):
-            source = f"{self.BASE_URL}/{match.group(1)}/photos"
+        for match in _GROUP_POST_URL_RE.finditer(page_html):
+            source = f"{self.BASE_URL}/groups/{match.group(1)}/posts/{match.group(2)}"
             if source in seen:
                 continue
             seen.add(source)
-            pairs.append((source, "photo"))
+            pairs.append((source, "feed"))
         for match in _RELATIVE_REEL_HREF_RE.finditer(page_html):
             source = f"{self.BASE_URL}/reel/{match.group(2)}"
             if source in seen:
@@ -532,6 +1045,12 @@ class FacebookScraper:
                 continue
             seen.add(source)
             pairs.append((source, "reel"))
+        for match in _RELATIVE_GROUP_POST_HREF_RE.finditer(page_html):
+            source = f"{self.BASE_URL}{match.group(1)}"
+            if source in seen:
+                continue
+            seen.add(source)
+            pairs.append((source, "feed"))
         if not pairs:
             for og_match in _OG_URL_RE.finditer(page_html):
                 candidate = str(og_match.group(1) or "").strip()
@@ -748,6 +1267,15 @@ class FacebookScraper:
 
         engagement = self._extract_engagement(html_text)
         user_avatar_url = self._extract_owner_avatar_url(html_text)
+        duration_seconds = self._extract_duration_seconds(html_text)
+        media_provenance = FacebookMediaProvenance(
+            platform="facebook",
+            matched_by="native",
+            fallback_used=False,
+            source_url=og_url,
+            candidate_urls=[],
+            attempts=[],
+        )
 
         return FacebookPost(
             post_id=post_id,
@@ -757,6 +1285,7 @@ class FacebookScraper:
             media_urls=media_urls,
             thumbnail_url=image_url or None,
             user_avatar_url=user_avatar_url,
+            duration_seconds=duration_seconds,
             likes=engagement["reaction_count"],
             comments=engagement["comment_count"],
             shares=engagement["share_count"],
@@ -764,6 +1293,7 @@ class FacebookScraper:
             posted_at=posted_at,
             url=og_url,
             reactions=engagement["reactions"],
+            media_provenance=media_provenance,
             raw_data={
                 "og_url": og_url,
                 "og_title": title,
@@ -774,6 +1304,8 @@ class FacebookScraper:
                 "play_count": engagement["play_count"],
                 "video_view_count": engagement["view_count"],
                 "user_avatar_url": user_avatar_url,
+                "duration_seconds": duration_seconds,
+                "media_provenance": media_provenance.to_dict(),
             },
         )
 
@@ -829,6 +1361,9 @@ class FacebookScraper:
         delay_seconds: float = 1.25,
         fetch_comment_list: bool = False,
         max_comments: int = 100,
+        fetch_share_list: bool = False,
+        max_shares: int = 100,
+        allow_cross_platform_media_fallback: bool = True,
     ) -> tuple[FacebookPost | None, list[FacebookComment]]:
         """Scrape a single Facebook post URL for engagement metrics and comments.
 
@@ -868,12 +1403,65 @@ class FacebookScraper:
             username=username,
             post_type_hint=post_type,
         )
+        self._resolve_cross_platform_media_fallback(
+            post=post,
+            html_text=html_text,
+            allow_fallback=allow_cross_platform_media_fallback,
+        )
 
         comments: list[FacebookComment] = []
         if fetch_comment_list:
             comments = self._extract_comments_from_ssr(html_text, max_comments=max_comments)
+        if fetch_share_list:
+            post.share_details = self._scrape_share_details(
+                post.url or post_url,
+                max_shares=max_shares,
+                delay_seconds=delay_seconds,
+            )
+            post.raw_data["share_details"] = [share.to_dict() for share in post.share_details]
 
         return post, comments
+
+    def search_posts(self, config: FacebookSearchConfig) -> list[FacebookPost]:
+        if not config.normalized_query:
+            return []
+
+        candidate_urls = self._discover_search_post_urls(config)
+        posts: list[FacebookPost] = []
+        seen_ids: set[str] = set()
+        checked = 0
+        for candidate_url in candidate_urls:
+            checked += 1
+            post, comments = self.scrape_post(
+                candidate_url,
+                delay_seconds=config.delay_seconds,
+                fetch_comment_list=config.include_comments,
+                max_comments=config.max_comments,
+                fetch_share_list=config.include_share_details,
+                max_shares=config.max_shares,
+                allow_cross_platform_media_fallback=config.allow_cross_platform_media_fallback,
+            )
+            if post is None or not post.post_id or post.post_id in seen_ids:
+                continue
+            posted_dt = datetime.fromtimestamp(post.posted_at, tz=UTC) if isinstance(post.posted_at, int) else None
+            if not config.in_date_window(posted_dt):
+                continue
+            if comments:
+                post.raw_data["comments_preview"] = [comment.to_dict() for comment in comments]
+            seen_ids.add(post.post_id)
+            posts.append(post)
+            if len(posts) >= max(1, config.max_posts):
+                break
+
+        self.last_retrieval_meta = {
+            **dict(self.last_retrieval_meta or {}),
+            "query": config.normalized_query,
+            "posts_checked": checked,
+            "matched_posts": len(posts),
+            "include_share_details": config.include_share_details,
+            "include_comments": config.include_comments,
+        }
+        return posts
 
     def scrape(
         self,
@@ -910,6 +1498,19 @@ class FacebookScraper:
                     post_html = self._fetch_html(candidate_url, delay_seconds=config.delay_seconds, referer=feed_url)
                 except Exception:  # noqa: BLE001
                     continue
+                if (
+                    (config.date_start is not None or config.date_end is not None)
+                    and not self._has_primary_post_signals(post_html)
+                    and self._playwright_fallback_enabled()
+                ):
+                    try:
+                        post_html = self._fetch_html_with_playwright(
+                            candidate_url,
+                            delay_seconds=config.delay_seconds,
+                            referer=feed_url,
+                        )
+                    except Exception:  # noqa: BLE001
+                        continue
                 post = self._build_post_from_html(
                     url=candidate_url,
                     html_text=post_html,
@@ -959,6 +1560,19 @@ class FacebookScraper:
                     post_html = self._fetch_html(candidate_url, delay_seconds=config.delay_seconds, referer=surface_url)
                 except Exception:  # noqa: BLE001
                     continue
+                if (
+                    (config.date_start is not None or config.date_end is not None)
+                    and not self._has_primary_post_signals(post_html)
+                    and self._playwright_fallback_enabled()
+                ):
+                    try:
+                        post_html = self._fetch_html_with_playwright(
+                            candidate_url,
+                            delay_seconds=config.delay_seconds,
+                            referer=surface_url,
+                        )
+                    except Exception:  # noqa: BLE001
+                        continue
                 post = self._build_post_from_html(
                     url=candidate_url,
                     html_text=post_html,

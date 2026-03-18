@@ -238,6 +238,23 @@ def fetch_show_images_missing_hosted(
     Joins with shows table to get show metadata for S3 path building.
     """
 
+    resolved_show_ids: list[str] | None = None
+    normalized_imdb_id = str(imdb_id or "").strip()
+    if normalized_imdb_id:
+        try:
+            response = db.schema("core").table("shows").select("id").eq("imdb_id", normalized_imdb_id).execute()
+        except Exception as exc:
+            raise ShowImageRepositoryError(f"Supabase error resolving show by IMDb ID: {exc}") from exc
+        if hasattr(response, "error") and response.error:
+            raise ShowImageRepositoryError(f"Supabase error resolving show by IMDb ID: {response.error}")
+        resolved_show_ids = [
+            str(row.get("id") or "").strip()
+            for row in (response.data or [])
+            if isinstance(row, Mapping) and str(row.get("id") or "").strip()
+        ]
+        if not resolved_show_ids:
+            return []
+
     def _base_query(*, include_archived_filter: bool):
         query = (
             db.schema("core")
@@ -245,6 +262,7 @@ def fetch_show_images_missing_hosted(
             .select(
                 "id,show_id,source,source_image_id,kind,file_path,url,url_path,"
                 "width,height,caption,position,image_type,tmdb_id,"
+                "shows(imdb_id),"
                 "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type"
             )
         )
@@ -257,6 +275,8 @@ def fetch_show_images_missing_hosted(
             query = query.eq("source", source)
         if show_id:
             query = query.eq("show_id", show_id)
+        if resolved_show_ids is not None:
+            query = query.in_("show_id", resolved_show_ids)
         if tmdb_id is not None:
             query = query.eq("tmdb_id", int(tmdb_id))
         if kind:

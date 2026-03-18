@@ -213,6 +213,7 @@ from api.routers import (  # noqa: E402
     admin_socialblade,
     admin_show_bravo,
     admin_show_icons,
+    admin_show_images,
     admin_show_links,
     admin_show_news,
     admin_show_roles,
@@ -251,6 +252,7 @@ app.include_router(admin_show_roles.router, prefix="/api/v1")
 app.include_router(admin_person_images.router, prefix="/api/v1")
 app.include_router(admin_nbcumv.router, prefix="/api/v1")
 app.include_router(admin_show_bravo.router, prefix="/api/v1")
+app.include_router(admin_show_images.router, prefix="/api/v1")
 app.include_router(admin_show_news.router, prefix="/api/v1")
 app.include_router(admin_scrape.router, prefix="/api/v1")
 app.include_router(admin_socialblade.router, prefix="/api/v1")

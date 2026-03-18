@@ -712,6 +712,64 @@ def update_asset_with_mirror_result(
     return {}
 
 
+def update_asset_with_hosted_fields(
+    db: DbSession,
+    asset_id: str,
+    *,
+    hosted_bucket: str,
+    hosted_key: str,
+    hosted_url: str,
+    hosted_bytes: int,
+    hosted_content_type: str | None = None,
+    hosted_etag: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    completed_at: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Update hosted fields without setting sha columns.
+
+    This is used as a recovery path when the mirrored bytes are already
+    represented by another media_asset row and sha uniqueness would otherwise
+    turn a usable hosted mirror into a hard failure.
+    """
+
+    payload: dict[str, Any] = {
+        "hosted_bucket": hosted_bucket,
+        "hosted_key": hosted_key,
+        "hosted_url": hosted_url,
+        "hosted_bytes": hosted_bytes,
+        "hosted_at": completed_at,
+        "ingest_status": "hosted",
+        "ingest_completed_at": completed_at,
+        "ingest_last_error": None,
+        "ingest_failed_at": None,
+        "ingest_next_retry_at": None,
+    }
+
+    if hosted_content_type:
+        payload["hosted_content_type"] = hosted_content_type
+    if hosted_etag:
+        payload["hosted_etag"] = hosted_etag
+    if isinstance(width, int) and width > 0:
+        payload["width"] = width
+    if isinstance(height, int) and height > 0:
+        payload["height"] = height
+    if metadata is not None:
+        payload["metadata"] = dict(metadata)
+
+    response = db.schema("core").table("media_assets").update(payload).eq("id", asset_id).execute()
+
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error updating hosted fields: {response.error}")
+
+    data = response.data or []
+    if isinstance(data, list) and data:
+        return data[0]
+    return {}
+
+
 def fetch_assets_for_mirroring(
     db: DbSession,
     *,

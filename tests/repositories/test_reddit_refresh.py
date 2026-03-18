@@ -112,6 +112,22 @@ def test_fetch_new_window_exhaustive_remains_incomplete_when_page_cap_is_hit(mon
     assert complete is False
 
 
+def test_fetch_sample_sorts_raises_when_all_sorts_fail(monkeypatch) -> None:
+    def fake_get_json(path, params):  # noqa: ANN001, ARG001
+        raise reddit_refresh.RedditRefreshError("Reddit request failed (403)", status=403)
+
+    monkeypatch.setattr(reddit_refresh._HTTP_CLIENT, "get_json", fake_get_json)  # noqa: SLF001
+
+    with pytest.raises(reddit_refresh.RedditRefreshError, match=r"Reddit request failed \(403\)") as exc_info:
+        reddit_refresh._fetch_sample_sorts(  # noqa: SLF001
+            subreddit="bravorealhousewives",
+            sort_modes=["new", "hot", "top"],
+            limit_per_mode=25,
+        )
+
+    assert exc_info.value.status == 403
+
+
 def test_discover_window_search_backfill_recovers_historical_post(monkeypatch) -> None:
     recovered = _listing_row(post_id="hist001", created_at=datetime(2025, 8, 20, 12, 0, tzinfo=UTC))
 
@@ -876,6 +892,44 @@ def test_execute_refresh_run_updates_live_progress(monkeypatch) -> None:
     assert any(int(update.get("comments_rows_upserted") or 0) >= 1 for update in progress_updates)
 
 
+def test_execute_refresh_run_marks_failed_when_discovery_raises_reddit_error(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000099"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "season",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {"mode": "sync_posts"},
+    }
+    updates: list[dict] = []
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_discover_window",
+        lambda *args, **kwargs: (_ for _ in ()).throw(  # noqa: ARG005
+            reddit_refresh.RedditRefreshError("Reddit request failed (403)", status=403)
+        ),
+    )
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_update_run",
+        lambda run_id_arg, **kwargs: updates.append({"run_id": run_id_arg, **kwargs}),  # noqa: ANN001
+    )
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
+
+    with pytest.raises(reddit_refresh.RedditRefreshError, match=r"Reddit request failed \(403\)"):
+        reddit_refresh.execute_refresh_run(run_id)
+
+    failed_update = next((item for item in updates if item.get("status") == "failed"), None)
+    assert failed_update is not None
+    assert failed_update["error_message"] == "Reddit request failed (403)"
+    diagnostics = failed_update.get("diagnostics") or {}
+    assert diagnostics.get("error_type") == "RedditRefreshError"
+    assert diagnostics.get("terminal_summary", {}).get("status") == "failed"
+
+
 def test_get_refresh_run_includes_queue_counters(monkeypatch) -> None:
     created_at = datetime(2026, 2, 28, 12, 0, tzinfo=UTC)
     updated_at = datetime(2026, 2, 28, 12, 1, tzinfo=UTC)
@@ -1584,6 +1638,112 @@ def test_execute_refresh_run_sync_details_emits_terminal_summary(monkeypatch) ->
     assert diagnostics["terminal_summary"]["detail_posts_done"] == 1
     assert diagnostics["progress"]["detail_posts_total"] == 1
     assert diagnostics["progress"]["detail_posts_done"] == 1
+
+
+def test_execute_refresh_run_sync_full_runs_detail_phase_without_duplicate_inline_comments(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000100"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "community:community-1:season:season-1:container:episode-18",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {
+            "mode": "sync_full",
+            "fetch_comments": True,
+            "comment_delta_only": True,
+            "force_rescrape": False,
+        },
+        "status": "running",
+        "claim_token": "claim-token-1",
+        "updated_at": datetime.now(tz=UTC),
+    }
+    updates: list[dict] = []
+    comment_fetches: list[str] = []
+
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda *args, **kwargs: False)  # noqa: ANN002, ANN003
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_discover_window",
+        lambda payload, progress_callback=None: {  # noqa: ARG005
+            "subreddit": "bravorealhousewives",
+            "window_start": "2026-01-20T05:00:00.000Z",
+            "window_end": "2026-01-27T05:00:00.000Z",
+            "window_exhaustive_complete": True,
+            "listing_pages_fetched": 1,
+            "terms": ["rhoslc"],
+            "hints": {"suggested_include_terms": [], "suggested_exclude_terms": []},
+            "threads": [
+                {
+                    "reddit_post_id": "abc123",
+                    "text": "Body",
+                    "num_comments": 4,
+                    "link_flair_text": "Salt Lake City",
+                }
+            ],
+            "totals": {"fetched_rows": 1, "matched_rows": 1, "tracked_flair_rows": 1},
+        },
+    )
+    monkeypatch.setattr(reddit_refresh, "_is_result_incomplete", lambda result: (False, False))  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_fetch_post_comments_tree",
+        lambda post_id: comment_fetches.append(post_id) or [],
+    )
+    monkeypatch.setattr(reddit_refresh, "_upsert_comments", lambda rows, *, conn: 0)  # noqa: ARG005
+    monkeypatch.setattr(
+        reddit_refresh, "get_refresh_run", lambda run_id_arg: {"run_id": run_id_arg, "status": "completed"}
+    )  # noqa: ARG005
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_update_run",
+        lambda run_id_arg, **kwargs: updates.append({"run_id": run_id_arg, **kwargs}),
+    )
+
+    class _FakeCursor:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ANN204
+            return False
+
+        def execute(self, sql, params):  # noqa: ANN001
+            self.sql = sql
+            self.params = params
+
+        def fetchall(self):  # noqa: ANN204
+            return [
+                {
+                    "reddit_post_id": "abc123",
+                    "url": "https://reddit.com/r/BravoRealHousewives/comments/abc123/thread/",
+                    "raw_payload": {},
+                }
+            ]
+
+    class _FakeConnection:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ANN204
+            return False
+
+    monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: _FakeConnection())
+    monkeypatch.setattr(reddit_refresh.pg, "db_cursor", lambda conn=None: _FakeCursor())  # noqa: ARG005
+
+    result = reddit_refresh.execute_refresh_run(run_id, preclaimed_run=run_row, worker_id="worker-1")
+
+    assert result["status"] == "completed"
+    assert comment_fetches == ["abc123"]
+    completed_update = next(item for item in updates if item.get("status") in {"completed", "partial"})
+    diagnostics = completed_update["diagnostics"]
+    assert diagnostics["mode"] == "sync_full"
+    assert diagnostics["comments"]["enabled"] is False
+    assert diagnostics["detail_posts_total"] == 1
+    assert diagnostics["detail_posts_done"] == 1
+    assert diagnostics["terminal_summary"]["mode"] == "sync_full"
 
 
 def test_list_reddit_community_posts_applies_flair_and_container_filters(monkeypatch) -> None:

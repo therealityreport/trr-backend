@@ -205,6 +205,166 @@ def test_get_social_account_profile_posts(client: TestClient, monkeypatch: pytes
     assert mocked.call_args.kwargs["page_size"] == 10
 
 
+def test_get_social_account_catalog_posts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [
+            {
+                "id": "catalog-1",
+                "source_id": "source-1",
+                "platform": "instagram",
+                "account_handle": "bravotv",
+                "assignment_status": "assigned",
+            }
+        ],
+        "pagination": {"page": 3, "page_size": 5, "total": 11, "total_pages": 3},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_posts",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/posts?page=3&page_size=5&assignment_status=assigned",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["assignment_status"] == "assigned"
+    assert mocked.call_args.kwargs["page"] == 3
+    assert mocked.call_args.kwargs["page_size"] == 5
+    assert mocked.call_args.kwargs["assignment_status"] == "assigned"
+
+
+def test_get_social_account_catalog_review_queue(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [
+            {
+                "id": "review-1",
+                "platform": "instagram",
+                "account_handle": "bravotv",
+                "hashtag": "rhop",
+                "review_status": "pending",
+            }
+        ]
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_review_queue",
+        return_value=expected,
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/review-queue",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["hashtag"] == "rhop"
+
+
+def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "run_id": "catalog-run-1",
+        "status": "queued",
+        "ingest_mode": "shared_account_catalog_backfill",
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+                return_value=expected,
+            ) as mocked:
+                response = client.post(
+                "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"backfill_scope": "full_history"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "catalog-run-1"
+    assert response.json()["status"] == "queued"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+def test_post_social_account_catalog_sync_recent(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "run_id": "catalog-run-2",
+        "status": "queued",
+        "ingest_mode": "shared_account_catalog_backfill",
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.sync_recent_social_account_catalog",
+                return_value=expected,
+            ) as mocked:
+                response = client.post(
+                "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/sync-recent",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"lookback_days": 3},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "catalog-run-2"
+    assert response.json()["status"] == "queued"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["lookback_days"] == 3
+
+
+def test_post_social_account_catalog_review_queue_resolve(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    item_id = str(uuid4())
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    expected = {
+        "item_id": item_id,
+        "review_status": "resolved_show_hashtag",
+        "resolution_action": "assign_season",
+        "resolved_show_id": show_id,
+        "resolved_season_id": season_id,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.resolve_social_account_catalog_review_queue_item",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/review-queue/{item_id}/resolve",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "resolution_action": "assign_season",
+                "show_id": show_id,
+                "season_id": season_id,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["item_id"] == item_id
+    assert response.json()["resolved_show_id"] == show_id
+    assert mocked.call_args.kwargs["item_id"] == item_id
+    assert mocked.call_args.kwargs["resolution_action"] == "assign_season"
+    assert mocked.call_args.kwargs["show_id"] == show_id
+    assert mocked.call_args.kwargs["season_id"] == season_id
+
+
 def test_put_social_account_profile_hashtags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -3008,6 +3168,43 @@ def test_create_sync_session_endpoint_returns_payload(client: TestClient, monkey
     assert mocked.call_args.kwargs["source_scope"] == "bravo"
 
 
+def test_create_sync_session_endpoint_blocks_when_workers_unhealthy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True), patch(
+        "api.routers.socials.is_remote_job_plane_enabled",
+        return_value=False,
+    ), patch(
+        "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+        side_effect=SocialWorkerUnavailableError(
+            "worker unavailable",
+            worker_health={"healthy": False, "healthy_workers": 0, "reason": "no_workers"},
+        ),
+    ):
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "source_scope": "bravo",
+                "platforms": ["twitter"],
+                "date_start": "2026-01-01T00:00:00Z",
+                "date_end": "2026-01-08T00:00:00Z",
+            },
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_WORKER_UNAVAILABLE"
+    assert body["detail"]["worker_health"]["reason"] == "no_workers"
+
+
 def test_get_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -3077,6 +3274,40 @@ def test_stream_sync_session_endpoint_emits_event_stream(client: TestClient, mon
 
     assert "event: sync_session" in body
     assert sync_session_id in body
+
+
+def test_build_sync_session_stream_payload_includes_run_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    sync_session_id = str(uuid4())
+    season_id = str(uuid4())
+    run_id = str(uuid4())
+    expected_sync_session = {
+        "sync_session_id": sync_session_id,
+        "season_id": season_id,
+        "current_run_id": run_id,
+        "status": "pass_running",
+    }
+    expected_run_progress = {
+        "season_id": season_id,
+        "run_id": run_id,
+        "status": "running",
+    }
+
+    with patch(
+        "trr_backend.repositories.social_sync_orchestrator.evaluate_sync_session",
+        return_value=expected_sync_session,
+    ) as mocked_session:
+        with patch(
+            "trr_backend.repositories.social_season_analytics.get_run_progress_snapshot",
+            return_value=expected_run_progress,
+        ) as mocked_progress:
+            from api.routers.socials import _build_sync_session_stream_payload
+
+            payload = _build_sync_session_stream_payload(sync_session_id)
+
+    assert payload["sync_session"] == expected_sync_session
+    assert payload["run_progress"] == expected_run_progress
+    mocked_session.assert_called_once_with(sync_session_id)
+    mocked_progress.assert_called_once_with(season_id, run_id, recent_log_limit=20)
 
 
 def test_cancel_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

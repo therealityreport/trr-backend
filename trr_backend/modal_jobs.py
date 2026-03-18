@@ -11,6 +11,7 @@ from typing import Final
 try:
     import modal
 except ModuleNotFoundError:  # pragma: no cover - exercised by local/test imports without modal installed
+
     class _ModalImage:
         @classmethod
         def debian_slim(cls, **_kwargs):
@@ -91,6 +92,46 @@ _ADMIN_KEEP_WARM = max(0, int(os.getenv("TRR_MODAL_ADMIN_KEEP_WARM", "1")))
 _DEFAULT_RUNTIME_SECRET_NAME = "trr-backend-runtime"
 _DEFAULT_SOCIAL_SECRET_NAME = "trr-social-auth"
 _LOCAL_RUNTIME_MARKERS: Final[frozenset[str]] = frozenset({"local", "dev", "development", "test"})
+_SOCIAL_IMAGE_LOCAL_FILES: Final[tuple[tuple[str, str], ...]] = (
+    (str(_BACKEND_ROOT / "scripts" / "_sync_common.py"), "/root/scripts/_sync_common.py"),
+    (str(_BACKEND_ROOT / "scripts" / "socials" / "__init__.py"), "/root/scripts/socials/__init__.py"),
+    (
+        str(_BACKEND_ROOT / "scripts" / "socials" / "refresh_cookies.py"),
+        "/root/scripts/socials/refresh_cookies.py",
+    ),
+    (
+        str(_BACKEND_ROOT / "scripts" / "socials" / "youtube" / "__init__.py"),
+        "/root/scripts/socials/youtube/__init__.py",
+    ),
+    (str(_BACKEND_ROOT / "scripts" / "socials" / "youtube" / "scrape.py"), "/root/scripts/socials/youtube/scrape.py"),
+)
+_SOCIAL_IMAGE_LOCAL_DIRS: Final[tuple[tuple[str, str], ...]] = (
+    (str(_BACKEND_ROOT / "scripts" / "sync"), "/root/scripts/sync"),
+    (str(_BACKEND_ROOT / "scripts" / "socials" / "instagram"), "/root/scripts/socials/instagram"),
+    (str(_BACKEND_ROOT / "scripts" / "socials" / "tiktok"), "/root/scripts/socials/tiktok"),
+    (str(_BACKEND_ROOT / "scripts" / "socials" / "twitter"), "/root/scripts/socials/twitter"),
+    (str(_BACKEND_ROOT / "scripts" / "socials" / "threads"), "/root/scripts/socials/threads"),
+    (str(_BACKEND_ROOT / "scripts" / "socials" / "facebook"), "/root/scripts/socials/facebook"),
+)
+_SOCIAL_BROWSER_APT_PACKAGES: Final[tuple[str, ...]] = (
+    "libnss3",
+    "libnspr4",
+    "libatk1.0-0",
+    "libatk-bridge2.0-0",
+    "libcups2",
+    "libdrm2",
+    "libxkbcommon0",
+    "libxcomposite1",
+    "libxdamage1",
+    "libxfixes3",
+    "libxrandr2",
+    "libgbm1",
+    "libpango-1.0-0",
+    "libcairo2",
+    "libasound2",
+    "libatspi2.0-0",
+)
+_SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = ("playwright install chromium",)
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_JOB_PLANE_MODE": "remote",
     "TRR_LONG_JOB_ENFORCE_REMOTE": "1",
@@ -110,49 +151,24 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "SOCIAL_QUEUE_ENABLED": "true",
 }
 
-_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install_from_requirements(str(_BACKEND_ROOT / "requirements.lock.txt"))
-    .add_local_python_source("api", "trr_backend")
-    .add_local_file(str(_BACKEND_ROOT / "scripts" / "_sync_common.py"), remote_path="/root/scripts/_sync_common.py")
-    .add_local_dir(str(_BACKEND_ROOT / "scripts" / "sync"), remote_path="/root/scripts/sync")
-    .add_local_file(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "__init__.py"),
-        remote_path="/root/scripts/socials/__init__.py",
-    )
-    .add_local_file(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "refresh_cookies.py"),
-        remote_path="/root/scripts/socials/refresh_cookies.py",
-    )
-    .add_local_dir(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "instagram"),
-        remote_path="/root/scripts/socials/instagram",
-    )
-    .add_local_dir(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "tiktok"),
-        remote_path="/root/scripts/socials/tiktok",
-    )
-    .add_local_dir(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "twitter"),
-        remote_path="/root/scripts/socials/twitter",
-    )
-    .add_local_dir(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "threads"),
-        remote_path="/root/scripts/socials/threads",
-    )
-    .add_local_dir(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "facebook"),
-        remote_path="/root/scripts/socials/facebook",
-    )
-    .add_local_file(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "youtube" / "__init__.py"),
-        remote_path="/root/scripts/socials/youtube/__init__.py",
-    )
-    .add_local_file(
-        str(_BACKEND_ROOT / "scripts" / "socials" / "youtube" / "scrape.py"),
-        remote_path="/root/scripts/socials/youtube/scrape.py",
-    )
-)
+
+def _build_social_image_base(*, include_browser_runtime: bool = False, image_factory: object | None = None):
+    factory = image_factory or modal.Image
+    image = factory.debian_slim(python_version="3.11")
+    if include_browser_runtime:
+        image = image.apt_install(*_SOCIAL_BROWSER_APT_PACKAGES)
+    image = image.pip_install_from_requirements(str(_BACKEND_ROOT / "requirements.lock.txt"))
+    if include_browser_runtime:
+        image = image.run_commands(*_SOCIAL_BROWSER_SETUP_COMMANDS)
+    image = image.add_local_python_source("api", "trr_backend")
+    for local_path, remote_path in _SOCIAL_IMAGE_LOCAL_FILES:
+        image = image.add_local_file(local_path, remote_path=remote_path)
+    for local_path, remote_path in _SOCIAL_IMAGE_LOCAL_DIRS:
+        image = image.add_local_dir(local_path, remote_path=remote_path)
+    return image
+
+
+_image = _build_social_image_base()
 
 _vision_image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -168,18 +184,12 @@ _vision_image = (
     .add_local_python_source("api", "trr_backend")
 )
 
-_browser_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .apt_install(
-        "libnss3", "libnspr4", "libatk1.0-0", "libatk-bridge2.0-0",
-        "libcups2", "libdrm2", "libxkbcommon0", "libxcomposite1",
-        "libxdamage1", "libxfixes3", "libxrandr2", "libgbm1",
-        "libpango-1.0-0", "libcairo2", "libasound2", "libatspi2.0-0",
-    )
-    .pip_install_from_requirements(str(_BACKEND_ROOT / "requirements.lock.txt"))
-    .run_commands("playwright install chromium")
-    .add_local_python_source("api", "trr_backend")
-)
+_browser_image = _build_social_image_base(include_browser_runtime=True)
+_FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
+    "run_social_job": _browser_image,
+    "run_socialblade_scrape": _browser_image,
+    "run_admin_vision": _vision_image,
+}
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -362,6 +372,7 @@ def run_reddit_refresh(run_id: str) -> dict[str, object]:
 
 
 @app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_job"],
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
@@ -434,7 +445,7 @@ def heartbeat_remote_executors() -> dict[str, object]:
 
 
 @app.function(
-    image=_vision_image,
+    image=_FUNCTION_IMAGE_BINDINGS["run_admin_vision"],
     secrets=_secrets,
     retries=0,
     timeout=20 * 60,
@@ -463,7 +474,7 @@ def run_admin_vision(payload: dict[str, object], batch: bool = False) -> dict[st
 
 
 @app.function(
-    image=_browser_image,
+    image=_FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"],
     secrets=_secrets,
     retries=0,
     timeout=5 * 60,
@@ -474,12 +485,11 @@ def run_socialblade_scrape(
     source: str = "person_page",
     force: bool = False,
 ) -> dict[str, object]:
-    import json
-
+    from trr_backend.socials.socialblade.auth import load_socialblade_cookies_from_sources
     from trr_backend.socials.socialblade.scraper import scrape_socialblade
     from trr_backend.socials.socialblade.service import refresh_and_persist_socialblade
 
-    cookies = json.loads(os.getenv("SOCIALBLADE_COOKIES_JSON", "[]"))
+    cookies = load_socialblade_cookies_from_sources()
     if person_id:
         return refresh_and_persist_socialblade(
             person_id=person_id,

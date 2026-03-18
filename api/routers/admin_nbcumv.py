@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -370,6 +371,42 @@ def _merge_dict(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str,
     return merged
 
 
+def _parse_int_field(image: dict[str, Any], *keys: str) -> int | None:
+    """Extract the first integer value from a dict by trying multiple keys."""
+    for key in keys:
+        raw = image.get(key)
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str) and raw.strip().isdigit():
+            return int(raw.strip())
+    return None
+
+
+def _parse_episode_number_from_caption(caption: str | None) -> int | None:
+    """Extract episode number from NBC-style captions like 'Episode 20180'."""
+    if not caption:
+        return None
+    match = re.search(r"Episode\s+(\d+)", caption, re.IGNORECASE)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_season_from_tags(tags: list[str]) -> int | None:
+    """Extract season number from Getty tags like 'Season 20'."""
+    for tag in tags:
+        match = re.search(r"\bSeason\s+(\d+)\b", str(tag), re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+    return None
+
+
 def _build_asset_metadata(
     *,
     image: dict[str, Any],
@@ -387,17 +424,106 @@ def _build_asset_metadata(
         or image.get("liveDate")
         or image.get("lbx_liveDate")
     )
+    getty = getty_asset or {}
+    getty_details = dict(getty.get("details") or {}) if isinstance(getty.get("details"), dict) else {}
+    getty_tags = list(getty.get("keyword_texts") or []) if isinstance(getty.get("keyword_texts"), list) else []
+    nbcumv_enriched = dict(image)
+    # Derive `company` from lbx_copyright/lbx_credit for frontend extractNbcumvFields()
+    if "company" not in nbcumv_enriched:
+        company = str(nbcumv_enriched.get("lbx_copyright") or "").strip()
+        if not company:
+            credit = str(nbcumv_enriched.get("lbx_credit") or "").strip()
+            if "/" in credit:
+                company = credit.split("/", 1)[-1].strip()
+        if company:
+            nbcumv_enriched["company"] = company
+    # Flatten showIds array to show_id string for frontend extractNbcumvFields()
+    if "show_id" not in nbcumv_enriched:
+        show_ids = nbcumv_enriched.get("showIds")
+        if isinstance(show_ids, list) and show_ids:
+            nbcumv_enriched["show_id"] = str(show_ids[0]).strip()
+    # Map lbx_type to content_type for frontend extractNbcumvFields()
+    if "content_type" not in nbcumv_enriched:
+        lbx_type = str(nbcumv_enriched.get("lbx_type") or "").strip()
+        if lbx_type:
+            nbcumv_enriched["content_type"] = lbx_type
     payload = {
         "object_name": image.get("lbx_filename"),
         "resolved_people": resolved_people,
         "unmatched_people": unmatched_people,
         "tagged_people": tagged_people,
         "published_at": published_at,
-        "source_page_url": (getty_asset or {}).get("detail_url"),
-        "nbcumv": dict(image),
-        "getty": getty_asset or {},
+        "source_page_url": getty.get("detail_url"),
+        "nbcumv": nbcumv_enriched,
+        "getty": getty,
+        "getty_details": getty_details,
+        "getty_tags": getty_tags,
+        "getty_event_title": str(getty.get("event_name") or "").strip() or None,
+        "getty_event_url": str(getty.get("event_url") or "").strip() or None,
+        "getty_event_id": str(getty.get("event_id") or "").strip() or None,
+        "getty_event_slug": str(getty.get("event_url_slug") or "").strip() or None,
+        "getty_event_date": str(getty.get("event_date") or "").strip() or None,
         "embedded_file": embedded_metadata or {},
     }
+
+    # --- Top-level keys the frontend reads directly ---
+
+    # Show name/id (frontend reads metadata.show_name, not resolved_show_name)
+    if isinstance(gallery_bucket, dict):
+        if gallery_bucket.get("resolved_show_name"):
+            payload["show_name"] = gallery_bucket["resolved_show_name"]
+        if gallery_bucket.get("resolved_show_id"):
+            payload["show_id"] = gallery_bucket["resolved_show_id"]
+
+    # Season number from NBCUMV fields or Getty tags
+    season_number = _parse_int_field(image, "lbx_seasonNumber", "lbx_season")
+    if season_number is None and getty_tags:
+        season_number = _parse_season_from_tags(getty_tags)
+    if season_number is not None:
+        payload["season_number"] = season_number
+
+    # Episode number from NBCUMV or caption
+    episode_number = _parse_int_field(image, "lbx_episodeNumber")
+    if episode_number is None:
+        episode_number = _parse_episode_number_from_caption(image.get("lbx_caption"))
+    if episode_number is not None:
+        payload["episode_number"] = episode_number
+
+    # Episode title from NBCUMV
+    episode_title = str(image.get("lbx_episodeTitle") or "").strip() or None
+    if episode_title:
+        payload["episode_title"] = episode_title
+
+    # Created date (frontend reads created_at, not published_at)
+    if published_at:
+        payload["created_at"] = published_at
+
+    # People count from Getty or tagged people
+    people_count: int | None = None
+    if isinstance(getty, dict) and getty:
+        getty_pc = getty.get("people_count")
+        if isinstance(getty_pc, int) and getty_pc >= 0:
+            people_count = getty_pc
+        elif isinstance(getty_pc, str) and getty_pc.strip().isdigit():
+            people_count = int(getty_pc.strip())
+        elif getty_tags:
+            from trr_backend.integrations.getty import _infer_people_count
+
+            people_count = _infer_people_count(getty_tags)
+    if people_count is None and tagged_people:
+        people_count = len(tagged_people)
+    if people_count is not None:
+        payload["people_count"] = people_count
+
+    # People names (frontend reads people_names, not tagged_people)
+    if tagged_people:
+        payload["people_names"] = list(tagged_people)
+
+    # Content type at top level (frontend reads metadata.content_type)
+    nbcumv_ct = nbcumv_enriched.get("content_type") or nbcumv_enriched.get("lbx_type")
+    if isinstance(nbcumv_ct, str) and nbcumv_ct.strip():
+        payload["content_type"] = nbcumv_ct.strip()
+
     if isinstance(gallery_bucket, dict):
         payload["gallery_bucket"] = dict(gallery_bucket)
         payload.update(dict(gallery_bucket))

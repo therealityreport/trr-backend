@@ -9,8 +9,8 @@ handoff:
   include: true
   state: active
   last_updated: 2026-03-16
-  current_phase: "operator evidence still pending"
-  next_action: "Use a real full-episode source for the longer-runtime proof, then capture the fresh-session browser walkthrough from a Chrome-enabled session"
+  current_phase: "external-url import regression covered; operator evidence still pending"
+  next_action: "Restart local app/backend with the shared secret synced, validate mirrored social-week imports against the live backend, then capture the fresh-session browser walkthrough"
   detail: self
 ```
 
@@ -59,3 +59,4 @@ handoff:
 - 2026-03-16: Cleared the hosted social sync-session blocker outside TASK12 by terminating stale Supavisor backend pid `3611221`, applying `0193_youtube_asset_manifest_repair`, and proving a live bounded sync-session smoke (`sync_session_id=d96b5ba5-2bf4-4563-b09f-c75900080227`, `run_id=7b0f3a70-4494-4c3b-b510-a283110c0715`) against the repaired schema.
 - 2026-03-16: Retired `3903` obsolete RHOSLC S6 Threads `mirror_platform_not_supported:threads` failures via `scripts/socials/retire_stale_threads_media_mirror_failures.py --season-id e9161955-6ee4-4985-865e-3386a0f670fb --apply`, reducing residual mirror follow-up to narrow twitter/youtube slices instead of a false full-queue blocker.
 - 2026-03-16: Attempted a longer-runtime validation with local file `scripts/socials/youtube/output/bravo_downloads/Oj872yqEFz4.mp4`, then invalidated it after confirming the asset is only `732.606875s` and not a real full episode. Upload session `033dbaf0-d4c2-4bc6-9e9e-4aa35be3389b` promoted `video_asset_id=e14fc66f-3815-45d0-ba21-4388afdcb43d`; run `d4489a91-659a-4cd5-937a-bd628d7881e8` was cancelled with `error_message=operator_cancelled_invalid_runtime_evidence`. Longer-runtime episode proof is still outstanding.
+- 2026-03-16: Added backend regression coverage proving `external_url` cast-screentime imports stay on the external-import path and do not trigger official-channel YouTube validation, then synced the local shared-secret env wiring for TRR-APP and TRR-Backend dev processes.

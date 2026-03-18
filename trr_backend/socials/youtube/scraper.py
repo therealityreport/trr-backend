@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from html import unescape
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -378,6 +379,21 @@ class YouTubeScraper:
         ),
     )
     DATE_ONLY_PREFIX_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
+    SHORTS_LIKE_COUNT_PATTERNS = (
+        re.compile(
+            r'<[^>]+\bid=(["\'])button-bar\1[^>]*>.*?<reel-action-bar-view-model\b[^>]*>.*?'
+            r'<like-button-view-model\b[^>]*>.*?<toggle-button-view-model\b[^>]*>.*?'
+            r'<button-view-model\b[^>]*>.*?<label\b[^>]*>.*?<div\b[^>]*>.*?'
+            r'<span\b[^>]*>(?P<count>[^<]+)</span>',
+            re.IGNORECASE | re.DOTALL,
+        ),
+        re.compile(
+            r'<like-button-view-model\b[^>]*>.*?<toggle-button-view-model\b[^>]*>.*?'
+            r'<button-view-model\b[^>]*>.*?<label\b[^>]*>.*?<div\b[^>]*>.*?'
+            r'<span\b[^>]*>(?P<count>[^<]+)</span>',
+            re.IGNORECASE | re.DOTALL,
+        ),
+    )
 
     # Client context for API requests
     INNERTUBE_CONTEXT = {
@@ -1012,6 +1028,37 @@ class YouTubeScraper:
                 break
         self._precise_publish_ts_cache[video_id] = ts
         return ts
+
+    def _extract_shorts_like_count_from_html(self, body: str) -> int:
+        html = str(body or "")
+        if not html:
+            return 0
+        for pattern in self.SHORTS_LIKE_COUNT_PATTERNS:
+            match = pattern.search(html)
+            if not match:
+                continue
+            count_text = unescape(str(match.group("count") or "")).strip()
+            likes = self._parse_like_count(count_text)
+            if likes > 0:
+                return likes
+        return 0
+
+    def _fetch_shorts_like_count(self, video_id: str, delay: float = 2.0) -> int:
+        normalized_video_id = str(video_id or "").strip()
+        if not normalized_video_id:
+            return 0
+        self._rate_limit(delay)
+        try:
+            response = self.session.get(
+                f"https://www.youtube.com/shorts/{normalized_video_id}",
+                headers=self._get_headers(),
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            logger.debug("Failed to fetch Shorts like count for %s: %s", normalized_video_id, exc)
+            return 0
+        return self._extract_shorts_like_count_from_html(response.text or "")
 
     @staticmethod
     def _extract_json_object_after_marker(text: str, marker: str) -> str | None:
@@ -1827,7 +1874,12 @@ class YouTubeScraper:
             except json.JSONDecodeError:
                 continue
 
-            video.likes = data.get("like_count", 0) or 0
+            resolved_like_count = data.get("like_count", 0) or 0
+            is_short = bool(getattr(video, "is_short", False)) or self._video_surface(video) == "shorts"
+            if resolved_like_count <= 0 and is_short:
+                fallback_delay = min(max(float(delay or 0.0) * 0.25, 0.05), 0.35)
+                resolved_like_count = self._fetch_shorts_like_count(video.video_id, delay=fallback_delay)
+            video.likes = resolved_like_count
             video.comments = data.get("comment_count", 0) or 0
             video.views = data.get("view_count", video.views) or video.views
             resolved_duration_seconds = int(data.get("duration", 0) or 0)

@@ -142,6 +142,7 @@ def test_load_root_rows_applies_scope_filters(monkeypatch) -> None:
     sql = " ".join(str(captured["sql"]).lower().split())
     params = captured["params"]
     assert "t.is_reply = false" in sql
+    assert "coalesce(t.is_quote, false) = false" in sql
     assert "t.season_id = %s::uuid" in sql
     assert "lower(coalesce(nullif(t.source_account, ''), nullif(t.username, ''), '')) = lower(%s)" in sql
     assert "t.tweet_id = %s" in sql

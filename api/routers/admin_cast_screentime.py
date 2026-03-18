@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import CastScreentimeAdminUser
 from api.screenalytics_auth import require_screenalytics_service_token
 from trr_backend.clients import screenalytics_cast_screentime
 from trr_backend.media.s3_mirror import build_public_object_url, get_cdn_base_url, get_s3_bucket, get_s3_client
@@ -1045,7 +1045,7 @@ def reconcile_stale_runs_once(*, show_id: str | None = None, stale_after_seconds
 @router.post("/admin/cast-screentime/upload-sessions")
 def create_upload_session(
     request: UploadSessionCreateRequest,
-    admin_user: AdminUser,
+    admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     _validate_upload_scope(request)
     _validate_video_classification(request.video_class, request.promo_subtype)
@@ -1105,7 +1105,7 @@ def create_upload_session(
 def complete_upload_session(
     upload_session_id: UUID,
     request: UploadSessionCompleteRequest,
-    _: AdminUser,
+    _: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     if upload_session_id != request.upload_session_id:
         raise HTTPException(status_code=400, detail="Path/body upload session mismatch")
@@ -1126,7 +1126,7 @@ def complete_upload_session(
 
 
 @router.get("/admin/cast-screentime/video-assets/{video_asset_id}")
-def get_video_asset(video_asset_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_video_asset(video_asset_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     video_asset = cast_screentime.get_video_asset(str(video_asset_id))
     if not video_asset:
         raise HTTPException(status_code=404, detail="Video asset not found")
@@ -1136,7 +1136,7 @@ def get_video_asset(video_asset_id: UUID, _: AdminUser) -> dict[str, Any]:
 @router.post("/admin/cast-screentime/video-assets/import")
 def import_video_asset(
     request: ImportVideoAssetRequest,
-    admin_user: AdminUser,
+    admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     _validate_video_classification(request.video_class, request.promo_subtype)
     owner_context = _resolve_owner_context_from_request(
@@ -1341,7 +1341,7 @@ def import_video_asset(
 def create_run(
     video_asset_id: UUID,
     request: CreateRunRequest,
-    _: AdminUser,
+    _: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     video_asset = cast_screentime.get_video_asset(str(video_asset_id))
     if not video_asset:
@@ -1382,19 +1382,26 @@ def create_run(
         dispatch_result = screenalytics_cast_screentime.start_run(str(run["id"]))
     except screenalytics_cast_screentime.ScreenalyticsCastScreentimeClientError as exc:
         dispatch_state = "dispatch_failed"
-        cast_screentime.update_run(str(run["id"]), {"error_message": str(exc)})
+        cast_screentime.update_run(
+            str(run["id"]),
+            {
+                "status": "failed",
+                "error_message": str(exc),
+                "completed_at": datetime.now(UTC).isoformat(),
+            },
+        )
     run_payload = cast_screentime.get_run_with_video_asset(str(run["id"])) or run
     return {"run": _annotate_run_row(run_payload), "dispatch_state": dispatch_state, "dispatch_result": dispatch_result}
 
 
 @router.get("/admin/cast-screentime/runs/{run_id}")
-def get_run(run_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_run(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     run = cast_screentime.get_run_with_video_asset(str(run_id))
     return _annotate_run_row(_assert_cast_screentime_run(run))
 
 
 @router.get("/admin/cast-screentime/runs/{run_id}/leaderboard")
-def get_leaderboard(run_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_leaderboard(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     return {
         "run_id": str(run_id),
@@ -1404,13 +1411,13 @@ def get_leaderboard(run_id: UUID, _: AdminUser) -> dict[str, Any]:
 
 
 @router.get("/admin/cast-screentime/runs/{run_id}/segments")
-def get_segments(run_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_segments(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     return {"run_id": str(run_id), "segments": cast_screentime.list_segments(str(run_id))}
 
 
 @router.get("/admin/cast-screentime/runs/{run_id}/evidence")
-def get_evidence(run_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_evidence(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     return {
         "run_id": str(run_id),
@@ -1422,7 +1429,7 @@ def get_evidence(run_id: UUID, _: AdminUser) -> dict[str, Any]:
 def get_run_artifact(
     run_id: UUID,
     artifact_key: str,
-    _: AdminUser,
+    _: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     artifact, payload = _read_run_artifact_payload(str(run_id), artifact_key)
@@ -1434,7 +1441,7 @@ def generate_segment_clip(
     run_id: UUID,
     segment_key: str,
     request: SegmentClipRequest,
-    _: AdminUser,
+    _: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     try:
@@ -1457,7 +1464,7 @@ def generate_segment_clip(
 
 
 @router.get("/admin/cast-screentime/runs/{run_id}/excluded-sections")
-def get_excluded_sections(run_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_excluded_sections(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     return {"run_id": str(run_id), "excluded_sections": cast_screentime.list_excluded_sections(str(run_id))}
 
@@ -1466,9 +1473,11 @@ def get_excluded_sections(run_id: UUID, _: AdminUser) -> dict[str, Any]:
 def set_review_status(
     run_id: UUID,
     request: ReviewStatusRequest,
-    admin_user: AdminUser,
+    admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run(str(run_id)))
+    if str(run.get("status") or "") != "success":
+        raise HTTPException(status_code=409, detail="Only successful runs can enter review flow")
     allowed = {
         "draft": {"ready_for_review"},
         "ready_for_review": {"in_review"},
@@ -1495,7 +1504,7 @@ def set_review_status(
 def publish_run(
     run_id: UUID,
     request: PublishRunRequest,
-    admin_user: AdminUser,
+    admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     video_class = str(run.get("video_class") or "episode")
@@ -1553,7 +1562,7 @@ def publish_run(
 
 
 @router.get("/admin/cast-screentime/video-assets/{video_asset_id}/publish-history")
-def get_publish_history(video_asset_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_publish_history(video_asset_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     video_asset = cast_screentime.get_video_asset(str(video_asset_id))
     if not video_asset:
         raise HTTPException(status_code=404, detail="Video asset not found")
@@ -1567,7 +1576,7 @@ def get_publish_history(video_asset_id: UUID, _: AdminUser) -> dict[str, Any]:
 @router.get("/admin/cast-screentime/shows/{show_id}/runs")
 def list_show_runs(
     show_id: UUID,
-    _: AdminUser,
+    _: CastScreentimeAdminUser,
     limit: int = Query(default=20, ge=1, le=100),
     video_class: Literal["episode", "promo"] | None = Query(default=None),
 ) -> dict[str, Any]:
@@ -1576,7 +1585,7 @@ def list_show_runs(
 
 
 @router.get("/admin/cast-screentime/shows/{show_id}/published-rollups")
-def get_show_published_rollups(show_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_show_published_rollups(show_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     try:
         return _aggregate_rollup(
             cast_screentime.list_current_published_versions_for_show(str(show_id)),
@@ -1589,7 +1598,7 @@ def get_show_published_rollups(show_id: UUID, _: AdminUser) -> dict[str, Any]:
 
 
 @router.get("/admin/cast-screentime/seasons/{season_id}/published-rollups")
-def get_season_published_rollups(season_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_season_published_rollups(season_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     try:
         return _aggregate_rollup(
             cast_screentime.list_current_published_versions_for_season(str(season_id)),
@@ -1602,7 +1611,7 @@ def get_season_published_rollups(season_id: UUID, _: AdminUser) -> dict[str, Any
 
 
 @router.get("/admin/cast-screentime/runs/{run_id}/decision-state")
-def get_decision_state(run_id: UUID, _: AdminUser) -> dict[str, Any]:
+def get_decision_state(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     show_id = str(run.get("show_id") or "").strip()
     if not show_id:
@@ -1627,7 +1636,7 @@ def set_suggestion_decision(
     run_id: UUID,
     suggestion_key: str,
     request: DecisionActionRequest,
-    admin_user: AdminUser,
+    admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     suggestions_payload = _artifact_payload_or_default(str(run_id), "cast_suggestions.json", default=[])
@@ -1672,7 +1681,7 @@ def set_unknown_review_decision(
     run_id: UUID,
     queue_key: str,
     request: DecisionActionRequest,
-    admin_user: AdminUser,
+    admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     queues_payload = _artifact_payload_or_default(str(run_id), "unknown_review_queues.json", default=[])
@@ -1714,7 +1723,7 @@ def set_unknown_review_decision(
 
 @router.post("/admin/cast-screentime/runs/reconcile-stale")
 def reconcile_stale_runs(
-    _: AdminUser,
+    _: CastScreentimeAdminUser,
     show_id: UUID | None = Query(default=None),
     stale_after_seconds: int = Query(default=_DEFAULT_STALE_AFTER_SECONDS, ge=60, le=86400),
 ) -> dict[str, Any]:

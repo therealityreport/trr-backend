@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from trr_backend.socials.facebook.scraper import FacebookScraper
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
+
+from trr_backend.socials.facebook.scraper import FacebookScraper, FacebookSearchConfig
 
 # Minimal SSR HTML fragment that mirrors the real Facebook feedback JSON structure
 _SAMPLE_FEEDBACK_HTML = """
@@ -232,3 +237,194 @@ class TestFacebookPostDataclass:
         )
         d = post.to_dict()
         assert d["reactions"] == {"Like": 50}
+
+
+class TestFacebookSearchAndShareHelpers:
+    def test_build_search_url_from_profile_and_dates(self) -> None:
+        config = FacebookSearchConfig(
+            profile_url="https://www.facebook.com/profile/100059495681624",
+            query="#RHOSLC",
+            date_start=datetime(2025, 1, 1, tzinfo=UTC),
+            date_end=datetime(2025, 12, 31, tzinfo=UTC),
+        )
+        url = FacebookScraper._build_search_url(config)
+        assert "/profile/100059495681624/search" in url
+        assert "q=%23RHOSLC" in url
+        assert "filters=" in url
+
+    def test_extract_post_urls_supports_group_posts(self) -> None:
+        scraper = FacebookScraper()
+        html = """
+        <a href="/groups/1432923047421128/posts/1722908395089257/">group post</a>
+        <a href="https://www.facebook.com/TestPage/posts/12345">feed post</a>
+        """
+        pairs = scraper._extract_post_urls(html, handle="")
+        urls = {url for url, _kind in pairs}
+        assert "https://www.facebook.com/groups/1432923047421128/posts/1722908395089257/" in urls
+        assert "https://www.facebook.com/TestPage/posts/12345" in urls
+
+    def test_extract_share_details_from_html(self) -> None:
+        html = """
+        <div data-ad-rendering-role="profile_name">
+          <a href="https://www.facebook.com/kyle.d.karnes"><span>Kyle Davis Karnes</span></a>
+          <title>Shared with Public</title>
+          <div data-ad-rendering-role="story_message">Opa! The moment you've been waiting for is finally here.</div>
+          <a href="https://www.facebook.com/kyle.d.karnes/posts/pfbid033MGB4hDUWwRo31hcXacsqDQZSuFSDogHFSy1jhfzVc92SWXdee7fpNF1rQsJBPVLl">30w</a>
+          <img src="https://scontent.xx.fbcdn.net/preview.jpg" />
+        </div>
+        """
+        shares = FacebookScraper._extract_share_details_from_html(html, max_shares=10)
+        assert len(shares) == 1
+        assert shares[0].sharer_name == "Kyle Davis Karnes"
+        assert shares[0].profile_url == "https://www.facebook.com/kyle.d.karnes"
+        assert shares[0].post_url == (
+            "https://www.facebook.com/kyle.d.karnes/posts/pfbid033MGB4hDUWwRo31hcXacsqDQZSuFSDogHFSy1jhfzVc92SWXdee7fpNF1rQsJBPVLl"
+        )
+        assert shares[0].privacy_label == "Shared with Public"
+        assert shares[0].caption_snippet == "Opa! The moment you've been waiting for is finally here."
+
+    def test_search_posts_uses_discovery_and_post_scrape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scraper = FacebookScraper()
+        post = scraper._build_post_from_html(
+            url="https://www.facebook.com/TestPage/posts/123",
+            html_text=(
+                '<meta property="og:url" content="https://www.facebook.com/TestPage/posts/123" />'
+                '<meta property="og:title" content="A title" />'
+                '<meta property="og:description" content="#RHOSLC hello" />'
+                '{"creation_time":1736035200}'
+            ),
+            username="TestPage",
+            post_type_hint="feed",
+        )
+
+        monkeypatch.setattr(scraper, "_discover_search_post_urls", lambda config: [post.url])
+        monkeypatch.setattr(scraper, "scrape_post", lambda *args, **kwargs: (post, []))
+
+        results = scraper.search_posts(
+            FacebookSearchConfig(
+                profile_url="https://www.facebook.com/TestPage",
+                query="#RHOSLC",
+                date_start=datetime(2025, 1, 1, tzinfo=UTC),
+                date_end=datetime(2025, 1, 31, tzinfo=UTC),
+                max_posts=5,
+            )
+        )
+        assert len(results) == 1
+        assert results[0].post_id == post.post_id
+
+    def test_cross_platform_media_fallback_accepts_exact_caption_same_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scraper = FacebookScraper()
+        post = scraper._build_post_from_html(
+            url="https://www.facebook.com/TestPage/posts/123",
+            html_text=(
+                '<meta property="og:url" content="https://www.facebook.com/TestPage/posts/123" />'
+                '<meta property="og:description" '
+                'content="Opa! The moment you&apos;ve been waiting for is finally here. ❄️ A new season of #RHOSLC goes the distance starting September 16th!" />'
+                '{"creation_time":1757980800}'
+            ),
+            username="TestPage",
+            post_type_hint="reel",
+        )
+        post.media_urls = []
+        post.thumbnail_url = None
+
+        class FakeInstagramScraper:
+            def __init__(self) -> None:
+                self.session = None
+                self.request_timeout = (10, 45)
+                self.cookies = {}
+
+            def _get_headers(self, referer: str | None = None) -> dict[str, str]:
+                return {}
+
+            def fetch_post_info(self, shortcode: str) -> dict[str, str]:
+                return {}
+
+            def _extract_caption(self, raw_media: dict[str, str]) -> str:
+                return str(raw_media.get("caption") or "")
+
+        resolution = SimpleNamespace(
+            source="html_json",
+            media_type="reel",
+            media_urls=["https://cdn.instagram.test/video.mp4"],
+            thumbnail_url="https://cdn.instagram.test/thumb.jpg",
+            attempts=[{"source": "html_json", "success": True}],
+            metadata=SimpleNamespace(
+                taken_at=datetime(2025, 9, 16, 15, 0, tzinfo=UTC),
+                duration_seconds=35.0,
+                raw_media={
+                    "caption": (
+                        "Opa! The moment you've been waiting for is finally here. ❄️ "
+                        "A new season of #RHOSLC goes the distance starting September 16th!"
+                    )
+                },
+            ),
+        )
+
+        monkeypatch.setattr("trr_backend.socials.instagram.InstagramScraper", FakeInstagramScraper)
+        monkeypatch.setattr("trr_backend.socials.instagram.resolve_instagram_media", lambda *args, **kwargs: resolution)
+
+        scraper._resolve_cross_platform_media_fallback(
+            post=post,
+            html_text='https://www.instagram.com/reel/ABC123/',
+            allow_fallback=True,
+        )
+
+        assert post.media_urls == ["https://cdn.instagram.test/video.mp4"]
+        assert post.thumbnail_url == "https://cdn.instagram.test/thumb.jpg"
+        assert post.media_provenance.platform == "instagram"
+        assert post.media_provenance.fallback_used is True
+
+    def test_cross_platform_media_fallback_rejects_caption_mismatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scraper = FacebookScraper()
+        post = scraper._build_post_from_html(
+            url="https://www.facebook.com/TestPage/posts/123",
+            html_text=(
+                '<meta property="og:url" content="https://www.facebook.com/TestPage/posts/123" />'
+                '<meta property="og:description" content="Original caption" />'
+                '{"creation_time":1757980800}'
+            ),
+            username="TestPage",
+            post_type_hint="feed",
+        )
+        post.media_urls = []
+
+        class FakeInstagramScraper:
+            def __init__(self) -> None:
+                self.session = None
+                self.request_timeout = (10, 45)
+                self.cookies = {}
+
+            def _get_headers(self, referer: str | None = None) -> dict[str, str]:
+                return {}
+
+            def fetch_post_info(self, shortcode: str) -> dict[str, str]:
+                return {}
+
+            def _extract_caption(self, raw_media: dict[str, str]) -> str:
+                return str(raw_media.get("caption") or "")
+
+        resolution = SimpleNamespace(
+            source="html_json",
+            media_type="image",
+            media_urls=["https://cdn.instagram.test/fallback.jpg"],
+            thumbnail_url=None,
+            attempts=[],
+            metadata=SimpleNamespace(
+                taken_at=datetime(2025, 9, 16, 12, 0, tzinfo=UTC),
+                duration_seconds=None,
+                raw_media={"caption": "Different caption"},
+            ),
+        )
+        monkeypatch.setattr("trr_backend.socials.instagram.InstagramScraper", FakeInstagramScraper)
+        monkeypatch.setattr("trr_backend.socials.instagram.resolve_instagram_media", lambda *args, **kwargs: resolution)
+
+        scraper._resolve_cross_platform_media_fallback(
+            post=post,
+            html_text='https://www.instagram.com/p/ABC123/',
+            allow_fallback=True,
+        )
+
+        assert post.media_urls == []
+        assert post.media_provenance.platform == "facebook"
+        assert post.media_provenance.fallback_used is False

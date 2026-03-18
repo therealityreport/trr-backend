@@ -262,7 +262,7 @@ def parse_args() -> argparse.Namespace:
 def _requires_media_mirror_s3_preflight(*, stage: str | None, platform: str | None) -> bool:
     normalized_stage = str(stage or "any").strip().lower() or "any"
     normalized_platform = str(platform or "any").strip().lower() or "any"
-    return normalized_stage in {"any", "media_mirror", "comment_media_mirror"} and normalized_platform in {
+    return normalized_stage in {"media_mirror", "comment_media_mirror"} and normalized_platform in {
         "any",
         "instagram",
         "tiktok",

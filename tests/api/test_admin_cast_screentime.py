@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
-from api.auth import require_admin
+from api.auth import require_cast_screentime_admin
 from api.main import app
 from api.routers import admin_cast_screentime as router_module
 from trr_backend.clients import screenalytics_cast_screentime
@@ -13,16 +15,35 @@ from trr_backend.repositories import cast_screentime as repo
 
 
 @pytest.fixture(autouse=True)
-def override_admin():
-    app.dependency_overrides[require_admin] = lambda: {"id": "service_role:test", "role": "service_role"}
+def override_admin(request):
+    if "no_admin_override" in request.fixturenames:
+        yield
+        return
+    app.dependency_overrides[require_cast_screentime_admin] = lambda: {"id": "service_role:test", "role": "service_role"}
     yield
-    app.dependency_overrides.pop(require_admin, None)
+    app.dependency_overrides.pop(require_cast_screentime_admin, None)
 
 
 @pytest.fixture(autouse=True)
 def set_service_token(monkeypatch):
     monkeypatch.setenv("SCREENALYTICS_SERVICE_TOKEN", "test-token")
     yield
+
+
+def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
+    now = datetime.now(tz=UTC)
+    payload = {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "role": "service_role",
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+@pytest.fixture
+def no_admin_override():
+    return True
 
 
 @pytest.fixture(autouse=True)
@@ -572,6 +593,48 @@ def test_upload_complete_and_run_flow():
     assert payload["run"]["run_type"] == "cast_screentime"
 
 
+def test_create_run_marks_dispatch_failures_failed(monkeypatch):
+    def _raise_dispatch_error(_run_id):
+        raise screenalytics_cast_screentime.ScreenalyticsCastScreentimeClientError(
+            "SCREENALYTICS_SERVICE_TOKEN is not configured"
+        )
+
+    monkeypatch.setattr(screenalytics_cast_screentime, "start_run", _raise_dispatch_error)
+
+    client = TestClient(app)
+    show_id = uuid4()
+
+    create_response = client.post(
+        "/api/v1/admin/cast-screentime/upload-sessions",
+        json={
+            "show_id": str(show_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
+    )
+    upload_session_id = create_response.json()["upload_session_id"]
+
+    complete_response = client.post(
+        f"/api/v1/admin/cast-screentime/upload-sessions/{upload_session_id}/complete",
+        json={"upload_session_id": upload_session_id},
+    )
+    video_asset_id = complete_response.json()["video_asset"]["id"]
+
+    run_response = client.post(
+        f"/api/v1/admin/cast-screentime/video-assets/{video_asset_id}/runs",
+        json={"run_config_json": {"processing_mode": "balanced"}},
+    )
+    assert run_response.status_code == 200
+    payload = run_response.json()
+
+    assert payload["dispatch_state"] == "dispatch_failed"
+    assert payload["run"]["status"] == "failed"
+    assert payload["run"]["error_message"] == "SCREENALYTICS_SERVICE_TOKEN is not configured"
+    assert payload["run"]["completed_at"] is not None
+    assert payload["run"]["review_status"] == "draft"
+
+
 def test_promo_upload_session_preserves_classification():
     client = TestClient(app)
     season_id = uuid4()
@@ -665,6 +728,33 @@ def test_import_social_youtube_row_uses_social_import_type():
     assert video_asset["promo_subtype"] == "episode_teaser"
 
 
+def test_import_external_url_uses_external_import_type_without_youtube_channel_check(monkeypatch):
+    youtube_metadata_calls: list[str] = []
+
+    monkeypatch.setattr(
+        router_module,
+        "_youtube_fetch_video_metadata",
+        lambda video_id: youtube_metadata_calls.append(video_id),
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/cast-screentime/video-assets/import",
+        json={
+            "source_mode": "external_url",
+            "source_url": "https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev/social/youtube/test/trailer.mp4",
+            "owner_scope": "season",
+            "owner_id": str(uuid4()),
+            "video_class": "promo",
+            "promo_subtype": "trailer",
+        },
+    )
+    assert response.status_code == 200
+    video_asset = response.json()["video_asset"]
+    assert video_asset["source_import_type"] == "external_url_import"
+    assert youtube_metadata_calls == []
+
+
 def test_upload_complete_fails_when_ffprobe_rejects_upload(monkeypatch):
     monkeypatch.setattr(router_module, "_ffprobe_video", lambda *_args, **_kwargs: {"ok": False, "error": "ffprobe_failed"})
 
@@ -748,6 +838,34 @@ def test_internal_finalize_and_reads():
     artifact_response = client.get(f"/api/v1/admin/cast-screentime/runs/{run_id}/artifacts/shots.json")
     assert artifact_response.status_code == 200
     assert artifact_response.json()["payload"]["shots"][0]["shot_key"] == "shot-1"
+
+
+def test_review_status_rejects_non_success_run():
+    client = TestClient(app)
+    show_id = uuid4()
+    create_response = client.post(
+        "/api/v1/admin/cast-screentime/upload-sessions",
+        json={"show_id": str(show_id), "filename": "episode.mp4", "content_type": "video/mp4", "expected_size_bytes": 1024},
+    )
+    upload_session_id = create_response.json()["upload_session_id"]
+    complete_response = client.post(
+        f"/api/v1/admin/cast-screentime/upload-sessions/{upload_session_id}/complete",
+        json={"upload_session_id": upload_session_id},
+    )
+    video_asset_id = complete_response.json()["video_asset"]["id"]
+    run_response = client.post(
+        f"/api/v1/admin/cast-screentime/video-assets/{video_asset_id}/runs",
+        json={},
+    )
+    run_id = run_response.json()["run"]["id"]
+
+    response = client.post(
+        f"/api/v1/admin/cast-screentime/runs/{run_id}/review-status",
+        json={"review_status": "ready_for_review", "notes": {}},
+    )
+
+    assert response.status_code == 409
+    assert "successful runs can enter review flow" in response.json()["detail"].lower()
 
 
 def test_generate_segment_clip_persists_clip_evidence():
@@ -1037,3 +1155,55 @@ def test_publish_rejects_promo_assets():
     )
     assert response.status_code == 409
     assert "independent reports" in response.json()["detail"].lower()
+
+
+def test_list_show_runs_rejects_service_role_without_internal_secret_header(monkeypatch, no_admin_override):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    client = TestClient(app)
+    response = client.get(
+        f"/api/v1/admin/cast-screentime/shows/{uuid4()}/runs",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403
+    assert "Allowlist admin access required" in response.json()["detail"]
+
+
+def test_list_show_runs_rejects_service_role_with_invalid_internal_secret_header(monkeypatch, no_admin_override):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    client = TestClient(app)
+    response = client.get(
+        f"/api/v1/admin/cast-screentime/shows/{uuid4()}/runs",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-TRR-Internal-Admin-Secret": "wrong-secret",
+        },
+    )
+
+    assert response.status_code == 403
+    assert "Allowlist admin access required" in response.json()["detail"]
+
+
+def test_list_show_runs_allows_service_role_with_valid_internal_secret_header(monkeypatch, no_admin_override):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setattr(repo, "list_runs_for_show", lambda show_id, limit=20, video_class=None: [])
+
+    client = TestClient(app)
+    response = client.get(
+        f"/api/v1/admin/cast-screentime/shows/{uuid4()}/runs",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-TRR-Internal-Admin-Secret": "internal-secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runs"] == []

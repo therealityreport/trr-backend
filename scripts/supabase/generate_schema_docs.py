@@ -19,10 +19,22 @@ try:
 except ImportError as exc:  # pragma: no cover - depends on local environment
     raise SystemExit("Missing psycopg2; install dev deps (e.g., `pip install -r requirements.txt`).") from exc
 
+try:
+    from dotenv import load_dotenv
+except ImportError as exc:  # pragma: no cover - depends on local environment
+    raise SystemExit("Missing python-dotenv; install dev deps (e.g., `pip install -r requirements.txt`).") from exc
+
 _OUTPUT_DIR = Path("supabase/schema_docs")
 _DIAGRAM_DIR = _OUTPUT_DIR / "diagrams"
 _SCHEMAS = ("core",)
 _SENSITIVE_KEYS = ("password", "token", "secret", "api_key", "access_key", "refresh_key", "session")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_repo_env() -> None:
+    for candidate in (_REPO_ROOT / ".env.local", _REPO_ROOT / ".env"):
+        if candidate.exists():
+            load_dotenv(candidate, override=False)
 
 
 @dataclass
@@ -37,6 +49,7 @@ class ColumnInfo:
 
 
 def _resolve_db_url() -> str:
+    _load_repo_env()
     for key in ("SUPABASE_DB_URL", "TRR_DB_URL"):
         value = (os.getenv(key) or "").strip()
         if value:

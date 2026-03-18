@@ -1,7 +1,7 @@
 # Status — Task 7 (Bravo Import + Cast Eligibility + Videos/News)
 
 Repo: TRR-Backend
-Last updated: February 17, 2026
+Last updated: March 16, 2026
 
 ## Phase Status
 
@@ -18,6 +18,27 @@ Last updated: February 17, 2026
 None.
 
 ## Recent Activity
+
+- March 16, 2026: Implemented unified show refresh orchestration stages and explicit rerun semantics for the admin show page.
+  - Expanded additive refresh targets in `api/routers/admin_show_sync.py`:
+    - `show_core`
+    - `links`
+    - `bravo`
+    - `cast_profiles`
+    - `cast_media`
+  - The default full show refresh stream now reports explicit stage metadata (`pipeline_stage`, `pipeline_status`, `skip_reason`) instead of collapsing work into ambiguous `Cast`/`People` buckets.
+  - Folded legacy standalone workflows under the unified pipeline:
+    - show/season/person link discovery now runs under `links`
+    - Bravo sync readiness/eligibility checks now run under `bravo`
+    - cast profile enrichment and cast media ingest now run as separate downstream stages
+  - Added `force_new_operation` request handling so explicit `Run`/`Rerun` actions start a fresh operation instead of attaching to an existing one.
+  - Hardened operation stream replay in `trr_backend/pipeline/admin_operations.py` so terminal-stage events are not dropped on fast operations.
+  - Tests:
+    - `tests/api/routers/test_admin_show_sync.py`
+  - Validation:
+    - `ruff check api/routers/admin_show_sync.py trr_backend/pipeline/admin_operations.py tests/api/routers/test_admin_show_sync.py` (pass)
+    - `pytest -q tests/api/routers/test_admin_show_sync.py tests/api/routers/test_admin_show_bravo.py` (pass, `66 passed`)
+    - `python -m py_compile api/routers/admin_show_sync.py trr_backend/pipeline/admin_operations.py tests/api/routers/test_admin_show_sync.py` (pass)
 
 - February 17, 2026: Implemented global cast-matrix sync and Bravo auto-trigger integration.
   - Added endpoint:
@@ -150,3 +171,18 @@ None.
     - `ruff check api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
     - `python -m py_compile api/routers/admin_show_bravo.py api/routers/admin_show_roles.py api/main.py api/routers/admin_show_links.py api/routers/admin_scrape.py` (pass)
     - `pytest -q tests/api/routers/test_admin_show_bravo.py` (10 passed)
+- March 16, 2026: Completed unified show refresh backend validation for the app-side Health Center rollout.
+  - Verified additive stage model (`show_core`, `links`, `bravo`, `cast_profiles`, `cast_media`) via targeted router/orchestration tests.
+  - Verified explicit reruns force a fresh operation instead of attaching to an in-flight run.
+  - Verified Bravo skip semantics and additive stream payload fields align with the updated TRR-APP health center pipeline.
+
+## Handoff Snapshot
+```yaml
+handoff:
+  include: true
+  state: recent
+  last_updated: 2026-03-16
+  current_phase: "Unified show refresh backend complete"
+  next_action: "Close out session and monitor for follow-up regressions"
+  detail: self
+```

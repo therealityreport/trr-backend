@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import jwt
 import pytest
+from fastapi import Response
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -799,6 +800,77 @@ class TestRefreshShow:
         p_news.assert_called_once()
         p_social.assert_called_once()
 
+    def test_refresh_supports_unified_targets(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        show_id = str(uuid4())
+        show_resp = MagicMock()
+        show_resp.data = [
+            {
+                "id": show_id,
+                "name": "The Real Housewives of Beverly Hills",
+                "networks": ["Bravo"],
+                "imdb_id": "tt1234567",
+                "external_ids": {},
+            }
+        ]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        from api.routers.admin_show_sync import RefreshStepResult
+
+        ok_result = RefreshStepResult(status="success", duration_ms=1, exit_code=0, error=None)
+        skipped_result = RefreshStepResult(
+            status="skipped",
+            duration_ms=1,
+            exit_code=0,
+            error="Show is not Bravo-eligible.",
+            skip_reason="Show is not Bravo-eligible.",
+        )
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync._run_details_refresh_steps", return_value={"details": ok_result}):
+                with patch("api.routers.admin_show_sync._run_script_step", return_value=ok_result):
+                    with patch("api.routers.admin_show_sync._refresh_show_social_setup_target", return_value=0):
+                        with patch(
+                            "api.routers.admin_show_sync._refresh_show_links_target",
+                            return_value={"status": "ok"},
+                        ):
+                            with patch(
+                                "api.routers.admin_show_sync._run_cast_person_refresh_stage",
+                                side_effect=[ok_result, ok_result],
+                            ) as p_cast:
+                                with patch(
+                                    "api.routers.admin_show_sync._run_inline_step",
+                                    side_effect=[ok_result, ok_result, skipped_result],
+                                ):
+                                    response = client.post(
+                                        f"/api/v1/admin/shows/{show_id}/refresh",
+                                        headers={"Authorization": f"Bearer {token}"},
+                                        json={
+                                            "targets": [
+                                                "show_core",
+                                                "links",
+                                                "bravo",
+                                                "cast_profiles",
+                                                "cast_media",
+                                            ]
+                                        },
+                                    )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["targets"] == ["show_core", "links", "bravo", "cast_profiles", "cast_media"]
+        assert payload["results"]["show_core"]["status"] == "success"
+        assert payload["results"]["links"]["status"] == "success"
+        assert payload["results"]["bravo"]["status"] == "skipped"
+        assert payload["results"]["cast_profiles"]["status"] == "success"
+        assert payload["results"]["cast_media"]["status"] == "success"
+        assert p_cast.call_count == 2
+
     def test_refresh_stream_emits_complete_event(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -939,6 +1011,95 @@ class TestRefreshShow:
         assert '"social_setup"' in text
         assert '"operation_id":' in text
         assert "event: error" not in text
+
+    def test_refresh_stream_emits_unified_stage_topics_and_skip_reason(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        show_id = str(uuid4())
+        show_resp = MagicMock()
+        show_resp.data = [
+            {
+                "id": show_id,
+                "name": "The Real Housewives of Beverly Hills",
+                "networks": ["Bravo"],
+                "imdb_id": "tt1234567",
+                "external_ids": {},
+            }
+        ]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        from api.routers.admin_show_sync import RefreshStepResult
+
+        ok_result = RefreshStepResult(status="success", duration_ms=1, exit_code=0, error=None)
+        skipped_result = RefreshStepResult(
+            status="skipped",
+            duration_ms=1,
+            exit_code=0,
+            error="Sync seasons, episodes, and cast before Bravo import (missing: cast).",
+            skip_reason="Sync seasons, episodes, and cast before Bravo import (missing: cast).",
+        )
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_show_sync._run_script_step", return_value=ok_result):
+                with patch("api.routers.admin_show_sync._refresh_show_social_setup_target", return_value=0):
+                    with patch("api.routers.admin_show_sync._refresh_show_links_target", return_value={"status": "ok"}):
+                        with patch(
+                            "api.routers.admin_show_sync._run_cast_person_refresh_stage",
+                            return_value=ok_result,
+                        ):
+                            with patch(
+                                "api.routers.admin_show_sync._run_inline_step",
+                                side_effect=[ok_result, ok_result, skipped_result],
+                            ):
+                                with client.stream(
+                                    "POST",
+                                    f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    json={"targets": ["show_core", "links", "bravo"]},
+                                ) as response:
+                                    assert response.status_code == 200
+                                    text = "\n".join(
+                                        line.decode("utf-8") if isinstance(line, (bytes, bytearray)) else str(line)
+                                        for line in response.iter_lines()
+                                    )
+
+        assert '"topic": "show_core"' in text
+        assert '"topic": "links"' in text
+        assert '"topic": "bravo"' in text
+        assert '"pipeline_stage": "show_core"' in text
+        assert '"pipeline_stage": "links"' in text
+        assert '"pipeline_stage": "bravo"' in text
+        assert '"skip_reason": "Sync seasons, episodes, and cast before Bravo import (missing: cast)."' in text
+
+    def test_refresh_stream_disables_attach_for_explicit_rerun(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        show_id = str(uuid4())
+        show_resp = MagicMock()
+        show_resp.data = [{"id": show_id, "imdb_id": "tt1234567", "external_ids": {}}]
+        show_resp.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = show_resp
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_show_sync.start_operation_for_stream",
+                return_value={"id": str(uuid4())},
+            ) as start_operation:
+                with patch("api.routers.admin_show_sync.operation_stream_response", return_value=Response("ok")):
+                    response = client.post(
+                        f"/api/v1/admin/shows/{show_id}/refresh/stream",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"targets": ["show_core"], "force_new_operation": True},
+                    )
+
+        assert response.status_code == 200
+        assert start_operation.call_args.kwargs["allow_attach"] is False
 
     def test_refresh_stream_emits_heartbeat_and_request_id(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")

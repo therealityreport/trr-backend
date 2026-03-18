@@ -27,6 +27,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.ingestion.cast_photo_sources import (
+    _is_real_housewives_fandom_source,
+    _should_keep_real_housewives_fandom_image,
+)
 from trr_backend.integrations.fandom import (
     FandomGalleryImage,
     fetch_fandom_file_metadata,
@@ -103,13 +107,14 @@ def _normalize_section_label(value: str | None) -> str | None:
     return cleaned
 
 
-def _infer_section_tag(*values: str | None) -> str | None:
+def _infer_content_type(*values: str | None) -> str | None:
     text = " ".join([v for v in values if v]).strip().lower()
+    text = re.sub(r"[_-]+", " ", text)
     if not text:
         return None
-    if "confessional" in text:
+    if "confessional" in text or "confession" in text:
         return "CONFESSIONAL"
-    if "intro" in text or "tagline" in text or "opening" in text:
+    if "intro" in text or "tagline" in text or "opening" in text or "chapter card" in text:
         return "INTRO"
     if "reunion" in text:
         return "REUNION"
@@ -148,7 +153,7 @@ def _gallery_image_to_cast_photo(
     """Convert a FandomGalleryImage to a cast_photos row."""
     now = datetime.now(UTC).isoformat()
     section_label = _normalize_section_label(image.section_label)
-    section_tag = _infer_section_tag(section_label, image.caption)
+    content_type = _infer_content_type(section_label, image.caption)
     season = _extract_season_number(section_label, image.caption)
     resolved_url = image.url
     resolved_width = image.width
@@ -161,6 +166,16 @@ def _gallery_image_to_cast_photo(
         resolved_height = file_meta.height
         resolved_mime = file_meta.mime_type
         resolved_created_at = file_meta.created_at
+    if _is_real_housewives_fandom_source(
+        image.source_page_url, image.url
+    ) and not _should_keep_real_housewives_fandom_image(
+        section_label,
+        image.caption,
+        resolved_url,
+        image.file_page_url,
+        image.source_page_url,
+    ):
+        raise ValueError(f"Skipping unsupported RH Fandom gallery image: {resolved_url}")
     metadata: dict[str, Any] = {
         "source_variant": "fandom_gallery",
         "source_page_url": image.file_page_url or image.source_page_url,
@@ -169,10 +184,8 @@ def _gallery_image_to_cast_photo(
         metadata["source_gallery_url"] = image.source_page_url
     if image.file_page_url:
         metadata["source_file_url"] = image.file_page_url
-    if section_label:
-        metadata["fandom_section_label"] = section_label
-    if section_tag:
-        metadata["fandom_section_tag"] = section_tag
+    if content_type:
+        metadata["content_type"] = content_type
     if season:
         metadata["season_number"] = season
     if resolved_width:
@@ -300,7 +313,13 @@ def main(argv: list[str] | None = None) -> int:
                         cached = None
                     file_meta_cache[img.file_page_url] = cached
                 file_meta = cached
-            rows.append(_gallery_image_to_cast_photo(img, person_id=person_id, file_meta=file_meta))
+            try:
+                row = _gallery_image_to_cast_photo(img, person_id=person_id, file_meta=file_meta)
+            except ValueError as exc:
+                if args.verbose:
+                    print(f"  Skip: {exc}")
+                continue
+            rows.append(row)
 
         if args.dry_run:
             print(f"  DRY RUN: Would import {len(rows)} photos")

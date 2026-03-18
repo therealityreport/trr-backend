@@ -6,7 +6,7 @@ import scripts.socials.worker as worker
 
 
 def test_requires_media_mirror_s3_preflight() -> None:
-    assert worker._requires_media_mirror_s3_preflight(stage="any", platform=None) is True  # noqa: SLF001
+    assert worker._requires_media_mirror_s3_preflight(stage="any", platform=None) is False  # noqa: SLF001
     assert worker._requires_media_mirror_s3_preflight(stage="media_mirror", platform="instagram") is True  # noqa: SLF001
     assert worker._requires_media_mirror_s3_preflight(stage="comment_media_mirror", platform="twitter") is True  # noqa: SLF001
     assert worker._requires_media_mirror_s3_preflight(stage="media_mirror", platform="tiktok") is True  # noqa: SLF001
@@ -155,7 +155,7 @@ def test_main_fails_fast_when_mirror_s3_preflight_fails(monkeypatch) -> None:
             once=True,
             run_id=None,
             parallel=1,
-            stage="any",
+            stage="media_mirror",
             tandem=False,
             posts_workers=1,
             comments_workers=1,
@@ -173,6 +173,83 @@ def test_main_fails_fast_when_mirror_s3_preflight_fails(monkeypatch) -> None:
     rc = worker.main()
 
     assert rc == 2
+
+
+def test_main_stage_any_skips_preflight_and_processes_non_mirror_job(monkeypatch) -> None:
+    process_calls: list[str] = []
+
+    class _FakeHeartbeat:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            return
+
+        def start(self) -> None:
+            return
+
+        def stop(self, *, reason: str = "shutdown") -> None:
+            del reason
+            return
+
+        def set_state(self, **_kwargs):  # noqa: ANN003
+            return
+
+    monkeypatch.setattr(
+        worker,
+        "parse_args",
+        lambda: SimpleNamespace(
+            worker_id="root-worker",
+            interval=0.1,
+            once=True,
+            run_id=None,
+            parallel=1,
+            stage="any",
+            tandem=False,
+            posts_workers=1,
+            comments_workers=1,
+            platform=None,
+        ),
+    )
+    monkeypatch.setattr(worker.logging, "basicConfig", lambda **_kwargs: None)
+    monkeypatch.setattr(worker, "load_env", lambda: None)
+    monkeypatch.setattr(worker, "WorkerHeartbeat", _FakeHeartbeat)
+    monkeypatch.setattr(
+        worker,
+        "ensure_media_mirror_s3_ready",
+        lambda: (_ for _ in ()).throw(RuntimeError("preflight should be skipped for stage=any")),
+    )
+    monkeypatch.setattr(worker, "recover_stale_running_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(worker, "reconcile_run_summaries", lambda **_kwargs: {"reconciled_runs": 0, "run_ids": []})
+    monkeypatch.setattr(
+        worker,
+        "claim_next_queued_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-comments-1",
+                "run_id": "run-1",
+                "platform": "instagram",
+                "config": {"stage": "comments"},
+            }
+        ],
+    )
+    monkeypatch.setattr(worker, "cancel_claimed_job_before_processing", lambda _job: None)
+    monkeypatch.setattr(
+        worker,
+        "process_claimed_job",
+        lambda job, **_kwargs: (
+            process_calls.append(str(job.get("id") or "")),
+            {
+                "id": str(job.get("id") or ""),
+                "run_id": str(job.get("run_id") or ""),
+                "platform": str(job.get("platform") or ""),
+                "status": "completed",
+                "items_found": 1,
+            },
+        )[1],
+    )
+
+    rc = worker.main()
+
+    assert rc == 0
+    assert process_calls == ["job-comments-1"]
 
 
 def test_main_queue_once_uses_claim_batch_and_processes_claimed_job(monkeypatch) -> None:

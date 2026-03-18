@@ -80,13 +80,14 @@ def _extract_season_number(*values: str | None) -> int | None:
     return None
 
 
-def _infer_fandom_section_tag(*values: str | None) -> str | None:
+def _infer_fandom_content_type(*values: str | None) -> str | None:
     text = " ".join([v for v in values if v]).strip().lower()
+    text = re.sub(r"[_-]+", " ", text)
     if not text:
         return None
-    if "confessional" in text:
+    if "confessional" in text or "confession" in text:
         return "CONFESSIONAL"
-    if "intro" in text or "tagline" in text or "opening" in text:
+    if "intro" in text or "tagline" in text or "opening" in text or "chapter card" in text:
         return "INTRO"
     if "reunion" in text:
         return "REUNION"
@@ -95,6 +96,32 @@ def _infer_fandom_section_tag(*values: str | None) -> str | None:
     if "episode" in text or "still" in text:
         return "EPISODE STILL"
     return "OTHER"
+
+
+# Map inferred content type → context_type column value.
+# Mirrors CONTENT_TYPE_CONTEXT_MAP in admin_asset_flags.py.
+_CONTENT_TYPE_TO_CONTEXT_TYPE: dict[str, str] = {
+    "CONFESSIONAL": "confessional",
+    "INTRO": "intro",
+    "REUNION": "reunion",
+    "PROMO": "promo",
+    "EPISODE STILL": "episode still",
+    "OTHER": "other",
+}
+
+
+def _is_real_housewives_fandom_source(*values: str | None) -> bool:
+    for value in values:
+        text = str(value or "").strip().lower()
+        if not text:
+            continue
+        if "real-housewives.fandom.com" in text or "static.wikia.nocookie.net/real-housewives/" in text:
+            return True
+    return False
+
+
+def _should_keep_real_housewives_fandom_image(*values: str | None) -> bool:
+    return _infer_fandom_content_type(*values) in {"CONFESSIONAL", "INTRO"}
 
 
 _REAL_HOUSEWIVES_SHOW_PATTERN = re.compile(
@@ -176,21 +203,18 @@ def _extract_episode_number(*values: str | None) -> int | None:
 
 def _build_fandom_metadata(
     *,
-    section_tag: str | None,
-    section_label: str | None,
+    content_type: str | None,
     source_variant: str | None = None,
     source_page_url: str | None = None,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
-    if section_tag:
-        metadata["fandom_section_tag"] = section_tag
-    if section_label:
-        metadata["fandom_section_label"] = section_label
+    if content_type:
+        metadata["content_type"] = content_type
     if source_variant:
         metadata["source_variant"] = source_variant
     if source_page_url:
         metadata["source_page_url"] = source_page_url
-    return metadata or None
+    return metadata
 
 
 # ---------------------------------------------------------------------------
@@ -813,21 +837,29 @@ def fetch_fandom_person_cast_photos(
         section_label = _normalize_fandom_section_label(photo.get("context_section"))
         caption_text = str(photo.get("caption") or "").strip() or None
         alt_text = str(photo.get("alt_text") or "").strip() or None
-        section_tag = _infer_fandom_section_tag(
+        if _is_real_housewives_fandom_source(
+            source_page_url, image_url
+        ) and not _should_keep_real_housewives_fandom_image(
             photo.get("context_type"),
             section_label,
             caption_text,
             alt_text,
+            image_url,
+            source_page_url,
+        ):
+            continue
+        content_type = _infer_fandom_content_type(
+            photo.get("context_type"),
+            section_label,
+            caption_text,
+            alt_text,
+            image_url,
+            source_page_url,
         )
         metadata = _build_fandom_metadata(
-            section_tag=section_tag,
-            section_label=section_label,
+            content_type=content_type,
             source_page_url=source_page_url,
         )
-        if metadata is None:
-            metadata = {}
-        if section_tag:
-            metadata.setdefault("content_type", section_tag)
 
         season_value = photo.get("season")
         season_number = (
@@ -897,8 +929,7 @@ def fetch_fandom_person_cast_photos(
                 "width": photo.get("width"),
                 "height": photo.get("height"),
                 "caption": caption_text or alt_text,
-                "context_section": photo.get("context_section"),
-                "context_type": photo.get("context_type"),
+                "context_type": _CONTENT_TYPE_TO_CONTEXT_TYPE.get(content_type or "") or photo.get("context_type"),
                 "season": season_number,
                 "position": photo.get("position"),
                 "people_names": people_names,
@@ -966,7 +997,17 @@ def fetch_fandom_gallery_cast_photos(
             continue
 
         section_label = _normalize_fandom_section_label(image.section_label)
-        section_tag = _infer_fandom_section_tag(section_label, image.caption)
+        if _is_real_housewives_fandom_source(gallery.url, image.source_page_url, image.url) and not (
+            _should_keep_real_housewives_fandom_image(
+                section_label,
+                image.caption,
+                image.url,
+                image.file_page_url,
+                image.source_page_url,
+            )
+        ):
+            continue
+
         season = _extract_season_number(section_label, image.caption)
         file_page_url = image.file_page_url
         file_meta = None
@@ -994,14 +1035,20 @@ def fetch_fandom_gallery_cast_photos(
             resolved_mime = file_meta.mime_type
             resolved_created_at = file_meta.created_at
 
+        content_type = _infer_fandom_content_type(
+            section_label,
+            image.caption,
+            resolved_url,
+            file_page_url,
+            image.source_page_url,
+        )
+        context_type = _CONTENT_TYPE_TO_CONTEXT_TYPE.get(content_type or "")
+
         metadata = _build_fandom_metadata(
-            section_tag=section_tag,
-            section_label=section_label,
+            content_type=content_type,
             source_variant="fandom_gallery",
             source_page_url=file_page_url or image.source_page_url,
         )
-        if metadata is None:
-            metadata = {}
         if image.source_page_url:
             metadata.setdefault("source_gallery_url", image.source_page_url)
         if file_page_url:
@@ -1035,6 +1082,7 @@ def fetch_fandom_gallery_cast_photos(
                 "image_url_canonical": _canonical_url(url_value),
                 "caption": image.caption,
                 "season": season,
+                "context_type": context_type,
                 "width": resolved_width,
                 "height": resolved_height,
                 "metadata": metadata,
