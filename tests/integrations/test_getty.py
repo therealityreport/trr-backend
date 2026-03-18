@@ -567,3 +567,26 @@ def test_extract_best_image_urls_from_display_sizes() -> None:
     assert urls["compUrl"] == "https://media.gettyimages.com/comp.jpg"
     assert urls["downloadableCompUrl"] == "https://media.gettyimages.com/preview.jpg"
     assert urls["thumbUrl"] == "https://media.gettyimages.com/thumb.jpg"
+
+
+def test_search_grouped_events_passes_numberofpeople_query_param(monkeypatch) -> None:
+    """query_params like numberofpeople should flow through to the search URL."""
+    captured_urls: list[str] = []
+
+    def fake_search_candidates(phrase, *, limit, session=None, query_params=None):
+        url = getty._build_search_url(phrase, query_params=query_params)
+        captured_urls.append(url)
+        return []
+
+    monkeypatch.setattr(getty, "_search_asset_candidates_for_phrase", fake_search_candidates)
+
+    getty.search_grouped_events(
+        "Brandi Glanville",
+        limit=10,
+        query_params={"numberofpeople": "one", "sort": "best"},
+        source_query_scope="broad",
+    )
+
+    assert len(captured_urls) == 1
+    assert "numberofpeople=one" in captured_urls[0]
+    assert "groupbyevent=true" in captured_urls[0]
