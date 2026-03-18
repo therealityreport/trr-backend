@@ -199,6 +199,13 @@ class RefreshImagesRequest(BaseModel):
             "Compatibility switch for queue-backed execution. Current endpoint runs inline and ignores this flag."
         ),
     )
+    expand_event_url: str | None = Field(
+        default=None,
+        description=(
+            "When set, skip the full refresh pipeline and instead perform a targeted full scan "
+            "of a single Getty event URL for this person. Runs NBCUMV crosswalk and persists results."
+        ),
+    )
 
 
 class RefreshImagesResponse(BaseModel):
@@ -1176,6 +1183,7 @@ def _import_nbcumv_person_media(
             "event_url_slug": str(event.get("event_url_slug") or "").strip() or None,
             "event_date": str(event.get("event_date") or "").strip() or None,
             "grouped_image_count": event.get("grouped_image_count"),
+            "person_image_count": event.get("person_image_count"),
             "bucket_type": bucket_metadata.get("bucket_type"),
             "bucket_key": bucket_metadata.get("bucket_key"),
             "bucket_label": bucket_metadata.get("bucket_label"),
@@ -1240,6 +1248,7 @@ def _import_nbcumv_person_media(
             "getty_event_slug": str(asset.get("event_url_slug") or "").strip() or None,
             "getty_event_date": str(asset.get("event_date") or "").strip() or None,
             "grouped_image_count": asset.get("grouped_image_count"),
+            "person_image_count": asset.get("person_image_count"),
             "source_query_scope": str(asset.get("source_query_scope") or "").strip() or None,
         }
         if object_name:
@@ -1386,6 +1395,7 @@ def _import_nbcumv_person_media(
         limit=max(1, int(limit)),
         person_name=normalized_person_name,
         source_query_scope="bravo",
+        full_scan_person_assets=True,
     )
     _emit_progress(0, 0, f"Collecting Getty grouped events for '{normalized_person_name}'...")
     broad_grouped_events = getty_integration.search_grouped_events(
@@ -1752,19 +1762,36 @@ def _import_nbcumv_person_media(
             if editorial_id:
                 event_inventory_by_editorial_id.setdefault(editorial_id, []).append(inventory_entry)
             captured.append(inventory_entry)
-            if (
+            matched_assets_list = event.get("matched_assets_list")
+            if isinstance(matched_assets_list, list) and matched_assets_list:
+                # Bravo full-scan: add EACH person-matching asset
+                for matched_asset in matched_assets_list:
+                    if not isinstance(matched_asset, dict):
+                        continue
+                    m_editorial_id = str(matched_asset.get("editorial_id") or "").strip()
+                    if not m_editorial_id or m_editorial_id in seen_editorial_ids:
+                        continue
+                    enriched = dict(matched_asset)
+                    enriched["event_name"] = str(event.get("event_name") or enriched.get("event_name") or "").strip() or None
+                    enriched["event_id"] = str(event.get("event_id") or enriched.get("event_id") or "").strip() or None
+                    enriched["event_url_slug"] = str(event.get("event_url_slug") or enriched.get("event_url_slug") or "").strip() or None
+                    enriched["event_url"] = str(event.get("event_url") or "").strip() or None
+                    enriched["event_date"] = str(event.get("event_date") or enriched.get("event_date") or "").strip() or None
+                    enriched["grouped_image_count"] = event.get("grouped_image_count")
+                    enriched["person_image_count"] = event.get("person_image_count")
+                    enriched["source_query_scope"] = str(event.get("source_query_scope") or "").strip() or None
+                    broad_event_assets.append(
+                        (enriched, resolved_event_show, resolved_event_show_title or None, bucket_metadata)
+                    )
+                    seen_editorial_ids.add(m_editorial_id)
+            elif (
                 bucket_metadata.get("bucket_type") == "event"
                 and isinstance(event_asset, dict)
                 and editorial_id
                 and editorial_id not in seen_editorial_ids
             ):
                 broad_event_assets.append(
-                    (
-                        event_asset,
-                        resolved_event_show,
-                        resolved_event_show_title or None,
-                        bucket_metadata,
-                    )
+                    (event_asset, resolved_event_show, resolved_event_show_title or None, bucket_metadata)
                 )
                 seen_editorial_ids.add(editorial_id)
         return captured
@@ -1881,6 +1908,8 @@ def _import_nbcumv_person_media(
         _mark_event_inventory_resolution(event_inventory_by_editorial_id, asset, resolution="nbcumv_matched")
         matched_bucket_metadata = dict(bucket_metadata)
         matched_bucket_metadata["source_resolution"] = "nbcumv_preferred_shared"
+        matched_bucket_metadata["source_query_scope"] = str(asset.get("source_query_scope") or "").strip() or None
+        matched_bucket_metadata["person_image_count"] = asset.get("person_image_count")
         matched_assets.append((asset, image, matched_bucket_metadata, "nbcumv_preferred_shared"))
         matched_summaries.append(_summarize_getty_asset(asset, reason="matched", image=image))
         _emit_progress(match_index, match_total, f"Matched NBCUMV asset {len(matched_assets)}: {filename}")
@@ -8202,6 +8231,334 @@ async def refresh_person_images_stream(
                 stage_error_detail=str(exc),
             )
             return
+
+        # ── Early-return: single-event expansion ────────────────────────
+        expand_event_url = (request.expand_event_url or "").strip() or None
+        if expand_event_url:
+            from api.routers.admin_nbcumv import (
+                NbcumvImportItem,
+                _ensure_sources,
+                _import_single_item,
+            )
+            from trr_backend.integrations import getty as getty_integration
+            from trr_backend.integrations import nbcumv as nbcumv_integration
+            from trr_backend.repositories.cast_photos import (
+                update_cast_photo_hosted_fields,
+                upsert_cast_photos as _upsert_cast_photos,
+            )
+
+            normalized_person_name = str(person_name or "").strip()
+            expand_errors: list[str] = []
+            expand_imported = 0
+            expand_getty_only = 0
+            expand_skipped = 0
+            expand_failed = 0
+
+            yield progress(
+                {
+                    "stage": "expand_event",
+                    "message": f"Scanning event: {expand_event_url}",
+                    "current": 0,
+                    "total": 0,
+                }
+            )
+
+            if not normalized_person_name:
+                yield error_event(
+                    stage="expand_event",
+                    error="Person name is required for event expansion",
+                    stage_error_code="EXPAND_MISSING_PERSON_NAME",
+                )
+                return
+
+            # 1. Scan the event page for matching assets
+            try:
+                scan_result = await asyncio.to_thread(
+                    getty_integration.scan_event_page_for_person,
+                    expand_event_url,
+                    person_name=normalized_person_name,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "expand_event scan failed person_id=%s url=%s: %s",
+                    person_id_str, expand_event_url, exc,
+                )
+                yield error_event(
+                    stage="expand_event",
+                    error="Event scan failed",
+                    detail=str(exc),
+                    stage_error_code="EXPAND_SCAN_FAILED",
+                    stage_error_detail=str(exc),
+                )
+                return
+
+            matched_assets = (scan_result or {}).get("matched_assets") or []
+            total_scanned = int((scan_result or {}).get("total_scanned") or 0)
+            yield progress(
+                {
+                    "stage": "expand_event",
+                    "message": (
+                        f"Scanned {total_scanned} assets, "
+                        f"{len(matched_assets)} match{'es' if len(matched_assets) != 1 else ''} "
+                        f"for {normalized_person_name}."
+                    ),
+                    "current": total_scanned,
+                    "total": total_scanned,
+                }
+            )
+
+            if not matched_assets:
+                complete_data = {
+                    "run_id": run_id,
+                    "stage": "complete",
+                    "message": f"No matching assets found in event for {normalized_person_name}.",
+                    "expand_event_url": expand_event_url,
+                    "total_scanned": total_scanned,
+                    "expand_imported": 0,
+                    "expand_getty_only": 0,
+                    "expand_skipped": 0,
+                    "expand_failed": 0,
+                    "errors": expand_errors,
+                }
+                yield f"event: complete\ndata: {json.dumps(envelope(complete_data))}\n\n"
+                return
+
+            # 2. Ensure vendor sources exist
+            try:
+                await asyncio.to_thread(_ensure_sources, db)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("expand_event: _ensure_sources failed: %s", exc)
+
+            # 3. NBCUMV crosswalk + persist for each matched asset
+            total_assets = len(matched_assets)
+            getty_only_rows: list[dict[str, Any]] = []
+
+            for idx, asset in enumerate(matched_assets, start=1):
+                if await _client_disconnected("expand_event"):
+                    return
+
+                object_name = str(asset.get("object_name") or "").strip()
+                editorial_id = str(asset.get("editorial_id") or "").strip()
+                yield progress(
+                    {
+                        "stage": "expand_event_crosswalk",
+                        "message": (
+                            f"Crosswalking asset {idx}/{total_assets}: "
+                            f"{object_name or editorial_id or 'unknown'}"
+                        ),
+                        "current": idx - 1,
+                        "total": total_assets,
+                    }
+                )
+
+                # Attempt NBCUMV lookup by object_name
+                nbcumv_image: dict[str, Any] | None = None
+                if object_name:
+                    try:
+                        nbcumv_image = await asyncio.to_thread(
+                            nbcumv_integration.fetch_image_by_identity,
+                            filename=object_name,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "expand_event NBCUMV lookup failed for %s: %s",
+                            object_name, exc,
+                        )
+
+                if isinstance(nbcumv_image, dict):
+                    # NBCUMV matched path — import via standard item import
+                    lbx_id = str(nbcumv_image.get("lbx_id") or "").strip()
+                    lbx_filename = str(nbcumv_image.get("lbx_filename") or "").strip()
+                    if not lbx_id or not lbx_filename:
+                        expand_failed += 1
+                        expand_errors.append(
+                            f"{object_name or editorial_id}: NBCUMV match missing lbx_id or filename."
+                        )
+                        continue
+                    try:
+                        import_result = await asyncio.to_thread(
+                            _import_single_item,
+                            db=db,
+                            item=NbcumvImportItem(
+                                lbx_id=lbx_id,
+                                lbx_filename=lbx_filename,
+                                location=nbcumv_image.get("location"),
+                                nbcumv_image=nbcumv_image,
+                                show_ids=[
+                                    v for v in nbcumv_image.get("showIds") or []
+                                    if isinstance(v, str)
+                                ],
+                                link_show_ids=(
+                                    [request.show_id] if request.show_id else []
+                                ),
+                                getty_detail_url=(
+                                    str(asset.get("detail_url") or "").strip() or None
+                                ),
+                                gallery_bucket={
+                                    "source_resolution": "nbcumv_preferred_shared",
+                                    "expand_event_url": expand_event_url,
+                                },
+                                person_ids=[person_id],
+                            ),
+                            assign_people=True,
+                            people_index={},
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception(
+                            "expand_event NBCUMV import failed person_id=%s lbx_id=%s: %s",
+                            person_id_str, lbx_id, exc,
+                        )
+                        expand_failed += 1
+                        expand_errors.append(f"{lbx_filename or lbx_id}: {exc}")
+                        continue
+
+                    if import_result.get("already_imported") and not (
+                        import_result.get("created_person_ids") or import_result.get("created_show_ids")
+                    ):
+                        expand_skipped += 1
+                    else:
+                        expand_imported += 1
+                else:
+                    # Getty-only fallback — build cast_photo row
+                    if not editorial_id:
+                        expand_failed += 1
+                        continue
+                    preview_url = str(
+                        asset.get("preview_url")
+                        or asset.get("preview")
+                        or asset.get("thumb_url")
+                        or asset.get("thumbUrl")
+                        or ""
+                    ).strip()
+                    detail_url = str(asset.get("detail_url") or "").strip() or None
+                    if not preview_url:
+                        expand_failed += 1
+                        continue
+                    # Extract dimensions
+                    width = asset.get("width") or asset.get("max_width")
+                    height = asset.get("height") or asset.get("max_height")
+                    if isinstance(width, (int, float)):
+                        width = int(width)
+                    else:
+                        width = None
+                    if isinstance(height, (int, float)):
+                        height = int(height)
+                    else:
+                        height = None
+                    people = [
+                        str(entry.get("text") or "").strip()
+                        for entry in (asset.get("people") or [])
+                        if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+                    ]
+                    caption_text = str(asset.get("caption") or "").strip() or None
+
+                    metadata: dict[str, Any] = {
+                        "getty": asset,
+                        "getty_only_fallback": True,
+                        "source_domain": "gettyimages.com",
+                        "source_url": preview_url,
+                        "source_page_url": detail_url,
+                        "original_source_page_url": detail_url,
+                        "original_source_label": "Getty",
+                        "crosswalk_reason": "no_nbcumv_match",
+                        "source_resolution": "getty_watermark_fallback",
+                        "expand_event_url": expand_event_url,
+                    }
+                    if object_name:
+                        metadata["object_name"] = object_name
+
+                    getty_only_rows.append(
+                        {
+                            "person_id": person_id_str,
+                            "source": _GETTY_SOURCE_ID,
+                            "source_image_id": editorial_id,
+                            "url": preview_url,
+                            "url_path": urlparse(preview_url).path or None,
+                            "image_url": preview_url,
+                            "thumb_url": str(
+                                asset.get("thumb_url") or asset.get("thumbUrl") or preview_url
+                            ).strip(),
+                            "image_url_canonical": preview_url,
+                            "source_page_url": detail_url,
+                            "caption": caption_text,
+                            "width": width,
+                            "height": height,
+                            "people_names": people or None,
+                            "file_name": object_name or None,
+                            "metadata": metadata,
+                        }
+                    )
+
+                yield progress(
+                    {
+                        "stage": "expand_event_crosswalk",
+                        "message": (
+                            f"Processed asset {idx}/{total_assets}: "
+                            f"{object_name or editorial_id or 'unknown'}"
+                        ),
+                        "current": idx,
+                        "total": total_assets,
+                    }
+                )
+
+            # 4. Persist any getty-only fallback rows
+            if getty_only_rows:
+                try:
+                    upserted = await asyncio.to_thread(
+                        _upsert_cast_photos, db, getty_only_rows, dedupe_on="source_image_id",
+                    )
+                    for upserted_row in upserted:
+                        row_id = str(upserted_row.get("id") or "").strip()
+                        source_image_id = str(upserted_row.get("source_image_id") or "").strip()
+                        source_row_map = {
+                            str(r.get("source_image_id") or "").strip(): r for r in getty_only_rows
+                        }
+                        source_row = source_row_map.get(source_image_id)
+                        row_preview_url = str((source_row or {}).get("url") or "").strip()
+                        if row_id and row_preview_url:
+                            try:
+                                await asyncio.to_thread(
+                                    update_cast_photo_hosted_fields,
+                                    db,
+                                    row_id,
+                                    {"hosted_url": row_preview_url, "hosted_content_type": "image/jpeg"},
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "expand_event: failed to set hosted fields for %s: %s",
+                                    row_id, exc,
+                                )
+                    expand_getty_only = len(upserted)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "expand_event: upsert_cast_photos failed for person_id=%s: %s",
+                        person_id_str, exc,
+                    )
+                    expand_failed += len(getty_only_rows)
+                    expand_errors.append(f"Getty-only upsert failed: {exc}")
+
+            # 5. Emit completion
+            total_persisted = expand_imported + expand_getty_only
+            complete_data = {
+                "run_id": run_id,
+                "stage": "complete",
+                "message": (
+                    f"Event expansion complete: {total_persisted} persisted "
+                    f"({expand_imported} via NBCUMV, {expand_getty_only} Getty-only), "
+                    f"{expand_skipped} skipped, {expand_failed} failed."
+                ),
+                "expand_event_url": expand_event_url,
+                "total_scanned": total_scanned,
+                "matched_asset_count": len(matched_assets),
+                "expand_imported": expand_imported,
+                "expand_getty_only": expand_getty_only,
+                "expand_skipped": expand_skipped,
+                "expand_failed": expand_failed,
+                "errors": expand_errors,
+            }
+            yield f"event: complete\ndata: {json.dumps(envelope(complete_data))}\n\n"
+            return
+        # ── End: single-event expansion ─────────────────────────────────
 
         for requested_source in requested_sources:
             update_source_progress(requested_source, status="pending", message="Pending")

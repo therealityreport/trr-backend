@@ -33,6 +33,8 @@ Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
 Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
 window.chrome = window.chrome || { runtime: {} };
 """
+_DEFAULT_SOCIALBLADE_VALIDATION_HANDLE = "socialblade"
+_DEFAULT_SHARED_CHROME_CDP_URL = "http://127.0.0.1:9222"
 
 
 def _default_socialblade_cookie_file_path() -> Path:
@@ -47,7 +49,10 @@ def socialblade_cookie_file_path() -> Path:
 
 
 def _socialblade_validation_url() -> str:
-    handle = str(os.getenv("SOCIALBLADE_VALIDATION_HANDLE") or "lisabarlow14").strip() or "lisabarlow14"
+    handle = (
+        str(os.getenv("SOCIALBLADE_VALIDATION_HANDLE") or _DEFAULT_SOCIALBLADE_VALIDATION_HANDLE).strip()
+        or _DEFAULT_SOCIALBLADE_VALIDATION_HANDLE
+    )
     return f"https://socialblade.com/instagram/user/{handle}"
 
 
@@ -113,8 +118,50 @@ def normalize_socialblade_cookies(raw_payload: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _socialblade_shared_chrome_cdp_url() -> str:
+    return str(os.getenv("SOCIALBLADE_SHARED_CHROME_CDP_URL") or _DEFAULT_SHARED_CHROME_CDP_URL).strip()
+
+
+def export_socialblade_cookies_from_shared_chrome() -> dict[str, str]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Playwright is required for SocialBlade cookie export") from exc
+
+    cdp_url = _socialblade_shared_chrome_cdp_url()
+    validation_url = _socialblade_validation_url()
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        try:
+            if not browser.contexts:
+                raise RuntimeError("Managed Chrome did not expose any browser contexts")
+            context = browser.contexts[0]
+            page = context.new_page()
+            try:
+                page.goto(validation_url, wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(3_000)
+                body_text = _body_text(page)
+                if _body_text_matches_access_denied(body_text):
+                    raise RuntimeError("Managed Chrome SocialBlade session is blocked by Cloudflare")
+                cookies = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
+                if not cookies.get("session"):
+                    raise RuntimeError("Managed Chrome does not have an authenticated SocialBlade session cookie")
+                write_cookie_file(socialblade_cookie_file_path(), cookies)
+                return cookies
+            finally:
+                page.close()
+        finally:
+            browser.close()
+
+
 def refresh_socialblade_cookies(reason: str | None = None) -> dict[str, str]:
     del reason
+    try:
+        return export_socialblade_cookies_from_shared_chrome()
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # noqa: BLE001
