@@ -3598,6 +3598,37 @@ async def post_social_account_catalog_sync_recent_route(
     }
 
 
+@router.get("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/progress")
+def get_social_account_catalog_run_progress_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    recent_log_limit: int = Query(default=20, ge=1, le=100),
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_run_progress
+
+    try:
+        return get_social_account_catalog_run_progress(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            recent_log_limit=recent_log_limit,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog run progress: platform=%s account=%s run_id=%s",
+            platform,
+            account_handle,
+            run_id,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/profiles/{platform}/{account_handle}/catalog/review-queue/{item_id}/resolve")
 def post_social_account_catalog_review_queue_resolve_route(
     platform: str,

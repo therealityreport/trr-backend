@@ -7,8 +7,10 @@ import logging
 import os
 import re
 import sys
+from collections import OrderedDict
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,15 @@ _ACCESS_DENIED_PATTERNS = (
     "social blade access denied",
 )
 _DATE_PREFIX_PATTERN = re.compile(r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(\d{4}-\d{2}-\d{2})$")
+_TRPC_FETCH_JS = """async ({ endpoint }) => {
+    const response = await fetch(endpoint, {
+        headers: { accept: "application/json, text/plain, */*" },
+    });
+    return {
+        status: response.status,
+        text: await response.text(),
+    };
+}"""
 
 
 def _parse_int(value: str) -> int:
@@ -180,6 +191,239 @@ def _followers_chart_from_table(metrics: dict[str, Any]) -> dict[str, Any] | Non
     }
 
 
+def _format_ordinal_rank(value: int) -> str:
+    if value <= 0:
+        return ""
+    suffix = "th"
+    if value % 100 not in {11, 12, 13}:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+    return f"{value:,}{suffix}"
+
+
+def _coerce_trpc_json(raw_payload: str, *, endpoint: str) -> Any:
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"SocialBlade returned non-JSON data for {endpoint}") from exc
+    return payload
+
+
+def _unwrap_trpc_result(payload: Any, *, endpoint: str, index: int | None = None) -> Any:
+    item = payload
+    if isinstance(payload, list):
+        if index is None:
+            index = 0
+        if index >= len(payload):
+            raise RuntimeError(f"SocialBlade tRPC payload missing index {index} for {endpoint}")
+        item = payload[index]
+    if not isinstance(item, dict):
+        raise RuntimeError(f"Unexpected SocialBlade tRPC payload for {endpoint}")
+    error = item.get("error")
+    if error:
+        message = (
+            error.get("json", {}).get("message")
+            or error.get("message")
+            or f"SocialBlade tRPC error for {endpoint}"
+        )
+        raise RuntimeError(str(message))
+    result = item.get("result", {}).get("data", {}).get("json")
+    if result is None:
+        raise RuntimeError(f"SocialBlade tRPC response missing result data for {endpoint}")
+    return result
+
+
+def _fetch_trpc_result(page: Any, endpoint: str, *, index: int | None = None) -> Any:
+    response = page.evaluate(_TRPC_FETCH_JS, {"endpoint": endpoint})
+    status = int(response.get("status") or 0)
+    payload = _coerce_trpc_json(str(response.get("text") or ""), endpoint=endpoint)
+    if status != 200:
+        raise RuntimeError(f"SocialBlade endpoint {endpoint} returned HTTP {status}")
+    return _unwrap_trpc_result(payload, endpoint=endpoint, index=index)
+
+
+def _search_socialblade_profile(page: Any, handle: str) -> dict[str, Any]:
+    endpoint = (
+        "/api/trpc/instagram.search?input="
+        + quote(json.dumps({"json": {"query": handle}}, separators=(",", ":")))
+    )
+    result = _fetch_trpc_result(page, endpoint)
+    profile = result.get("platformResult") if isinstance(result, dict) else None
+    if not isinstance(profile, dict) or not str(profile.get("id") or "").strip():
+        raise RuntimeError(f"SocialBlade could not resolve @{handle}")
+    return profile
+
+
+def _fetch_socialblade_user(page: Any, creator_id: str) -> dict[str, Any]:
+    endpoint = (
+        "/api/trpc/instagram.user?input="
+        + quote(json.dumps({"json": {"id": creator_id}}, separators=(",", ":")))
+    )
+    result = _fetch_trpc_result(page, endpoint)
+    if not isinstance(result, dict):
+        raise RuntimeError("SocialBlade user endpoint returned an unexpected payload")
+    return result
+
+
+def _fetch_socialblade_history(page: Any, creator_id: str, *, limit: int) -> list[dict[str, Any]]:
+    endpoint = (
+        "/api/trpc/instagram.user,instagram.history?batch=1&input="
+        + quote(
+            json.dumps(
+                {
+                    "0": {"json": {"id": creator_id}},
+                    "1": {"json": {"id": creator_id, "limit": limit}},
+                },
+                separators=(",", ":"),
+            )
+        )
+    )
+    result = _fetch_trpc_result(page, endpoint, index=1)
+    if not isinstance(result, list):
+        raise RuntimeError("SocialBlade history endpoint returned an unexpected payload")
+    return result
+
+
+def _fetch_socialblade_period_deltas(page: Any, creator_id: str, *, period: str) -> list[dict[str, Any]]:
+    endpoint = (
+        "/api/trpc/instagram.monthly?batch=1&input="
+        + quote(
+            json.dumps(
+                {"0": {"json": {"id": creator_id, "period": period}}},
+                separators=(",", ":"),
+            )
+        )
+    )
+    result = _fetch_trpc_result(page, endpoint, index=0)
+    if not isinstance(result, list):
+        raise RuntimeError(f"SocialBlade {period} endpoint returned an unexpected payload")
+    return result
+
+
+def _scrape_authenticated_api(
+    page: Any,
+    handle: str,
+) -> tuple[dict[str, Any], dict[str, str], dict[str, Any], dict[str, Any] | None]:
+    profile = _search_socialblade_profile(page, handle)
+    creator_id = str(profile.get("id") or "").strip()
+    user_payload = _fetch_socialblade_user(page, creator_id)
+    stats, rankings = _build_profile_stats_from_user_payload(user_payload)
+    history_rows = _fetch_socialblade_history(page, creator_id, limit=60)
+    metrics = _history_rows_to_metrics(history_rows, limit=60)
+    daily_deltas = _fetch_socialblade_period_deltas(page, creator_id, period="daily")
+    chart_data = _build_total_followers_chart_from_daily_deltas(stats["followers"], daily_deltas)
+    return stats, rankings, metrics, chart_data
+
+
+def _has_socialblade_login_credentials() -> bool:
+    return bool((os.getenv("SOCIALBLADE_EMAIL") or "").strip() and (os.getenv("SOCIALBLADE_PASSWORD") or "").strip())
+
+
+def _build_profile_stats_from_user_payload(user: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    followers = _parse_int(str(user.get("followers") or "0"))
+    following = _parse_int(str(user.get("following") or "0"))
+    media_count = _parse_int(str(user.get("media_count") or "0"))
+    engagement_rate_value = float(user.get("engagement_rate") or 0)
+    average_likes = float(user.get("average_likes") or 0)
+    average_comments = float(user.get("average_comments") or 0)
+    ranks = user.get("ranks") or {}
+    return (
+        {
+            "followers": followers,
+            "following": following,
+            "media_count": media_count,
+            "engagement_rate": f"{engagement_rate_value:.2f}%",
+            "average_likes": average_likes,
+            "average_comments": average_comments,
+        },
+        {
+            "grade": str(user.get("grade") or "").strip(),
+            "sb_rank": _format_ordinal_rank(int(ranks.get("sb") or 0)),
+            "followers_rank": _format_ordinal_rank(int(ranks.get("followers") or 0)),
+            "engagement_rate_rank": _format_ordinal_rank(int(ranks.get("engagement_rate") or 0)),
+        },
+    )
+
+
+def _history_rows_to_metrics(history_rows: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
+    ordered_totals: OrderedDict[str, dict[str, int]] = OrderedDict()
+    for row in sorted(history_rows, key=lambda item: str(item.get("date") or "")):
+        date = str(row.get("date") or "")[:10]
+        if not date:
+            continue
+        ordered_totals[date] = {
+            "followers": _parse_int(str(row.get("followers") or "0")),
+            "following": _parse_int(str(row.get("following") or "0")),
+            "media_count": _parse_int(str(row.get("media_count") or "0")),
+        }
+
+    previous: dict[str, int] | None = None
+    rendered_rows: list[dict[str, str]] = []
+    for date, totals in ordered_totals.items():
+        rendered_rows.append(
+            {
+                "Date": date,
+                "Followers Delta": str(totals["followers"] - (previous["followers"] if previous else 0)),
+                "Followers Total": f"{totals['followers']:,}",
+                "Following Delta": str(totals["following"] - (previous["following"] if previous else 0)),
+                "Following Total": f"{totals['following']:,}",
+                "Media Count Delta": str(totals["media_count"] - (previous["media_count"] if previous else 0)),
+                "Media Count Total": f"{totals['media_count']:,}",
+            }
+        )
+        previous = totals
+
+    return {
+        "period": f"Last {min(limit, len(rendered_rows))} Days",
+        "row_count": len(rendered_rows),
+        "headers": [
+            "Date",
+            "Followers Delta",
+            "Followers Total",
+            "Following Delta",
+            "Following Total",
+            "Media Count Delta",
+            "Media Count Total",
+        ],
+        "data": rendered_rows,
+    }
+
+
+def _build_total_followers_chart_from_daily_deltas(
+    current_followers: int,
+    daily_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if current_followers <= 0 or not daily_rows:
+        return None
+
+    deltas_by_date: OrderedDict[str, int] = OrderedDict()
+    for row in sorted(daily_rows, key=lambda item: str(item.get("date") or "")):
+        date = str(row.get("date") or "")[:10]
+        if not date:
+            continue
+        deltas_by_date[date] = _parse_int(str(row.get("followers") or "0"))
+
+    if not deltas_by_date:
+        return None
+
+    running_total = current_followers
+    rendered_rows: list[dict[str, Any]] = []
+    for date, delta in reversed(deltas_by_date.items()):
+        rendered_rows.append({"date": date, "followers": running_total})
+        running_total -= delta
+    rendered_rows.reverse()
+
+    return {
+        "frequency": "daily",
+        "metric": "total_followers",
+        "total_data_points": len(rendered_rows),
+        "date_range": {
+            "from": rendered_rows[0]["date"],
+            "to": rendered_rows[-1]["date"],
+        },
+        "data": rendered_rows,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main scrape function
 # ---------------------------------------------------------------------------
@@ -234,22 +478,61 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
             if _page_access_denied(body_text):
                 raise RuntimeError("SocialBlade blocked by Cloudflare (1020 access denied)")
 
-            _log("Extracting profile stats and rankings...")
-            stats, rankings = _extract_profile_stats_from_body_text(body_text)
-            _log(f"Stats: {stats['followers']} followers, SB Rank: {rankings['sb_rank']}")
+            chart_data = None
+            metrics = None
+            stats = None
+            rankings = None
 
-            raw_table_data = page.evaluate(_JS_EXTRACT_TABLE)
-            metrics = _normalize_table_data(raw_table_data, body_text)
-            _log(f"Table: {metrics['row_count']} rows ({metrics['period']})")
-
-            chart_data = _followers_chart_from_table(metrics)
-            if chart_data:
+            authenticated_api_error: Exception | None = None
+            try:
+                stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
                 _log(
-                    f"Follower history: {chart_data['total_data_points']} points, "
-                    f"{chart_data['date_range']['from']} → {chart_data['date_range']['to']}"
+                    f"Authenticated API scrape: {stats['followers']} followers, "
+                    f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
                 )
-            else:
-                _log("WARNING: Could not derive follower history from daily metrics table")
+            except Exception as exc:  # noqa: BLE001
+                authenticated_api_error = exc
+                _log(f"Authenticated API scrape unavailable: {exc}")
+
+            if (not chart_data or not metrics) and _has_socialblade_login_credentials():
+                try:
+                    _log("Attempting SocialBlade login fallback for authenticated API access...")
+                    _do_login(page, context)
+                    page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
+                    page.wait_for_timeout(4_000)
+                    body_text = _extract_body_text(page)
+                    if _page_access_denied(body_text):
+                        raise RuntimeError("SocialBlade blocked by Cloudflare after login")
+                    stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
+                    _log(
+                        f"Authenticated API scrape after login: {stats['followers']} followers, "
+                        f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    authenticated_api_error = exc
+                    _log(f"Authenticated API scrape still unavailable after login: {exc}")
+
+            if not stats or not rankings:
+                _log("Extracting profile stats and rankings from page text...")
+                stats, rankings = _extract_profile_stats_from_body_text(body_text)
+                _log(f"Stats: {stats['followers']} followers, SB Rank: {rankings['sb_rank']}")
+
+            if not metrics:
+                raw_table_data = page.evaluate(_JS_EXTRACT_TABLE)
+                metrics = _normalize_table_data(raw_table_data, body_text)
+                _log(f"Table: {metrics['row_count']} rows ({metrics['period']})")
+
+            if not chart_data:
+                chart_data = _followers_chart_from_table(metrics)
+                if chart_data:
+                    _log(
+                        f"Follower history fallback: {chart_data['total_data_points']} points, "
+                        f"{chart_data['date_range']['from']} → {chart_data['date_range']['to']}"
+                    )
+                else:
+                    if authenticated_api_error is not None:
+                        _log(f"WARNING: Falling back after authenticated API failure: {authenticated_api_error}")
+                    _log("WARNING: Could not derive follower history from authenticated API or daily metrics table")
 
             stats_refreshed = bool(
                 stats["followers"] > 0
@@ -307,6 +590,17 @@ def _do_login(page: Any, context: Any) -> None:
     pw_input = page.locator('input[type="password"]').first
     pw_input.fill(password)
 
+    turnstile_input = page.locator('input[name="cf-turnstile-response"]').first
+    if turnstile_input.count():
+        for _ in range(12):
+            if turnstile_input.input_value().strip():
+                break
+            page.wait_for_timeout(5_000)
+        else:
+            raise RuntimeError(
+                "SocialBlade login blocked: Cloudflare Turnstile did not complete in the headless browser"
+            )
+
     # Submit
     submit = page.locator('button[type="submit"], input[type="submit"]').first
     submit.click()
@@ -347,6 +641,8 @@ if __name__ == "__main__":
     cookies_json = os.environ.get("SOCIALBLADE_COOKIES_JSON", "[]")
     try:
         cookie_list = json.loads(cookies_json)
+        if not cookie_list:
+            cookie_list = load_socialblade_cookies_from_sources()
     except json.JSONDecodeError:
         cookie_list = load_socialblade_cookies_from_sources()
 

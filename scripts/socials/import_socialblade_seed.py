@@ -18,8 +18,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("json_path", type=Path, help="Path to normalized SocialBlade JSON")
     parser.add_argument(
         "--handle",
-        default="lisabarlow14",
-        help="Instagram handle to resolve in core.people.external_ids->>'instagram_id' (default: lisabarlow14)",
+        required=True,
+        help="Instagram handle to resolve in core.people.external_ids->>'instagram_id'",
     )
     return parser.parse_args()
 

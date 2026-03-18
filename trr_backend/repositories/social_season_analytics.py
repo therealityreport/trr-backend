@@ -25,7 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Any, Literal, Mapping, Sequence, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -25771,116 +25771,57 @@ def _format_run_progress_activity_summary(metadata: dict[str, Any]) -> str:
     return " · ".join(part for part in parts if part)
 
 
-def get_run_progress_snapshot(
-    season_id: str,
-    run_id: str,
-    *,
-    recent_log_limit: int = 20,
-) -> dict[str, Any]:
-    safe_recent_log_limit = max(1, min(int(recent_log_limit), 100))
-    if not _relation_exists("social.scrape_runs") or not _relation_exists("social.scrape_jobs"):
-        raise ValueError("social_ingest_queue_schema_missing")
-    features = _scrape_jobs_features()
-    if not bool(features.get("has_run_id")):
-        raise ValueError("run_progress_requires_scrape_jobs_run_id")
-
-    run_row = pg.fetch_one(
-        """
-        select
-          id::text as run_id,
-          season_id::text as season_id,
-          status,
-          source_scope,
-          config,
-          summary,
-          created_at,
-          started_at,
-          completed_at
-        from social.scrape_runs
-        where id = %s::uuid
-          and season_id = %s::uuid
-        limit 1
-        """,
-        [run_id, season_id],
-    )
-    if not run_row:
-        raise ValueError("run_not_found")
-
-    select_worker_id = "j.worker_id" if bool(features.get("has_queue_fields")) else "null::text as worker_id"
-    job_rows = pg.fetch_all(
-        f"""
-        select
-          j.id::text as id,
-          j.platform,
-          j.job_type,
-          j.status,
-          j.items_found,
-          j.error_message,
-          j.created_at,
-          j.started_at,
-          j.completed_at,
-          j.config,
-          j.metadata,
-          {select_worker_id}
-        from social.scrape_jobs j
-        where j.season_id = %s::uuid
-          and j.run_id = %s::uuid
-        order by coalesce(j.completed_at, j.started_at, j.created_at) desc, j.created_at desc
-        """,
-        [season_id, run_id],
-    )
-
-    computed_total_jobs = len(job_rows)
-    computed_completed_jobs = 0
-    computed_failed_jobs = 0
-    computed_active_jobs = 0
-    computed_items_found_total = 0
+def _summarize_run_progress_job_rows(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    completed_jobs = 0
+    failed_jobs = 0
+    active_jobs = 0
+    items_found_total = 0
     for row in job_rows:
         status = str(row.get("status") or "").strip().lower()
         if status == "completed":
-            computed_completed_jobs += 1
+            completed_jobs += 1
         elif status == "failed":
-            computed_failed_jobs += 1
+            failed_jobs += 1
         elif status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES:
-            computed_active_jobs += 1
-        computed_items_found_total += _normalize_non_negative_int(row.get("items_found"))
+            active_jobs += 1
+        items_found_total += _normalize_non_negative_int(row.get("items_found"))
+    return {
+        "total_jobs": len(job_rows),
+        "completed_jobs": completed_jobs,
+        "failed_jobs": failed_jobs,
+        "active_jobs": active_jobs,
+        "items_found_total": items_found_total,
+    }
 
-    stored_summary = _metadata_dict(run_row.get("summary"))
-    summary_needs_refresh = (
-        _normalize_non_negative_int(stored_summary.get("total_jobs")) != computed_total_jobs
-        or _normalize_non_negative_int(stored_summary.get("completed_jobs")) != computed_completed_jobs
-        or _normalize_non_negative_int(stored_summary.get("failed_jobs")) != computed_failed_jobs
-        or _normalize_non_negative_int(stored_summary.get("active_jobs")) != computed_active_jobs
-        or _normalize_non_negative_int(stored_summary.get("items_found_total")) != computed_items_found_total
+
+def _run_progress_summary_needs_refresh(
+    stored_summary: Mapping[str, Any],
+    computed_summary: Mapping[str, Any],
+) -> bool:
+    return (
+        _normalize_non_negative_int(stored_summary.get("total_jobs"))
+        != _normalize_non_negative_int(computed_summary.get("total_jobs"))
+        or _normalize_non_negative_int(stored_summary.get("completed_jobs"))
+        != _normalize_non_negative_int(computed_summary.get("completed_jobs"))
+        or _normalize_non_negative_int(stored_summary.get("failed_jobs"))
+        != _normalize_non_negative_int(computed_summary.get("failed_jobs"))
+        or _normalize_non_negative_int(stored_summary.get("active_jobs"))
+        != _normalize_non_negative_int(computed_summary.get("active_jobs"))
+        or _normalize_non_negative_int(stored_summary.get("items_found_total"))
+        != _normalize_non_negative_int(computed_summary.get("items_found_total"))
     )
-    run_status = str(run_row.get("status") or "").strip().lower()
-    if summary_needs_refresh or (run_status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES and computed_active_jobs == 0):
-        if run_status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES and computed_active_jobs == 0:
-            _finalize_run_status(run_id, force_recompute=True)
-        else:
-            _update_run_summary(run_id, force_recompute=True)
-        refreshed_run_row = pg.fetch_one(
-            """
-            select
-              id::text as run_id,
-              season_id::text as season_id,
-              status,
-              source_scope,
-              config,
-              summary,
-              created_at,
-              started_at,
-              completed_at
-            from social.scrape_runs
-            where id = %s::uuid
-              and season_id = %s::uuid
-            limit 1
-            """,
-            [run_id, season_id],
-        )
-        if refreshed_run_row:
-            run_row = refreshed_run_row
 
+
+def _build_run_progress_snapshot_payload(
+    *,
+    run_row: Mapping[str, Any],
+    job_rows: list[dict[str, Any]],
+    run_id: str,
+    season_id: str | None,
+    recent_log_limit: int = 20,
+    summary_override: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    safe_recent_log_limit = max(1, min(int(recent_log_limit), 100))
     stages_payload: dict[str, dict[str, int]] = {
         key: {
             "jobs_total": 0,
@@ -26083,7 +26024,7 @@ def get_run_progress_snapshot(
     )
 
     return {
-        "season_id": str(run_row.get("season_id") or season_id),
+        "season_id": str(run_row.get("season_id") or season_id or ""),
         "run_id": str(run_row.get("run_id") or run_id),
         "run_status": str(run_row.get("status") or ""),
         "source_scope": str(run_row.get("source_scope") or ""),
@@ -26099,9 +26040,243 @@ def get_run_progress_snapshot(
             "active_workers_now": len(active_worker_ids),
             "worker_ids_sample": sorted(active_worker_ids)[:12],
         },
-        "summary": _metadata_dict(run_row.get("summary")),
+        "summary": _metadata_dict(summary_override if summary_override is not None else run_row.get("summary")),
         "updated_at": _iso(_now_utc()),
     }
+
+
+def get_run_progress_snapshot(
+    season_id: str,
+    run_id: str,
+    *,
+    recent_log_limit: int = 20,
+) -> dict[str, Any]:
+    safe_recent_log_limit = max(1, min(int(recent_log_limit), 100))
+    if not _relation_exists("social.scrape_runs") or not _relation_exists("social.scrape_jobs"):
+        raise ValueError("social_ingest_queue_schema_missing")
+    features = _scrape_jobs_features()
+    if not bool(features.get("has_run_id")):
+        raise ValueError("run_progress_requires_scrape_jobs_run_id")
+
+    run_row = pg.fetch_one(
+        """
+        select
+          id::text as run_id,
+          season_id::text as season_id,
+          status,
+          source_scope,
+          config,
+          summary,
+          created_at,
+          started_at,
+          completed_at
+        from social.scrape_runs
+        where id = %s::uuid
+          and season_id = %s::uuid
+        limit 1
+        """,
+        [run_id, season_id],
+    )
+    if not run_row:
+        raise ValueError("run_not_found")
+
+    select_worker_id = "j.worker_id" if bool(features.get("has_queue_fields")) else "null::text as worker_id"
+    job_rows = pg.fetch_all(
+        f"""
+        select
+          j.id::text as id,
+          j.platform,
+          j.job_type,
+          j.status,
+          j.items_found,
+          j.error_message,
+          j.created_at,
+          j.started_at,
+          j.completed_at,
+          j.config,
+          j.metadata,
+          {select_worker_id}
+        from social.scrape_jobs j
+        where j.season_id = %s::uuid
+          and j.run_id = %s::uuid
+        order by coalesce(j.completed_at, j.started_at, j.created_at) desc, j.created_at desc
+        """,
+        [season_id, run_id],
+    )
+
+    computed_summary = _summarize_run_progress_job_rows(job_rows)
+    stored_summary = _metadata_dict(run_row.get("summary"))
+    run_status = str(run_row.get("status") or "").strip().lower()
+    if _run_progress_summary_needs_refresh(stored_summary, computed_summary) or (
+        run_status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES and computed_summary["active_jobs"] == 0
+    ):
+        if run_status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES and computed_summary["active_jobs"] == 0:
+            _finalize_run_status(run_id, force_recompute=True)
+        else:
+            _update_run_summary(run_id, force_recompute=True)
+        refreshed_run_row = pg.fetch_one(
+            """
+            select
+              id::text as run_id,
+              season_id::text as season_id,
+              status,
+              source_scope,
+              config,
+              summary,
+              created_at,
+              started_at,
+              completed_at
+            from social.scrape_runs
+            where id = %s::uuid
+              and season_id = %s::uuid
+            limit 1
+            """,
+            [run_id, season_id],
+        )
+        if refreshed_run_row:
+            run_row = refreshed_run_row
+
+    return _build_run_progress_snapshot_payload(
+        run_row=run_row,
+        job_rows=job_rows,
+        run_id=run_id,
+        season_id=season_id,
+        recent_log_limit=safe_recent_log_limit,
+    )
+
+
+def get_social_account_catalog_run_progress(
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    *,
+    recent_log_limit: int = 20,
+) -> dict[str, Any]:
+    safe_recent_log_limit = max(1, min(int(recent_log_limit), 100))
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
+        raise ValueError("Catalog backfill is not supported for this platform.")
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    if not _relation_exists("social.scrape_runs") or not _relation_exists("social.scrape_jobs"):
+        raise ValueError("social_ingest_queue_schema_missing")
+    features = _scrape_jobs_features()
+    if not bool(features.get("has_run_id")):
+        raise ValueError("run_progress_requires_scrape_jobs_run_id")
+
+    run_row = pg.fetch_one(
+        """
+        select
+          id::text as run_id,
+          season_id::text as season_id,
+          status,
+          source_scope,
+          config,
+          summary,
+          created_at,
+          started_at,
+          completed_at
+        from social.scrape_runs
+        where id = %s::uuid
+          and coalesce(config->>'pipeline_ingest_mode', '') = %s
+        limit 1
+        """,
+        [run_id, SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE],
+    )
+    if not run_row:
+        raise ValueError("run_not_found")
+
+    run_config = _metadata_dict(run_row.get("config"))
+    configured_platforms = {
+        _normalize_platform_name(value)
+        for value in _as_text_list(run_config.get("platforms") or [])
+        if _normalize_platform_name(value)
+    }
+    configured_accounts = {
+        _normalize_social_account_profile_handle(value)
+        for value in _as_text_list(run_config.get("accounts_override") or [])
+        if _normalize_social_account_profile_handle(value)
+    }
+    if configured_platforms and normalized_platform not in configured_platforms:
+        raise ValueError("run_not_found")
+    if configured_accounts and normalized_account not in configured_accounts:
+        raise ValueError("run_not_found")
+
+    select_worker_id = "j.worker_id" if bool(features.get("has_queue_fields")) else "null::text as worker_id"
+    job_rows = pg.fetch_all(
+        f"""
+        select
+          j.id::text as id,
+          j.platform,
+          j.job_type,
+          j.status,
+          j.items_found,
+          j.error_message,
+          j.created_at,
+          j.started_at,
+          j.completed_at,
+          j.config,
+          j.metadata,
+          {select_worker_id}
+        from social.scrape_jobs j
+        where j.run_id = %s::uuid
+          and j.platform = %s
+          and lower(coalesce(j.config->>'account', '')) = %s
+        order by coalesce(j.completed_at, j.started_at, j.created_at) desc, j.created_at desc
+        """,
+        [run_id, normalized_platform, normalized_account],
+    )
+    if not job_rows:
+        raise ValueError("run_not_found")
+
+    computed_summary = _summarize_run_progress_job_rows(job_rows)
+    single_target_run = (
+        (not configured_platforms or configured_platforms == {normalized_platform})
+        and (not configured_accounts or configured_accounts == {normalized_account})
+    )
+    summary_override: Mapping[str, Any] | None = None
+    if single_target_run:
+        stored_summary = _metadata_dict(run_row.get("summary"))
+        run_status = str(run_row.get("status") or "").strip().lower()
+        if _run_progress_summary_needs_refresh(stored_summary, computed_summary) or (
+            run_status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES and computed_summary["active_jobs"] == 0
+        ):
+            if run_status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES and computed_summary["active_jobs"] == 0:
+                _finalize_run_status(run_id, force_recompute=True)
+            else:
+                _update_run_summary(run_id, force_recompute=True)
+            refreshed_run_row = pg.fetch_one(
+                """
+                select
+                  id::text as run_id,
+                  season_id::text as season_id,
+                  status,
+                  source_scope,
+                  config,
+                  summary,
+                  created_at,
+                  started_at,
+                  completed_at
+                from social.scrape_runs
+                where id = %s::uuid
+                  and coalesce(config->>'pipeline_ingest_mode', '') = %s
+                limit 1
+                """,
+                [run_id, SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE],
+            )
+            if refreshed_run_row:
+                run_row = refreshed_run_row
+    else:
+        summary_override = computed_summary
+
+    return _build_run_progress_snapshot_payload(
+        run_row=run_row,
+        job_rows=job_rows,
+        run_id=run_id,
+        season_id=str(run_row.get("season_id") or "") or None,
+        recent_log_limit=safe_recent_log_limit,
+        summary_override=summary_override,
+    )
 
 
 def _week_live_health_platform_specs() -> dict[str, dict[str, str]]:
